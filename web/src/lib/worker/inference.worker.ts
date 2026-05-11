@@ -1,5 +1,8 @@
 /// <reference lib="webworker" />
 import * as ort from 'onnxruntime-web/webgpu';
+import { sampleCenteredNoise } from '$lib/protein-ops/coords';
+import { makeSchedule, type ScheduleKind } from '$lib/protein-ops/schedules';
+import { sampleEulerFMEndpoint } from '$lib/samplers/euler-fm-endpoint';
 import type { WorkerRequest, WorkerResponse } from './protocol';
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -9,7 +12,7 @@ declare const self: DedicatedWorkerGlobalScope;
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
 ort.env.wasm.numThreads = 1;
 
-// Frozen constants from legacy-model/data (see tools/exports/legacy-teacher/sample_onnx.py).
+// Frozen constants from legacy-model/data — see tools/exports/legacy-teacher/sample_onnx.py.
 const BACKBONE_PATTERN = [18, 2, 1]; // N, CA, C atom IDs (RF2AA encoding)
 const ALA_TOKEN = 1;
 
@@ -49,19 +52,15 @@ async function fetchWithProgress(
 }
 
 async function load(id: number, modelUrl: string) {
-  const t0 = performance.now();
+  const tStart = performance.now();
   const bytes = await fetchWithProgress(modelUrl, (loaded, total) =>
     post({ id, type: 'progress', loaded, total }),
   );
   const tFetched = performance.now();
 
-  // Detect WebGPU support and pick provider list. Manual fallback only —
-  // ORT-Web does NOT automatically retry on a different EP if the first fails.
   let providers: ('webgpu' | 'wasm')[] = ['wasm'];
   if ('gpu' in navigator) {
     try {
-      // Lightweight probe: just ask for an adapter.
-      // Cast through `any` — we don't depend on @webgpu/types just for this probe.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const adapter = await (navigator as any).gpu.requestAdapter();
       if (adapter) providers = ['webgpu', 'wasm'];
@@ -78,7 +77,6 @@ async function load(id: number, modelUrl: string) {
     activeProvider = providers[0];
   } catch (err) {
     if (providers[0] === 'webgpu') {
-      // Retry without WebGPU
       session = await ort.InferenceSession.create(bytes, {
         executionProviders: ['wasm'],
         graphOptimizationLevel: 'all',
@@ -89,6 +87,7 @@ async function load(id: number, modelUrl: string) {
     }
   }
   const tInit = performance.now();
+  void tStart;
 
   post({
     id,
@@ -99,26 +98,6 @@ async function load(id: number, modelUrl: string) {
     modelSizeBytes: bytes.byteLength,
     initLatencyMs: tInit - tFetched,
   });
-  // Don't hold the model bytes after the session has consumed them.
-  // (No-op here because `bytes` falls out of scope at function return,
-  // but worth being deliberate as model sizes grow.)
-}
-
-// Mulberry32 — deterministic, cheap, good-enough for visual reproducibility.
-function mulberry32(seed: number) {
-  let s = seed >>> 0;
-  return () => {
-    s = (s + 0x6d2b79f5) >>> 0;
-    let t = s;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-function randn(rng: () => number) {
-  const u = rng();
-  const v = rng();
-  return Math.sqrt(-2 * Math.log(u + 1e-9)) * Math.cos(2 * Math.PI * v);
 }
 
 function buildStaticFeatures(batch: number, length: number) {
@@ -143,58 +122,81 @@ function buildStaticFeatures(batch: number, length: number) {
   };
 }
 
-function zeroCenter(coords: Float32Array, o: number) {
-  let cx = 0,
-    cy = 0,
-    cz = 0;
-  for (let i = 0; i < o; i++) {
-    cx += coords[i * 3 + 0];
-    cy += coords[i * 3 + 1];
-    cz += coords[i * 3 + 2];
+/** Reshape a [batch, o*3] Float32Array trajectory frame into per-sample [o*3] frames. */
+function unbatchFrame(frame: Float32Array, batch: number, oTimes3Times3: number): Float32Array[] {
+  const per = oTimes3Times3;
+  const out: Float32Array[] = [];
+  for (let b = 0; b < batch; b++) {
+    out.push(frame.slice(b * per, (b + 1) * per));
   }
-  cx /= o;
-  cy /= o;
-  cz /= o;
-  for (let i = 0; i < o; i++) {
-    coords[i * 3 + 0] -= cx;
-    coords[i * 3 + 1] -= cy;
-    coords[i * 3 + 2] -= cz;
-  }
+  return out;
 }
 
-async function forward(id: number, length: number, seed: number, t: number) {
+async function runSample(
+  id: number,
+  length: number,
+  nSamples: number,
+  nfe: number,
+  scheduleKind: ScheduleKind,
+  schedulP: number,
+  seed: number,
+) {
   if (!session) throw new Error('model not loaded');
 
-  const batch = 1;
+  const batch = nSamples;
   const o = length * 3;
-  const rng = mulberry32(seed);
-  const coords = new Float32Array(batch * o * 3);
-  for (let i = 0; i < coords.length; i++) coords[i] = randn(rng);
-  zeroCenter(coords, o);
+  const perSampleLen = o * 3; // each per-sample coord buffer is o*3 floats
 
   const staticFeats = buildStaticFeatures(batch, length);
-  const feeds: Record<string, ort.Tensor> = {
-    backbone_coords: new ort.Tensor('float32', coords, [batch, o, 3]),
-    t: new ort.Tensor('float32', new Float32Array([t]), [batch]),
-    ...staticFeats,
-  };
-  // Filter to declared inputs (legacy exporter DCE'd backbone_aa_idx).
   const expected = new Set(session.inputNames);
-  const filtered: Record<string, ort.Tensor> = {};
-  for (const k of Object.keys(feeds)) if (expected.has(k)) filtered[k] = feeds[k];
 
-  const t0 = performance.now();
-  const out = await session.run(filtered);
-  const latencyMs = performance.now() - t0;
+  // forward closure — sampler stays model-blind, this binds the static feats.
+  const forward = async (x: Float32Array, tArr: Float32Array): Promise<Float32Array> => {
+    const feeds: Record<string, ort.Tensor> = {
+      backbone_coords: new ort.Tensor('float32', x, [batch, o, 3]),
+      t: new ort.Tensor('float32', tArr, [batch]),
+      ...staticFeats,
+    };
+    for (const k of Object.keys(feeds)) {
+      if (!expected.has(k)) delete feeds[k];
+    }
+    const out = await session!.run(feeds);
+    const x1Hat = out.x1_hat as ort.Tensor;
+    // Copy out of the runtime-managed buffer.
+    return new Float32Array(x1Hat.data as Float32Array);
+  };
 
-  const x1Hat = out.x1_hat as ort.Tensor;
-  const data = x1Hat.data as Float32Array;
+  const xInit = sampleCenteredNoise(batch, o, seed);
+  const schedule = makeSchedule(nfe, scheduleKind, schedulP);
+
+  const tStart = performance.now();
+  let lastStepEnd = tStart;
+
+  // Per-sample trajectory accumulators.
+  const trajectories: Float32Array[][] = Array.from({ length: nSamples }, () => []);
+
+  const result = await sampleEulerFMEndpoint(forward, xInit, batch, o, {
+    numSteps: nfe,
+    schedule,
+    onFrame: (step, t, x) => {
+      // Split the batched frame into per-sample slices and accumulate.
+      const perSample = unbatchFrame(x, batch, perSampleLen);
+      for (let b = 0; b < nSamples; b++) trajectories[b].push(perSample[b]);
+
+      const now = performance.now();
+      post({ id, type: 'sampleStep', step, t, latencyMs: now - lastStepEnd });
+      lastStepEnd = now;
+    },
+  });
+
+  const finalSamples = unbatchFrame(result.final, batch, perSampleLen);
   post({
     id,
-    type: 'forwardDone',
-    outputShape: x1Hat.dims,
-    latencyMs,
-    sample: Array.from(data.slice(0, 9)),
+    type: 'sampleDone',
+    finalSamples,
+    trajectories,
+    length,
+    totalLatencyMs: performance.now() - tStart,
   });
 }
 
@@ -205,11 +207,18 @@ self.onmessage = async (ev: MessageEvent<WorkerRequest>) => {
       case 'load':
         await load(req.id, req.modelUrl);
         break;
-      case 'forward':
-        await forward(req.id, req.length, req.seed, req.t);
+      case 'sample':
+        await runSample(
+          req.id,
+          req.length,
+          req.nSamples,
+          req.nfe,
+          req.schedule,
+          req.schedulP,
+          req.seed,
+        );
         break;
       default: {
-        // exhaustive
         const _exhaustive: never = req;
         void _exhaustive;
       }
