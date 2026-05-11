@@ -2,6 +2,18 @@
 // Each request carries an `id`; responses echo it so callers can correlate.
 
 import type { ScheduleKind } from '$lib/protein-ops/schedules';
+import type { GtMode } from '$lib/samplers/sde-proteina-endpoint';
+
+export type SamplerKind = 'euler-fm' | 'sde-proteina';
+
+export interface SDEParams {
+  gamma: number; // Proteina γ (default 0.1)
+  gtMode: GtMode;
+  gtEps: number; // default 1e-2
+  gtMax: number | null; // default 3.0 in production; null = no cap
+  tLimOde: number; // default 0.99
+  noiseSeed: number; // for per-step noise (separate from initial-noise seed)
+}
 
 export type WorkerRequest =
   | { id: number; type: 'load'; modelUrl: string }
@@ -14,6 +26,8 @@ export type WorkerRequest =
       schedule: ScheduleKind;
       schedulP: number;
       seed: number;
+      sampler: SamplerKind;
+      sde?: SDEParams; // required iff sampler === 'sde-proteina'
     };
 
 export type WorkerResponse =
@@ -30,18 +44,17 @@ export type WorkerResponse =
   | {
       id: number;
       type: 'sampleStep';
-      step: number; // 0..numSteps (frame index in the trajectory)
+      step: number; // 0..numSteps
       t: number;
-      latencyMs: number; // per-step latency
+      latencyMs: number;
     }
   | {
       id: number;
       type: 'sampleDone';
-      /** length = nSamples; each entry is a Float32Array of [length*3, 3] flat coords for the final frame. */
       finalSamples: Float32Array[];
-      /** length = nSamples; each entry is an array of (numSteps+1) Float32Array frames of [length*3, 3] flat. */
       trajectories: Float32Array[][];
-      length: number; // residue count
+      length: number;
       totalLatencyMs: number;
+      sampler: SamplerKind;
     }
   | { id: number; type: 'error'; message: string };

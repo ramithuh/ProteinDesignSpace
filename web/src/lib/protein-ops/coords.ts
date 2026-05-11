@@ -21,6 +21,27 @@ export function randn(rng: () => number): number {
 }
 
 /**
+ * Cached normal generator: yields one ~N(0,1) per call. Uses Box-Muller in
+ * polar form, caching the second sample to avoid wasting half the uniforms.
+ */
+export function makeNormalRng(seed: number): () => number {
+  const u = mulberry32(seed);
+  let cached: number | null = null;
+  return () => {
+    if (cached !== null) {
+      const v = cached;
+      cached = null;
+      return v;
+    }
+    const r1 = u();
+    const r2 = u();
+    const mag = Math.sqrt(-2 * Math.log(r1 + 1e-9));
+    cached = mag * Math.sin(2 * Math.PI * r2);
+    return mag * Math.cos(2 * Math.PI * r2);
+  };
+}
+
+/**
  * Subtract per-batch centroid in place. x has shape [batch, o, 3] flat.
  */
 export function zeroCenter(x: Float32Array, batch: number, o: number): void {

@@ -1,8 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import InferenceWorker from '$lib/worker/inference.worker?worker';
-  import type { WorkerRequest, WorkerResponse } from '$lib/worker/protocol';
+  import type {
+    SamplerKind,
+    SDEParams,
+    WorkerRequest,
+    WorkerResponse,
+  } from '$lib/worker/protocol';
   import type { ScheduleKind } from '$lib/protein-ops/schedules';
+  import type { GtMode } from '$lib/samplers/sde-proteina-endpoint';
   import { coordsToMultiModelPdb } from '$lib/protein-ops/pdb';
   import MolTrajectoryViewer from '$lib/viewer/MolTrajectoryViewer.svelte';
 
@@ -26,6 +32,14 @@
   let schedule: ScheduleKind = $state('log');
   let schedulP = $state(2.0);
   let seed = $state(42);
+  let sampler: SamplerKind = $state('euler-fm');
+
+  // SDE-Proteina params (only used when sampler === 'sde-proteina')
+  let sdeGamma = $state(0.1);
+  let sdeGtMax = $state<number>(3.0); // production cap; set to 0 to mean "no cap"
+  let sdeGtMode: GtMode = $state('one-minus-t-over-t');
+  let sdeTLimOde = $state(0.99);
+  let sdeNoiseSeed = $state(7);
 
   // Sampling progress / results
   let sampleProgress = $state({ step: 0, total: 0 });
@@ -102,6 +116,17 @@
     sampleProgress = { step: 0, total: nfe };
     pdbsBySample = [];
     totalLatencyMs = 0;
+    const sde: SDEParams | undefined =
+      sampler === 'sde-proteina'
+        ? {
+            gamma: sdeGamma,
+            gtMode: sdeGtMode,
+            gtEps: 1e-2,
+            gtMax: sdeGtMax > 0 ? sdeGtMax : null,
+            tLimOde: sdeTLimOde,
+            noiseSeed: sdeNoiseSeed,
+          }
+        : undefined;
     send({
       id: nextReqId++,
       type: 'sample',
@@ -111,6 +136,8 @@
       schedule,
       schedulP,
       seed,
+      sampler,
+      sde,
     });
   }
 
@@ -179,6 +206,13 @@
   <section>
     <h2>generation</h2>
     <div class="controls">
+      <label>
+        sampler
+        <select bind:value={sampler}>
+          <option value="euler-fm">Euler-FM (ODE)</option>
+          <option value="sde-proteina">SDE-Proteina</option>
+        </select>
+      </label>
       <label> length <input type="number" min="30" max="256" bind:value={length} /></label>
       <label> samples <input type="number" min="1" max="8" bind:value={nSamples} /></label>
       <label> NFE <input type="number" min="4" max="500" bind:value={nfe} /></label>
@@ -198,6 +232,42 @@
         {status === 'sampling' ? 'sampling…' : 'generate'}
       </button>
     </div>
+
+    {#if sampler === 'sde-proteina'}
+      <details class="sde-details" open>
+        <summary>SDE-Proteina knobs</summary>
+        <div class="controls">
+          <label>
+            γ
+            <input type="number" min="0" max="2" step="0.01" bind:value={sdeGamma} />
+          </label>
+          <label>
+            g(t) max
+            <input type="number" min="0" max="50" step="0.1" bind:value={sdeGtMax} />
+            <span class="hint">(0 = no cap)</span>
+          </label>
+          <label>
+            g(t) shape
+            <select bind:value={sdeGtMode}>
+              <option value="one-minus-t-over-t">(1−t)/t</option>
+              <option value="one-over-t">1/t</option>
+            </select>
+          </label>
+          <label>
+            t_lim_ode
+            <input type="number" min="0" max="1" step="0.01" bind:value={sdeTLimOde} />
+          </label>
+          <label>
+            noise seed
+            <input type="number" min="0" bind:value={sdeNoiseSeed} />
+          </label>
+        </div>
+        <p class="hint">
+          Production legacy-model student uses γ=0.1, g(t)=(1−t)/t, g(t)_max=3.0, t_lim_ode=0.99.
+          Try NFE 16–32 with these settings for the student-style regime.
+        </p>
+      </details>
+    {/if}
 
     {#if status === 'sampling'}
       <div class="bar"><div style="width: {samplePct}%"></div></div>
@@ -423,6 +493,28 @@
   .muted {
     color: #777;
     font-size: 12px;
+  }
+
+  /* SDE knobs */
+  .sde-details {
+    margin: 10px 0 4px;
+    padding: 8px 10px;
+    background: #161618;
+    border: 1px solid #2a2a2c;
+    border-radius: 4px;
+  }
+  .sde-details summary {
+    cursor: pointer;
+    font-size: 11px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+  .sde-details .hint {
+    margin: 6px 0 0;
+    font-size: 11px;
+    color: #666;
   }
   code {
     font-family: 'JetBrains Mono', ui-monospace, monospace;

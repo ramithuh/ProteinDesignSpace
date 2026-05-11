@@ -3,7 +3,8 @@ import * as ort from 'onnxruntime-web/webgpu';
 import { sampleCenteredNoise } from '$lib/protein-ops/coords';
 import { makeSchedule, type ScheduleKind } from '$lib/protein-ops/schedules';
 import { sampleEulerFMEndpoint } from '$lib/samplers/euler-fm-endpoint';
-import type { WorkerRequest, WorkerResponse } from './protocol';
+import { sampleSDEProteinaEndpoint } from '$lib/samplers/sde-proteina-endpoint';
+import type { SamplerKind, SDEParams, WorkerRequest, WorkerResponse } from './protocol';
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -140,17 +141,18 @@ async function runSample(
   scheduleKind: ScheduleKind,
   schedulP: number,
   seed: number,
+  sampler: SamplerKind,
+  sde: SDEParams | undefined,
 ) {
   if (!session) throw new Error('model not loaded');
 
   const batch = nSamples;
   const o = length * 3;
-  const perSampleLen = o * 3; // each per-sample coord buffer is o*3 floats
+  const perSampleLen = o * 3;
 
   const staticFeats = buildStaticFeatures(batch, length);
   const expected = new Set(session.inputNames);
 
-  // forward closure — sampler stays model-blind, this binds the static feats.
   const forward = async (x: Float32Array, tArr: Float32Array): Promise<Float32Array> => {
     const feeds: Record<string, ort.Tensor> = {
       backbone_coords: new ort.Tensor('float32', x, [batch, o, 3]),
@@ -162,7 +164,6 @@ async function runSample(
     }
     const out = await session!.run(feeds);
     const x1Hat = out.x1_hat as ort.Tensor;
-    // Copy out of the runtime-managed buffer.
     return new Float32Array(x1Hat.data as Float32Array);
   };
 
@@ -172,22 +173,39 @@ async function runSample(
   const tStart = performance.now();
   let lastStepEnd = tStart;
 
-  // Per-sample trajectory accumulators.
   const trajectories: Float32Array[][] = Array.from({ length: nSamples }, () => []);
+  const onFrame = (step: number, t: number, x: Float32Array) => {
+    const perSample = unbatchFrame(x, batch, perSampleLen);
+    for (let b = 0; b < nSamples; b++) trajectories[b].push(perSample[b]);
+    const now = performance.now();
+    post({ id, type: 'sampleStep', step, t, latencyMs: now - lastStepEnd });
+    lastStepEnd = now;
+  };
 
-  const result = await sampleEulerFMEndpoint(forward, xInit, batch, o, {
-    numSteps: nfe,
-    schedule,
-    onFrame: (step, t, x) => {
-      // Split the batched frame into per-sample slices and accumulate.
-      const perSample = unbatchFrame(x, batch, perSampleLen);
-      for (let b = 0; b < nSamples; b++) trajectories[b].push(perSample[b]);
-
-      const now = performance.now();
-      post({ id, type: 'sampleStep', step, t, latencyMs: now - lastStepEnd });
-      lastStepEnd = now;
-    },
-  });
+  let result: { final: Float32Array; trajectory: Float32Array[] };
+  if (sampler === 'euler-fm') {
+    result = await sampleEulerFMEndpoint(forward, xInit, batch, o, {
+      numSteps: nfe,
+      schedule,
+      onFrame,
+    });
+  } else if (sampler === 'sde-proteina') {
+    if (!sde) throw new Error('sde params required for sampler=sde-proteina');
+    result = await sampleSDEProteinaEndpoint(forward, xInit, batch, o, {
+      numSteps: nfe,
+      schedule,
+      gamma: sde.gamma,
+      gtMode: sde.gtMode,
+      gtEps: sde.gtEps,
+      gtMax: sde.gtMax,
+      tLimOde: sde.tLimOde,
+      seed: sde.noiseSeed,
+      onFrame,
+    });
+  } else {
+    const _exhaustive: never = sampler;
+    throw new Error(`unknown sampler: ${_exhaustive}`);
+  }
 
   const finalSamples = unbatchFrame(result.final, batch, perSampleLen);
   post({
@@ -197,6 +215,7 @@ async function runSample(
     trajectories,
     length,
     totalLatencyMs: performance.now() - tStart,
+    sampler,
   });
 }
 
@@ -216,6 +235,8 @@ self.onmessage = async (ev: MessageEvent<WorkerRequest>) => {
           req.schedule,
           req.schedulP,
           req.seed,
+          req.sampler,
+          req.sde,
         );
         break;
       default: {
