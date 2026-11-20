@@ -242,6 +242,7 @@
 
   const PALETTE_GROUPS = [
     { title: 'Inputs', ids: ['pdb-input', 'sequence-input'] },
+    { title: 'Conditioning', ids: ['rfd4-conditioner'] },
     { title: 'Design / Generate', ids: ['rfd4-proteina', 'legacy-teacher'] },
     { title: 'Inverse Fold', ids: ['web-protein-mpnn'] },
     { title: 'Structure Fold', ids: ['localfold-af2'] },
@@ -280,6 +281,7 @@
     <div class="legend-box">
       <div class="pal-title">Typed Wires</div>
       <div class="leg-item"><span class="l-dot" style="background: {PORT_COLORS.StructureArtifact.bg}"></span> Structure</div>
+      <div class="leg-item"><span class="l-dot" style="background: {PORT_COLORS.ConditionSpec.bg}"></span> Condition</div>
       <div class="leg-item"><span class="l-dot" style="background: {PORT_COLORS.SequenceSet.bg}"></span> Sequences</div>
       <div class="leg-item"><span class="l-dot" style="background: {PORT_COLORS.FoldedStructure.bg}"></span> Folds</div>
       <div class="leg-item"><span class="l-dot" style="background: {PORT_COLORS.DesignabilityMetrics.bg}"></span> Metrics</div>

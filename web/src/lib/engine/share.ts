@@ -8,6 +8,7 @@ import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 const ADAPTER_TO_SHORT: Record<string, string> = {
   'pdb-input': 'p',
   'sequence-input': 'q',
+  'rfd4-conditioner': 'c',
   'rfd4-proteina': 'r',
   'legacy-teacher': 'x',
   'web-protein-mpnn': 'm',

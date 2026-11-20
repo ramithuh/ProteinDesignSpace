@@ -51,6 +51,24 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       structure: { type: 'StructureArtifact' },
     },
   },
+  'rfd4-conditioner': {
+    id: 'rfd4-conditioner',
+    displayName: 'RFD4 Conditioning (Hotspots / Motif / H-Bond)',
+    shortName: 'RFD4 Condition',
+    stage: 'condition',
+    runtime: 'cpu-ts',
+    estimatedVramMB: 0,
+    approxWeightsMB: 0,
+    licenseNote: 'RFD4-Proteina condition_spec DSL compiler',
+    description:
+      'Compose RFD4 contigs, PPI hotspots (C_HOT), indexed/unindexed motifs (C_CRDGRP/C_IDX), H-bond targets (C_HB), CATH folds, or 1-click official RFD4 benchmark contexts.',
+    inputs: {
+      template: { type: 'StructureArtifact', required: false },
+    },
+    outputs: {
+      condition: { type: 'ConditionSpec' },
+    },
+  },
   'rfd4-proteina': {
     id: 'rfd4-proteina',
     displayName: 'RFD4-Proteina (WebGPU INT8)',
@@ -61,9 +79,10 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 330,
     licenseNote: 'MIT code (sokrypton/rfd4-proteina-webgpu); NVIDIA RFD4-Proteina weights',
     description:
-      'All-atom sequence-structure co-design flow matching (Baker Lab / NVIDIA) running via custom WGSL INT8 kernels. Supports unconditional monomers or YAML/JSON condition specs.',
+      'All-atom sequence-structure co-design flow matching (Baker Lab / NVIDIA) running via custom WGSL INT8 kernels. Supports unconditional monomers, partial diffusion, inverse folding, and full AtomWorks/RFD4 conditioning.',
     inputs: {
       template: { type: 'StructureArtifact', required: false },
+      condition: { type: 'ConditionSpec', required: false },
     },
     outputs: {
       structure: { type: 'StructureArtifact' },
@@ -126,6 +145,25 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     },
   },
 };
+
+export interface Rfd4BenchmarkMeta {
+  id: string;
+  label: string;
+  category: string;
+  needsEncoder?: boolean;
+}
+
+export const RFD4_BENCHMARK_OPTIONS: Rfd4BenchmarkMeta[] = [
+  { id: 'custom_cath_monomer', label: 'CATH 3.40.50 Rossmann (54 aa, α/β SS)', category: 'Fold' },
+  { id: 'uncond_short', label: 'Unconditional Monomer (100 aa)', category: 'Unconditional' },
+  { id: 'motif_idx_1prw', label: 'Indexed Motif — 1PRW EF-Hand (76 aa)', category: 'Motif' },
+  { id: 'motif_unidx_1prw', label: 'Unindexed Motif — 1PRW + Hungarian Insertion', category: 'Motif' },
+  { id: 'ppi_pdl1', label: 'PD-L1 PPI Binder w/ Hotspots (208 tokens)', category: 'Binder' },
+  { id: 'sm_sam', label: 'SAM Small-Molecule Pocket w/ H-Bonds', category: 'Ligand' },
+  { id: 'dna_7m5w', label: 'DNA-Binding Protein Complex (B-DNA)', category: 'Nucleic Acid' },
+  { id: 'partial_diffusion_1prw', label: 'Partial Diffusion — 1PRW (frac=0.5, +138 MB enc)', category: 'Partial', needsEncoder: true },
+  { id: 'inverse_folding_1prw', label: 'RFD4 Inverse Folding — 1PRW (+138 MB enc)', category: 'InvFold', needsEncoder: true },
+];
 
 export interface PresetDefinition {
   id: string;
@@ -345,6 +383,74 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold_mpnn', toPort: 'sequences' },
         { fromNode: 'gen', fromPort: 'structure', toNode: 'score_mpnn', toPort: 'structure' },
         { fromNode: 'fold_mpnn', fromPort: 'folds', toNode: 'score_mpnn', toPort: 'folds' },
+      ],
+    },
+  },
+  {
+    id: 'rfd4-conditioned-cath',
+    name: 'Conditioned RFD4 (CATH / Motif / Hotspots) → LocalFold',
+    badge: 'Conditioning Block',
+    summary:
+      'Compose RFD4 conditioning (CATH fold + α/β secondary structure, or switch to PD-L1 hotspots / 1PRW motif / SAM H-bond pocket) into RFD4-Proteina and refold with LocalFold AF2.',
+    graph: {
+      id: 'rfd4-conditioned-cath',
+      name: 'Conditioned RFD4 → LocalFold',
+      nodes: [
+        {
+          id: 'cond',
+          adapterId: 'rfd4-conditioner',
+          label: 'RFD4 Condition',
+          params: {
+            taskPreset: 'custom_cath_monomer',
+            contig: 'h1:16-16P,l1:4-4P,s1:8-8P,l2:4-4P,h2:14-14P,s2:8-8P',
+            lockChain: '',
+            hotspots: '',
+            motifSpan: '',
+            unindexedMotif: false,
+            hbondMode: 'none',
+            hbondSelection: '',
+            cathCode: '3.40.50',
+            paintBrush: 'hotspots',
+            rawJsonOverride: '',
+          },
+          position: { x: 36, y: 120 },
+        },
+        {
+          id: 'gen',
+          adapterId: 'rfd4-proteina',
+          label: 'RFD4-Proteina',
+          params: {
+            mode: 'conditioned',
+            length: 70,
+            nsteps: 30,
+            recycleSchedule: 'low',
+            seed: 42,
+            presetId: 'custom_cath_monomer',
+            partialFraction: 0.5,
+            customSpecYaml: '',
+          },
+          position: { x: 330, y: 120 },
+        },
+        {
+          id: 'fold',
+          adapterId: 'localfold-af2',
+          label: 'LocalFold AF2',
+          params: { recycles: 1, maxSequences: 1, seed: 0 },
+          position: { x: 625, y: 170 },
+        },
+        {
+          id: 'score',
+          adapterId: 'designability-scorer',
+          label: 'scRMSD / scTM',
+          params: { scRmsdThreshold: 2.0, plddtThreshold: 70 },
+          position: { x: 920, y: 40 },
+        },
+      ],
+      edges: [
+        { fromNode: 'cond', fromPort: 'condition', toNode: 'gen', toPort: 'condition' },
+        { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
       ],
     },
   },

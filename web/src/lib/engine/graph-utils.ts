@@ -10,10 +10,12 @@ export const PORT_COLORS: Record<PortType, { bg: string; label: string; short: s
   SequenceSet: { bg: '#a855f7', label: 'Sequences (AA)', short: 'Sequences' },
   FoldedStructure: { bg: '#10b981', label: 'Refold (AF2)', short: 'Folds' },
   DesignabilityMetrics: { bg: '#f59e0b', label: 'Metrics (scRMSD)', short: 'Metrics' },
+  ConditionSpec: { bg: '#f43f5e', label: 'Conditioning (RFD4)', short: 'Condition' },
 };
 
 export const STAGE_COLORS: Record<string, string> = {
   source: '#64748b',
+  condition: '#f43f5e',
   generate: '#3b82f6',
   'inverse-fold': '#a855f7',
   fold: '#10b981',
@@ -30,7 +32,30 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         sequence: 'MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALE',
       };
     case 'rfd4-proteina':
-      return { length: 70, nsteps: 30, recycleSchedule: 'low', seed: 42, customSpecYaml: '' };
+      return {
+        mode: 'unconditional',
+        length: 70,
+        nsteps: 30,
+        recycleSchedule: 'low',
+        seed: 42,
+        presetId: 'custom_cath_monomer',
+        partialFraction: 0.5,
+        customSpecYaml: '',
+      };
+    case 'rfd4-conditioner':
+      return {
+        taskPreset: 'custom',
+        contig: '70-70',
+        lockChain: '',
+        hotspots: '',
+        motifSpan: '',
+        unindexedMotif: false,
+        hbondMode: 'none',
+        hbondSelection: '',
+        cathCode: '',
+        paintBrush: 'hotspots',
+        rawJsonOverride: '',
+      };
     case 'legacy-teacher':
       return {
         modelUrl: '/models/legacy-teacher/v1/model.onnx',

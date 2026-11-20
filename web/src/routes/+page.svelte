@@ -266,6 +266,24 @@
   function handleResidueClick(info: { chain: string; seqId: number; compId: string }) {
     const tag = `${info.chain}${info.seqId}`;
     lastPickedResidue = `${tag} (${info.compId})`;
+
+    // If an RFD4 Condition block is selected, paint into its active brush field (hotspots or motifSpan)
+    if (selectedNode?.adapterId === 'rfd4-conditioner') {
+      const brush = String(selectedNode.params.paintBrush ?? 'hotspots');
+      const key = brush === 'motifSpan' ? 'motifSpan' : 'hotspots';
+      const prev = String(selectedNode.params[key] ?? '').trim();
+      const parts = prev ? prev.split(/[,\s]+/).filter(Boolean) : [];
+      if (!parts.includes(tag)) {
+        parts.push(tag);
+        updateNodeParams(selectedNode.id, {
+          ...selectedNode.params,
+          taskPreset: 'custom',
+          [key]: parts.join(', '),
+        });
+      }
+      return;
+    }
+
     const mpnnNode =
       (selectedNode?.adapterId === 'web-protein-mpnn' ? selectedNode : null) ??
       graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn');

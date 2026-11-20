@@ -12,6 +12,7 @@ import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
 import type {
   ArtifactRef,
   CanonicalArtifact,
+  ConditionSpecArtifact,
   DesignabilityMetrics,
   DesignabilityRow,
   FoldedStructure,
@@ -271,6 +272,119 @@ export class ExecutionScheduler {
       };
     }
 
+    if (node.adapterId === 'rfd4-conditioner') {
+      const p = node.params ?? {};
+      const template = inputs.template as StructureArtifact | undefined;
+      const taskPreset = String(p.taskPreset ?? 'custom');
+      const rawOverride = String(p.rawJsonOverride ?? '').trim();
+
+      if (rawOverride) {
+        const parsed = JSON.parse(rawOverride) as Record<string, unknown>;
+        const art: ConditionSpecArtifact = {
+          kind: 'ConditionSpec',
+          id: `cond-raw-${fnv1a(rawOverride)}`,
+          label: 'Custom JSON Spec',
+          contig: String(parsed.contig ?? p.contig ?? '70-70'),
+          conditions: (parsed.conditions as Record<string, unknown>) ?? {},
+          inputCif: template?.cifText ?? template?.pdbText,
+          specMode: true,
+          summary: `raw spec (${String(parsed.contig ?? 'custom')})`,
+        };
+        return { condition: art };
+      }
+
+      if (taskPreset !== 'custom') {
+        const art: ConditionSpecArtifact = {
+          kind: 'ConditionSpec',
+          id: `cond-preset-${taskPreset}`,
+          label: `RFD4 Preset: ${taskPreset}`,
+          contig: String(p.contig ?? ''),
+          conditions: {},
+          cifUrl: `preset:${taskPreset}`,
+          summary: `preset:${taskPreset}`,
+        };
+        return { condition: art };
+      }
+
+      const contig = String(p.contig ?? '70-70').trim() || '70-70';
+      const conditions: Record<string, unknown> = {};
+      const tags: string[] = [contig];
+
+      const lockChain = String(p.lockChain ?? '').trim();
+      if (lockChain) {
+        const ch = lockChain[0].toUpperCase();
+        conditions.C_CRD = { true: [{ select: `sel('${ch}/*/*/*')` }] };
+        conditions.C_SEQ = { true: [{ select: `sel('${ch}/*/*/*')` }] };
+        tags.push(`lock:${ch}`);
+      }
+
+      const hotspots = String(p.hotspots ?? '').trim();
+      if (hotspots) {
+        // Group residues by chain (e.g. "A54, A56, A66" -> sel('A/*/54,56,66/*'))
+        const byChain = new Map<string, string[]>();
+        for (const tok of hotspots.split(/[,\s]+/).filter(Boolean)) {
+          const m = /^([A-Za-z])?:?(\d+(?:-\d+)?)$/.exec(tok);
+          if (!m) continue;
+          const ch = (m[1] || 'A').toUpperCase();
+          const list = byChain.get(ch) ?? [];
+          list.push(m[2]);
+          byChain.set(ch, list);
+        }
+        const exprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/${nums.join(',')}/*')`);
+        if (exprs.length > 0) {
+          conditions.C_HOT = { true: [{ select: exprs.join(' | ') }] };
+          tags.push(`hot:${hotspots}`);
+        }
+      }
+
+      const motifSpan = String(p.motifSpan ?? '').trim();
+      if (motifSpan) {
+        const byChain = new Map<string, string[]>();
+        for (const tok of motifSpan.split(/[,\s]+/).filter(Boolean)) {
+          const m = /^([A-Za-z])?:?(\d+(?:-\d+)?)$/.exec(tok);
+          if (!m) continue;
+          const ch = (m[1] || 'A').toUpperCase();
+          const list = byChain.get(ch) ?? [];
+          list.push(m[2]);
+          byChain.set(ch, list);
+        }
+        const exprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/${nums.join(',')}/*')`);
+        if (exprs.length > 0) {
+          const sel = exprs.join(' | ');
+          conditions.C_CRDGRP = { 1: [{ select: sel }] };
+          conditions.C_SEQ = { true: [{ select: sel }] };
+          if (p.unindexedMotif) conditions.C_IDX = { false: [{ select: sel }] };
+          tags.push(p.unindexedMotif ? `unidx-motif:${motifSpan}` : `motif:${motifSpan}`);
+        }
+      }
+
+      const hbondMode = String(p.hbondMode ?? 'none');
+      const hbondSel = String(p.hbondSelection ?? '').trim();
+      if (hbondMode !== 'none' && hbondSel) {
+        const expr = hbondSel.includes('sel(') ? hbondSel : `sel('${hbondSel}')`;
+        conditions.C_HB = { [hbondMode]: [{ select: expr }] };
+        tags.push(`HB:${hbondMode}`);
+      }
+
+      const cathCode = String(p.cathCode ?? '').trim();
+      if (cathCode) {
+        conditions.C_CATH = { [cathCode]: [{ select: "sel('*/*/*/*')" }] };
+        tags.push(`CATH:${cathCode}`);
+      }
+
+      const art: ConditionSpecArtifact = {
+        kind: 'ConditionSpec',
+        id: `cond-${fnv1a(JSON.stringify({ contig, conditions, tpl: template?.id }))}`,
+        label: tags.join(' · '),
+        contig,
+        conditions,
+        inputCif: template?.cifText ?? template?.pdbText,
+        specMode: true,
+        summary: tags.join(' · '),
+      };
+      return { condition: art };
+    }
+
     if (node.adapterId === 'designability-scorer') {
       const structure = inputs.structure as StructureArtifact | undefined;
       const folds = inputs.folds as FoldedStructure | undefined;
@@ -442,6 +556,16 @@ function summarizeArtifact(art: CanonicalArtifact): ArtifactRef {
       summary: {
         count: art.folds.length,
         bestPlddt: Number(Math.max(...art.folds.map((f) => f.meanPlddt), 0).toFixed(1)),
+      },
+    };
+  }
+  if (art.kind === 'ConditionSpec') {
+    return {
+      id: art.id,
+      kind: art.kind,
+      summary: {
+        contig: art.contig,
+        summary: art.summary,
       },
     };
   }

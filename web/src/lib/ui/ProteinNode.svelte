@@ -44,6 +44,9 @@
       if (art.kind === 'StructureArtifact') {
         return `L=${art.length} aa · Rg ${art.geometry.rg.toFixed(1)} Å`;
       }
+      if (art.kind === 'ConditionSpec') {
+        return art.summary;
+      }
     }
     return null;
   });

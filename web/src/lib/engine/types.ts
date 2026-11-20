@@ -9,7 +9,8 @@ export type PortType =
   | 'TrajectoryFrames'
   | 'SequenceSet'
   | 'FoldedStructure'
-  | 'DesignabilityMetrics';
+  | 'DesignabilityMetrics'
+  | 'ConditionSpec';
 
 export interface StructureArtifact {
   kind: 'StructureArtifact';
@@ -93,11 +94,28 @@ export interface DesignabilityMetrics {
   passRate: number;
 }
 
+export interface ConditionSpecArtifact {
+  kind: 'ConditionSpec';
+  id: string;
+  label: string;
+  contig: string;
+  conditions: Record<string, unknown>;
+  /** Optional remote .cif.zst / .cif URL (e.g. RFD4 upstream benchmark context). */
+  cifUrl?: string | null;
+  /** Optional inline PDB/mmCIF structure text from upstream template. */
+  inputCif?: string;
+  specMode?: boolean;
+  partialFraction?: number | null;
+  inverseFolding?: boolean;
+  summary: string;
+}
+
 export type CanonicalArtifact =
   | StructureArtifact
   | SequenceSet
   | FoldedStructure
-  | DesignabilityMetrics;
+  | DesignabilityMetrics
+  | ConditionSpecArtifact;
 
 /** Content-addressed lightweight handle suitable for Agents / WebMCP / Campaign logs. */
 export interface ArtifactRef {
@@ -115,7 +133,7 @@ export interface AdapterManifest {
   id: string;
   displayName: string;
   shortName: string;
-  stage: 'source' | 'generate' | 'inverse-fold' | 'fold' | 'score';
+  stage: 'source' | 'condition' | 'generate' | 'inverse-fold' | 'fold' | 'score';
   runtime: RuntimeKind;
   estimatedVramMB: number;
   approxWeightsMB: number;

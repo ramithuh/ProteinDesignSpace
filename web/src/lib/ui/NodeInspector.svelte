@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ADAPTER_REGISTRY } from '$lib/engine/registry';
+  import { ADAPTER_REGISTRY, RFD4_BENCHMARK_OPTIONS } from '$lib/engine/registry';
   import type { WorkflowNode } from '$lib/engine/types';
 
   interface Props {
@@ -93,18 +93,184 @@
           oninput={(e) => setParam('sequence', e.currentTarget.value)}
         ></textarea>
       </label>
-    {:else if node.adapterId === 'rfd4-proteina'}
-      <label>
-        Length (aa)
-        <input
-          type="number"
-          min="30"
-          max="200"
+    {:else if node.adapterId === 'rfd4-conditioner'}
+      <label class="wide">
+        Task / Benchmark Preset
+        <select
           {disabled}
-          value={Number(node.params.length ?? 70)}
-          oninput={(e) => setParam('length', Number(e.currentTarget.value))}
-        />
+          value={String(node.params.taskPreset ?? 'custom')}
+          onchange={(e) => setParam('taskPreset', e.currentTarget.value)}
+        >
+          <option value="custom">Custom Conditioning Builder (below)</option>
+          {#each RFD4_BENCHMARK_OPTIONS as opt (opt.id)}
+            <option value={opt.id}>[{opt.category}] {opt.label}</option>
+          {/each}
+        </select>
       </label>
+
+      {#if String(node.params.taskPreset ?? 'custom') === 'custom'}
+        <label class="wide">
+          Contig (e.g. <code>70-70</code>, <code>A18-132,/0,70-70</code>, <code>10-20,A16-35,10-20</code>)
+          <input
+            type="text"
+            {disabled}
+            value={String(node.params.contig ?? '70-70')}
+            oninput={(e) => setParam('contig', e.currentTarget.value)}
+          />
+        </label>
+        <label>
+          Lock Chain
+          <input
+            type="text"
+            {disabled}
+            placeholder="e.g. A"
+            style="width: 72px"
+            value={String(node.params.lockChain ?? '')}
+            oninput={(e) => setParam('lockChain', e.currentTarget.value)}
+          />
+        </label>
+        <label>
+          CATH Fold
+          <input
+            type="text"
+            {disabled}
+            placeholder="e.g. 3.40.50"
+            style="width: 96px"
+            value={String(node.params.cathCode ?? '')}
+            oninput={(e) => setParam('cathCode', e.currentTarget.value)}
+          />
+        </label>
+        <label>
+          3D Click Brush
+          <select
+            {disabled}
+            value={String(node.params.paintBrush ?? 'hotspots')}
+            onchange={(e) => setParam('paintBrush', e.currentTarget.value)}
+          >
+            <option value="hotspots">Paint Hotspots (C_HOT)</option>
+            <option value="motifSpan">Paint Motif (C_CRDGRP)</option>
+          </select>
+        </label>
+        <label class="wide">
+          Hotspots (<code>C_HOT</code> — click in Mol* or type e.g. A54, A56, A66)
+          <input
+            type="text"
+            {disabled}
+            placeholder="A54, A56, A66, A115"
+            value={String(node.params.hotspots ?? '')}
+            oninput={(e) => setParam('hotspots', e.currentTarget.value)}
+          />
+        </label>
+        <label class="wide">
+          Fixed Motif (<code>C_CRDGRP</code> + <code>C_SEQ</code> — e.g. A16-35, A52-71)
+          <input
+            type="text"
+            {disabled}
+            placeholder="A16-35, A52-71"
+            value={String(node.params.motifSpan ?? '')}
+            oninput={(e) => setParam('motifSpan', e.currentTarget.value)}
+          />
+        </label>
+        <label class="inline-check">
+          <input
+            type="checkbox"
+            {disabled}
+            checked={Boolean(node.params.unindexedMotif)}
+            onchange={(e) => setParam('unindexedMotif', e.currentTarget.checked)}
+          />
+          Unindexed Motif (<code>C_IDX=false</code>)
+        </label>
+        <label>
+          H-Bond (<code>C_HB</code>)
+          <select
+            {disabled}
+            value={String(node.params.hbondMode ?? 'none')}
+            onchange={(e) => setParam('hbondMode', e.currentTarget.value)}
+          >
+            <option value="none">None</option>
+            <option value="ACCEPTOR">ACCEPTOR</option>
+            <option value="DONOR">DONOR</option>
+            <option value="BOTH">BOTH</option>
+          </select>
+        </label>
+        {#if String(node.params.hbondMode ?? 'none') !== 'none'}
+          <label class="wide">
+            H-Bond Selection (<code>sel(...)</code>, e.g. <code>B/SAM/*/*</code> or <code>A/*/42/OG</code>)
+            <input
+              type="text"
+              {disabled}
+              placeholder="B/SAM/*/*"
+              value={String(node.params.hbondSelection ?? '')}
+              oninput={(e) => setParam('hbondSelection', e.currentTarget.value)}
+            />
+          </label>
+        {/if}
+        <details class="full">
+          <summary>Advanced: Raw RFD4 condition_spec JSON override</summary>
+          <textarea
+            rows="4"
+            {disabled}
+            placeholder={'{"contig": "70-70", "conditions": {"C_CATH": {"3.40.50": [{"select": "sel(\'*/*/*/*\')"}]}}}'}
+            value={String(node.params.rawJsonOverride ?? '')}
+            oninput={(e) => setParam('rawJsonOverride', e.currentTarget.value)}
+          ></textarea>
+        </details>
+      {/if}
+    {:else if node.adapterId === 'rfd4-proteina'}
+      {@const rfdMode = String(node.params.mode ?? 'unconditional')}
+      <label>
+        Mode
+        <select
+          {disabled}
+          value={rfdMode}
+          onchange={(e) => setParam('mode', e.currentTarget.value)}
+        >
+          <option value="unconditional">Unconditional Monomer</option>
+          <option value="conditioned">Conditioned (upstream block)</option>
+          <option value="preset">Official RFD4 Benchmark</option>
+          <option value="partial">Partial Diffusion (+138M enc)</option>
+          <option value="inverse-folding">Inverse Folding (+138M enc)</option>
+        </select>
+      </label>
+      {#if rfdMode === 'unconditional'}
+        <label>
+          Length (aa)
+          <input
+            type="number"
+            min="30"
+            max="200"
+            {disabled}
+            value={Number(node.params.length ?? 70)}
+            oninput={(e) => setParam('length', Number(e.currentTarget.value))}
+          />
+        </label>
+      {:else if rfdMode === 'preset'}
+        <label class="wide">
+          Upstream Benchmark
+          <select
+            {disabled}
+            value={String(node.params.presetId ?? 'custom_cath_monomer')}
+            onchange={(e) => setParam('presetId', e.currentTarget.value)}
+          >
+            {#each RFD4_BENCHMARK_OPTIONS as opt (opt.id)}
+              <option value={opt.id}>[{opt.category}] {opt.label}</option>
+            {/each}
+          </select>
+        </label>
+      {:else if rfdMode === 'partial'}
+        <label>
+          Partial frac
+          <input
+            type="number"
+            min="0.1"
+            max="0.9"
+            step="0.05"
+            {disabled}
+            value={Number(node.params.partialFraction ?? 0.5)}
+            oninput={(e) => setParam('partialFraction', Number(e.currentTarget.value))}
+          />
+        </label>
+      {/if}
       <label>
         Steps
         <input
@@ -137,16 +303,18 @@
           oninput={(e) => setParam('seed', Number(e.currentTarget.value))}
         />
       </label>
-      <details class="full">
-        <summary>Optional RFD4 YAML/JSON conditioning spec (contigs, hotspots, H-bonds)</summary>
-        <textarea
-          rows="4"
-          {disabled}
-          placeholder={'Optional: leave blank for unconditional monomer, or paste RFD4 YAML/JSON e.g.:\n{"contig": "70-70", "conditions": {}}'}
-          value={String(node.params.customSpecYaml ?? '')}
-          oninput={(e) => setParam('customSpecYaml', e.currentTarget.value)}
-        ></textarea>
-      </details>
+      {#if rfdMode === 'unconditional'}
+        <details class="full">
+          <summary>Optional inline RFD4 YAML/JSON spec</summary>
+          <textarea
+            rows="3"
+            {disabled}
+            placeholder={'Leave blank for pure monomer, or wire an RFD4 Condition block into the condition port.'}
+            value={String(node.params.customSpecYaml ?? '')}
+            oninput={(e) => setParam('customSpecYaml', e.currentTarget.value)}
+          ></textarea>
+        </details>
+      {/if}
     {:else if node.adapterId === 'legacy-teacher'}
       <label>
         Sampler
@@ -412,6 +580,12 @@
   label.full,
   details.full {
     width: 100%;
+  }
+  label.inline-check {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    padding-bottom: 6px;
   }
   details summary {
     cursor: pointer;
