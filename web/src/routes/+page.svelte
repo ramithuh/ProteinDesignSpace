@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import { ExecutionScheduler, attachProgrammaticApi } from '$lib/engine/scheduler';
-  import { ADAPTER_REGISTRY, SAMPLE_CAMPAIGN, WORKFLOW_PRESETS } from '$lib/engine/registry';
+  import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from '$lib/engine/registry';
   import { autoLayoutGraph, validateGraph } from '$lib/engine/graph-utils';
   import {
     extractSubgraphUpTo,
@@ -14,7 +14,6 @@
   import { decodeHashToGraph, encodeGraphToHash } from '$lib/engine/share';
   import { clearAllModelCaches, getCacheStats } from '$lib/engine/opfs-cache';
   import type {
-    CampaignState,
     CanonicalArtifact,
     ConditionSpecArtifact,
     DesignabilityMetrics,
@@ -31,11 +30,9 @@
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
   import WorkflowCanvas from '$lib/ui/WorkflowCanvas.svelte';
   import RecipeDrawer from '$lib/ui/RecipeDrawer.svelte';
-  import CampaignViewer from '$lib/ui/CampaignViewer.svelte';
 
   const scheduler = new ExecutionScheduler();
 
-  let activeTab = $state<'workbench' | 'campaign'>('workbench');
   let rightPanelTab = $state<'params' | 'peek'>('params');
   let splitMode = $state<'horizontal' | 'vertical'>('horizontal');
   let splitPct = $state<number>(65);
@@ -80,9 +77,6 @@
   let trajFrame = $state(0);
   let molPickMode = $state<'auto' | 'off' | 'hotspots' | 'motif' | 'mpnn'>('auto');
   let lastPickedResidue = $state<string | null>(null);
-
-  // Campaign Inspector state (BindClaw-style multi-round log)
-  let campaign = $state<CampaignState>(structuredClone(SAMPLE_CAMPAIGN));
 
   function showToastMessage(msg: string, ms = 3200) {
     shareToast = msg;
@@ -578,47 +572,6 @@
     lastPickedResidue = baseLabel;
   }
 
-  function recordRunToCampaign() {
-    moreMenuOpen = false;
-    if (!metricsArtifact) return;
-    const nextRoundNum = (campaign.rounds.at(-1)?.round ?? 0) + 1;
-    const genNode =
-      graph.nodes.find((n) => ADAPTER_REGISTRY[n.adapterId]?.stage === 'generate') ??
-      graph.nodes.find((n) => ADAPTER_REGISTRY[n.adapterId]?.stage === 'source') ??
-      graph.nodes[0];
-    const condNode = graph.nodes.find((n) => n.adapterId === 'rfd4-conditioner');
-    const foldNode = graph.nodes.find((n) => ADAPTER_REGISTRY[n.adapterId]?.stage === 'fold');
-    const cleanParams: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(genNode?.params ?? {})) {
-      if (k === 'pdbText' || k === 'rawJsonOverride' || k === 'customSpecYaml') continue;
-      cleanParams[k] = v;
-    }
-    const condSummary = condNode
-      ? `cond(${String(condNode.params.taskPreset !== 'custom' ? condNode.params.taskPreset : condNode.params.contig ?? '')}) · `
-      : '';
-    const best = metricsArtifact.best;
-    const newRound = {
-      round: nextRoundNum,
-      timestamp: new Date().toISOString(),
-      label: `Round ${nextRoundNum} — ${selectedNode?.label ?? graph.name}`,
-      generator: ADAPTER_REGISTRY[genNode?.adapterId ?? '']?.displayName ?? genNode?.adapterId ?? 'unknown',
-      folder: ADAPTER_REGISTRY[foldNode?.adapterId ?? '']?.displayName ?? 'LocalFold AF2 (WebGPU INT5)',
-      nDesigned: metricsArtifact.rows.length,
-      nPassed: metricsArtifact.rows.filter((r) => r.designable).length,
-      hitRate: metricsArtifact.passRate,
-      bestScRmsd: best ? best.scRmsd : null,
-      bestPlddt: best ? best.meanPlddt : null,
-      conditioningSummary: `${condSummary}${JSON.stringify(cleanParams)}`.slice(0, 120),
-      agentNotes: `Recorded live in browser from denovo.run (${((totalElapsedMs ?? 0) / 1000).toFixed(1)}s).`,
-      designedPdb: best?.designedPdb,
-      alignedFoldPdb: best?.alignedFoldPdb,
-      sequence: best?.sequence,
-      pae: best?.pae ? Array.from(best.pae) : undefined,
-    };
-    campaign = { ...campaign, rounds: [...campaign.rounds, newRound] };
-    activeTab = 'campaign';
-  }
-
   // Preset & pick-target helpers
   let activePreset = $derived(WORKFLOW_PRESETS.find((p) => p.id === selectedPresetId) ?? null);
   let hasConditionerNode = $derived(graph.nodes.some((n) => n.adapterId === 'rfd4-conditioner'));
@@ -787,44 +740,21 @@
   <div class="hdr-left">
     <h1 class="brand-logo"><span class="accent">denovo</span>.run</h1>
 
-    <div class="seg-tabs" role="tablist" aria-label="Workspace view">
-      <button
-        type="button"
-        role="tab"
-        aria-selected={activeTab === 'workbench'}
-        class:active={activeTab === 'workbench'}
-        onclick={() => (activeTab = 'workbench')}
-      >
-        Workbench
-      </button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={activeTab === 'campaign'}
-        class:active={activeTab === 'campaign'}
-        onclick={() => (activeTab = 'campaign')}
-      >
-        Campaign ({campaign.rounds.length})
-      </button>
-    </div>
-
-    {#if activeTab === 'workbench'}
-      <select
-        class="preset-select"
-        aria-label="Workflow preset"
-        disabled={isRunning}
-        value={selectedPresetId}
-        title={activePreset?.summary ?? graph.name}
-        onchange={(e) => selectPreset(e.currentTarget.value)}
-      >
-        {#if !activePreset}
-          <option value={selectedPresetId}>Custom: {graph.name}</option>
-        {/if}
-        {#each WORKFLOW_PRESETS as p (p.id)}
-          <option value={p.id} title={p.summary}>{p.name} — {p.badge}</option>
-        {/each}
-      </select>
-    {/if}
+    <select
+      class="preset-select"
+      aria-label="Workflow preset"
+      disabled={isRunning}
+      value={selectedPresetId}
+      title={activePreset?.summary ?? graph.name}
+      onchange={(e) => selectPreset(e.currentTarget.value)}
+    >
+      {#if !activePreset}
+        <option value={selectedPresetId}>Custom: {graph.name}</option>
+      {/if}
+      {#each WORKFLOW_PRESETS as p (p.id)}
+        <option value={p.id} title={p.summary}>{p.name} — {p.badge}</option>
+      {/each}
+    </select>
   </div>
 
   <div class="hdr-right">
@@ -891,19 +821,17 @@
     </div>
 
     <!-- Layout Split Toggle (Horizontal Side-by-Side vs Vertical Stacked) -->
-    {#if activeTab === 'workbench'}
-      <button
-        type="button"
-        class="hdr-icon-btn"
-        onclick={toggleSplitMode}
-        title={splitMode === 'horizontal'
-          ? 'Switch to top/bottom stacked layout'
-          : 'Switch to left/right horizontal split'}
-        aria-label="Toggle horizontal or vertical split layout"
-      >
-        {splitMode === 'horizontal' ? '⬓' : '◫'}
-      </button>
-    {/if}
+    <button
+      type="button"
+      class="hdr-icon-btn"
+      onclick={toggleSplitMode}
+      title={splitMode === 'horizontal'
+        ? 'Switch to top/bottom stacked layout'
+        : 'Switch to left/right horizontal split'}
+      aria-label="Toggle horizontal or vertical split layout"
+    >
+      {splitMode === 'horizontal' ? '⬓' : '◫'}
+    </button>
 
     <!-- Theme Toggle -->
     <button
@@ -916,89 +844,80 @@
       {theme === 'dark' ? '☀' : '☾'}
     </button>
 
-    {#if activeTab === 'workbench'}
-      <!-- Overflow ⋯ Menu Popover -->
-      <div class="pop-wrap" bind:this={moreWrapEl}>
-        <button
-          type="button"
-          class="hdr-icon-btn"
-          class:active={moreMenuOpen}
-          aria-expanded={moreMenuOpen}
-          aria-label="Workflow actions menu"
-          title="Recipe, Share, Import/Export & Run options"
-          onclick={() => {
-            sysMenuOpen = false;
-            moreMenuOpen = !moreMenuOpen;
-          }}
-        >
-          ⋯
-        </button>
-
-        {#if moreMenuOpen}
-          <div class="hdr-popover menu-pop" role="menu">
-            <button
-              type="button"
-              class="menu-item"
-              role="menuitem"
-              onclick={() => {
-                showRecipe = !showRecipe;
-                moreMenuOpen = false;
-              }}
-            >
-              <span>{showRecipe ? 'Hide Recipe' : '</> Recipe'}</span>
-            </button>
-            <button type="button" class="menu-item" role="menuitem" onclick={copyQuickShareLink}>
-              <span>🔗 Share Link</span>
-            </button>
-            <button type="button" class="menu-item" role="menuitem" onclick={exportWorkflowJson}>
-              <span>Export JSON</span>
-            </button>
-            <label class="menu-item" class:disabled={isRunning}>
-              <span>Import JSON</span>
-              <input
-                type="file"
-                accept=".json"
-                hidden
-                disabled={isRunning}
-                onchange={importGraphJson}
-              />
-            </label>
-            {#if metricsArtifact}
-              <div class="menu-sep"></div>
-              <button type="button" class="menu-item accent" role="menuitem" onclick={recordRunToCampaign}>
-                <span>+ Save to Campaign</span>
-              </button>
-            {/if}
-            <div class="menu-sep"></div>
-            <button
-              type="button"
-              class="menu-item"
-              role="menuitem"
-              disabled={isRunning || validationErrors.length > 0}
-              onclick={() => runWorkflow(true)}
-            >
-              <span>Re-run Fresh</span>
-            </button>
-          </div>
-        {/if}
-      </div>
-
-      <!-- Primary Run CTA -->
+    <!-- Overflow ⋯ Menu Popover -->
+    <div class="pop-wrap" bind:this={moreWrapEl}>
       <button
         type="button"
-        class="btn-primary"
-        disabled={isRunning || validationErrors.length > 0}
-        onclick={() => runWorkflow(false)}
+        class="hdr-icon-btn"
+        class:active={moreMenuOpen}
+        aria-expanded={moreMenuOpen}
+        aria-label="Workflow actions menu"
+        title="Recipe, Share, Import/Export & Run options"
+        onclick={() => {
+          sysMenuOpen = false;
+          moreMenuOpen = !moreMenuOpen;
+        }}
       >
-        {isRunning ? 'Running…' : '▶ Run'}
+        ⋯
       </button>
-    {/if}
+
+      {#if moreMenuOpen}
+        <div class="hdr-popover menu-pop" role="menu">
+          <button
+            type="button"
+            class="menu-item"
+            role="menuitem"
+            onclick={() => {
+              showRecipe = !showRecipe;
+              moreMenuOpen = false;
+            }}
+          >
+            <span>{showRecipe ? 'Hide Recipe' : '</> Recipe'}</span>
+          </button>
+          <button type="button" class="menu-item" role="menuitem" onclick={copyQuickShareLink}>
+            <span>🔗 Share Link</span>
+          </button>
+          <button type="button" class="menu-item" role="menuitem" onclick={exportWorkflowJson}>
+            <span>Export JSON</span>
+          </button>
+          <label class="menu-item" class:disabled={isRunning}>
+            <span>Import JSON</span>
+            <input
+              type="file"
+              accept=".json"
+              hidden
+              disabled={isRunning}
+              onchange={importGraphJson}
+            />
+          </label>
+          <div class="menu-sep"></div>
+          <button
+            type="button"
+            class="menu-item"
+            role="menuitem"
+            disabled={isRunning || validationErrors.length > 0}
+            onclick={() => runWorkflow(true)}
+          >
+            <span>Re-run Fresh</span>
+          </button>
+        </div>
+      {/if}
+    </div>
+
+    <!-- Primary Run CTA -->
+    <button
+      type="button"
+      class="btn-primary"
+      disabled={isRunning || validationErrors.length > 0}
+      onclick={() => runWorkflow(false)}
+    >
+      {isRunning ? 'Running…' : '▶ Run'}
+    </button>
   </div>
 </header>
 
-{#if activeTab === 'workbench'}
-  <div
-    class="workbench-split"
+<div
+  class="workbench-split"
     class:horizontal={splitMode === 'horizontal'}
     class:dragging={draggingSplit}
     bind:this={splitWrapEl}
@@ -1213,9 +1132,6 @@
       </div>
     </section>
   </div>
-{:else}
-  <CampaignViewer {campaign} {theme} onLoadCampaign={(c) => (campaign = c)} />
-{/if}
 
 <style>
   .app-header {
@@ -1252,36 +1168,6 @@
   }
   .accent {
     color: var(--accent-bright);
-  }
-
-  .seg-tabs {
-    display: inline-flex;
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    padding: 2px;
-    gap: 2px;
-  }
-  .seg-tabs button {
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
-    padding: 4px 10px;
-    border-radius: 5px;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    font-family: inherit;
-    white-space: nowrap;
-  }
-  .seg-tabs button:hover {
-    color: var(--text-primary);
-  }
-  .seg-tabs button.active {
-    background: var(--bg-surface-selected);
-    color: var(--text-primary);
-    font-weight: 600;
-    box-shadow: inset 0 0 0 1px var(--border-strong);
   }
 
   .preset-select {
@@ -1467,10 +1353,6 @@
   .menu-item:hover:not(:disabled):not(.disabled) {
     background: var(--bg-surface-hover);
     color: var(--text-primary);
-  }
-  .menu-item.accent {
-    color: var(--accent-bright);
-    font-weight: 600;
   }
   .menu-item:disabled,
   .menu-item.disabled {
