@@ -11,7 +11,8 @@
       "sparsePaths": [
         "LICENSE",
         "webgpu",
-        "shared"
+        "shared",
+        "cpu"
       ]
     },
     {
@@ -24,7 +25,8 @@
         "THIRD_PARTY_NOTICES.md",
         "webgpu",
         "shared",
-        "cpu/rfd4p"
+        "cpu/rfd4p",
+        "vendor/localfold-1edc50a7"
       ]
     }
   ]
