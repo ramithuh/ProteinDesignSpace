@@ -35,7 +35,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
       return {
         mode: 'unconditional',
         length: 70,
-        nsteps: 30,
+        nsteps: 60,
         recycleSchedule: 'low',
         earlyStop: true,
         seed: 42,

@@ -8,6 +8,7 @@
     useSvelteFlow,
     type Connection,
     type Edge,
+    type EdgeTypes,
     type IsValidConnection,
     type Node,
     type NodeTypes,
@@ -28,6 +29,7 @@
     WorkflowGraph,
   } from '$lib/engine/types';
   import ProteinNode, { type ProteinNodeData } from './ProteinNode.svelte';
+  import SmartEdge from './SmartEdge.svelte';
   import BlockCatalogPopover from './BlockCatalogPopover.svelte';
 
   interface Props {
@@ -66,6 +68,10 @@
 
   const nodeTypes: NodeTypes = {
     protein: ProteinNode as unknown as NodeTypes[string],
+  };
+
+  const edgeTypes: EdgeTypes = {
+    smart: SmartEdge as unknown as EdgeTypes[string],
   };
 
   let validationToast = $state<string | null>(null);
@@ -235,6 +241,10 @@
       };
     });
 
+    // Assign small lane staggers if multiple edges fan out from the same source node
+    // so parallel skip wires don't overlap on the exact same horizontal track.
+    const outCounts = new Map<string, number>();
+
     flowEdges = laid.edges.map((e) => {
       const eid = makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort);
       const col = edgeColor(e.fromNode, e.fromPort);
@@ -264,9 +274,14 @@
         style = `stroke: ${col}; stroke-width: 2px; cursor: pointer;`;
       }
 
+      const fanIdx = outCounts.get(e.fromNode) ?? 0;
+      outCounts.set(e.fromNode, fanIdx + 1);
+      // Only stagger when >1 edge leaves the same node and routes as a detour
+      const laneStagger = fanIdx > 0 ? (fanIdx - 1) * 12 : 0;
+
       return {
         id: eid,
-        type: 'smoothstep',
+        type: 'smart',
         source: e.fromNode,
         sourceHandle: e.fromPort,
         target: e.toNode,
@@ -280,7 +295,7 @@
           color: col,
         },
         style,
-        pathOptions: { borderRadius: 14, offset: 26 },
+        data: { laneStagger },
       };
     });
   });
@@ -522,6 +537,7 @@
       bind:nodes={flowNodes}
       bind:edges={flowEdges}
       {nodeTypes}
+      {edgeTypes}
       forceColorMode={theme}
       nodesDraggable={!disabled}
       nodesConnectable={!disabled}
