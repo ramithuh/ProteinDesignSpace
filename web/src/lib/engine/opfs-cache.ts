@@ -57,6 +57,11 @@ export async function fetchCachedBytes(
   const contentEncoding = resp.headers.get('content-encoding');
   const rawTotal = Number(resp.headers.get('content-length') ?? 0);
   const total = Number.isFinite(rawTotal) && rawTotal > 0 ? rawTotal : 0;
+  // On cross-origin (CORS) responses, `Content-Encoding` is not a CORS-safelisted header and
+  // reads as `null` even when a CDN (e.g. GitHub Pages / Fastly) gzips an already-compressed
+  // `.cif.zst` binary—making the encoded `Content-Length` slightly LARGER than the decoded body.
+  // Fetch already errors on true HTTP stream truncation; only enforce exact length when non-CORS.
+  const canTrustContentLength = !contentEncoding && resp.type !== 'cors';
 
   let bytes: Uint8Array;
   if (resp.body) {
@@ -71,7 +76,7 @@ export async function fetchCachedBytes(
       // Keep reported total >= loaded so callers computing loaded / total stay <= 1 (e.g. gzipped bodies)
       onProgress?.({ loaded, total: Math.max(total, loaded), fromCache: false });
     }
-    if (!contentEncoding && total > 0 && loaded < total) {
+    if (total > 0 && (loaded === 0 || (canTrustContentLength && loaded < total))) {
       chunks.length = 0;
       throw new Error(`Truncated download for ${url}: received ${loaded} of ${total} bytes`);
     }
@@ -85,7 +90,7 @@ export async function fetchCachedBytes(
     chunks.length = 0;
   } else {
     bytes = new Uint8Array(await resp.arrayBuffer());
-    if (!contentEncoding && total > 0 && bytes.byteLength < total) {
+    if (total > 0 && (bytes.byteLength === 0 || (canTrustContentLength && bytes.byteLength < total))) {
       throw new Error(
         `Truncated download for ${url}: received ${bytes.byteLength} of ${total} bytes`,
       );

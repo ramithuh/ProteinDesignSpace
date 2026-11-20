@@ -83,6 +83,28 @@ describe('engine/opfs-cache', () => {
     }
   });
 
+  it('accepts CORS responses where hidden gzip expands Content-Length above decoded bytes (e.g. .cif.zst)', async () => {
+    const payload = new Uint8Array(3802).fill(42);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(payload);
+        controller.close();
+      },
+    });
+    const corsResp = {
+      ok: true,
+      status: 200,
+      type: 'cors',
+      headers: new Headers({ 'content-length': '3830' }),
+      body: stream,
+    } as unknown as Response;
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(corsResp));
+
+    const bytes = await fetchCachedBytes('cors-zst-key', 'https://web.rfd4-proteina.org/web/examples/sm_sam.cif.zst');
+    expect(bytes.byteLength).toBe(3802);
+  });
+
   it('accepts exact-length downloads and rejects HTTP error responses', async () => {
     const payload = new Uint8Array([7, 8, 9, 10]);
     vi.stubGlobal(
