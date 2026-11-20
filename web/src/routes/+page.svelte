@@ -4,21 +4,30 @@
   import { ExecutionScheduler, attachProgrammaticApi } from '$lib/engine/scheduler';
   import { ADAPTER_REGISTRY, SAMPLE_CAMPAIGN, WORKFLOW_PRESETS } from '$lib/engine/registry';
   import { autoLayoutGraph, validateGraph } from '$lib/engine/graph-utils';
+  import {
+    extractSubgraphUpTo,
+    findContextStructure,
+    getNodePeekSlots,
+    makeEdgeId,
+    pickDefaultPeekSlot,
+  } from '$lib/engine/peek';
   import { decodeHashToGraph, encodeGraphToHash } from '$lib/engine/share';
   import { clearAllModelCaches, getCacheStats } from '$lib/engine/opfs-cache';
   import type {
     CampaignState,
     CanonicalArtifact,
+    ConditionSpecArtifact,
     DesignabilityMetrics,
     DesignabilityRow,
     FoldedStructure,
     NodeProgressEvent,
     SequenceSet,
     StructureArtifact,
+    WorkflowEdge,
     WorkflowGraph,
   } from '$lib/engine/types';
   import MolSuperposeViewer from '$lib/viewer/MolSuperposeViewer.svelte';
-  import PaePlot from '$lib/viewer/PaePlot.svelte';
+  import ArtifactPeekPanel from '$lib/ui/ArtifactPeekPanel.svelte';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
   import WorkflowCanvas from '$lib/ui/WorkflowCanvas.svelte';
   import RecipeDrawer from '$lib/ui/RecipeDrawer.svelte';
@@ -47,8 +56,11 @@
   let nodeStates = $state<Record<string, NodeProgressEvent>>({});
   let outputsByNode = $state.raw<Record<string, Record<string, CanonicalArtifact>>>({});
 
-  // Viewer toggles
+  // Viewer & intermediate peek state
+  let selectedPeekSlotId = $state<string | null>(null);
+  let selectedEdgeId = $state<string | null>(null);
   let selectedRowIdx = $state(0);
+  let selectedFoldIdx = $state(0);
   let showDesigned = $state(true);
   let showRefold = $state(true);
   let showTrajectory = $state(false);
@@ -157,12 +169,44 @@
     const g = structuredClone(preset.graph);
     graph = g.nodes.some((n) => !n.position) ? autoLayoutGraph(g) : g;
     selectedNodeId = graph.nodes[0]?.id ?? '';
+    selectedPeekSlotId = null;
+    selectedEdgeId = null;
     nodeStates = {};
     outputsByNode = {};
     runError = null;
     totalElapsedMs = null;
     selectedRowIdx = 0;
+    selectedFoldIdx = 0;
     showTrajectory = false;
+  }
+
+  function handleSelectNode(nodeId: string) {
+    selectedNodeId = nodeId;
+    selectedPeekSlotId = null;
+    selectedEdgeId = null;
+  }
+
+  function handleSelectEdge(edge: WorkflowEdge) {
+    selectedNodeId = edge.toNode;
+    selectedPeekSlotId = `in:${edge.toPort}`;
+    selectedEdgeId = makeEdgeId(edge.fromNode, edge.fromPort, edge.toNode, edge.toPort);
+  }
+
+  function handlePeekPort(nodeId: string, direction: 'in' | 'out', portName: string) {
+    selectedNodeId = nodeId;
+    selectedPeekSlotId = `${direction}:${portName}`;
+    if (direction === 'in') {
+      const edge = graph.edges.find((e) => e.toNode === nodeId && e.toPort === portName);
+      selectedEdgeId = edge ? makeEdgeId(edge.fromNode, edge.fromPort, edge.toNode, edge.toPort) : null;
+    } else {
+      selectedEdgeId = null;
+    }
+  }
+
+  function handleSelectPeekSlot(slotId: string) {
+    selectedPeekSlotId = slotId;
+    const slot = peekSlots.find((s) => s.id === slotId);
+    selectedEdgeId = slot?.direction === 'in' ? (slot.edgeId ?? null) : null;
   }
 
   function handleGraphChange(next: WorkflowGraph) {
@@ -205,31 +249,57 @@
 
   let validationErrors = $derived(validateGraph(graph));
 
-  async function runWorkflow(bypassCache = false) {
+  async function runWorkflow(bypassCache = false, upToNodeId?: string) {
     if (isRunning) return;
-    const errs = validateGraph(graph);
+    const plainGraph = $state.snapshot(graph) as WorkflowGraph;
+    const targetGraph = upToNodeId ? extractSubgraphUpTo(plainGraph, upToNodeId) : plainGraph;
+    const errs = validateGraph(targetGraph);
     if (errs.length > 0) {
       runError = errs.join('\n');
       return;
     }
     isRunning = true;
     runError = null;
-    totalElapsedMs = null;
-    nodeStates = {};
+    if (!upToNodeId) {
+      totalElapsedMs = null;
+      nodeStates = {};
+      outputsByNode = {};
+    } else {
+      const targetIds = new Set(targetGraph.nodes.map((n) => n.id));
+      const nextStates: Record<string, NodeProgressEvent> = {};
+      for (const [id, st] of Object.entries(nodeStates)) {
+        if (!targetIds.has(id)) nextStates[id] = st;
+      }
+      nodeStates = nextStates;
+    }
+
     try {
-      const plainGraph = $state.snapshot(graph) as WorkflowGraph;
-      const res = await scheduler.run(plainGraph, handleProgress, { bypassCache });
-      outputsByNode = res.outputsByNode;
-      totalElapsedMs = res.totalElapsedMs;
+      const res = await scheduler.run(targetGraph, handleProgress, {
+        bypassCache,
+        onNodeOutput: (nodeId, outs) => {
+          outputsByNode = { ...outputsByNode, [nodeId]: outs };
+        },
+      });
+      outputsByNode = { ...outputsByNode, ...res.outputsByNode };
+      if (!upToNodeId) {
+        totalElapsedMs = res.totalElapsedMs;
+      }
       selectedRowIdx = 0;
+      selectedFoldIdx = 0;
       showTrajectory = false;
       activeGpuWorker = scheduler.getActiveGpuAdapter();
 
-      // Auto-focus a scorer or fold node if present so results appear immediately
-      const lastScorer = [...graph.nodes].reverse().find((n) => n.adapterId === 'designability-scorer');
-      const lastFold = [...graph.nodes].reverse().find((n) => n.adapterId === 'localfold-af2');
-      if (lastScorer) selectedNodeId = lastScorer.id;
-      else if (lastFold) selectedNodeId = lastFold.id;
+      if (upToNodeId) {
+        selectedNodeId = upToNodeId;
+        selectedPeekSlotId = null;
+        selectedEdgeId = null;
+      } else {
+        // Auto-focus a scorer or fold node if present so results appear immediately
+        const lastScorer = [...graph.nodes].reverse().find((n) => n.adapterId === 'designability-scorer');
+        const lastFold = [...graph.nodes].reverse().find((n) => n.adapterId === 'localfold-af2');
+        if (lastScorer) handleSelectNode(lastScorer.id);
+        else if (lastFold) handleSelectNode(lastFold.id);
+      }
 
       await refreshCacheStats();
     } catch (err) {
@@ -365,40 +435,117 @@
     activeTab = 'campaign';
   }
 
-  // Node-scoped artifact lookup (prefers the currently selected canvas node so branched DAGs can be compared!)
+  // Node- and port-scoped intermediate peek state
   let selectedNode = $derived(graph.nodes.find((n) => n.id === selectedNodeId) ?? graph.nodes[0] ?? null);
 
-  function findArtifact<T extends CanonicalArtifact>(kind: T['kind']): T | null {
-    const selOuts = selectedNodeId ? outputsByNode[selectedNodeId] : undefined;
-    if (selOuts) {
-      for (const art of Object.values(selOuts)) {
-        if (art.kind === kind) return art as T;
-      }
+  let peekSlots = $derived.by(() =>
+    selectedNode ? getNodePeekSlots(graph, selectedNode.id, outputsByNode) : [],
+  );
+
+  let resolvedPeekSlotId = $derived.by(() => {
+    if (selectedPeekSlotId && peekSlots.some((s) => s.id === selectedPeekSlotId)) {
+      return selectedPeekSlotId;
     }
-    // Fallback to most recent node emitting this kind
+    return pickDefaultPeekSlot(peekSlots);
+  });
+
+  let activePeekSlot = $derived.by(
+    () => peekSlots.find((s) => s.id === resolvedPeekSlotId) ?? null,
+  );
+  let activeArtifact = $derived<CanonicalArtifact | null>(activePeekSlot?.artifact ?? null);
+  let contextStructure = $derived.by(() =>
+    selectedNode ? findContextStructure(graph, selectedNode.id, outputsByNode) : null,
+  );
+
+  // Typed views of the currently peeked modality
+  let peekMetrics = $derived<DesignabilityMetrics | null>(
+    activeArtifact?.kind === 'DesignabilityMetrics' ? activeArtifact : null,
+  );
+  let peekFoldSet = $derived<FoldedStructure | null>(
+    activeArtifact?.kind === 'FoldedStructure' ? activeArtifact : null,
+  );
+  let peekStructure = $derived<StructureArtifact | null>(
+    activeArtifact?.kind === 'StructureArtifact' ? activeArtifact : null,
+  );
+  let peekCondition = $derived<ConditionSpecArtifact | null>(
+    activeArtifact?.kind === 'ConditionSpec' ? activeArtifact : null,
+  );
+  let peekSequences = $derived<SequenceSet | null>(
+    activeArtifact?.kind === 'SequenceSet' ? activeArtifact : null,
+  );
+
+  // Latest scorer result anywhere in the graph (for "+ Save to Campaign" and "Scorer summary →")
+  let latestScorerHit = $derived.by((): { nodeId: string; metrics: DesignabilityMetrics } | null => {
+    if (peekMetrics && selectedNode) {
+      return { nodeId: selectedNode.id, metrics: peekMetrics };
+    }
     for (const n of [...graph.nodes].reverse()) {
       const outs = outputsByNode[n.id];
       if (!outs) continue;
       for (const art of Object.values(outs)) {
-        if (art.kind === kind) return art as T;
+        if (art.kind === 'DesignabilityMetrics') {
+          return { nodeId: n.id, metrics: art };
+        }
       }
     }
     return null;
-  }
+  });
 
-  let structureArtifact = $derived.by(() => findArtifact<StructureArtifact>('StructureArtifact'));
-  let sequenceArtifact = $derived.by(() => findArtifact<SequenceSet>('SequenceSet'));
-  let foldArtifact = $derived.by(() => findArtifact<FoldedStructure>('FoldedStructure'));
-  let metricsArtifact = $derived.by(() => findArtifact<DesignabilityMetrics>('DesignabilityMetrics'));
+  let metricsArtifact = $derived<DesignabilityMetrics | null>(latestScorerHit?.metrics ?? null);
 
   let activeRow = $derived<DesignabilityRow | null>(
-    metricsArtifact?.rows[selectedRowIdx] ?? metricsArtifact?.best ?? null,
+    peekMetrics?.rows[selectedRowIdx] ?? peekMetrics?.best ?? null,
+  );
+  let activeFold = $derived(
+    peekFoldSet?.folds[selectedFoldIdx] ?? peekFoldSet?.folds[0] ?? null,
   );
 
-  // If the user selected a standalone LocalFold node (e.g. Sequence Input -> LocalFold without a Scorer)
-  let standaloneFold = $derived(
-    !activeRow && foldArtifact?.folds[0] ? foldArtifact.folds[0] : null,
+  // 3D Mol* viewport bindings derived strictly from the active peek modality
+  let viewerDesignedPdb = $derived.by((): string | null => {
+    if (peekMetrics) return activeRow?.designedPdb ?? contextStructure?.pdbText ?? null;
+    if (peekStructure) return peekStructure.pdbText;
+    if (peekCondition) return peekCondition.inputCif ?? contextStructure?.pdbText ?? null;
+    if (peekSequences) return contextStructure?.pdbText ?? null;
+    // Standalone folds are not Kabsch-aligned to the designed backbone, so keep designedPdb null
+    return null;
+  });
+
+  let viewerRefoldPdb = $derived.by((): string | null => {
+    if (peekMetrics) return activeRow?.alignedFoldPdb ?? null;
+    if (peekFoldSet) return activeFold?.pdbText ?? null;
+    return null;
+  });
+
+  let viewerStructureMeta = $derived<StructureArtifact | null>(
+    peekStructure ?? (peekMetrics || peekSequences || peekCondition ? contextStructure : null),
   );
+
+  let viewerLabel = $derived.by((): string => {
+    const dirTag = activePeekSlot
+      ? `${activePeekSlot.direction === 'in' ? 'IN' : 'OUT'} · ${activePeekSlot.portName}`
+      : '';
+    if (peekMetrics && activeRow) {
+      return `${selectedNode?.label ?? 'Scorer'} · ${activeRow.sequenceId} · scRMSD ${activeRow.scRmsd.toFixed(2)} Å · pLDDT ${activeRow.meanPlddt.toFixed(1)}`;
+    }
+    if (peekFoldSet && activeFold) {
+      return `${dirTag} · ${activeFold.sequenceId} · pLDDT ${activeFold.meanPlddt.toFixed(1)}`;
+    }
+    if (peekStructure) {
+      const fromTag = activePeekSlot?.peerNodeLabel ? ` ← ${activePeekSlot.peerNodeLabel}` : '';
+      return `${dirTag}${fromTag} · ${peekStructure.label}`;
+    }
+    if (peekSequences && contextStructure) {
+      return `Context backbone (${contextStructure.label}) · peeking ${dirTag}`;
+    }
+    if (peekCondition) {
+      return viewerDesignedPdb
+        ? `${dirTag} template · ${peekCondition.label}`
+        : `${dirTag} · ${peekCondition.label}`;
+    }
+    return selectedNode
+      ? `${selectedNode.label ?? selectedNode.adapterId} · denovo.run viewport`
+      : 'denovo.run viewport';
+  });
 
   // Active scorer thresholds (for dynamic table highlights)
   let activeScorerNode = $derived(
@@ -411,14 +558,21 @@
 
   // Reset row index when switching between different scorer branches
   $effect(() => {
-    void metricsArtifact?.id;
+    void peekMetrics?.id;
     selectedRowIdx = 0;
+  });
+
+  // Reset fold index when switching between different fold sets
+  $effect(() => {
+    void peekFoldSet?.id;
+    selectedFoldIdx = 0;
   });
 
   // Reset trajectory frame index when structure changes so modelIndex never goes out of bounds
   $effect(() => {
-    void structureArtifact?.id;
+    void viewerStructureMeta?.id;
     trajFrame = 0;
+    if (!viewerStructureMeta?.trajectoryPdb) showTrajectory = false;
   });
 </script>
 
@@ -480,7 +634,7 @@
     <div class="flow-head">
       <div>
         <span class="section-title">WORKFLOW CANVAS</span>
-        <span class="flow-sub">drag blocks · connect matching colored ports · Backspace deletes · click any block to inspect its parameters &amp; outputs</span>
+        <span class="flow-sub">drag blocks · connect colored ports · click any block, port, or wire to peek intermediate data</span>
       </div>
       <div class="flow-actions">
         {#if shareToast}
@@ -511,12 +665,15 @@
       <WorkflowCanvas
         {graph}
         {selectedNodeId}
+        {selectedEdgeId}
         {nodeStates}
         {outputsByNode}
         {theme}
         disabled={isRunning}
         onGraphChange={handleGraphChange}
-        onSelectNode={(id) => (selectedNodeId = id)}
+        onSelectNode={handleSelectNode}
+        onSelectEdge={handleSelectEdge}
+        onPeekPort={handlePeekPort}
       />
     </SvelteFlowProvider>
 
@@ -537,28 +694,33 @@
     {/if}
 
     {#if selectedNode}
-      <NodeInspector node={selectedNode} disabled={isRunning} onUpdate={updateNodeParams} />
+      <NodeInspector
+        node={selectedNode}
+        disabled={isRunning}
+        onUpdate={updateNodeParams}
+        onRunUpTo={(id) => runWorkflow(false, id)}
+      />
     {/if}
   </section>
 
-  <!-- Live Results: Mol* Superposition + Designability Table + PAE -->
+  <!-- Live Results & Intermediate Peek: Mol* Viewport + Modality Inspector -->
   <section class="results-grid">
     <div class="viewer-col">
       <div class="viewer-bar">
         <label><input type="checkbox" bind:checked={showDesigned} /> Designed</label>
         <label><input type="checkbox" bind:checked={showRefold} /> Refold (pLDDT)</label>
         <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
-        {#if structureArtifact?.trajectoryPdb}
+        {#if viewerStructureMeta?.trajectoryPdb}
           <label><input type="checkbox" bind:checked={showTrajectory} /> Trajectory</label>
           {#if showTrajectory}
             <input
               type="range"
               min="0"
-              max={Math.max(0, (structureArtifact.trajectoryFrameCount ?? 1) - 1)}
+              max={Math.max(0, (viewerStructureMeta.trajectoryFrameCount ?? 1) - 1)}
               bind:value={trajFrame}
               class="slider"
             />
-            <code class="mono">{trajFrame + 1}/{structureArtifact.trajectoryFrameCount}</code>
+            <code class="mono">{trajFrame + 1}/{viewerStructureMeta.trajectoryFrameCount}</code>
           {/if}
         {/if}
         {#if lastPickedResidue}
@@ -567,9 +729,9 @@
       </div>
 
       <MolSuperposeViewer
-        designedPdb={activeRow?.designedPdb ?? structureArtifact?.pdbText ?? null}
-        refoldPdb={activeRow?.alignedFoldPdb ?? standaloneFold?.pdbText ?? null}
-        trajectoryPdb={structureArtifact?.trajectoryPdb ?? null}
+        designedPdb={viewerDesignedPdb}
+        refoldPdb={viewerRefoldPdb}
+        trajectoryPdb={viewerStructureMeta?.trajectoryPdb ?? null}
         frameIndex={showTrajectory ? trajFrame : undefined}
         {showDesigned}
         {showRefold}
@@ -577,21 +739,17 @@
         {illustrative}
         {theme}
         height={440}
-        label={activeRow
-          ? `${selectedNode?.label ?? 'Scorer'} · ${activeRow.sequenceId} · scRMSD ${activeRow.scRmsd.toFixed(2)} Å · pLDDT ${activeRow.meanPlddt.toFixed(1)}`
-          : standaloneFold
-            ? `${standaloneFold.sequenceId} · pLDDT ${standaloneFold.meanPlddt.toFixed(1)}`
-            : structureArtifact?.label ?? 'denovo.run viewport'}
+        label={viewerLabel}
         onResidueClick={handleResidueClick}
       />
 
-      {#if structureArtifact}
+      {#if viewerStructureMeta}
         <div class="geom-strip">
-          <span>L = <b>{structureArtifact.length} aa</b></span>
-          <span>R<sub>g</sub> = <b>{structureArtifact.geometry.rg.toFixed(1)} Å</b></span>
-          <span>α <b>{structureArtifact.geometry.helixPct.toFixed(0)}%</b> · β <b>{structureArtifact.geometry.sheetPct.toFixed(0)}%</b></span>
-          <span>Cα breaks: <b>{structureArtifact.geometry.chainBreaks}</b></span>
-          <span>Clashes: <b>{structureArtifact.geometry.clashes}</b></span>
+          <span>L = <b>{viewerStructureMeta.length} aa</b></span>
+          <span>R<sub>g</sub> = <b>{viewerStructureMeta.geometry.rg.toFixed(1)} Å</b></span>
+          <span>α <b>{viewerStructureMeta.geometry.helixPct.toFixed(0)}%</b> · β <b>{viewerStructureMeta.geometry.sheetPct.toFixed(0)}%</b></span>
+          <span>Cα breaks: <b>{viewerStructureMeta.geometry.chainBreaks}</b></span>
+          <span>Clashes: <b>{viewerStructureMeta.geometry.clashes}</b></span>
           {#if totalElapsedMs !== null}
             <span>Total: <b>{(totalElapsedMs / 1000).toFixed(1)}s</b></span>
           {/if}
@@ -600,118 +758,26 @@
     </div>
 
     <div class="metrics-col">
-      <div class="panel">
-        <div class="panel-head">
-          <span class="section-title">
-            {selectedNode ? `OUTPUTS · ${selectedNode.label ?? selectedNode.adapterId}` : 'PIPELINE OUTPUTS'}
-          </span>
-          {#if metricsArtifact}
-            <span class="pass-pill" class:good={metricsArtifact.passRate > 0}>
-              {(metricsArtifact.passRate * 100).toFixed(0)}% designable
-            </span>
-          {/if}
-        </div>
-
-        {#if metricsArtifact && metricsArtifact.rows.length > 0}
-          <table class="scores">
-            <thead>
-              <tr>
-                <th>Seq</th>
-                <th>scRMSD</th>
-                <th>scTM</th>
-                <th>pLDDT</th>
-                <th>pTM</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each metricsArtifact.rows as row, i (`${row.sequenceId}_${i}`)}
-                <tr
-                  class:selected={i === selectedRowIdx}
-                  onclick={() => (selectedRowIdx = i)}
-                >
-                  <td><code>{row.sequenceId}</code></td>
-                  <td class:good-val={row.scRmsd < scRmsdThreshold}>{row.scRmsd.toFixed(2)} Å</td>
-                  <td>{row.scTm.toFixed(3)}</td>
-                  <td class:good-val={row.meanPlddt >= plddtThreshold}>{row.meanPlddt.toFixed(1)}</td>
-                  <td>{row.ptm !== null ? row.ptm.toFixed(2) : '—'}</td>
-                  <td>
-                    <span class="verdict" class:pass={row.designable}>
-                      {row.designable ? 'PASS' : 'FAIL'}
-                    </span>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-
-          {#if activeRow}
-            <div class="seq-box">
-              <div class="seq-head">
-                <span>Selected Sequence ({activeRow.sequence.length} aa)</span>
-                <div class="dl-links">
-                  <button
-                    class="link-btn"
-                    onclick={() => downloadText(activeRow.designedPdb, `${activeRow.structureId}_designed.pdb`)}
-                  >
-                    ↓ Designed PDB
-                  </button>
-                  <button
-                    class="link-btn"
-                    onclick={() => downloadText(activeRow.alignedFoldPdb, `${activeRow.sequenceId}_refold_aligned.pdb`)}
-                  >
-                    ↓ Refold PDB
-                  </button>
-                </div>
-              </div>
-              <div class="seq-text">{activeRow.sequence}</div>
-            </div>
-
-            <div class="pae-row">
-              <PaePlot pae={activeRow.pae} size={200} />
-              <div class="pae-notes">
-                <div><b>Fold time:</b> {(activeRow.foldElapsedMs / 1000).toFixed(1)} s</div>
-                <div><b>Refold R<sub>g</sub>:</b> {activeRow.geometry.rg.toFixed(1)} Å</div>
-                <div><b>Refold α/β:</b> {activeRow.geometry.helixPct.toFixed(0)}% / {activeRow.geometry.sheetPct.toFixed(0)}%</div>
-                <p class="tip">
-                  Tip: In branched graphs (like <b>RFD4 Fork</b>), click each Scorer block on the canvas to compare its superposition &amp; PAE!
-                </p>
-              </div>
-            </div>
-          {/if}
-        {:else if standaloneFold}
-          <div class="seq-box">
-            <div class="seq-head">
-              <span>Folded {standaloneFold.sequenceId} · pLDDT {standaloneFold.meanPlddt.toFixed(1)}</span>
-              <button
-                class="link-btn"
-                onclick={() => downloadText(standaloneFold.pdbText, `${standaloneFold.sequenceId}_af2.pdb`)}
-              >
-                ↓ Folded PDB
-              </button>
-            </div>
-            <div class="seq-text">{standaloneFold.sequence}</div>
-          </div>
-          <PaePlot pae={standaloneFold.pae} size={200} />
-        {:else if sequenceArtifact}
-          <div class="seq-box">
-            <div class="seq-head">
-              <span>{sequenceArtifact.candidates.length} Sequence(s) · {sequenceArtifact.sourceModelId}</span>
-            </div>
-            {#each sequenceArtifact.candidates as c, i (`${c.id}_${i}`)}
-              <div class="seq-text" style="margin-bottom: 6px">
-                <b>{c.id}</b> {c.score !== null ? `(score ${c.score.toFixed(2)})` : ''}: {c.sequence}
-              </div>
-            {/each}
-          </div>
-        {:else}
-          <div class="placeholder-box">
-            Wire any blocks on the canvas (or pick a preset above) and click <b>▶ Run Canvas</b>.
-            <br /><br />
-            Try <b>RFD4 Fork: Native vs SolubleMPNN</b> to see branched DAG execution comparing two folding arms on one RFD4 backbone!
-          </div>
-        {/if}
-      </div>
+      <ArtifactPeekPanel
+        node={selectedNode}
+        slots={peekSlots}
+        activeSlot={activePeekSlot}
+        {contextStructure}
+        {selectedRowIdx}
+        {selectedFoldIdx}
+        {scRmsdThreshold}
+        {plddtThreshold}
+        {isRunning}
+        hasScorerResult={Boolean(latestScorerHit && latestScorerHit.nodeId !== selectedNode?.id)}
+        onSelectSlot={handleSelectPeekSlot}
+        onSelectRow={(idx) => (selectedRowIdx = idx)}
+        onSelectFold={(idx) => (selectedFoldIdx = idx)}
+        onRunUpToNode={(id) => runWorkflow(false, id)}
+        onJumpToScorer={() => {
+          if (latestScorerHit) handleSelectNode(latestScorerHit.nodeId);
+        }}
+        onDownloadText={downloadText}
+      />
     </div>
   </section>
 {:else}
@@ -1001,143 +1067,6 @@
   }
   .geom-strip b {
     color: var(--text-primary);
-  }
-
-  .panel {
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .panel-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  .pass-pill {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: var(--warn-bg);
-    color: var(--warn-text);
-  }
-  .pass-pill.good {
-    background: var(--ok-bg);
-    color: var(--ok-text);
-  }
-
-  table.scores {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-  }
-  table.scores th {
-    text-align: left;
-    font-size: 10px;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--border);
-  }
-  table.scores td {
-    padding: 7px 8px;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-  table.scores tr {
-    cursor: pointer;
-  }
-  table.scores tr:hover {
-    background: var(--bg-surface-hover);
-  }
-  table.scores tr.selected {
-    background: var(--bg-surface-selected);
-  }
-  .good-val {
-    color: var(--ok-text);
-    font-weight: 600;
-  }
-  .verdict {
-    font-size: 10px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    background: var(--err-bg);
-    color: var(--err-text);
-  }
-  .verdict.pass {
-    background: var(--ok-bg);
-    color: var(--ok-text);
-  }
-
-  .seq-box {
-    background: var(--bg-surface-2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 10px;
-  }
-  .seq-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-bottom: 6px;
-  }
-  .dl-links {
-    display: flex;
-    gap: 10px;
-  }
-  .link-btn {
-    background: none;
-    border: none;
-    color: var(--accent-bright);
-    font-size: 11px;
-    cursor: pointer;
-    padding: 0;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-  }
-  .link-btn:hover {
-    text-decoration: underline;
-  }
-  .seq-text {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 11px;
-    color: var(--text-secondary);
-    word-break: break-all;
-    line-height: 1.5;
-  }
-
-  .pae-row {
-    display: flex;
-    gap: 14px;
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-  .pae-notes {
-    flex: 1;
-    min-width: 160px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-  }
-  .tip {
-    margin: 8px 0 0;
-    font-size: 11px;
-    color: var(--text-dim);
-    line-height: 1.45;
-  }
-  .placeholder-box {
-    padding: 20px 10px;
-    text-align: center;
-    font-size: 12px;
-    color: var(--text-dim);
-    line-height: 1.6;
   }
   code,
   .mono {

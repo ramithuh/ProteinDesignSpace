@@ -13,6 +13,7 @@
   } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import { ADAPTER_REGISTRY } from '$lib/engine/registry';
+  import { makeEdgeId } from '$lib/engine/peek';
   import {
     PORT_COLORS,
     STAGE_COLORS,
@@ -32,23 +33,29 @@
   interface Props {
     graph: WorkflowGraph;
     selectedNodeId: string;
+    selectedEdgeId?: string | null;
     nodeStates: Record<string, NodeProgressEvent>;
     outputsByNode: Record<string, Record<string, CanonicalArtifact>>;
     theme?: 'dark' | 'light';
     disabled?: boolean;
     onGraphChange: (next: WorkflowGraph) => void;
     onSelectNode: (nodeId: string) => void;
+    onSelectEdge?: (edge: WorkflowEdge) => void;
+    onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
   }
 
   let {
     graph,
     selectedNodeId,
+    selectedEdgeId = null,
     nodeStates,
     outputsByNode,
     theme = 'dark',
     disabled = false,
     onGraphChange,
     onSelectNode,
+    onSelectEdge = undefined,
+    onPeekPort = undefined,
   }: Props = $props();
 
   const nodeTypes: NodeTypes = {
@@ -88,21 +95,37 @@
 
   $effect(() => {
     const laid = graph.nodes.some((n) => !n.position) ? autoLayoutGraph(graph) : graph;
-    flowNodes = laid.nodes.map((n) => ({
-      id: n.id,
-      type: 'protein',
-      position: n.position ?? { x: 40, y: 80 },
-      selected: n.id === selectedNodeId,
-      data: {
-        adapterId: n.adapterId,
-        label: n.label ?? ADAPTER_REGISTRY[n.adapterId]?.shortName ?? n.adapterId,
-        state: nodeStates[n.id],
-        outputs: outputsByNode[n.id],
-        onDelete: disabled ? undefined : removeNode,
-      },
-    }));
+    flowNodes = laid.nodes.map((n) => {
+      const inputPortsReady: Record<string, boolean> = {};
+      for (const e of laid.edges) {
+        if (e.toNode === n.id && outputsByNode[e.fromNode]?.[e.fromPort]) {
+          inputPortsReady[e.toPort] = true;
+        }
+      }
+      const outputPortsReady: Record<string, boolean> = {};
+      for (const port of Object.keys(outputsByNode[n.id] ?? {})) {
+        outputPortsReady[port] = true;
+      }
+      return {
+        id: n.id,
+        type: 'protein',
+        position: n.position ?? { x: 40, y: 80 },
+        selected: n.id === selectedNodeId,
+        data: {
+          adapterId: n.adapterId,
+          label: n.label ?? ADAPTER_REGISTRY[n.adapterId]?.shortName ?? n.adapterId,
+          state: nodeStates[n.id],
+          outputs: outputsByNode[n.id],
+          inputPortsReady,
+          outputPortsReady,
+          onDelete: disabled ? undefined : removeNode,
+          onPeekPort,
+        },
+      };
+    });
 
     flowEdges = laid.edges.map((e) => {
+      const eid = makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort);
       const col = edgeColor(e.fromNode, e.fromPort);
       const srcState = nodeStates[e.fromNode]?.status;
       const dstState = nodeStates[e.toNode]?.status;
@@ -111,15 +134,19 @@
         srcState === 'loading' ||
         dstState === 'running' ||
         dstState === 'loading';
+      const isSel = eid === selectedEdgeId;
       return {
-        id: `${e.fromNode}:${e.fromPort}->${e.toNode}:${e.toPort}`,
+        id: eid,
         type: 'smoothstep',
         source: e.fromNode,
         sourceHandle: e.fromPort,
         target: e.toNode,
         targetHandle: e.toPort,
+        selected: isSel,
         animated: active,
-        style: `stroke: ${col}; stroke-width: 2px;`,
+        style: isSel
+          ? `stroke: ${col}; stroke-width: 3.5px; filter: drop-shadow(0 0 4px ${col}); cursor: pointer;`
+          : `stroke: ${col}; stroke-width: 2px; cursor: pointer;`,
         pathOptions: { borderRadius: 14, offset: 26 },
       };
     });
@@ -366,6 +393,12 @@
         onnodedragstop={handleNodeDragStop}
         ondelete={handleDelete}
         onnodeclick={({ node }) => onSelectNode(node.id)}
+        onedgeclick={({ edge }) => {
+          const found = graph.edges.find(
+            (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === edge.id,
+          );
+          if (found) onSelectEdge?.(found);
+        }}
         proOptions={{ hideAttribution: true }}
       >
         <Background gap={20} size={1} />

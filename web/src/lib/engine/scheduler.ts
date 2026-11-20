@@ -494,7 +494,10 @@ export class ExecutionScheduler {
   async run(
     graph: WorkflowGraph,
     onProgress: (ev: NodeProgressEvent) => void,
-    opts: { bypassCache?: boolean } = {},
+    opts: {
+      bypassCache?: boolean;
+      onNodeOutput?: (nodeId: string, outputs: Record<string, CanonicalArtifact>) => void;
+    } = {},
   ): Promise<RunResult> {
     if (this.running) throw new Error('A workflow run is already in progress');
     this.running = true;
@@ -566,6 +569,7 @@ export class ExecutionScheduler {
         }
 
         outputsByNode[node.id] = nodeOutputs;
+        opts.onNodeOutput?.(node.id, nodeOutputs);
         refsByNode[node.id] = {};
         for (const [port, art] of Object.entries(nodeOutputs)) {
           refsByNode[node.id][port] = summarizeArtifact(art);

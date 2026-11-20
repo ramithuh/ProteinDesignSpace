@@ -704,4 +704,29 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     );
     expect((afterRes.outputsByNode.s.sequences as SequenceSet).candidates).toHaveLength(1);
   });
+
+  it('streams intermediate node outputs live via onNodeOutput in topological order', async () => {
+    const scheduler = new ExecutionScheduler();
+    const streamed: Array<{ nodeId: string; kinds: string[] }> = [];
+    const graph: WorkflowGraph = {
+      id: 'stream-test',
+      name: 'Stream Test',
+      nodes: [
+        { id: 'cond', adapterId: 'rfd4-conditioner', params: { taskPreset: 'custom', contig: 'A1-53' } },
+        { id: 'src', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+      ],
+      edges: [{ fromNode: 'src', fromPort: 'structure', toNode: 'cond', toPort: 'template' }],
+    };
+
+    await scheduler.run(graph, () => {}, {
+      onNodeOutput: (nodeId, outs) => {
+        streamed.push({ nodeId, kinds: Object.values(outs).map((a) => a.kind) });
+      },
+    });
+
+    expect(streamed).toEqual([
+      { nodeId: 'src', kinds: ['StructureArtifact'] },
+      { nodeId: 'cond', kinds: ['ConditionSpec'] },
+    ]);
+  });
 });

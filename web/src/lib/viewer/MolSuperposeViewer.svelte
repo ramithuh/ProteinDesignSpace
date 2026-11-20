@@ -163,11 +163,12 @@
       // 1. Designed structure (or multi-model trajectory)
       if (sDesigned && (useTraj && tPdb ? tPdb : dPdb)) {
         const text = useTraj && tPdb ? tPdb : dPdb!;
+        const fmt = /^\s*(data_|loop_|_atom_site\.)/m.test(text) ? 'mmcif' : 'pdb';
         const data = await ctx.builders.data.rawData({
           data: text,
           label: useTraj ? 'Trajectory' : 'Designed Backbone',
         });
-        const traj = await ctx.builders.structure.parseTrajectory(data, 'pdb');
+        const traj = await ctx.builders.structure.parseTrajectory(data, fmt);
         // Fixed off-by-one: MODEL 1 = index 0 (topology), frames 0..T-1 = indices 1..T
         const targetIdx = useTraj && fIdx !== undefined ? fIdx + 1 : 0;
         const model = await ctx.builders.structure.createModel(traj, { modelIndex: targetIdx });

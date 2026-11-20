@@ -9,7 +9,10 @@
     label: string;
     state?: NodeProgressEvent;
     outputs?: Record<string, CanonicalArtifact>;
+    inputPortsReady?: Record<string, boolean>;
+    outputPortsReady?: Record<string, boolean>;
     onDelete?: (nodeId: string) => void;
+    onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
     [key: string]: unknown;
   }
 
@@ -86,6 +89,7 @@
     <div class="col in-col">
       {#each inputs as [portName, spec] (portName)}
         {@const color = PORT_COLORS[spec.type]?.bg ?? '#94a3b8'}
+        {@const ready = Boolean(data.inputPortsReady?.[portName])}
         <div class="port-row left">
           <Handle
             type="target"
@@ -93,9 +97,18 @@
             id={portName}
             style="background: {color}; border: 2px solid var(--bg-surface); width: 11px; height: 11px; left: -6px;"
           />
-          <span class="port-label" title={`${portName}: ${spec.type}${spec.required === false ? ' (optional)' : ''}`}>
-            {portName}{#if spec.required === false}<span class="opt">?</span>{/if}
-          </span>
+          <button
+            type="button"
+            class="port-label port-btn"
+            class:ready
+            title={`Click to peek input "${portName}" (${spec.type})${spec.required === false ? ' [optional]' : ''}`}
+            onclick={(e) => {
+              e.stopPropagation();
+              data.onPeekPort?.(id, 'in', portName);
+            }}
+          >
+            {portName}{#if spec.required === false}<span class="opt">?</span>{/if}{#if ready}<span class="ready-dot" style="background: {color}"></span>{/if}
+          </button>
         </div>
       {/each}
     </div>
@@ -103,8 +116,20 @@
     <div class="col out-col">
       {#each outputs as [portName, spec] (portName)}
         {@const color = PORT_COLORS[spec.type]?.bg ?? '#94a3b8'}
+        {@const ready = Boolean(data.outputPortsReady?.[portName])}
         <div class="port-row right">
-          <span class="port-label" title={`${portName}: ${spec.type}`}>{portName}</span>
+          <button
+            type="button"
+            class="port-label port-btn"
+            class:ready
+            title={`Click to peek output "${portName}" (${spec.type})`}
+            onclick={(e) => {
+              e.stopPropagation();
+              data.onPeekPort?.(id, 'out', portName);
+            }}
+          >
+            {#if ready}<span class="ready-dot" style="background: {color}"></span>{/if}{portName}
+          </button>
           <Handle
             type="source"
             position={Position.Right}
@@ -242,6 +267,31 @@
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10px;
     color: var(--text-secondary);
+  }
+  .port-btn {
+    background: none;
+    border: none;
+    padding: 1px 3px;
+    border-radius: 3px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .port-btn:hover {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+    text-decoration: underline;
+  }
+  .port-btn.ready {
+    color: var(--text-primary);
+  }
+  .ready-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
   }
   .opt {
     color: var(--text-dim);

@@ -6,9 +6,10 @@
     node: WorkflowNode;
     disabled?: boolean;
     onUpdate: (nodeId: string, params: Record<string, unknown>) => void;
+    onRunUpTo?: (nodeId: string) => void;
   }
 
-  let { node, disabled = false, onUpdate }: Props = $props();
+  let { node, disabled = false, onUpdate, onRunUpTo = undefined }: Props = $props();
   let manifest = $derived(ADAPTER_REGISTRY[node.adapterId]);
 
   function setParam(key: string, value: unknown) {
@@ -48,6 +49,17 @@
       <p class="desc">{manifest?.description}</p>
     </div>
     <div class="meta">
+      {#if onRunUpTo}
+        <button
+          type="button"
+          class="run-here-btn"
+          {disabled}
+          onclick={() => onRunUpTo(node.id)}
+          title="Execute only upstream blocks up to this block (memoized for full runs)"
+        >
+          ▶ Run to here
+        </button>
+      {/if}
       <span class="pill">{manifest?.runtime}</span>
       {#if manifest && manifest.approxWeightsMB > 0}
         <span class="pill">~{manifest.approxWeightsMB} MB</span>
@@ -570,7 +582,27 @@
   .meta {
     display: flex;
     gap: 6px;
+    align-items: center;
     flex-shrink: 0;
+  }
+  .run-here-btn {
+    background: var(--bg-surface-2);
+    color: var(--accent-bright);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 3px 9px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  .run-here-btn:hover:not(:disabled) {
+    background: var(--bg-surface-hover);
+    border-color: var(--accent);
+  }
+  .run-here-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .pill {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
