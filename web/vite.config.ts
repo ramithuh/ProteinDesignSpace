@@ -19,8 +19,9 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
-  // Allow serving large model files via symlink out of /static.
+  // Allow serving large model files via symlink out of /static + Tailscale HTTPS preview.
   server: {
     fs: { strict: false },
+    allowedHosts: ['.ts.net', 'localhost'],
   },
 });

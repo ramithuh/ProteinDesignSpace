@@ -187,7 +187,9 @@ export class ExecutionScheduler {
 
       worker.addEventListener('message', onMessage);
       worker.addEventListener('error', onError);
-      worker.postMessage({ id, type: 'run', params: node.params, inputs });
+      // Plain-object clone strips any reactive Proxy (e.g. Svelte 5 $state) before postMessage.
+      const plainParams = JSON.parse(JSON.stringify(node.params ?? {}));
+      worker.postMessage({ id, type: 'run', params: plainParams, inputs });
     });
   }
 

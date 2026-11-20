@@ -22,6 +22,7 @@
 
   let activeTab = $state<'workbench' | 'campaign'>('workbench');
   let webgpuSupported = $state<boolean | null>(null);
+  let webgpuDetail = $state<string>('checking…');
   let webMcpReady = $state(false);
   let activeGpuWorker = $state<string | null>(null);
   let cacheUsedMB = $state<number>(0);
@@ -50,7 +51,30 @@
   let campaign = $state<CampaignState>(structuredClone(SAMPLE_CAMPAIGN));
 
   onMount(async () => {
-    webgpuSupported = 'gpu' in navigator;
+    if (!window.isSecureContext) {
+      webgpuSupported = false;
+      webgpuDetail = 'needs HTTPS/localhost';
+    } else if (!('gpu' in navigator) || !navigator.gpu) {
+      webgpuSupported = false;
+      webgpuDetail = 'unavailable in browser';
+    } else {
+      try {
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          webgpuSupported = false;
+          webgpuDetail = 'no GPU adapter';
+        } else {
+          webgpuSupported = true;
+          const info = (adapter as unknown as { info?: { vendor?: string; architecture?: string } }).info;
+          const f16 = adapter.features.has('shader-f16') ? 'f16' : 'f32';
+          const tag = info?.vendor || info?.architecture || 'ready';
+          webgpuDetail = `${tag} (${f16})`;
+        }
+      } catch {
+        webgpuSupported = false;
+        webgpuDetail = 'adapter error';
+      }
+    }
     const { webMcpRegistered } = attachProgrammaticApi(scheduler, handleProgress);
     webMcpReady = webMcpRegistered;
     await refreshCacheStats();
@@ -99,7 +123,8 @@
     totalElapsedMs = null;
     nodeStates = {};
     try {
-      const res = await scheduler.run(graph, handleProgress, { bypassCache });
+      const plainGraph = $state.snapshot(graph) as WorkflowGraph;
+      const res = await scheduler.run(plainGraph, handleProgress, { bypassCache });
       outputsByNode = res.outputsByNode;
       totalElapsedMs = res.totalElapsedMs;
       selectedRowIdx = 0;
@@ -232,7 +257,7 @@
   </div>
   <div class="sys-pills">
     <span class="chip" class:ok={webgpuSupported} class:bad={webgpuSupported === false}>
-      WebGPU: {webgpuSupported === null ? '…' : webgpuSupported ? 'ready' : 'unavailable'}
+      WebGPU: {webgpuDetail}
     </span>
     {#if activeGpuWorker}
       <button class="chip gpu" onclick={freeVram} title="Dispose & terminate active WebGPU worker">
