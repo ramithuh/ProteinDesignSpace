@@ -2,6 +2,7 @@
 // for the model-agnostic denovo.run node-graph canvas.
 
 import { ADAPTER_REGISTRY } from './registry';
+import { validateNodeParams } from './param-validation';
 import type { PortType, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 
 export const PORT_COLORS: Record<PortType, { bg: string; label: string; short: string }> = {
@@ -228,7 +229,7 @@ export function validateGraph(graph: WorkflowGraph): string[] {
     indeg.set(e.toNode, (indeg.get(e.toNode) ?? 0) + 1);
   }
 
-  // Check required inputs
+  // Check required inputs and node parameter validity
   for (const node of byId.values()) {
     const manifest = ADAPTER_REGISTRY[node.adapterId];
     if (!manifest) continue;
@@ -240,6 +241,7 @@ export function validateGraph(graph: WorkflowGraph): string[] {
         );
       }
     }
+    errors.push(...validateNodeParams(node));
   }
 
   // Cycle detection via Kahn's topological sort

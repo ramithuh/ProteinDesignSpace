@@ -5,6 +5,14 @@
     RFD4_BENCHMARK_OPTIONS,
   } from '$lib/engine/registry';
   import { STAGE_COLORS } from '$lib/engine/graph-utils';
+  import {
+    NUMERIC_SPECS,
+    isValidResidueToken,
+    validateJsonOverride,
+    validateSequenceText,
+    validateStructureText,
+  } from '$lib/engine/param-validation';
+  import NumericInput from './NumericInput.svelte';
   import type { WorkflowNode } from '$lib/engine/types';
 
   interface Props {
@@ -70,12 +78,6 @@
 
   function setParam(key: string, value: unknown) {
     onUpdate(node.id, { ...node.params, [key]: value });
-  }
-
-  function setNumParam(key: string, raw: string) {
-    if (raw.trim() === '') return;
-    const n = Number(raw);
-    if (Number.isFinite(n)) setParam(key, n);
   }
 
   function parseResidueTokens(raw: unknown): string[] {
@@ -147,6 +149,7 @@
       </label>
 
       {#if node.params.mode === 'custom'}
+        {@const pdbCheck = validateStructureText(String(node.params.pdbText ?? ''))}
         <label class="file-row full">
           Upload .pdb / .cif
           <input type="file" accept=".pdb,.cif,.mmcif,.ent,.txt" {disabled} onchange={handleFileUpload} />
@@ -155,24 +158,41 @@
           PDB / mmCIF text ({String(node.params.filename || 'custom.pdb')})
           <textarea
             rows="4"
+            class:input-error={pdbCheck.status === 'error'}
             {disabled}
             placeholder="Paste ATOM lines or mmCIF _atom_site block…"
             value={String(node.params.pdbText ?? '')}
             oninput={(e) => setParam('pdbText', e.currentTarget.value)}
           ></textarea>
+          {#if pdbCheck.message}
+            <span class="field-hint" class:err={pdbCheck.status === 'error'} class:ok={pdbCheck.status === 'ok'}>
+              {pdbCheck.message}
+            </span>
+          {/if}
         </label>
       {/if}
 
     {:else if node.adapterId === 'sequence-input'}
+      {@const seqCheck = validateSequenceText(String(node.params.sequence ?? ''))}
       <label class="full">
         Amino acid sequence (plain or multi-FASTA)
         <textarea
           rows="5"
+          class:input-error={seqCheck.status === 'error'}
+          class:input-warn={seqCheck.status === 'warn'}
           {disabled}
           placeholder=">seq1&#10;MKTAYIAKQRQISFVK..."
           value={String(node.params.sequence ?? '')}
           oninput={(e) => setParam('sequence', e.currentTarget.value)}
         ></textarea>
+        <span
+          class="field-hint"
+          class:err={seqCheck.status === 'error'}
+          class:warn={seqCheck.status === 'warn'}
+          class:ok={seqCheck.status === 'ok'}
+        >
+          {seqCheck.message}
+        </span>
       </label>
 
       <details class="adv-details full">
@@ -208,14 +228,20 @@
       </label>
 
       {#if String(node.params.taskPreset ?? 'custom') === 'custom'}
+        {@const contigVal = String(node.params.contig ?? '70-70')}
+        {@const rawJsonCheck = validateJsonOverride(String(node.params.rawJsonOverride ?? ''))}
         <label class="full">
           Contig (e.g. <code>70-70</code>, <code>A18-132,/0,70-70</code>)
           <input
             type="text"
+            class:input-error={!contigVal.trim() && !String(node.params.rawJsonOverride ?? '').trim()}
             {disabled}
-            value={String(node.params.contig ?? '70-70')}
+            value={contigVal}
             oninput={(e) => setParam('contig', e.currentTarget.value)}
           />
+          {#if !contigVal.trim() && !String(node.params.rawJsonOverride ?? '').trim()}
+            <span class="field-hint err">Contig is required unless a raw JSON override is provided.</span>
+          {/if}
         </label>
 
         <div class="chip-field full">
@@ -232,7 +258,8 @@
           {#if hotspotTokens.length > 0}
             <div class="res-chips">
               {#each hotspotTokens as tok, i (`hot_${tok}_${i}`)}
-                <span class="res-chip">
+                {@const badTok = !isValidResidueToken(tok)}
+                <span class="res-chip" class:invalid-chip={badTok} title={badTok ? 'Expected format like A54 or A16-35' : undefined}>
                   {tok}
                   <button
                     type="button"
@@ -261,7 +288,8 @@
           {#if motifTokens.length > 0}
             <div class="res-chips">
               {#each motifTokens as tok, i (`motif_${tok}_${i}`)}
-                <span class="res-chip">
+                {@const badTok = !isValidResidueToken(tok)}
+                <span class="res-chip" class:invalid-chip={badTok} title={badTok ? 'Expected format like A16-35' : undefined}>
                   {tok}
                   <button
                     type="button"
@@ -350,11 +378,17 @@
               Raw RFD4 <code>condition_spec</code> JSON override
               <textarea
                 rows="3"
+                class:input-error={rawJsonCheck.status === 'error'}
                 {disabled}
                 placeholder={'{"contig": "70-70", "conditions": {"C_CATH": {"3.40.50": [{"select": "sel(\'*/*/*/*\')"}]}}}'}
                 value={String(node.params.rawJsonOverride ?? '')}
                 oninput={(e) => setParam('rawJsonOverride', e.currentTarget.value)}
               ></textarea>
+              {#if rawJsonCheck.message}
+                <span class="field-hint" class:err={rawJsonCheck.status === 'error'} class:ok={rawJsonCheck.status === 'ok'}>
+                  {rawJsonCheck.message}
+                </span>
+              {/if}
             </label>
           </div>
         </details>
@@ -379,13 +413,12 @@
       {#if rfdMode === 'unconditional'}
         <label>
           Length (aa)
-          <input
-            type="number"
-            min="30"
-            max="200"
+          <NumericInput
             {disabled}
+            ariaLabel="Length (aa)"
+            spec={NUMERIC_SPECS['rfd4-proteina'].length}
             value={Number(node.params.length ?? 70)}
-            oninput={(e) => setNumParam('length', e.currentTarget.value)}
+            onChange={(v) => setParam('length', v)}
           />
         </label>
       {:else if rfdMode === 'preset'}
@@ -404,14 +437,12 @@
       {:else if rfdMode === 'partial'}
         <label>
           Partial frac
-          <input
-            type="number"
-            min="0.1"
-            max="0.9"
-            step="0.05"
+          <NumericInput
             {disabled}
+            ariaLabel="Partial fraction"
+            spec={NUMERIC_SPECS['rfd4-proteina'].partialFraction}
             value={Number(node.params.partialFraction ?? 0.5)}
-            oninput={(e) => setNumParam('partialFraction', e.currentTarget.value)}
+            onChange={(v) => setParam('partialFraction', v)}
           />
         </label>
       {/if}
@@ -421,13 +452,12 @@
         <div class="adv-fields">
           <label>
             Steps
-            <input
-              type="number"
-              min="10"
-              max="120"
+            <NumericInput
               {disabled}
+              ariaLabel="Diffusion steps"
+              spec={NUMERIC_SPECS['rfd4-proteina'].nsteps}
               value={Number(node.params.nsteps ?? 60)}
-              oninput={(e) => setNumParam('nsteps', e.currentTarget.value)}
+              onChange={(v) => setParam('nsteps', v)}
             />
           </label>
           <label>
@@ -437,18 +467,19 @@
               value={String(node.params.recycleSchedule ?? 'low')}
               onchange={(e) => setParam('recycleSchedule', e.currentTarget.value)}
             >
-              <option value="low">low (fast)</option>
+              <option value="none">none (fastest · 1×/step)</option>
+              <option value="low">low (balanced)</option>
               <option value="medium">medium (higher quality)</option>
             </select>
           </label>
           <label>
             Seed
-            <input
-              type="number"
-              min="0"
+            <NumericInput
               {disabled}
+              ariaLabel="Seed"
+              spec={NUMERIC_SPECS['rfd4-proteina'].seed}
               value={Number(node.params.seed ?? 42)}
-              oninput={(e) => setNumParam('seed', e.currentTarget.value)}
+              onChange={(v) => setParam('seed', v)}
             />
           </label>
           <label class="inline-check">
@@ -491,25 +522,22 @@
       </label>
       <label>
         Sequences
-        <input
-          type="number"
-          min="1"
-          max="8"
+        <NumericInput
           {disabled}
+          ariaLabel="Number of sequences"
+          spec={NUMERIC_SPECS['web-protein-mpnn'].numSequences}
           value={Number(node.params.numSequences ?? 2)}
-          oninput={(e) => setNumParam('numSequences', e.currentTarget.value)}
+          onChange={(v) => setParam('numSequences', v)}
         />
       </label>
       <label>
         Temp
-        <input
-          type="number"
-          min="0.01"
-          max="1.5"
-          step="0.05"
+        <NumericInput
           {disabled}
+          ariaLabel="Sampling temperature"
+          spec={NUMERIC_SPECS['web-protein-mpnn'].temperature}
           value={Number(node.params.temperature ?? 0.1)}
-          oninput={(e) => setNumParam('temperature', e.currentTarget.value)}
+          onChange={(v) => setParam('temperature', v)}
         />
       </label>
 
@@ -527,7 +555,8 @@
         {#if fixedTokens.length > 0}
           <div class="res-chips">
             {#each fixedTokens as tok, i (`fix_${tok}_${i}`)}
-              <span class="res-chip">
+              {@const badTok = !isValidResidueToken(tok)}
+              <span class="res-chip" class:invalid-chip={badTok} title={badTok ? 'Expected format like A10 or A12-15' : undefined}>
                 {tok}
                 <button
                   type="button"
@@ -558,12 +587,12 @@
           </label>
           <label>
             Seed
-            <input
-              type="number"
-              min="0"
+            <NumericInput
               {disabled}
+              ariaLabel="Seed"
+              spec={NUMERIC_SPECS['web-protein-mpnn'].seed}
               value={Number(node.params.seed ?? 42)}
-              oninput={(e) => setNumParam('seed', e.currentTarget.value)}
+              onChange={(v) => setParam('seed', v)}
             />
           </label>
         </div>
@@ -593,38 +622,34 @@
       </label>
       <label>
         Recycles
-        <input
-          type="number"
-          min="0"
-          max="4"
+        <NumericInput
           {disabled}
+          ariaLabel="Recycles"
+          spec={NUMERIC_SPECS['localfold-af2'].recycles}
           value={Number(node.params.recycles ?? 1)}
-          oninput={(e) => setNumParam('recycles', e.currentTarget.value)}
+          onChange={(v) => setParam('recycles', v)}
         />
       </label>
       {#if lfMeta.family === 'af3'}
         <label>
           Diffusion steps
-          <input
-            type="number"
-            min="10"
-            max="200"
-            step="5"
+          <NumericInput
             {disabled}
+            ariaLabel="Diffusion steps"
+            spec={NUMERIC_SPECS['localfold-af2'].diffusionSteps}
             value={Number(node.params.diffusionSteps ?? 25)}
-            oninput={(e) => setNumParam('diffusionSteps', e.currentTarget.value)}
+            onChange={(v) => setParam('diffusionSteps', v)}
           />
         </label>
       {/if}
       <label>
         Max seqs to fold
-        <input
-          type="number"
-          min="1"
-          max="8"
+        <NumericInput
           {disabled}
+          ariaLabel="Max sequences to fold"
+          spec={NUMERIC_SPECS['localfold-af2'].maxSequences}
           value={Number(node.params.maxSequences ?? 2)}
-          oninput={(e) => setNumParam('maxSequences', e.currentTarget.value)}
+          onChange={(v) => setParam('maxSequences', v)}
         />
       </label>
       {#if lfMeta.nonCommercial}
@@ -638,12 +663,12 @@
         <div class="adv-fields">
           <label>
             Seed
-            <input
-              type="number"
-              min="0"
+            <NumericInput
               {disabled}
+              ariaLabel="Seed"
+              spec={NUMERIC_SPECS['localfold-af2'].seed}
               value={Number(node.params.seed ?? 0)}
-              oninput={(e) => setNumParam('seed', e.currentTarget.value)}
+              onChange={(v) => setParam('seed', v)}
             />
           </label>
         </div>
@@ -652,26 +677,22 @@
     {:else if node.adapterId === 'designability-scorer'}
       <label>
         scRMSD &lt; Å
-        <input
-          type="number"
-          min="0.5"
-          max="5"
-          step="0.1"
+        <NumericInput
           {disabled}
+          ariaLabel="scRMSD threshold"
+          spec={NUMERIC_SPECS['designability-scorer'].scRmsdThreshold}
           value={Number(node.params.scRmsdThreshold ?? 2.0)}
-          oninput={(e) => setNumParam('scRmsdThreshold', e.currentTarget.value)}
+          onChange={(v) => setParam('scRmsdThreshold', v)}
         />
       </label>
       <label>
         pLDDT &ge;
-        <input
-          type="number"
-          min="30"
-          max="95"
-          step="5"
+        <NumericInput
           {disabled}
+          ariaLabel="pLDDT threshold"
+          spec={NUMERIC_SPECS['designability-scorer'].plddtThreshold}
           value={Number(node.params.plddtThreshold ?? 70)}
-          oninput={(e) => setNumParam('plddtThreshold', e.currentTarget.value)}
+          onChange={(v) => setParam('plddtThreshold', v)}
         />
       </label>
     {/if}
@@ -766,7 +787,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 10px 12px;
-    align-items: flex-end;
+    align-items: flex-start;
   }
   label {
     display: flex;
@@ -848,10 +869,9 @@
     display: flex;
     flex-wrap: wrap;
     gap: 10px 12px;
-    align-items: flex-end;
+    align-items: flex-start;
     margin-top: 10px;
   }
-  input[type='number'],
   input[type='text'],
   select,
   textarea {
@@ -863,8 +883,30 @@
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 12px;
   }
-  input[type='number'] {
-    width: 82px;
+  .input-error {
+    border-color: var(--err-strong) !important;
+  }
+  .input-warn {
+    border-color: var(--warn-border) !important;
+  }
+  .field-hint {
+    font-size: 10.5px;
+    line-height: 1.35;
+    color: var(--text-dim);
+  }
+  .field-hint.err {
+    color: var(--err-strong);
+  }
+  .field-hint.warn {
+    color: var(--warn-text);
+  }
+  .field-hint.ok {
+    color: var(--ok-text, #10b981);
+  }
+  .res-chip.invalid-chip {
+    border-color: var(--err-strong);
+    color: var(--err-strong);
+    background: color-mix(in srgb, var(--err-strong) 10%, transparent);
   }
   textarea {
     width: 100%;

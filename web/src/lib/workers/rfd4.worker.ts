@@ -172,7 +172,7 @@ self.onmessage = async (ev: MessageEvent) => {
       const mode = String(p.mode ?? 'unconditional');
       const length = Math.max(30, Math.min(256, Number(p.length ?? 70)));
       const nsteps = Math.max(10, Math.min(120, Number(p.nsteps ?? 60)));
-      const recycleSchedule = (p.recycleSchedule ?? 'low') as 'low' | 'medium';
+      const recycleSchedule = (p.recycleSchedule ?? 'low') as 'none' | 'low' | 'medium';
       const earlyStop = p.earlyStop !== false;
       const seed = Number(p.seed ?? 42);
       const customSpecYaml = String(p.customSpecYaml ?? '').trim();
@@ -465,8 +465,12 @@ self.onmessage = async (ev: MessageEvent) => {
       );
       if (parsed.nResidues >= 15 && uniqueFinal <= 1) {
         const errHint = gpuValErr ? ` (WebGPU validation error: ${gpuValErr.message})` : '';
+        const stepHint =
+          nsteps < 58
+            ? ` Steps=${nsteps} is below the stable floor (~58) for RFD4's vf_tsr schedule — set Steps to 60 and use Recycle=none for speed.`
+            : ' Try reloading the page or switching browser/GPU backend.';
         throw new Error(
-          `RFD4-Proteina produced a degenerate single-residue sequence (${finalSeq.slice(0, 12)}…, logits nz=${logitsNonZero}, nan=${logitsNan})${errHint}. Try reloading the page or switching browser/GPU backend.`,
+          `RFD4-Proteina produced a degenerate single-residue sequence (${finalSeq.slice(0, 12)}…, logits nz=${logitsNonZero}, nan=${logitsNan})${errHint}.${stepHint}`,
         );
       }
 
