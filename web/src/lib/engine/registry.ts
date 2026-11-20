@@ -35,22 +35,6 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       sequences: { type: 'SequenceSet' },
     },
   },
-  'legacy-teacher': {
-    id: 'legacy-teacher',
-    displayName: 'legacy-model Flow Matching (ONNX)',
-    shortName: 'legacy-model',
-    stage: 'generate',
-    runtime: 'ort-webgpu',
-    estimatedVramMB: 1400,
-    approxWeightsMB: 855,
-    licenseNote: 'Internal legacy-model-flow-map checkpoint (ONNX fp32)',
-    description:
-      'De novo monomer backbone flow-matching model running via ONNX Runtime Web (Euler-FM ODE or SDE-Proteina). Automatically reconstructs carbonyl O for ProteinMPNN.',
-    inputs: {},
-    outputs: {
-      structure: { type: 'StructureArtifact' },
-    },
-  },
   'rfd4-conditioner': {
     id: 'rfd4-conditioner',
     displayName: 'RFD4 Conditioning (Hotspots / Motif / H-Bond)',
@@ -457,69 +441,6 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
       ],
     },
   },
-  {
-    id: 'legacy-model-mpnn-refold',
-    name: 'legacy-model (ONNX) → ProteinMPNN → LocalFold',
-    badge: 'Local legacy-model Checkpoint',
-    summary:
-      'Run your local legacy-teacher flow-matching model (Euler-FM or SDE-Proteina) with OPFS caching, reconstruct carbonyl O, design sequences with SolubleMPNN, and refold in LocalFold AF2.',
-    graph: {
-      id: 'legacy-model-mpnn-refold',
-      name: 'legacy-model → ProteinMPNN → LocalFold',
-      nodes: [
-        {
-          id: 'gen',
-          adapterId: 'legacy-teacher',
-          label: 'legacy-teacher',
-          params: {
-            modelUrl: '/models/legacy-teacher/v1/model.onnx',
-            length: 80,
-            nfe: 32,
-            sampler: 'sde-proteina',
-            schedule: 'log',
-            scheduleP: 2.0,
-            seed: 42,
-            sdeGamma: 0.1,
-            sdeGtMax: 3.0,
-            sdeGtMode: 'one-minus-t-over-t',
-            sdeTLimOde: 0.99,
-            sdeNoiseSeed: 7,
-          },
-        },
-        {
-          id: 'mpnn',
-          adapterId: 'web-protein-mpnn',
-          label: 'SolubleMPNN',
-          params: {
-            family: 'solublempnn',
-            modelName: 'v_48_020',
-            numSequences: 2,
-            temperature: 0.1,
-            seed: 42,
-            fixedPositions: '',
-          },
-        },
-        {
-          id: 'fold',
-          adapterId: 'localfold-af2',
-          label: 'LocalFold AF2',
-          params: { recycles: 1, maxSequences: 2, seed: 0 },
-        },
-        {
-          id: 'score',
-          adapterId: 'designability-scorer',
-          label: 'scRMSD / scTM',
-          params: { scRmsdThreshold: 2.0, plddtThreshold: 70 },
-        },
-      ],
-      edges: [
-        { fromNode: 'gen', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
-        { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
-        { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
-        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
-      ],
-    },
-  },
 ];
 
 /** Sample multi-round BindClaw-style campaign for demonstrating the Campaign Inspector tab. */
@@ -537,8 +458,8 @@ export const SAMPLE_CAMPAIGN: CampaignState = {
     {
       round: 1,
       timestamp: '2026-11-20T12:00:00Z',
-      label: 'Round 1 — Exploratory ODE baseline',
-      generator: 'legacy-teacher (Euler-FM, NFE=32)',
+      label: 'Round 1 — Unconditional baseline (T=0.2)',
+      generator: 'RFD4-Proteina (WebGPU INT8, 40 steps)',
       folder: 'LocalFold AF2 (single-seq, 1 recycle)',
       nDesigned: 4,
       nPassed: 1,
@@ -547,13 +468,13 @@ export const SAMPLE_CAMPAIGN: CampaignState = {
       bestPlddt: 78.4,
       conditioningSummary: 'Unconditional L=70, SolubleMPNN T=0.2',
       agentNotes:
-        'Loops between helices 2–3 showed elevated flexibility (pLDDT ~62). Switching to SDE-Proteina (γ=0.1) and lowering MPNN temperature to 0.1 for tighter core packing.',
+        'Loops between helices 2–3 showed elevated flexibility (pLDDT ~62). Increasing diffusion steps to 60 and lowering SolubleMPNN temperature to 0.1 for tighter core packing.',
     },
     {
       round: 2,
       timestamp: '2026-11-20T12:14:00Z',
-      label: 'Round 2 — SDE-Proteina + T=0.1 core tightening',
-      generator: 'legacy-teacher (SDE-Proteina, γ=0.1)',
+      label: 'Round 2 — SolubleMPNN T=0.1 core tightening',
+      generator: 'RFD4-Proteina (WebGPU INT8, 60 steps)',
       folder: 'LocalFold AF2 (single-seq, 2 recycles)',
       nDesigned: 4,
       nPassed: 3,
@@ -562,13 +483,13 @@ export const SAMPLE_CAMPAIGN: CampaignState = {
       bestPlddt: 86.7,
       conditioningSummary: 'Unconditional L=70, SolubleMPNN T=0.1',
       agentNotes:
-        'Hit rate jumped from 25% → 75%. Testing RFD4-Proteina co-design in Round 3 to compare native co-designed sequences against SolubleMPNN re-sequencing.',
+        'Hit rate jumped from 25% → 75%. Testing RFD4-Proteina native co-design in Round 3 to compare native co-designed sequences against SolubleMPNN re-sequencing.',
     },
     {
       round: 3,
       timestamp: '2026-11-20T12:28:00Z',
       label: 'Round 3 — RFD4-Proteina all-atom co-design',
-      generator: 'RFD4-Proteina (WebGPU INT8, 30 steps)',
+      generator: 'RFD4-Proteina (WebGPU INT8, 60 steps)',
       folder: 'LocalFold AF2 (single-seq, 2 recycles)',
       nDesigned: 4,
       nPassed: 4,

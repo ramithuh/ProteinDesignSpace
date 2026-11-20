@@ -57,21 +57,6 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         paintBrush: 'hotspots',
         rawJsonOverride: '',
       };
-    case 'legacy-teacher':
-      return {
-        modelUrl: '/models/legacy-teacher/v1/model.onnx',
-        length: 80,
-        nfe: 32,
-        sampler: 'sde-proteina',
-        schedule: 'log',
-        scheduleP: 2.0,
-        seed: 42,
-        sdeGamma: 0.1,
-        sdeGtMax: 3.0,
-        sdeGtMode: 'one-minus-t-over-t',
-        sdeTLimOde: 0.99,
-        sdeNoiseSeed: 7,
-      };
     case 'web-protein-mpnn':
       return {
         family: 'solublempnn',

@@ -1,49 +1,27 @@
-# ProteinDesignSpace — web
+# `denovo.run` — Web App
 
-SvelteKit playground app. All inference runs in the browser via a Web Worker using ONNX Runtime Web (WebGPU primary, WASM fallback, single-threaded).
+SvelteKit 5 static SPA (`@sveltejs/adapter-static`) running browser-native WebGPU protein design and refolding pipelines inside Dedicated Web Workers with OPFS / CacheStorage weight caching.
 
-## Status
-
-V0 toolchain validator — loads the model, reports active EP, runs one forward pass at user-chosen `t`. No sampling loop or viewer yet (next milestone).
-
-## Dev
+## Development
 
 ```bash
-cd web
 npm install
 npm run dev
 ```
 
-Open <http://localhost:5173>. Use Chrome / Edge / Arc for WebGPU; Firefox 145+ on macOS also works in stable.
+Open <http://localhost:5173> in a WebGPU-enabled browser (Chrome, Edge, Arc, or Firefox 145+ on macOS). Model weights are fetched directly from their canonical upstream Hugging Face / CDN sources on first run and cached locally in browser storage.
 
-### Model file
-
-The page expects `/models/legacy-teacher/v1/model.onnx` to resolve. In dev this is a symlink at `web/static/models/legacy-teacher/v1/model.onnx → ../../../../../tools/exports/legacy-teacher/model.onnx`. Generate the artifact first:
+## Testing & Verification
 
 ```bash
-cd ..
-conda run -n legacy-model python tools/exports/legacy-teacher/export.py --opset 18
+npm test          # Run Vitest unit & integration tests
+npm run check     # Run svelte-kit sync + svelte-check
+npm run build     # Build static bundle into ./build
 ```
 
-If the symlink is missing:
+## Architecture
 
-```bash
-mkdir -p web/static/models/legacy-teacher/v1
-ln -s ../../../../../tools/exports/legacy-teacher/model.onnx \
-      web/static/models/legacy-teacher/v1/model.onnx
-```
-
-(The 855MB file is never copied or committed; it's served straight from the bundle directory.)
-
-## Architecture in this slice
-
-- `src/lib/worker/inference.worker.ts` — single-purpose worker. Loads ORT-Web with WebGPU EP, fetches & instantiates the model, runs forward.
-- `src/lib/worker/protocol.ts` — typed message protocol between main thread ↔ worker.
-- `src/routes/+page.svelte` — UI. Two buttons (load, forward), three inputs (length, seed, t), info panels.
-- `src/routes/+layout.ts` — `ssr = false; prerender = true` so the static adapter emits a single SPA shell.
-
-Next milestones (see repo root `README.md` for the full roadmap):
-
-1. Port the Euler-FM sampler from `tools/exports/legacy-teacher/sample_onnx.py` into `src/lib/samplers/euler-fm-endpoint.ts`.
-2. Lift the Mol\* trajectory viewer from `legacy-model-flow-map/examples/14_flow_map_trajectory_viewer.py` into `src/lib/viewer/`.
-3. Wire generation → trajectory streaming → live viewer.
+- `src/lib/engine/scheduler.ts` — Topological DAG scheduler with content-addressed memoization, live intermediate output streaming, and a single-active-GPU-worker VRAM mutex (`dispose` → `terminate`).
+- `src/lib/workers/` — Isolated Dedicated Web Workers for `rfd4-proteina`, `web-protein-mpnn`, and `localfold-af2`.
+- `src/lib/protein-ops/` — Pure TypeScript PDB/mmCIF parser, Kabsch SVD alignment, TM-score, and backbone geometry statistics.
+- `src/lib/ui/` & `src/lib/viewer/` — Interactive `@xyflow/svelte` DAG canvas, searchable `+ Add Block` catalog, tabbed `Parameters` / `Peek` inspector, Mol\* 3D superposition viewer, PAE plot, and Campaign Inspector.

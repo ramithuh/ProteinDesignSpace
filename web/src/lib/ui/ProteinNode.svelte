@@ -80,10 +80,6 @@
         if (mode === 'inverse-folding') return `inv-fold · ${steps} steps`;
         return `${Number(p.length ?? 70)} aa · ${steps} steps`;
       }
-      case 'legacy-teacher': {
-        const sampler = p.sampler === 'euler-fm' ? 'ODE' : 'SDE';
-        return `${Number(p.length ?? 80)} aa · ${sampler} · ${Number(p.nfe ?? 32)} NFE`;
-      }
       case 'web-protein-mpnn': {
         const fam =
           p.family === 'proteinmpnn'

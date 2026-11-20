@@ -10,7 +10,6 @@ const ADAPTER_TO_SHORT: Record<string, string> = {
   'sequence-input': 'q',
   'rfd4-conditioner': 'c',
   'rfd4-proteina': 'r',
-  'legacy-teacher': 'x',
   'web-protein-mpnn': 'm',
   'localfold-af2': 'f',
   'designability-scorer': 's',

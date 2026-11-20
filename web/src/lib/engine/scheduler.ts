@@ -2,7 +2,6 @@
 // Handles topological execution, content-addressed memoization, Single-Active-GPU-Worker
 // VRAM mutex (dispose -> terminate), CPU nodes, and WebMCP / window.__denovo hooks.
 
-import legacy-modelWorker from '$lib/workers/legacy-model.worker?worker';
 import MpnnWorker from '$lib/workers/mpnn.worker?worker';
 import LocalFoldWorker from '$lib/workers/localfold.worker?worker';
 import Rfd4Worker from '$lib/workers/rfd4.worker?worker';
@@ -128,8 +127,6 @@ export class ExecutionScheduler {
 
   private spawnWorker(adapterId: string): Worker {
     switch (adapterId) {
-      case 'legacy-teacher':
-        return new legacy-modelWorker();
       case 'web-protein-mpnn':
         return new MpnnWorker();
       case 'localfold-af2':

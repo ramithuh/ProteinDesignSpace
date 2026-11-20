@@ -21,7 +21,7 @@
   const STAGE_GROUPS = [
     { title: 'Inputs', ids: ['pdb-input', 'sequence-input'] },
     { title: 'Conditioning', ids: ['rfd4-conditioner'] },
-    { title: 'Generate', ids: ['rfd4-proteina', 'legacy-teacher'] },
+    { title: 'Generate', ids: ['rfd4-proteina'] },
     { title: 'Inverse Fold', ids: ['web-protein-mpnn'] },
     { title: 'Fold', ids: ['localfold-af2'] },
     { title: 'Evaluate', ids: ['designability-scorer'] },
@@ -32,7 +32,6 @@
     'sequence-input': 'Paste amino acid sequences (plain or FASTA)',
     'rfd4-conditioner': 'Contigs, hotspots, motifs, H-bonds & CATH folds',
     'rfd4-proteina': 'All-atom sequence + backbone diffusion (WebGPU INT8)',
-    'legacy-teacher': 'Monomer backbone flow matching (ONNX WebGPU)',
     'web-protein-mpnn': 'Inverse-fold sequences with Soluble / Protein / Cα MPNN',
     'localfold-af2': 'Single-sequence AlphaFold2 refolding (WebGPU INT5)',
     'designability-scorer': 'Kabsch superposition, scRMSD, scTM & pLDDT pass rate',
