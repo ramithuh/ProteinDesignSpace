@@ -216,7 +216,8 @@ describe('protein-ops/pdb', () => {
     const L = seq.length;
     expect(AF2_ATOM37_NAMES.length).toBe(37);
     expect(Object.keys(AA1_TO_AA3).length).toBe(21);
-    expect(Object.keys(AA3_TO_AA1).length).toBe(21);
+    expect(Object.keys(AA3_TO_AA1).length).toBe(22);
+    expect(AA3_TO_AA1.MSE).toBe('M');
 
     const ncac = buildIdealPeptideNcac(L);
     const bb4 = reconstructBackboneOxygen(ncac, L);
@@ -321,5 +322,139 @@ describe('protein-ops/pdb', () => {
     expect(m2.caCoords[0]).toBeCloseTo(f0[3], 2);
     expect(m3.caCoords[0]).toBeCloseTo(f1[3], 2);
     expect(m4.caCoords[0]).toBeCloseTo(f2[3], 2);
+  });
+
+  it('coordsToMultiModelPdb returns END\\n for empty trajectory', () => {
+    expect(coordsToMultiModelPdb([], 5)).toBe('END\n');
+  });
+
+  it('reconstructBackboneOxygen respects chainIds boundaries and >= 2.0 A chain-break guard', () => {
+    const ncac = buildIdealPeptideNcac(4);
+    // Move residues 2..3 far away (+50 A in Z) to create a break / second chain
+    for (let r = 2; r < 4; r++) {
+      for (let a = 0; a < 3; a++) {
+        ncac[(r * 3 + a) * 3 + 2] += 50;
+      }
+    }
+    const bb4WithChains = reconstructBackboneOxygen(ncac, 4, ['A', 'A', 'B', 'B']);
+    const bb4NoChains = reconstructBackboneOxygen(ncac, 4);
+
+    // For residue 1 (last residue of chain A), d(C_1, N_2) > 50 A >= 2.0 A -> must use (N, CA, C) plane fallback (z = 0, angle = 120.8 deg)
+    for (const bb4 of [bb4WithChains, bb4NoChains]) {
+      const ca: [number, number, number] = [bb4[(1 * 4 + 1) * 3], bb4[(1 * 4 + 1) * 3 + 1], bb4[(1 * 4 + 1) * 3 + 2]];
+      const c: [number, number, number] = [bb4[(1 * 4 + 2) * 3], bb4[(1 * 4 + 2) * 3 + 1], bb4[(1 * 4 + 2) * 3 + 2]];
+      const o: [number, number, number] = [bb4[(1 * 4 + 3) * 3], bb4[(1 * 4 + 3) * 3 + 1], bb4[(1 * 4 + 3) * 3 + 2]];
+      expect(dist3(c, o)).toBeCloseTo(1.231, 4);
+      expect(Math.abs(o[2])).toBeLessThan(1e-4); // NOT pulled toward z=+50 of chain B!
+      expect(angleDeg(ca, c, o)).toBeCloseTo(120.8, 1);
+    }
+
+    // Even when chain B residue 2 is placed close (< 2.0 A) in space, chainIds boundary forces C-term fallback
+    const closeNcac = buildIdealPeptideNcac(2);
+    // Bring res 1 N close to res 0 C (< 1.5 A) with a Z offset
+    closeNcac[(1 * 3 + 0) * 3 + 0] = closeNcac[(0 * 3 + 2) * 3 + 0] + 1.3;
+    closeNcac[(1 * 3 + 0) * 3 + 1] = closeNcac[(0 * 3 + 2) * 3 + 1];
+    closeNcac[(1 * 3 + 0) * 3 + 2] = 0.5;
+    const acrossChains = reconstructBackboneOxygen(closeNcac, 2, ['A', 'B']);
+    // O for residue 0 must stay in its own (N,CA,C) z=0 plane despite nearby chain B N at z=0.5
+    expect(Math.abs(acrossChains[(0 * 4 + 3) * 3 + 2])).toBeLessThan(1e-4);
+  });
+
+  it('parsePdbBackbone patches missing O in-place preserving chains/numbering/sidechains/HETATMs, maps MSE->M & unknown->X, and leaves CA-only untouched', () => {
+    const pdb = [
+      'ATOM      1  N   MSE A  10       0.000   0.000   0.000  1.00 50.00           N  ',
+      'ATOM      2  CA  MSE A  10       1.458   0.000   0.000  1.00 50.00           C  ',
+      'ATOM      3  C   MSE A  10       2.009   1.420   0.000  1.00 50.00           C  ',
+      'ATOM      4  CB  MSE A  10       1.900  -0.750   1.200  1.00 50.00           C  ',
+      'ATOM      5  N   XYZ A  10A      3.320   1.500   0.000  1.00 50.00           N  ',
+      'ATOM      6  CA  XYZ A  10A      4.000   2.800   0.000  1.00 50.00           C  ',
+      'ATOM      7  C   XYZ A  10A      5.500   2.600   0.000  1.00 50.00           C  ',
+      'ATOM      8  O   XYZ A  10A      6.100   1.550   0.250  1.00 50.00           O  ',
+      'TER',
+      'ATOM      9  N   ALA B  50      20.000   0.000   0.000  1.00 60.00           N  ',
+      'ATOM     10  CA  ALA B  50      21.458   0.000   0.000  1.00 60.00           C  ',
+      'ATOM     11  C   ALA B  50      22.009   1.420   0.000  1.00 60.00           C  ',
+      'HETATM   12  C1  LIG C 200      30.000  30.000  30.000  1.00 20.00           C  ',
+      'END',
+    ].join('\n');
+
+    const parsed = parsePdbBackbone(pdb);
+    expect(parsed.nResidues).toBe(3);
+    expect(parsed.sequence).toBe('MXA'); // MSE->M, XYZ->X, ALA->A
+    expect(parsed.chainIds).toEqual(['A', 'A', 'B']);
+    // Real parsed O of residue 1 (10A) is preserved verbatim (z=0.250)
+    expect(parsed.backbone4Coords[(1 * 4 + 3) * 3 + 0]).toBeCloseTo(6.1, 3);
+    expect(parsed.backbone4Coords[(1 * 4 + 3) * 3 + 2]).toBeCloseTo(0.25, 3);
+    // In-place patched PDB preserves sidechain CB, insertion code 10A, chain B resSeq 50, and HETATM LIG
+    expect(parsed.pdbText).toContain(' CB  MSE A  10');
+    expect(parsed.pdbText).toContain(' CA  XYZ A  10A');
+    expect(parsed.pdbText).toContain(' CA  ALA B  50');
+    expect(parsed.pdbText).toContain('HETATM   12  C1  LIG C 200');
+    // Missing O atoms were inserted for A:10 and B:50
+    expect(parsed.pdbText).toContain(' O   MSE A  10 ');
+    expect(parsed.pdbText).toContain(' O   ALA B  50 ');
+
+    // CA-only PDB must NOT have fake O lines synthesized
+    const caOnly = [
+      'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 50.00           C  ',
+      'ATOM      2  CA  GLY A   2       3.800   0.000   0.000  1.00 50.00           C  ',
+      'ATOM      3  CA  VAL A   3       7.600   0.000   0.000  1.00 50.00           C  ',
+      'END',
+    ].join('\n');
+    const parsedCa = parsePdbBackbone(caOnly);
+    expect(parsedCa.pdbText).toBe(caOnly);
+    expect(parsedCa.pdbText).not.toContain(' O  ');
+  });
+
+  it('parseStructureText mmCIF handles multi-model, altLocs, insCodes, real O preservation, MSE->M, and unknown->X', () => {
+    const cif = [
+      'data_multi_test',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_alt_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.pdbx_PDB_ins_code',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      '_atom_site.pdbx_PDB_model_num',
+      // Model 1: res A:10 (MSE, altLoc A kept, altLoc B ignored), res A:10A (XYZ -> X, real O preserved), res B:5 (ALA)
+      'ATOM 1 N . MSE A 10 ? 0.000 0.000 0.000 1',
+      'ATOM 2 CA A MSE A 10 ? 1.458 0.000 0.000 1',
+      'ATOM 3 CA B MSE A 10 ? 99.000 99.000 99.000 1',
+      'ATOM 4 C . MSE A 10 ? 2.009 1.420 0.000 1',
+      'ATOM 5 O . MSE A 10 ? 1.111 2.222 0.333 1',
+      'ATOM 6 N . XYZ A 10 A 3.320 1.500 0.000 1',
+      'ATOM 7 CA . XYZ A 10 A 4.000 2.800 0.000 1',
+      'ATOM 8 C . XYZ A 10 A 5.500 2.600 0.000 1',
+      'ATOM 9 O . XYZ A 10 A 6.200 1.700 -0.400 1',
+      'ATOM 10 N . ALA B 5 ? 20.000 0.000 0.000 1',
+      'ATOM 11 CA . ALA B 5 ? 21.458 0.000 0.000 1',
+      'ATOM 12 C . ALA B 5 ? 22.009 1.420 0.000 1',
+      // Model 2 (must be ignored completely!)
+      'ATOM 13 CA . GLY A 10 ? -77.000 -77.000 -77.000 2',
+      'ATOM 14 CA . GLY B 99 ? -88.000 -88.000 -88.000 2',
+      '#',
+    ].join('\n');
+
+    const parsed = parseStructureText(cif);
+    expect(parsed.format).toBe('mmcif');
+    expect(parsed.nResidues).toBe(3);
+    expect(parsed.sequence).toBe('MXA');
+    expect(parsed.chainIds).toEqual(['A', 'A', 'B']);
+    // AltLoc A kept (1.458), not altLoc B (99.0) or Model 2 (-77.0)
+    expect(parsed.caCoords[0]).toBeCloseTo(1.458, 3);
+    // Real parsed O coordinates preserved verbatim
+    expect(parsed.backbone4Coords[(0 * 4 + 3) * 3 + 0]).toBeCloseTo(1.111, 3);
+    expect(parsed.backbone4Coords[(0 * 4 + 3) * 3 + 2]).toBeCloseTo(0.333, 3);
+    expect(parsed.backbone4Coords[(1 * 4 + 3) * 3 + 2]).toBeCloseTo(-0.4, 3);
+    // Exported PDB preserves chain B, insertion code 10A, and TER between chains
+    expect(parsed.pdbText).toContain('TER');
+    expect(parsed.pdbText).toContain('A  10A');
+    expect(parsed.pdbText).toContain('B   5 ');
   });
 });

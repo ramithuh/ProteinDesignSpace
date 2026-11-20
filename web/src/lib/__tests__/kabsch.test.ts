@@ -91,12 +91,7 @@ describe('protein-ops/kabsch', () => {
     }
   });
 
-  // BUG DOCUMENTED (do not fix app code in test-builder):
-  // In kabsch.ts:204-212, `u0 x u1` already gives det(U) = +1 (and det(V) = +1),
-  // so multiplying `U[:,2]` by `sign = mat3Det(H) < 0 ? -1 : 1` forces det(U) = -1
-  // and det(R) = det(V * U^T) = -1 (an improper reflection!) on mirror-image inputs.
-  // Change `it.fails` -> `it` once kabsch.ts:207 is fixed.
-  it.fails('strictly rejects reflections (det(R) === +1) when aligning chiral mirror images', () => {
+  it('strictly rejects reflections (det(R) === +1) when aligning chiral mirror images', () => {
     const mirrored = new Float32Array(sampleCa.length);
     for (let i = 0; i < sampleCa.length; i += 3) {
       mirrored[i + 0] = sampleCa[i + 0];
@@ -276,5 +271,44 @@ describe('protein-ops/kabsch', () => {
     const brStats = computeGeometryStats(broken);
     expect(brStats.chainBreaks).toBe(2);
     expect(brStats.clashes).toBe(2);
+  });
+
+  it('computeGeometryStats with chainIds ignores inter-chain jumps while catching intra-chain breaks & inter-chain clashes', () => {
+    // Chain A (3 residues spaced 3.8 A) + Chain B (3 residues spaced 3.8 A, offset by +50 A in Z)
+    const twoChains = new Float32Array([
+      0, 0, 0,
+      3.8, 0, 0,
+      7.6, 0, 0,
+      0, 0, 50,
+      3.8, 0, 50,
+      7.6, 0, 50,
+    ]);
+    const chainIds = ['A', 'A', 'A', 'B', 'B', 'B'];
+
+    const multi = computeGeometryStats(twoChains, chainIds);
+    expect(multi.chainBreaks).toBe(0);
+    expect(multi.clashes).toBe(0);
+    expect(multi.meanCaDist).toBeCloseTo(3.8, 4);
+
+    // Without chainIds, the 50 A jump looks like a chain break
+    expect(computeGeometryStats(twoChains).chainBreaks).toBe(1);
+
+    // Intra-chain break inside chain A is still detected when chainIds are passed
+    const intraBreak = new Float32Array(twoChains);
+    intraBreak[2 * 3 + 0] = 20.0; // 16.2 A jump inside chain A
+    expect(computeGeometryStats(intraBreak, chainIds).chainBreaks).toBe(1);
+
+    // Inter-chain clash (< 3.0 A between last residue of chain A and first residue of chain B) is detected
+    const interClash = new Float32Array([
+      0, 0, 0,
+      3.8, 0, 0,
+      7.6, 0, 0,
+      7.6, 1.5, 0, // 1.5 A from A:3 -> inter-chain clash!
+      11.4, 1.5, 0,
+      15.2, 1.5, 0,
+    ]);
+    const clashStats = computeGeometryStats(interClash, chainIds);
+    expect(clashStats.chainBreaks).toBe(0);
+    expect(clashStats.clashes).toBeGreaterThanOrEqual(1);
   });
 });

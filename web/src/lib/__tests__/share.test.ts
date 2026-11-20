@@ -120,7 +120,9 @@ describe('engine/share', () => {
     expect(encPreset.strippedPdb).toBe(true);
     expect(encPreset.length).toBeLessThan(200);
     const decPreset = await decodeHashToGraph(encPreset.hash);
-    expect(decPreset!.nodes[0].params.filename).toBe('huge_upload.pdb');
+    // Oversized pdbText strip resets mode to demo-bundle & default filename so shared link stays runnable
+    expect(decPreset!.nodes[0].params.mode).toBe('demo-bundle');
+    expect(decPreset!.nodes[0].params.filename).toBe('demo_3helix_53aa.pdb');
     expect(decPreset!.nodes[0].params.pdbText).toBe('');
 
     // 2. Compressed-DAG (#g=) mode
@@ -141,8 +143,9 @@ describe('engine/share', () => {
     expect(encCustom.strippedPdb).toBe(true);
     expect(encCustom.length).toBeLessThan(200);
     const decCustom = await decodeHashToGraph(encCustom.hash);
+    expect(decCustom!.nodes[0].params.mode).toBe('demo-bundle');
+    expect(decCustom!.nodes[0].params.filename).toBe('demo_3helix_53aa.pdb');
     expect(decCustom!.nodes[0].params.pdbText).toBe('');
-    expect(decCustom!.nodes[0].params.filename).toBe('big.pdb');
 
     // 3. Small PDB (<= 1500 chars) is preserved
     const smallPdb = 'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C  \nEND\n';
@@ -180,5 +183,71 @@ describe('engine/share', () => {
     // Error handling
     expect(() => parseRecipeToGraph('denovo: v1\nnodes:\n  x: {"model":"nope"}\n')).toThrow(/Unknown model/);
     expect(() => parseRecipeToGraph('denovo: v1\nwires:\n  - bad wire syntax\n')).toThrow(/Invalid wire syntax/);
+  });
+
+  it('round-trips >100 KB payload via deflateRaw/inflateRaw without backpressure deadlock', async () => {
+    // 140 KB deterministic non-trivial payload (exceeds internal stream highWaterMark)
+    const bigSeq = Array.from({ length: 140_000 }, (_, i) => 'ACDEFGHIKLMNPQRSTVWY'[(i * 7 + (i >> 3)) % 20]).join('');
+    const bigGraph: WorkflowGraph = {
+      id: 'big-payload',
+      name: 'Big Payload',
+      nodes: [
+        {
+          id: 's1',
+          adapterId: 'sequence-input',
+          params: { label: 'big', sequence: bigSeq },
+        },
+      ],
+      edges: [],
+    };
+    const encoded = await encodeGraphToHash(bigGraph);
+    expect(encoded.mode).toBe('compressed-dag');
+    const decoded = await decodeHashToGraph(encoded.hash);
+    expect(decoded).not.toBeNull();
+    expect(decoded!.nodes[0].params.sequence).toBe(bigSeq);
+  });
+
+  it('handles #p= omitted preset params via adapter defaults and guards against prototype pollution', async () => {
+    // `partialFraction` is omitted on rfd4-refold-native preset.graph.nodes[0].params,
+    // so decodeHashToGraph must coerce it to a number using defaultParamsForAdapter('rfd4-proteina')
+    const decoded = await decodeHashToGraph(
+      '#p=rfd4-refold-native&gen.partialFraction=0.75&gen.__proto__=bad&gen.constructor=bad&gen.prototype=bad',
+    );
+    expect(decoded).not.toBeNull();
+    expect(decoded!.nodes[0].params.partialFraction).toBe(0.75);
+    expect(typeof decoded!.nodes[0].params.partialFraction).toBe('number');
+    expect(Object.prototype.hasOwnProperty.call(decoded!.nodes[0].params, '__proto__')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(decoded!.nodes[0].params, 'constructor')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(decoded!.nodes[0].params, 'prototype')).toBe(false);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('parses YAML node IDs named "name" and "denovo" and validates JSON recipe adapters', () => {
+    const yaml = [
+      'denovo: v1',
+      'name: "Reserved Node IDs"',
+      'nodes:',
+      '  name: {"model":"pdb-input"}',
+      '  denovo: {"model":"web-protein-mpnn"}',
+      'wires:',
+      '  - name.structure -> denovo.structure',
+    ].join('\n');
+    const parsed = parseRecipeToGraph(yaml);
+    expect(parsed.name).toBe('Reserved Node IDs');
+    expect(parsed.nodes.map((n) => [n.id, n.adapterId])).toEqual([
+      ['name', 'pdb-input'],
+      ['denovo', 'web-protein-mpnn'],
+    ]);
+    expect(parsed.edges).toEqual([
+      { fromNode: 'name', fromPort: 'structure', toNode: 'denovo', toPort: 'structure' },
+    ]);
+
+    // JSON recipe rejects unknown adapterId and missing node id
+    expect(() =>
+      parseRecipeToGraph(JSON.stringify({ nodes: [{ id: 'a', adapterId: 'fake-model', params: {} }], edges: [] })),
+    ).toThrow(/Unknown model/);
+    expect(() =>
+      parseRecipeToGraph(JSON.stringify({ nodes: [{ id: '', adapterId: 'pdb-input', params: {} }], edges: [] })),
+    ).toThrow(/missing an id/);
   });
 });

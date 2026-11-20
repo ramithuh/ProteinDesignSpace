@@ -12,9 +12,10 @@ import type {
   WorkflowGraph,
 } from '$lib/engine/types';
 
-// Controllable Worker stub so designability-scorer & memoization can be tested end-to-end through ExecutionScheduler
+// Controllable Worker stub so designability-scorer, memoization & releaseActiveGpu can be tested end-to-end
 let mockFoldFactory: (() => FoldedStructure) | null = null;
 let mockWorkerRunCalls = 0;
+let mockHangWorker = false;
 
 class MockWorker {
   private listeners = new Map<string, Set<(ev: MessageEvent) => void>>();
@@ -32,6 +33,7 @@ class MockWorker {
     }
     if (msg.type === 'run') {
       mockWorkerRunCalls++;
+      if (mockHangWorker) return; // intentionally stays in-flight to test mid-run releaseActiveGpu()
       const folds = mockFoldFactory ? mockFoldFactory() : {
         kind: 'FoldedStructure' as const,
         id: 'mock-folds',
@@ -55,6 +57,7 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
   beforeEach(() => {
     mockFoldFactory = null;
     mockWorkerRunCalls = 0;
+    mockHangWorker = false;
     vi.stubGlobal('Worker', MockWorker);
   });
 
@@ -255,14 +258,20 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     expect(c1.specMode).toBe(true);
     expect(c1.inputCif).toBeTruthy();
     expect(c1.conditions.C_CRD).toEqual({ true: [{ select: "sel('A/*/*/*')" }] });
+    expect(c1.conditions.C_SEQ).toEqual({
+      true: [
+        { select: "sel('A/*/*/*')" },
+        { select: "sel('A/*/[16-35,52-71]/*')" },
+      ],
+    });
     expect(c1.conditions.C_HOT).toEqual({
-      true: [{ select: "sel('A/*/54,56/*') | sel('B/*/10-12/*')" }],
+      true: [{ select: "sel('A/*/[54,56]/*') | sel('B/*/[10-12]/*')" }],
     });
     expect(c1.conditions.C_CRDGRP).toEqual({
-      1: [{ select: "sel('A/*/16-35,52-71/*')" }],
+      1: [{ select: "sel('A/*/[16-35,52-71]/*')" }],
     });
     expect(c1.conditions.C_IDX).toEqual({
-      false: [{ select: "sel('A/*/16-35,52-71/*')" }],
+      false: [{ select: "sel('A/*/[16-35,52-71]/*')", group: 'motif' }],
     });
     expect(c1.conditions.C_HB).toEqual({
       ACCEPTOR: [{ select: "sel('B/SAM/*/*')" }],
@@ -523,5 +532,176 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     ).rejects.toThrow(/cycle/i);
 
     await scheduler.releaseActiveGpu();
+  });
+
+  it('deduplicates duplicate FASTA headers, busts cond-raw cache on template change, handles scorer length mismatch & NaN sorting, and releases GPU mid-run without deadlock', async () => {
+    const scheduler = new ExecutionScheduler();
+
+    // 1. Duplicate FASTA headers -> dup, dup_2, dup_3
+    const dupFastaRes = await scheduler.run(
+      {
+        id: 'dup-fasta',
+        name: 'Dup FASTA',
+        nodes: [
+          {
+            id: 's',
+            adapterId: 'sequence-input',
+            params: {
+              sequence: '>dup\nAAAAA\n>dup\nGGGGG\n>dup\nLLLLL',
+            },
+          },
+        ],
+        edges: [],
+      },
+      () => {},
+    );
+    const dupSet = dupFastaRes.outputsByNode.s.sequences as SequenceSet;
+    expect(dupSet.candidates.map((c) => c.id)).toEqual(['dup', 'dup_2', 'dup_3']);
+
+    // 2. cond-raw artifact id includes upstream template.id (cache busting when template changes)
+    const pdb1 = [
+      'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      2  CA  ALA A   2       3.800   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      3  CA  ALA A   3       7.600   0.000   0.000  1.00  0.00           C  ',
+      'END',
+    ].join('\n');
+    const pdb2 = pdb1.replace('7.600', '7.700');
+    const rawJson = JSON.stringify({ contig: '10-10', conditions: {} });
+    const runCondRaw = (pdbText: string) =>
+      scheduler.run(
+        {
+          id: 'cond-raw-tpl',
+          name: 'Cond Raw Tpl',
+          nodes: [
+            { id: 't', adapterId: 'pdb-input', params: { mode: 'custom', pdbText } },
+            { id: 'c', adapterId: 'rfd4-conditioner', params: { rawJsonOverride: rawJson } },
+          ],
+          edges: [{ fromNode: 't', fromPort: 'structure', toNode: 'c', toPort: 'template' }],
+        },
+        () => {},
+      );
+    const rCond1 = await runCondRaw(pdb1);
+    const rCond2 = await runCondRaw(pdb2);
+    const art1 = rCond1.outputsByNode.c.condition as ConditionSpecArtifact;
+    const art2 = rCond2.outputsByNode.c.condition as ConditionSpecArtifact;
+    expect(art1.id).not.toBe(art2.id);
+    expect(art1.inputCif).toBe(pdb1);
+    expect(art2.inputCif).toBe(pdb2);
+
+    // 3. designability-scorer rejects length mismatch with clear error
+    const demoPdb = generateSampleHelixBundlePdb();
+    const demoL = parsePdbBackbone(demoPdb).nResidues;
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'folds-mismatch',
+      parentStructureId: 'demo',
+      folds: [
+        {
+          sequenceId: 'wrong-len',
+          sequence: 'A'.repeat(10),
+          foldModelId: 'localfold-af2',
+          pdbText: demoPdb,
+          caCoords: new Float32Array(10 * 3),
+          plddt: new Float32Array(10).fill(90),
+          meanPlddt: 90,
+          ptm: 0.9,
+          elapsedMs: 1,
+        },
+      ],
+    });
+    const scoreGraph = (id: string): WorkflowGraph => ({
+      id,
+      name: id,
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'A'.repeat(demoL) } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 2, seed: 0 } },
+        { id: 'score', adapterId: 'designability-scorer', params: { scRmsdThreshold: 2.0, plddtThreshold: 70 } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'src', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    });
+    await expect(scheduler.run(scoreGraph('mismatch'), () => {}, { bypassCache: true })).rejects.toThrow(
+      /Length mismatch/,
+    );
+
+    // 4. designability-scorer sorts NaN scRMSD last and marks designable = false
+    const demoCa = parsePdbBackbone(demoPdb).caCoords;
+    const nanCa = new Float32Array(demoCa);
+    nanCa[0] = Number.NaN;
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'folds-nan',
+      parentStructureId: 'demo',
+      folds: [
+        {
+          sequenceId: 'nan-cand',
+          sequence: 'A'.repeat(demoL),
+          foldModelId: 'localfold-af2',
+          pdbText: demoPdb,
+          caCoords: nanCa,
+          plddt: new Float32Array(demoL).fill(95),
+          meanPlddt: 95,
+          ptm: 0.9,
+          elapsedMs: 1,
+        },
+        {
+          sequenceId: 'good-cand',
+          sequence: 'L'.repeat(demoL),
+          foldModelId: 'localfold-af2',
+          pdbText: demoPdb,
+          caCoords: new Float32Array(demoCa),
+          plddt: new Float32Array(demoL).fill(90),
+          meanPlddt: 90,
+          ptm: 0.9,
+          elapsedMs: 1,
+        },
+      ],
+    });
+    const nanRes = await scheduler.run(scoreGraph('nan-sort'), () => {}, { bypassCache: true });
+    const nanMetrics = nanRes.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(nanMetrics.rows[0].sequenceId).toBe('good-cand');
+    expect(nanMetrics.rows[0].designable).toBe(true);
+    expect(nanMetrics.rows[1].sequenceId).toBe('nan-cand');
+    expect(Number.isNaN(nanMetrics.rows[1].scRmsd)).toBe(true);
+    expect(nanMetrics.rows[1].designable).toBe(false);
+
+    // 5. releaseActiveGpu() mid-run rejects the active promise cleanly and leaves scheduler reusable (no deadlock)
+    mockHangWorker = true;
+    const inflight = scheduler.run(
+      {
+        id: 'hang-test',
+        name: 'Hang',
+        nodes: [
+          { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'ACDEFGHIKLMNPQRSTVWY' } },
+          { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 1, seed: 99 } },
+        ],
+        edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+      },
+      () => {},
+      { bypassCache: true },
+    );
+    // Let runGpuNode spawn and postMessage before releasing GPU
+    await Promise.resolve();
+    await Promise.resolve();
+    const releasePromise = scheduler.releaseActiveGpu();
+    await expect(inflight).rejects.toThrow(/released while running/i);
+    await releasePromise;
+
+    // Scheduler must NOT be deadlocked after mid-run release
+    mockHangWorker = false;
+    const afterRes = await scheduler.run(
+      {
+        id: 'after-release',
+        name: 'After Release',
+        nodes: [{ id: 's', adapterId: 'sequence-input', params: { sequence: 'ACDEFGHIKL' } }],
+        edges: [],
+      },
+      () => {},
+    );
+    expect((afterRes.outputsByNode.s.sequences as SequenceSet).candidates).toHaveLength(1);
   });
 });

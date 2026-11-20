@@ -216,12 +216,7 @@ describe('RFD4-Proteina upstream integration regressions', () => {
     expect(builtYaml.n).toBe(12);
   });
 
-  // BUG DOCUMENTED (do not fix app code in test-builder):
-  // scheduler.ts:333 & 351 (rfd4-conditioner) emit unbracketed `sel('A/*/2,4/*')`,
-  // which upstream spec.js parses as residue 2 only (silently dropping residue 4)!
-  // Upstream spec.js requires bracketed `sel('A/*/[2,4]/*')` or `sel('A/*/2/*') | sel('A/*/4/*')`.
-  // Change `it.fails` -> `it` once scheduler.ts:333 & 351 are fixed.
-  it.fails('regression: rfd4-conditioner multi-hotspot output selects all listed residues in upstream buildBatch', async () => {
+  it('regression: rfd4-conditioner multi-hotspot, lockChain+motif C_SEQ merge, and unindexed C_IDX integrate cleanly with upstream buildBatch', async () => {
     const tplCif = buildMinimalTemplateCif(6);
     const scheduler = new ExecutionScheduler();
     const res = await scheduler.run(
@@ -232,7 +227,14 @@ describe('RFD4-Proteina upstream integration regressions', () => {
           {
             id: 'c',
             adapterId: 'rfd4-conditioner',
-            params: { taskPreset: 'custom', contig: 'A1-6,/0,10-10', hotspots: 'A2, A4' },
+            params: {
+              taskPreset: 'custom',
+              contig: 'A1-6,/0,10-10',
+              lockChain: 'A',
+              hotspots: 'A2, A4',
+              motifSpan: 'A1-2, A5-6',
+              unindexedMotif: true,
+            },
           },
         ],
         edges: [],
@@ -244,6 +246,7 @@ describe('RFD4-Proteina upstream integration regressions', () => {
       { contig: cond.contig, conditions: cond.conditions },
       { inputCif: tplCif, seed: 11 },
     );
+    // Both A2 and A4 must be marked in condition_hotspot_1_atom
     const hotData = built.batch.condition_hotspot_1_atom.data;
     const hotResidues: number[] = [];
     for (let t = 0; t < built.n; t++) {
@@ -255,6 +258,9 @@ describe('RFD4-Proteina upstream integration regressions', () => {
       }
     }
     expect(hotResidues).toHaveLength(2);
+    // Unindexed motif tokens (A1-2, A5-6 = 4 residues) must be flagged in is_in_context_conditioning
+    const ctxCount = Array.from(built.batch.is_in_context_conditioning.data).filter((v) => v > 0).length;
+    expect(ctxCount).toBe(4);
   });
 
   it('sequenceForDecoder: valid logits vs all-zero logits (poly-ALA=1 collapse) vs NaN logits', () => {

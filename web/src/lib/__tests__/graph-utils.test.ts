@@ -88,6 +88,90 @@ describe('engine/registry & engine/graph-utils', () => {
     expect(validateGraph(optionalOnly)).toEqual([]);
   });
 
+  it('validateGraph rejects duplicate node IDs, cycles, self-loops, port mismatches, unknown ports, and duplicate target ports', () => {
+    // 1. Duplicate node IDs
+    const dupIds: WorkflowGraph = {
+      id: 'dup-ids',
+      name: 'Dup IDs',
+      nodes: [
+        { id: 'n1', adapterId: 'pdb-input', params: {} },
+        { id: 'n1', adapterId: 'pdb-input', params: {} },
+      ],
+      edges: [],
+    };
+    expect(validateGraph(dupIds).some((e) => /Duplicate node ID/i.test(e))).toBe(true);
+
+    // 2. Cycle (a -> b -> a)
+    const cyclic: WorkflowGraph = {
+      id: 'cyc',
+      name: 'Cyclic',
+      nodes: [
+        { id: 'a', adapterId: 'rfd4-proteina', params: {} },
+        { id: 'b', adapterId: 'rfd4-proteina', params: {} },
+      ],
+      edges: [
+        { fromNode: 'a', fromPort: 'structure', toNode: 'b', toPort: 'template' },
+        { fromNode: 'b', fromPort: 'structure', toNode: 'a', toPort: 'template' },
+      ],
+    };
+    expect(validateGraph(cyclic).some((e) => /cycle/i.test(e))).toBe(true);
+
+    // 3. Self-loop
+    const selfLoop: WorkflowGraph = {
+      id: 'self',
+      name: 'Self',
+      nodes: [{ id: 'a', adapterId: 'rfd4-proteina', params: {} }],
+      edges: [{ fromNode: 'a', fromPort: 'structure', toNode: 'a', toPort: 'template' }],
+    };
+    const selfErrs = validateGraph(selfLoop);
+    expect(selfErrs.some((e) => /Self-loop/i.test(e))).toBe(true);
+
+    // 4. Port type mismatch + unknown ports
+    const badPorts: WorkflowGraph = {
+      id: 'bad-ports',
+      name: 'Bad Ports',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', params: {} },
+        { id: 'fold', adapterId: 'localfold-af2', params: {} },
+      ],
+      edges: [
+        { fromNode: 'src', fromPort: 'structure', toNode: 'fold', toPort: 'sequences' },
+      ],
+    };
+    expect(validateGraph(badPorts).some((e) => /Type mismatch/i.test(e))).toBe(true);
+
+    const unknownPorts: WorkflowGraph = {
+      id: 'unk-ports',
+      name: 'Unknown Ports',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', params: {} },
+        { id: 'mpnn', adapterId: 'web-protein-mpnn', params: {} },
+      ],
+      edges: [
+        { fromNode: 'src', fromPort: 'badOut', toNode: 'mpnn', toPort: 'badIn' },
+      ],
+    };
+    const unkErrs = validateGraph(unknownPorts);
+    expect(unkErrs.some((e) => /unknown output port/i.test(e))).toBe(true);
+    expect(unkErrs.some((e) => /unknown input port/i.test(e))).toBe(true);
+
+    // 5. Duplicate incoming edges to same target port
+    const dupTarget: WorkflowGraph = {
+      id: 'dup-target',
+      name: 'Dup Target',
+      nodes: [
+        { id: 'src1', adapterId: 'pdb-input', params: {} },
+        { id: 'src2', adapterId: 'pdb-input', params: {} },
+        { id: 'mpnn', adapterId: 'web-protein-mpnn', params: {} },
+      ],
+      edges: [
+        { fromNode: 'src1', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
+        { fromNode: 'src2', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
+      ],
+    };
+    expect(validateGraph(dupTarget).some((e) => /multiple incoming edges/i.test(e))).toBe(true);
+  });
+
   it('validateConnection enforces exact typed port compatibility and rejects unknown ports/nodes', () => {
     const graph: WorkflowGraph = {
       id: 'types',
