@@ -35,3 +35,7 @@ dist/
 *.bin
 *.pt
 *.ckpt
+
+# Synced upstream WebGPU ES modules (recreated by `node tools/sync-upstream.mjs`)
+web/static/vendor/
+.upstream-tmp/

@@ -1,0 +1,198 @@
+// Core denovo.run orchestration types (aligned with RFC-0001 + CampaignState hooks).
+
+import type { GeometryStats } from '$lib/protein-ops/kabsch';
+
+export type RuntimeKind = 'ort-webgpu' | 'wgsl-custom' | 'cpu-ts';
+
+export type PortType =
+  | 'StructureArtifact'
+  | 'TrajectoryFrames'
+  | 'SequenceSet'
+  | 'FoldedStructure'
+  | 'DesignabilityMetrics';
+
+export interface StructureArtifact {
+  kind: 'StructureArtifact';
+  id: string;
+  label: string;
+  sourceModelId: string;
+  length: number;
+  sequence: string;
+  /** Canonical [L * 3] Cα coordinates in Å. */
+  caCoords: Float32Array;
+  /** Canonical [L * 4 * 3] backbone N/CA/C/O coordinates in Å. */
+  backbone4Coords: Float32Array;
+  pdbText: string;
+  cifText?: string;
+  /** Optional multi-model PDB when trajectory frames are available. */
+  trajectoryPdb?: string;
+  trajectoryFrameCount?: number;
+  geometry: GeometryStats;
+}
+
+export interface SequenceCandidate {
+  id: string;
+  sequence: string;
+  score: number | null;
+  globalScore: number | null;
+  sourceModelId: string;
+  temperature?: number;
+  seed?: number;
+}
+
+export interface SequenceSet {
+  kind: 'SequenceSet';
+  id: string;
+  parentStructureId: string;
+  sourceModelId: string;
+  candidates: SequenceCandidate[];
+}
+
+export interface FoldedCandidate {
+  sequenceId: string;
+  sequence: string;
+  foldModelId: string;
+  pdbText: string;
+  caCoords: Float32Array;
+  plddt: Float32Array;
+  meanPlddt: number;
+  ptm: number | null;
+  pae?: Float32Array;
+  elapsedMs: number;
+}
+
+export interface FoldedStructure {
+  kind: 'FoldedStructure';
+  id: string;
+  parentStructureId: string;
+  folds: FoldedCandidate[];
+}
+
+export interface DesignabilityRow {
+  structureId: string;
+  sequenceId: string;
+  sequence: string;
+  scRmsd: number;
+  scTm: number;
+  meanPlddt: number;
+  ptm: number | null;
+  designable: boolean; // scRMSD < 2.0 Å && meanPlddt >= 70
+  alignedFoldPdb: string;
+  designedPdb: string;
+  pae?: Float32Array;
+  plddt: Float32Array;
+  geometry: GeometryStats;
+  foldElapsedMs: number;
+}
+
+export interface DesignabilityMetrics {
+  kind: 'DesignabilityMetrics';
+  id: string;
+  rows: DesignabilityRow[];
+  best: DesignabilityRow | null;
+  passRate: number;
+}
+
+export type CanonicalArtifact =
+  | StructureArtifact
+  | SequenceSet
+  | FoldedStructure
+  | DesignabilityMetrics;
+
+/** Content-addressed lightweight handle suitable for Agents / WebMCP / Campaign logs. */
+export interface ArtifactRef {
+  id: string;
+  kind: CanonicalArtifact['kind'];
+  summary: Record<string, unknown>;
+}
+
+export interface PortSpec {
+  type: PortType;
+  required?: boolean;
+}
+
+export interface AdapterManifest {
+  id: string;
+  displayName: string;
+  shortName: string;
+  stage: 'source' | 'generate' | 'inverse-fold' | 'fold' | 'score';
+  runtime: RuntimeKind;
+  estimatedVramMB: number;
+  approxWeightsMB: number;
+  licenseNote: string;
+  description: string;
+  inputs: Record<string, PortSpec>;
+  outputs: Record<string, PortSpec>;
+}
+
+export interface WorkflowNode {
+  id: string;
+  adapterId: string;
+  label?: string;
+  params: Record<string, unknown>;
+}
+
+export interface WorkflowEdge {
+  fromNode: string;
+  fromPort: string;
+  toNode: string;
+  toPort: string;
+}
+
+export interface WorkflowGraph {
+  id: string;
+  name: string;
+  description?: string;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+}
+
+export type NodeRunStatus = 'idle' | 'cached' | 'loading' | 'running' | 'done' | 'error';
+
+export interface NodeProgressEvent {
+  nodeId: string;
+  status: NodeRunStatus;
+  phase?: string;
+  progress?: number; // 0..1
+  detail?: string;
+  elapsedMs?: number;
+  error?: string;
+}
+
+/**
+ * BindClaw-compatible multi-round campaign record.
+ * Supports both recording local browser rounds AND importing external
+ * BindClaw / LangGraph campaign JSON files for visual inspection.
+ */
+export interface CampaignRound {
+  round: number;
+  timestamp: string;
+  label: string;
+  generator: string;
+  folder: string;
+  nDesigned: number;
+  nPassed: number;
+  hitRate: number;
+  bestScRmsd: number | null;
+  bestPlddt: number | null;
+  agentNotes?: string;
+  conditioningSummary?: string;
+  designedPdb?: string;
+  alignedFoldPdb?: string;
+  sequence?: string;
+  pae?: number[];
+}
+
+export interface CampaignState {
+  schema: 'denovo.campaign/v1';
+  campaignId: string;
+  title: string;
+  goal: string;
+  assay: {
+    scRmsdThreshold: number;
+    plddtThreshold: number;
+    targetName?: string;
+    offTargetName?: string;
+  };
+  rounds: CampaignRound[];
+}

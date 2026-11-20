@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "description": "Pinned sparse upstream WebGPU protein design engines synced into web/static/vendor/ (gitignored). Weights are fetched at runtime from upstream CDNs/HF into OPFS.",
+  "repos": [
+    {
+      "id": "localfold",
+      "repo": "https://github.com/sokrypton/localfold.git",
+      "commit": "f98fc0083d",
+      "license": "Beerware (code only; model weights subject to upstream parameter licenses)",
+      "targetDir": "web/static/vendor/localfold",
+      "sparsePaths": [
+        "LICENSE",
+        "webgpu",
+        "shared"
+      ]
+    },
+    {
+      "id": "rfd4-proteina",
+      "repo": "https://github.com/sokrypton/rfd4-proteina-webgpu.git",
+      "commit": "3d1fe03986",
+      "license": "MIT (code only; NVIDIA RFD4-Proteina weights subject to model card terms)",
+      "targetDir": "web/static/vendor/rfd4-proteina",
+      "sparsePaths": [
+        "THIRD_PARTY_NOTICES.md",
+        "webgpu",
+        "shared",
+        "cpu/rfd4p"
+      ]
+    }
+  ]
+}

@@ -5,6 +5,9 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 const config = {
   preprocess: vitePreprocess(),
   kit: {
+    alias: {
+      'proteinmpnn-web': 'node_modules/proteinmpnn-web/src/index.ts',
+    },
     adapter: adapter({
       pages: 'build',
       assets: 'build',
