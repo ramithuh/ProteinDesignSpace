@@ -227,6 +227,50 @@ export class ExecutionScheduler {
       return { structure: art };
     }
 
+    if (node.adapterId === 'sequence-input') {
+      const raw = String(node.params.sequence ?? '').trim();
+      if (!raw) throw new Error('Sequence Input is empty');
+      const candidates: Array<{
+        id: string;
+        sequence: string;
+        score: null;
+        globalScore: null;
+        sourceModelId: string;
+      }> = [];
+      if (raw.includes('>')) {
+        const blocks = raw.split(/^>/m).filter((b) => b.trim().length > 0);
+        blocks.forEach((b, idx) => {
+          const lines = b.split('\n');
+          const header = lines[0].trim().split(/\s+/)[0] || `seq-${idx + 1}`;
+          const seq = lines.slice(1).join('').replace(/[^ACDEFGHIKLMNPQRSTVWY]/gi, '').toUpperCase();
+          if (seq.length >= 5) {
+            candidates.push({ id: header, sequence: seq, score: null, globalScore: null, sourceModelId: 'sequence-input' });
+          }
+        });
+      } else {
+        const seq = raw.replace(/[^ACDEFGHIKLMNPQRSTVWY]/gi, '').toUpperCase();
+        if (seq.length >= 5) {
+          candidates.push({
+            id: String(node.params.label || 'custom-seq-1'),
+            sequence: seq,
+            score: null,
+            globalScore: null,
+            sourceModelId: 'sequence-input',
+          });
+        }
+      }
+      if (candidates.length === 0) throw new Error('No valid amino acid sequences (>= 5 aa) found');
+      return {
+        sequences: {
+          kind: 'SequenceSet',
+          id: `seqin-${fnv1a(raw)}`,
+          parentStructureId: 'none',
+          sourceModelId: 'sequence-input',
+          candidates,
+        },
+      };
+    }
+
     if (node.adapterId === 'designability-scorer') {
       const structure = inputs.structure as StructureArtifact | undefined;
       const folds = inputs.folds as FoldedStructure | undefined;

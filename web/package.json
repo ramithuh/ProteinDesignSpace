@@ -22,6 +22,7 @@
     "vite": "^6.0.0"
   },
   "dependencies": {
+    "@xyflow/svelte": "^2.0.2",
     "molstar": "^5.13.1",
     "onnxruntime-web": "^1.23.0",
     "proteinmpnn-web": "github:MurrellGroup/webProteinMPNN#10849c13a9"

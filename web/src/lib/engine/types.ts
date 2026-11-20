@@ -130,6 +130,8 @@ export interface WorkflowNode {
   adapterId: string;
   label?: string;
   params: Record<string, unknown>;
+  /** Optional canvas coordinates for visual node-graph editor. */
+  position?: { x: number; y: number };
 }
 
 export interface WorkflowEdge {

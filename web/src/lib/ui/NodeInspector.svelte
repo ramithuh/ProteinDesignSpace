@@ -73,6 +73,26 @@
           ></textarea>
         </label>
       {/if}
+    {:else if node.adapterId === 'sequence-input'}
+      <label class="wide">
+        Label
+        <input
+          type="text"
+          {disabled}
+          value={String(node.params.label ?? 'custom-seq-1')}
+          oninput={(e) => setParam('label', e.currentTarget.value)}
+        />
+      </label>
+      <label class="full">
+        Amino acid sequence (plain or multi-FASTA)
+        <textarea
+          rows="4"
+          {disabled}
+          placeholder=">seq1&#10;MKTAYIAKQRQISFVK..."
+          value={String(node.params.sequence ?? '')}
+          oninput={(e) => setParam('sequence', e.currentTarget.value)}
+        ></textarea>
+      </label>
     {:else if node.adapterId === 'rfd4-proteina'}
       <label>
         Length (aa)
