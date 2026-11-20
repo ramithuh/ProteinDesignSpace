@@ -39,6 +39,7 @@ export interface SequenceCandidate {
   sourceModelId: string;
   temperature?: number;
   seed?: number;
+  chainLengths?: number[];
 }
 
 export interface SequenceSet {

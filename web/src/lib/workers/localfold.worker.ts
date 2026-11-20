@@ -7,6 +7,15 @@ import type { FoldedCandidate, FoldedStructure, SequenceSet } from '$lib/engine/
 
 declare const self: DedicatedWorkerGlobalScope;
 
+function fnv1a(str: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let lfModules: any = null;
 let gpuDevice: GPUDevice | null = null;
@@ -52,9 +61,12 @@ async function ensureLoaded(id: number) {
     }
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error('No compatible WebGPU adapter found for LocalFold');
-    gpuDevice = await lfModules.requestAlphaFoldDevice(adapter, { memoryBudgetBytes: null });
-    void gpuDevice!.lost.then(() => {
-      gpuDevice = null;
+    const dev: GPUDevice = await lfModules.requestAlphaFoldDevice(adapter, { memoryBudgetBytes: null });
+    gpuDevice = dev;
+    void dev.lost.then(() => {
+      if (gpuDevice === dev) {
+        gpuDevice = null;
+      }
     });
   }
 
@@ -153,14 +165,25 @@ self.onmessage = async (ev: MessageEvent) => {
 
       for (let i = 0; i < targets.length; i++) {
         const cand = targets[i];
-        const rawUpper = cand.sequence.toUpperCase();
-        const validCount = (rawUpper.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
-        if (rawUpper.length > 0 && validCount / rawUpper.length < 0.5) {
+        const stripped = cand.sequence.toUpperCase().replace(/[\s/:,]+/g, '');
+        if (stripped.length === 0) {
+          throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
+        }
+        const validCount = (stripped.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
+        if (validCount / stripped.length < 0.5) {
           throw new Error(
-            `Refusing to fold "${cand.id}": ${rawUpper.length - validCount}/${rawUpper.length} residues are unknown/non-canonical (would collapse to poly-ALA). Check the upstream generator output.`,
+            `Refusing to fold "${cand.id}": ${stripped.length - validCount}/${stripped.length} residues are unknown/non-canonical (>50% unknown). Check the upstream generator output.`,
           );
         }
-        const cleanSeq = rawUpper.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, 'A');
+        // Preserve 'X' natively (LocalFold encodes 'X' as aatype=20); map any other non-canonical char to 'X'
+        const cleanSeq = stripped.replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, 'X');
+        const chainLengths =
+          Array.isArray(cand.chainLengths) &&
+          cand.chainLengths.length > 0 &&
+          cand.chainLengths.every((n) => Number.isInteger(n) && n > 0) &&
+          cand.chainLengths.reduce((a, b) => a + b, 0) === cleanSeq.length
+            ? cand.chainLengths
+            : [cleanSeq.length];
         const a3m = `>query\n${cleanSeq}\n`;
         const foldStart = performance.now();
 
@@ -181,31 +204,27 @@ self.onmessage = async (ev: MessageEvent) => {
             randomSeed: seed + i,
             maxMsaSequences: 1,
             maxExtraSequences: 1,
-            chainLengths: [cleanSeq.length],
+            maskFraction: 0,
+            chainLengths,
             tolerance: 0.5,
           },
           loadedAf2.paeBreaks,
           undefined,
           (prog: { completed: number; total: number }) => {
-            const sub = prog.total > 0 ? prog.completed / prog.total : 0;
+            const sub = prog.total > 0 ? Math.min(1, Math.max(0, prog.completed / prog.total)) : 0;
             self.postMessage({
               id: msg.id,
               type: 'progress',
               phase: 'fold',
               progress: (i + sub) / targets.length,
-              detail: `Folding ${cand.id} (${i + 1}/${targets.length}): block ${prog.completed}/${prog.total}`,
+              detail: `Folding ${cand.id} (${i + 1}/${targets.length}): ${(sub * 100).toFixed(0)}%`,
             });
           },
         );
 
         const fin = prediction.final;
-        const plddtRaw = fin.confidence.plddt as Float32Array;
-        // Ensure pLDDT is on 0..100 scale
-        const maxP = plddtRaw.reduce((a, b) => (b > a ? b : a), 0);
-        const plddt =
-          maxP <= 1.5
-            ? Float32Array.from(plddtRaw, (v) => v * 100)
-            : new Float32Array(plddtRaw);
+        // ConfidenceHeadsGpu always emits pLDDT on the 0..100 scale
+        const plddt = new Float32Array(fin.confidence.plddt as Float32Array);
         let sumPlddt = 0;
         for (let k = 0; k < plddt.length; k++) sumPlddt += plddt[k];
         const meanPlddt = plddt.length ? sumPlddt / plddt.length : 0;
@@ -239,9 +258,18 @@ self.onmessage = async (ev: MessageEvent) => {
         });
       }
 
+      const runHash = fnv1a(
+        JSON.stringify({
+          seqSetId: seqSet.id,
+          recycles,
+          maxSequences: maxSeqs,
+          seed,
+        }),
+      );
+
       const out: FoldedStructure = {
         kind: 'FoldedStructure',
-        id: `folds-${seqSet.id}-r${recycles}`,
+        id: `folds-${seqSet.id}-r${recycles}-${runHash}`,
         parentStructureId: seqSet.parentStructureId,
         folds,
       };

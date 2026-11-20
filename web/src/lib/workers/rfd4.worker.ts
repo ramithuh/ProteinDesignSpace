@@ -14,6 +14,27 @@ declare const self: DedicatedWorkerGlobalScope;
 const RFD4_ORIGIN = 'https://web.rfd4-proteina.org';
 const RFD4_SHARDED_URL = `${RFD4_ORIGIN}/weights/int8`;
 
+function fnv1a(str: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function computeChainLengths(chainIds: readonly string[]): number[] {
+  const lengths: number[] = [];
+  for (let i = 0; i < chainIds.length; i++) {
+    if (i === 0 || chainIds[i] !== chainIds[i - 1]) {
+      lengths.push(1);
+    } else {
+      lengths[lengths.length - 1]++;
+    }
+  }
+  return lengths;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let rfd4Mod: any = null;
 let gpuDevice: GPUDevice | null = null;
@@ -40,10 +61,13 @@ async function ensureLoaded(id: number, needEncoder: boolean) {
     if (!res?.device) {
       throw new Error('No compatible WebGPU device found for RFD4-Proteina');
     }
-    gpuDevice = res.device;
-    void gpuDevice!.lost.then(() => {
-      gpuDevice = null;
-      generator = null;
+    const dev: GPUDevice = res.device;
+    gpuDevice = dev;
+    void dev.lost.then(() => {
+      if (gpuDevice === dev) {
+        gpuDevice = null;
+        generator = null;
+      }
     });
   }
 
@@ -152,21 +176,42 @@ self.onmessage = async (ev: MessageEvent) => {
       const earlyStop = p.earlyStop !== false;
       const seed = Number(p.seed ?? 42);
       const customSpecYaml = String(p.customSpecYaml ?? '').trim();
+      const partialFraction = Math.max(0.05, Math.min(0.95, Number(p.partialFraction ?? 0.5)));
       const template = msg.inputs?.template as StructureArtifact | undefined;
       const condArtifact = msg.inputs?.condition as ConditionSpecArtifact | undefined;
 
-      // Determine preset ID if either mode === 'preset' or condition block references preset:<id>
-      const presetFromCond =
-        condArtifact?.cifUrl?.startsWith('preset:') ? condArtifact.cifUrl.slice(7) : null;
-      const activePresetId = presetFromCond ?? (mode === 'preset' ? String(p.presetId ?? 'custom_cath_monomer') : null);
+      // Validate mode and resolve active preset ID strictly based on `mode`
+      if (
+        mode !== 'unconditional' &&
+        mode !== 'conditioned' &&
+        mode !== 'preset' &&
+        mode !== 'partial' &&
+        mode !== 'inverse-folding'
+      ) {
+        throw new Error(`Unknown RFD4 mode "${mode}"`);
+      }
+
+      if (mode === 'conditioned' && !condArtifact) {
+        throw new Error(
+          'RFD4 "conditioned" mode requires a wired ConditionSpec input (e.g. from an RFD4 Condition node)',
+        );
+      }
+
+      const activePresetId =
+        mode === 'preset'
+          ? String(p.presetId ?? 'custom_cath_monomer')
+          : mode === 'conditioned' && condArtifact?.cifUrl?.startsWith('preset:')
+            ? condArtifact.cifUrl.slice(7)
+            : null;
 
       const needEncoder =
         mode === 'partial' ||
         mode === 'inverse-folding' ||
         activePresetId === 'partial_diffusion_1prw' ||
         activePresetId === 'inverse_folding_1prw' ||
-        Boolean(condArtifact?.inverseFolding) ||
-        (condArtifact?.partialFraction != null && condArtifact.partialFraction > 0);
+        (mode === 'conditioned' &&
+          (Boolean(condArtifact?.inverseFolding) ||
+            (condArtifact?.partialFraction != null && condArtifact.partialFraction > 0)));
 
       await ensureLoaded(msg.id, needEncoder);
 
@@ -192,10 +237,21 @@ self.onmessage = async (ev: MessageEvent) => {
 
       let runLabel = `RFD4 (L=${length})`;
 
-      if (activePresetId) {
-        const preset = rfd4Mod.getRfd4pPresetById(activePresetId);
-        if (!preset) throw new Error(`Unknown RFD4 preset "${activePresetId}"`);
+      const buildFromPreset = async (presetId: string) => {
+        const presetsList = Array.isArray(rfd4Mod.RFD4P_PRESETS) ? rfd4Mod.RFD4P_PRESETS : [];
+        // Validate directly against RFD4P_PRESETS instead of getRfd4pPresetById (which falls back to RFD4P_PRESETS[0])
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const preset = presetsList.find((item: any) => item.id === presetId);
+        if (!preset) {
+          throw new Error(`Unknown RFD4 preset "${presetId}"`);
+        }
         runLabel = `RFD4 · ${preset.id}`;
+
+        const presetNeedsEncoder =
+          preset.partialTrajectoryFractionSteps != null || Boolean(preset.inverseFolding);
+        if (presetNeedsEncoder) {
+          await ensureLoaded(msg.id, true);
+        }
 
         if (preset.partialTrajectoryFractionSteps != null) {
           genOpts.partialTrajectoryFractionSteps = preset.partialTrajectoryFractionSteps;
@@ -207,47 +263,65 @@ self.onmessage = async (ev: MessageEvent) => {
         if (preset.cifUrl) {
           const cifBytes = await fetchExampleCifBytes(msg.id, preset.cifUrl);
           if (preset.specMode) {
-            built = rfd4Mod.buildBatch(
+            return rfd4Mod.buildBatch(
               { contig: preset.contig, conditions: preset.conditions ?? {} },
               { inputCif: cifBytes, seed },
             );
-          } else {
-            // Annotated upstream .cif.zst already carries condition columns
-            built = rfd4Mod.buildBatch(cifBytes, { seed });
+          }
+          // Annotated upstream .cif.zst already carries condition columns
+          return rfd4Mod.buildBatch(cifBytes, { seed });
+        }
+        return rfd4Mod.buildBatch(
+          { contig: preset.contig, conditions: preset.conditions ?? {} },
+          { seed },
+        );
+      };
+
+      if (mode === 'preset') {
+        built = await buildFromPreset(activePresetId!);
+      } else if (mode === 'conditioned') {
+        const cond = condArtifact!;
+        if (activePresetId) {
+          built = await buildFromPreset(activePresetId);
+          if (cond.partialFraction != null && cond.partialFraction > 0) {
+            await ensureLoaded(msg.id, true);
+            genOpts.partialTrajectoryFractionSteps = cond.partialFraction;
+          }
+          if (cond.inverseFolding) {
+            await ensureLoaded(msg.id, true);
+            genOpts.inverseFolding = true;
           }
         } else {
+          runLabel = `RFD4 · ${cond.label}`;
+          let inputCif: string | Uint8Array | undefined =
+            cond.inputCif ?? template?.cifText ?? template?.pdbText;
+          if (!inputCif && cond.cifUrl) {
+            inputCif = await fetchExampleCifBytes(msg.id, cond.cifUrl);
+          }
+          if (cond.partialFraction != null && cond.partialFraction > 0) {
+            genOpts.partialTrajectoryFractionSteps = cond.partialFraction;
+          }
+          if (cond.inverseFolding) genOpts.inverseFolding = true;
           built = rfd4Mod.buildBatch(
-            { contig: preset.contig, conditions: preset.conditions ?? {} },
-            { seed },
+            { contig: cond.contig, conditions: cond.conditions ?? {} },
+            { inputCif, seed },
           );
         }
-      } else if (condArtifact) {
-        runLabel = `RFD4 · ${condArtifact.label}`;
-        const inputCif = condArtifact.inputCif ?? template?.cifText ?? template?.pdbText;
-        if (condArtifact.partialFraction != null && condArtifact.partialFraction > 0) {
-          genOpts.partialTrajectoryFractionSteps = condArtifact.partialFraction;
-        }
-        if (condArtifact.inverseFolding) genOpts.inverseFolding = true;
-        built = rfd4Mod.buildBatch(
-          { contig: condArtifact.contig, conditions: condArtifact.conditions ?? {} },
-          { inputCif, seed },
-        );
       } else if (mode === 'partial' || mode === 'inverse-folding') {
         const inputCif = template?.cifText ?? template?.pdbText;
         if (!inputCif) {
           throw new Error(`RFD4 "${mode}" mode requires a wired template StructureArtifact (e.g. from PDB Input)`);
         }
         if (mode === 'partial') {
-          const frac = Math.max(0.05, Math.min(0.95, Number(p.partialFraction ?? 0.5)));
-          genOpts.partialTrajectoryFractionSteps = frac;
-          runLabel = `RFD4 partial (frac=${frac})`;
+          genOpts.partialTrajectoryFractionSteps = partialFraction;
+          runLabel = `RFD4 partial (frac=${partialFraction})`;
         } else {
           genOpts.inverseFolding = true;
           runLabel = `RFD4 inverse-fold`;
         }
-        const tplLen = template?.length ?? length;
+        // Omit hardcoded contig so non-1-indexed, gapped, or multi-chain templates are preserved verbatim
         built = rfd4Mod.buildBatch(
-          { contig: `A1-${tplLen}`, conditions: {} },
+          { input: 'template', conditions: {} },
           { inputCif, seed },
         );
       } else if (customSpecYaml) {
@@ -268,9 +342,21 @@ self.onmessage = async (ev: MessageEvent) => {
       }
 
       // Capture any silent WebGPU validation errors (which otherwise leave output buffers all-zero!)
-      gpuDevice?.pushErrorScope?.('validation');
-      let res = await generator.generate(built.batch, genOpts);
-      const gpuValErr = await gpuDevice?.popErrorScope?.().catch(() => null);
+      const scopeDevice = gpuDevice;
+      const pushedScope = typeof scopeDevice?.pushErrorScope === 'function';
+      if (pushedScope) {
+        scopeDevice!.pushErrorScope('validation');
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let res: any;
+      let gpuValErr: GPUError | null = null;
+      try {
+        res = await generator.generate(built.batch, genOpts);
+      } finally {
+        if (pushedScope && typeof scopeDevice?.popErrorScope === 'function') {
+          gpuValErr = await scopeDevice.popErrorScope().catch(() => null);
+        }
+      }
       if (gpuValErr) {
         console.error('[rfd4] WebGPU validation error during generate():', gpuValErr.message);
       }
@@ -385,10 +471,31 @@ self.onmessage = async (ev: MessageEvent) => {
       }
 
       const geometry = computeGeometryStats(parsed.caCoords);
+      const chainLengths = computeChainLengths(parsed.chainIds);
+      const candChainLengths =
+        chainLengths.length > 0 && chainLengths.reduce((a, b) => a + b, 0) === finalSeq.length
+          ? chainLengths
+          : undefined;
+
+      const runHash = fnv1a(
+        JSON.stringify({
+          mode,
+          length: mode === 'unconditional' && !customSpecYaml ? length : null,
+          nsteps,
+          recycleSchedule,
+          earlyStop,
+          seed,
+          activePresetId,
+          condId: mode === 'conditioned' ? (condArtifact?.id ?? null) : null,
+          customSpecYaml: mode === 'unconditional' ? customSpecYaml : '',
+          partialFraction: mode === 'partial' ? partialFraction : null,
+          templateId: template?.id ?? null,
+        }),
+      );
 
       const structArtifact: StructureArtifact = {
         kind: 'StructureArtifact',
-        id: `rfd4-${mode}-L${parsed.nResidues}-s${seed}`,
+        id: `rfd4-${mode}-L${parsed.nResidues}-s${seed}-${runHash}`,
         label: `${runLabel} (L=${parsed.nResidues}, steps=${res.stepsRun})`,
         sourceModelId: 'rfd4-proteina',
         length: parsed.nResidues,
@@ -413,6 +520,7 @@ self.onmessage = async (ev: MessageEvent) => {
             globalScore: null,
             sourceModelId: 'rfd4-proteina',
             seed,
+            ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
           },
         ],
       };
