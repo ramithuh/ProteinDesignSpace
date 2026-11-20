@@ -81,11 +81,58 @@
     flowApi = null;
   }
 
-  // Cleanup toast timer on destroy
+  const FIT_VIEW_OPTS = { padding: 0.2, maxZoom: 1, duration: 220 } as const;
+
+  let fitTimer: ReturnType<typeof setTimeout> | null = null;
+  let fitRaf1: number | null = null;
+  let fitRaf2: number | null = null;
+
+  function cancelPendingFit() {
+    if (fitTimer) {
+      clearTimeout(fitTimer);
+      fitTimer = null;
+    }
+    if (fitRaf1 !== null) {
+      cancelAnimationFrame(fitRaf1);
+      fitRaf1 = null;
+    }
+    if (fitRaf2 !== null) {
+      cancelAnimationFrame(fitRaf2);
+      fitRaf2 = null;
+    }
+  }
+
+  function scheduleFitView(duration = 220) {
+    cancelPendingFit();
+    void tick().then(() => {
+      fitRaf1 = requestAnimationFrame(() => {
+        fitRaf1 = null;
+        fitRaf2 = requestAnimationFrame(() => {
+          fitRaf2 = null;
+          void flowApi?.fitView({ ...FIT_VIEW_OPTS, duration });
+          // Backup pass once SvelteFlow's ResizeObserver finishes measuring new node boxes
+          fitTimer = setTimeout(() => {
+            fitTimer = null;
+            void flowApi?.fitView({ ...FIT_VIEW_OPTS, duration });
+          }, 80);
+        });
+      });
+    });
+  }
+
+  // Cleanup timers/rAFs on destroy
   $effect(() => {
     return () => {
       if (toastTimer) clearTimeout(toastTimer);
+      cancelPendingFit();
     };
+  });
+
+  // Fit the entire workflow whenever switching presets/graphs or toggling split layout
+  $effect(() => {
+    void graph.id;
+    void fillHeight;
+    scheduleFitView(220);
   });
 
   // Close wire legend on click-outside
@@ -292,11 +339,7 @@
     } else {
       onSelectNode(nodeId);
     }
-    void tick().then(() => {
-      requestAnimationFrame(() => {
-        void flowApi?.fitView({ padding: 0.18, duration: 220 });
-      });
-    });
+    scheduleFitView(220);
   }
 
   function handleDragStart(ev: DragEvent, adapterId: string) {
@@ -340,10 +383,7 @@
   async function handleAutoLayout() {
     if (disabled) return;
     onGraphChange(autoLayoutGraph(graph));
-    await tick();
-    requestAnimationFrame(() => {
-      void flowApi?.fitView({ padding: 0.18, duration: 250 });
-    });
+    scheduleFitView(250);
   }
 
   function handleClear() {
@@ -446,45 +486,43 @@
   {/if}
 
   <div class="flow-inner">
-    {#key graph.id}
-      <SvelteFlow
-        bind:nodes={flowNodes}
-        bind:edges={flowEdges}
-        {nodeTypes}
-        forceColorMode={theme}
-        nodesDraggable={!disabled}
-        nodesConnectable={!disabled}
-        zoomOnDoubleClick={false}
-        deleteKey={disabled ? null : ['Backspace', 'Delete']}
-        fitView
-        fitViewOptions={{ padding: 0.18 }}
-        {isValidConnection}
-        onconnect={handleConnect}
-        onnodedragstop={handleNodeDragStop}
-        ondelete={handleDelete}
-        onpaneclick={() => {
-          catalogOpen = false;
-          wireLegendOpen = false;
-        }}
-        onnodeclick={({ node }) => {
-          catalogOpen = false;
-          wireLegendOpen = false;
-          onSelectNode(node.id);
-        }}
-        onedgeclick={({ edge }) => {
-          catalogOpen = false;
-          wireLegendOpen = false;
-          const found = graph.edges.find(
-            (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === edge.id,
-          );
-          if (found) onSelectEdge?.(found);
-        }}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background gap={20} size={1} />
-        <Controls showLock={false} />
-      </SvelteFlow>
-    {/key}
+    <SvelteFlow
+      bind:nodes={flowNodes}
+      bind:edges={flowEdges}
+      {nodeTypes}
+      forceColorMode={theme}
+      nodesDraggable={!disabled}
+      nodesConnectable={!disabled}
+      zoomOnDoubleClick={false}
+      deleteKey={disabled ? null : ['Backspace', 'Delete']}
+      fitView
+      fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
+      {isValidConnection}
+      onconnect={handleConnect}
+      onnodedragstop={handleNodeDragStop}
+      ondelete={handleDelete}
+      onpaneclick={() => {
+        catalogOpen = false;
+        wireLegendOpen = false;
+      }}
+      onnodeclick={({ node }) => {
+        catalogOpen = false;
+        wireLegendOpen = false;
+        onSelectNode(node.id);
+      }}
+      onedgeclick={({ edge }) => {
+        catalogOpen = false;
+        wireLegendOpen = false;
+        const found = graph.edges.find(
+          (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === edge.id,
+        );
+        if (found) onSelectEdge?.(found);
+      }}
+      proOptions={{ hideAttribution: true }}
+    >
+      <Background gap={20} size={1} />
+      <Controls showLock={false} />
+    </SvelteFlow>
   </div>
 </div>
 
