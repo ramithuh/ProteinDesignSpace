@@ -93,15 +93,15 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
   },
   'localfold-af2': {
     id: 'localfold-af2',
-    displayName: 'LocalFold AF2 (WebGPU INT5)',
-    shortName: 'LocalFold AF2',
+    displayName: 'LocalFold (AF2 / RF3 / Boltz-2 / AF3)',
+    shortName: 'LocalFold',
     stage: 'fold',
     runtime: 'wgsl-custom',
-    estimatedVramMB: 1100,
+    estimatedVramMB: 1400,
     approxWeightsMB: 97,
-    licenseNote: 'Beerware code (sokrypton/localfold); DeepMind AF2 CC-BY-4.0 weights',
+    licenseNote: 'Beerware engine (sokrypton/localfold); model weights fetched per-checkpoint from Hugging Face (AF2 CC-BY-4.0, RF3 BSD-3, Boltz-2 MIT, OpenBind-0/Protenix-2/OpenDDE/Mol-1/IF2 Apache-2.0, AF3 Non-Commercial)',
     description:
-      'Single-sequence AlphaFold2 monomer refolding on WebGPU (~97 MB INT5 shards from HF sokrypton/localfold). Produces all-atom PDB, pLDDT, pTM, and PAE locally with zero server upload.',
+      'Client-side WebGPU structure prediction powered by sokrypton/localfold. Choose AlphaFold2 (models 1–5), RoseTTAFold3 (RF3), Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, or AlphaFold 3.',
     inputs: {
       sequences: { type: 'SequenceSet' },
     },
@@ -147,6 +147,32 @@ export const RFD4_BENCHMARK_OPTIONS: Rfd4BenchmarkMeta[] = [
   { id: 'dna_7m5w', label: 'DNA-Binding Protein Complex (B-DNA)', category: 'Nucleic Acid' },
   { id: 'partial_diffusion_1prw', label: 'Partial Diffusion — 1PRW (frac=0.5, +138 MB enc)', category: 'Partial', needsEncoder: true },
   { id: 'inverse_folding_1prw', label: 'RFD4 Inverse Folding — 1PRW (+138 MB enc)', category: 'InvFold', needsEncoder: true },
+];
+
+export interface LocalFoldModelMeta {
+  id: string;
+  label: string;
+  shortLabel: string;
+  family: 'af2' | 'af3';
+  approxMB: number;
+  license: string;
+  nonCommercial?: boolean;
+}
+
+export const LOCALFOLD_MODEL_OPTIONS: LocalFoldModelMeta[] = [
+  { id: 'monomer', label: 'AlphaFold2 · model_1_ptm', shortLabel: 'AF2 m1_ptm', family: 'af2', approxMB: 97, license: 'CC-BY-4.0' },
+  { id: 'monomer-2', label: 'AlphaFold2 · model_2_ptm (delta)', shortLabel: 'AF2 m2_ptm', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
+  { id: 'monomer-3', label: 'AlphaFold2 · model_3_ptm (template-free)', shortLabel: 'AF2 m3_ptm', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
+  { id: 'monomer-4', label: 'AlphaFold2 · model_4_ptm (template-free)', shortLabel: 'AF2 m4_ptm', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
+  { id: 'monomer-5', label: 'AlphaFold2 · model_5_ptm (template-free)', shortLabel: 'AF2 m5_ptm', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
+  { id: 'rosettafold3', label: 'RoseTTAFold3 (RF3)', shortLabel: 'RF3', family: 'af3', approxMB: 266, license: 'BSD-3-Clause' },
+  { id: 'boltz2', label: 'Boltz-2', shortLabel: 'Boltz-2', family: 'af3', approxMB: 364, license: 'MIT' },
+  { id: 'openbind0', label: 'OpenBind-0 (OpenFold3 v0.5.0)', shortLabel: 'OpenBind-0', family: 'af3', approxMB: 265, license: 'Apache-2.0' },
+  { id: 'protenix2', label: 'Protenix-v2', shortLabel: 'Protenix-v2', family: 'af3', approxMB: 334, license: 'Apache-2.0' },
+  { id: 'opendde', label: 'OpenDDE', shortLabel: 'OpenDDE', family: 'af3', approxMB: 473, license: 'Apache-2.0' },
+  { id: 'mol1', label: 'Mol-1', shortLabel: 'Mol-1', family: 'af3', approxMB: 510, license: 'Apache-2.0' },
+  { id: 'intellifold2', label: 'IntelliFold-2', shortLabel: 'IntelliFold-2', family: 'af3', approxMB: 612, license: 'Apache-2.0' },
+  { id: 'af3', label: 'AlphaFold 3 (Non-Commercial)', shortLabel: 'AF3', family: 'af3', approxMB: 265, license: 'AF3 Non-Commercial', nonCommercial: true },
 ];
 
 export interface PresetDefinition {
@@ -438,6 +464,62 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
         { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
         { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    },
+  },
+  {
+    id: 'rfd4-af2-vs-rf3',
+    name: 'RFD4 Fork: AF2 vs RoseTTAFold3',
+    badge: 'Cross-Folder Check',
+    summary:
+      'Generate one de novo protein with RFD4-Proteina, then cross-validate its native sequence with both AlphaFold2 (model_1_ptm) and RoseTTAFold3 (RF3) in parallel branches.',
+    graph: {
+      id: 'rfd4-af2-vs-rf3',
+      name: 'RFD4 Fork: AF2 vs RoseTTAFold3',
+      nodes: [
+        {
+          id: 'gen',
+          adapterId: 'rfd4-proteina',
+          label: 'RFD4-Proteina',
+          params: { length: 65, nsteps: 60, recycleSchedule: 'low', earlyStop: true, seed: 42, customSpecYaml: '' },
+          position: { x: 40, y: 120 },
+        },
+        {
+          id: 'fold_af2',
+          adapterId: 'localfold-af2',
+          label: 'LocalFold (AF2)',
+          params: { model: 'monomer', recycles: 1, diffusionSteps: 25, maxSequences: 1, seed: 0 },
+          position: { x: 350, y: 24 },
+        },
+        {
+          id: 'score_af2',
+          adapterId: 'designability-scorer',
+          label: 'Score (AF2)',
+          params: { scRmsdThreshold: 2.0, plddtThreshold: 70 },
+          position: { x: 660, y: 24 },
+        },
+        {
+          id: 'fold_rf3',
+          adapterId: 'localfold-af2',
+          label: 'LocalFold (RF3)',
+          params: { model: 'rosettafold3', recycles: 1, diffusionSteps: 25, maxSequences: 1, seed: 0 },
+          position: { x: 350, y: 230 },
+        },
+        {
+          id: 'score_rf3',
+          adapterId: 'designability-scorer',
+          label: 'Score (RF3)',
+          params: { scRmsdThreshold: 2.0, plddtThreshold: 70 },
+          position: { x: 660, y: 230 },
+        },
+      ],
+      edges: [
+        { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold_af2', toPort: 'sequences' },
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'score_af2', toPort: 'structure' },
+        { fromNode: 'fold_af2', fromPort: 'folds', toNode: 'score_af2', toPort: 'folds' },
+        { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold_rf3', toPort: 'sequences' },
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'score_rf3', toPort: 'structure' },
+        { fromNode: 'fold_rf3', fromPort: 'folds', toNode: 'score_rf3', toPort: 'folds' },
       ],
     },
   },

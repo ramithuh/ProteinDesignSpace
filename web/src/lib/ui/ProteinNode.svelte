@@ -1,6 +1,10 @@
 <script lang="ts">
   import { Handle, Position } from '@xyflow/svelte';
-  import { ADAPTER_REGISTRY, RFD4_BENCHMARK_OPTIONS } from '$lib/engine/registry';
+  import {
+    ADAPTER_REGISTRY,
+    LOCALFOLD_MODEL_OPTIONS,
+    RFD4_BENCHMARK_OPTIONS,
+  } from '$lib/engine/registry';
   import { PORT_COLORS, STAGE_COLORS } from '$lib/engine/graph-utils';
   import type { CanonicalArtifact, NodeProgressEvent } from '$lib/engine/types';
 
@@ -94,7 +98,14 @@
         return `${fam} ${ckpt} · ${n} seq${n === 1 ? '' : 's'} · T=${t}`;
       }
       case 'localfold-af2': {
-        return `AF2 model_1_ptm · ${Number(p.recycles ?? 1)} rec · ×${Number(p.maxSequences ?? 2)}`;
+        const modelId = String(p.model ?? 'monomer');
+        const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
+        const rec = Number(p.recycles ?? 1);
+        if (meta.family === 'af3') {
+          const steps = Number(p.diffusionSteps ?? 25);
+          return `${meta.shortLabel} · ${steps} steps · ${rec} rec`;
+        }
+        return `${meta.shortLabel} · ${rec} rec · ×${Number(p.maxSequences ?? 2)}`;
       }
       case 'designability-scorer': {
         return `scRMSD < ${Number(p.scRmsdThreshold ?? 2.0).toFixed(1)} Å · pLDDT ≥ ${Number(p.plddtThreshold ?? 70)}`;

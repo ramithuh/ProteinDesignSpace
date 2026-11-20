@@ -100,7 +100,13 @@ describe('engine/share', () => {
     expect(decoded!.nodes[0].params.sequence).toBe(custom.nodes[0].params.sequence);
     expect(decoded!.nodes[1].id).toBe('fold1');
     expect(decoded!.nodes[1].label).toBe('AF2 3-Recycle');
-    expect(decoded!.nodes[1].params).toEqual({ recycles: 3, maxSequences: 1, seed: 7 });
+    expect(decoded!.nodes[1].params).toEqual({
+      model: 'monomer',
+      recycles: 3,
+      diffusionSteps: 25,
+      maxSequences: 1,
+      seed: 7,
+    });
     expect(decoded!.edges).toEqual(custom.edges);
     expect(decoded!.nodes.every((n) => n.position !== undefined)).toBe(true);
   });

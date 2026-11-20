@@ -33,7 +33,7 @@
     'rfd4-conditioner': 'Contigs, hotspots, motifs, H-bonds & CATH folds',
     'rfd4-proteina': 'All-atom sequence + backbone diffusion (WebGPU INT8)',
     'web-protein-mpnn': 'Inverse-fold sequences with Soluble / Protein / Cα MPNN',
-    'localfold-af2': 'Single-sequence AlphaFold2 refolding (WebGPU INT5)',
+    'localfold-af2': 'Fold with AF2, RoseTTAFold3, Boltz-2, OpenBind-0, AF3 (WebGPU)',
     'designability-scorer': 'Kabsch superposition, scRMSD, scTM & pLDDT pass rate',
   };
 

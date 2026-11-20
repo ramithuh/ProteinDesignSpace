@@ -1,11 +1,25 @@
 /// <reference lib="webworker" />
-// Dedicated WebGPU worker wrapping sokrypton/localfold (AlphaFold2 monomer INT5)
+// Dedicated WebGPU worker wrapping sokrypton/localfold
+// Supports AlphaFold2 monomer (models 1–5) AND all AF3-lineage models
+// (RoseTTAFold3, Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, AF3)
 // loaded directly from /vendor/localfold/ as plain ES modules.
 
-import { atom37ToPdb } from '$lib/protein-ops/pdb';
+import { atom37ToPdb, parsePdbBackbone } from '$lib/protein-ops/pdb';
 import type { FoldedCandidate, FoldedStructure, SequenceSet } from '$lib/engine/types';
 
 declare const self: DedicatedWorkerGlobalScope;
+
+const AF2_MODELS = new Set(['monomer', 'monomer-2', 'monomer-3', 'monomer-4', 'monomer-5']);
+const AF3_MODELS = new Set([
+  'rosettafold3',
+  'boltz2',
+  'openbind0',
+  'protenix2',
+  'opendde',
+  'mol1',
+  'intellifold2',
+  'af3',
+]);
 
 function fnv1a(str: string): string {
   let h = 0x811c9dc5;
@@ -17,81 +31,184 @@ function fnv1a(str: string): string {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let lfModules: any = null;
+let lfCore: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let lfAf3: any = null;
 let gpuDevice: GPUDevice | null = null;
+let loadedModelKey: string | null = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let loadedAf2: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let loadedAf3: any = null;
 
 async function importVendor(relPath: string) {
   const url = `${self.location.origin}/vendor/localfold/${relPath}`;
   return await import(/* @vite-ignore */ url);
 }
 
-async function ensureLoaded(id: number) {
-  if (loadedAf2 && gpuDevice) return;
+async function ensureCoreModules(id: number) {
+  if (lfCore) return;
+  self.postMessage({
+    id,
+    type: 'progress',
+    phase: 'init',
+    progress: 0.02,
+    detail: 'Loading LocalFold WebGPU modules...',
+  });
+  const [monomerMod, fixtureMod, storeMod, deltaStoreMod, manifestsMod, deviceMod] = await Promise.all([
+    importVendor('webgpu/af2/model/monomer.js'),
+    importVendor('shared/bundles/alphafold-fixture.js'),
+    importVendor('shared/bundles/http-tensor-store.js'),
+    importVendor('shared/bundles/delta-tensor-store.js'),
+    importVendor('shared/bundles/manifests/index.js'),
+    importVendor('webgpu/runtime/device.js'),
+  ]);
+  lfCore = {
+    AlphaFoldMonomerGpu: monomerMod.AlphaFoldMonomerGpu,
+    AlphaFoldFixture: fixtureMod.AlphaFoldFixture,
+    HttpTensorStore: storeMod.HttpTensorStore,
+    DeltaTensorStore: deltaStoreMod.DeltaTensorStore,
+    MODEL_BUNDLES: manifestsMod.MODEL_BUNDLES,
+    bundleBaseUrl: manifestsMod.bundleBaseUrl,
+    loadManifest: manifestsMod.loadManifest,
+    requestAlphaFoldDevice: deviceMod.requestAlphaFoldDevice,
+  };
+}
 
-  if (!lfModules) {
+async function ensureAf3Modules(id: number) {
+  if (lfAf3) return;
+  self.postMessage({
+    id,
+    type: 'progress',
+    phase: 'init',
+    progress: 0.04,
+    detail: 'Loading LocalFold AF3 / RF3 / Boltz-2 WebGPU kernels...',
+  });
+  const [foldMod, diffWeightsMod, weightsMod, featuriseMod, dialectMod, residentMod] = await Promise.all([
+    importVendor('webgpu/af3/fold.js'),
+    importVendor('shared/af3/weights/diffusion-weights.js'),
+    importVendor('shared/af3/weights/weights.js'),
+    importVendor('shared/af3/featurise/featurise.js'),
+    importVendor('shared/af3/dialect.js'),
+    importVendor('webgpu/runtime/resident.js'),
+  ]);
+  lfAf3 = {
+    foldBatch: foldMod.foldBatch,
+    foldWeights: diffWeightsMod.foldWeights,
+    releaseWeights: weightsMod.releaseWeights,
+    featuriseProtein: featuriseMod.featuriseProtein,
+    featuriserDialect: dialectMod.featuriserDialect,
+    releaseResidentWeights: residentMod.releaseResidentWeights,
+  };
+}
+
+function releaseCurrentModel() {
+  try {
+    loadedAf2?.store?.releaseDecoded?.();
+    loadedAf2?.baseStore?.releaseDecoded?.();
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (loadedAf3?.weights && lfAf3?.releaseWeights) {
+      lfAf3.releaseWeights(loadedAf3.weights);
+    }
+    loadedAf3?.store?.releaseDecoded?.();
+    if (gpuDevice && lfAf3?.releaseResidentWeights) {
+      lfAf3.releaseResidentWeights(gpuDevice);
+    }
+  } catch {
+    /* ignore */
+  }
+  loadedAf2 = null;
+  loadedAf3 = null;
+  loadedModelKey = null;
+}
+
+async function ensureDevice() {
+  if (gpuDevice) return;
+  if (!('gpu' in navigator) || !navigator.gpu) {
+    throw new Error('WebGPU is required for LocalFold but is not available in this browser');
+  }
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) throw new Error('No compatible WebGPU adapter found for LocalFold');
+  const dev: GPUDevice = await lfCore.requestAlphaFoldDevice(adapter, { memoryBudgetBytes: null });
+  gpuDevice = dev;
+  void dev.lost.then(() => {
+    if (gpuDevice === dev) {
+      gpuDevice = null;
+      releaseCurrentModel();
+    }
+  });
+}
+
+async function ensureModelLoaded(id: number, modelKey: string) {
+  await ensureCoreModules(id);
+
+  if (loadedModelKey && loadedModelKey !== modelKey) {
+    releaseCurrentModel();
+    try {
+      gpuDevice?.destroy();
+    } catch {
+      /* ignore */
+    }
+    gpuDevice = null;
+  }
+
+  await ensureDevice();
+
+  if (loadedModelKey === modelKey && (loadedAf2 || loadedAf3)) {
+    return;
+  }
+
+  const makeWeightProgress = (label: string) => (p: { loadedBytes: number; totalBytes: number }) => {
+    const frac = p.totalBytes > 0 ? p.loadedBytes / p.totalBytes : 0;
+    const mb = (p.loadedBytes / 1024 / 1024).toFixed(1);
+    const totMb = (p.totalBytes / 1024 / 1024).toFixed(0);
     self.postMessage({
       id,
       type: 'progress',
-      phase: 'init',
-      progress: 0.02,
-      detail: 'Loading LocalFold WebGPU modules...',
+      phase: 'weights',
+      progress: frac,
+      detail: `${label} weights: ${mb} / ${totMb} MB`,
     });
-    const [monomerMod, fixtureMod, storeMod, manifestsMod, deviceMod] = await Promise.all([
-      importVendor('webgpu/af2/model/monomer.js'),
-      importVendor('shared/bundles/alphafold-fixture.js'),
-      importVendor('shared/bundles/http-tensor-store.js'),
-      importVendor('shared/bundles/manifests/index.js'),
-      importVendor('webgpu/runtime/device.js'),
-    ]);
-    lfModules = {
-      AlphaFoldMonomerGpu: monomerMod.AlphaFoldMonomerGpu,
-      AlphaFoldFixture: fixtureMod.AlphaFoldFixture,
-      HttpTensorStore: storeMod.HttpTensorStore,
-      bundleBaseUrl: manifestsMod.bundleBaseUrl,
-      loadManifest: manifestsMod.loadManifest,
-      requestAlphaFoldDevice: deviceMod.requestAlphaFoldDevice,
-    };
-  }
+  };
 
-  if (!gpuDevice) {
-    if (!('gpu' in navigator) || !navigator.gpu) {
-      throw new Error('WebGPU is required for LocalFold AF2 but is not available in this browser');
+  if (AF2_MODELS.has(modelKey)) {
+    const bundleMeta = lfCore.MODEL_BUNDLES[modelKey];
+    let store;
+    let baseStore = null;
+
+    if (bundleMeta?.delta?.base) {
+      const baseKey = bundleMeta.delta.base;
+      const [baseManifest, deltaManifest] = await Promise.all([
+        lfCore.loadManifest(baseKey),
+        lfCore.loadManifest(modelKey),
+      ]);
+      baseStore = await lfCore.HttpTensorStore.fromManifest(
+        lfCore.bundleBaseUrl(baseKey),
+        baseManifest,
+        makeWeightProgress('LocalFold AF2 base'),
+      );
+      baseStore.prefetch?.();
+      const deltaStore = await lfCore.HttpTensorStore.fromManifest(
+        lfCore.bundleBaseUrl(modelKey),
+        deltaManifest,
+        makeWeightProgress(`LocalFold ${modelKey} delta`),
+      );
+      deltaStore.prefetch?.();
+      store = new lfCore.DeltaTensorStore(baseStore, deltaStore);
+    } else {
+      const manifest = await lfCore.loadManifest(modelKey);
+      store = await lfCore.HttpTensorStore.fromManifest(
+        lfCore.bundleBaseUrl(modelKey),
+        manifest,
+        makeWeightProgress('LocalFold AF2 INT5'),
+      );
+      store.prefetch?.();
     }
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) throw new Error('No compatible WebGPU adapter found for LocalFold');
-    const dev: GPUDevice = await lfModules.requestAlphaFoldDevice(adapter, { memoryBudgetBytes: null });
-    gpuDevice = dev;
-    void dev.lost.then(() => {
-      if (gpuDevice === dev) {
-        gpuDevice = null;
-      }
-    });
-  }
 
-  if (!loadedAf2) {
-    const manifest = await lfModules.loadManifest('monomer');
-    const base = lfModules.bundleBaseUrl('monomer');
-    const store = await lfModules.HttpTensorStore.fromManifest(
-      base,
-      manifest,
-      (p: { loadedBytes: number; totalBytes: number }) => {
-        const frac = p.totalBytes > 0 ? p.loadedBytes / p.totalBytes : 0;
-        const mb = (p.loadedBytes / 1024 / 1024).toFixed(1);
-        const totMb = (p.totalBytes / 1024 / 1024).toFixed(0);
-        self.postMessage({
-          id,
-          type: 'progress',
-          phase: 'weights',
-          progress: frac,
-          detail: `LocalFold AF2 INT5 weights: ${mb} / ${totMb} MB`,
-        });
-      },
-    );
-    store.prefetch?.();
-
-    const fixture = lfModules.AlphaFoldFixture.fromStore(store);
+    const fixture = lfCore.AlphaFoldFixture.fromStore(store);
     const [
       embedding,
       template,
@@ -116,6 +233,7 @@ async function ensureLoaded(id: number) {
 
     loadedAf2 = {
       store,
+      baseStore,
       featureTables,
       paeBreaks,
       weights: {
@@ -131,15 +249,53 @@ async function ensureLoaded(id: number) {
         distogram: undefined,
       },
     };
+    loadedModelKey = modelKey;
+    return;
   }
+
+  if (AF3_MODELS.has(modelKey)) {
+    await ensureAf3Modules(id);
+    const manifest = await lfCore.loadManifest(modelKey);
+    const base = lfCore.bundleBaseUrl(modelKey);
+    const store = await lfCore.HttpTensorStore.fromManifest(
+      base,
+      manifest,
+      makeWeightProgress(`LocalFold ${modelKey} INT5`),
+    );
+    store.prefetch?.();
+
+    self.postMessage({
+      id,
+      type: 'progress',
+      phase: 'weights',
+      progress: 0.96,
+      detail: `Preparing ${modelKey} weights...`,
+    });
+    const weights = await lfAf3.foldWeights(store);
+    loadedAf3 = { store, weights };
+    loadedModelKey = modelKey;
+    return;
+  }
+
+  throw new Error(`Unsupported LocalFold model "${modelKey}"`);
+}
+
+function splitIntoColonChains(cleanSeq: string, chainLengths: number[]): string {
+  if (chainLengths.length <= 1) return cleanSeq;
+  const parts: string[] = [];
+  let offset = 0;
+  for (const len of chainLengths) {
+    parts.push(cleanSeq.slice(offset, offset + len));
+    offset += len;
+  }
+  return parts.join(':');
 }
 
 self.onmessage = async (ev: MessageEvent) => {
   const msg = ev.data;
   try {
     if (msg.type === 'dispose') {
-      loadedAf2?.store?.releaseDecoded?.();
-      loadedAf2 = null;
+      releaseCurrentModel();
       gpuDevice?.destroy();
       gpuDevice = null;
       self.postMessage({ id: msg.id, type: 'disposed' });
@@ -150,118 +306,244 @@ self.onmessage = async (ev: MessageEvent) => {
       const t0 = performance.now();
       const seqSet = msg.inputs?.sequences as SequenceSet | undefined;
       if (!seqSet?.candidates?.length) {
-        throw new Error('LocalFold AF2 requires an upstream SequenceSet with at least one sequence');
+        throw new Error('LocalFold requires an upstream SequenceSet with at least one sequence');
       }
 
       const p = msg.params ?? {};
+      const modelKey = String(p.model ?? 'monomer');
+      if (!AF2_MODELS.has(modelKey) && !AF3_MODELS.has(modelKey)) {
+        throw new Error(`Unsupported LocalFold model "${modelKey}"`);
+      }
+      const isAf3 = AF3_MODELS.has(modelKey);
       const recycles = Math.max(0, Math.min(6, Number(p.recycles ?? 1)));
+      const diffusionSteps = Math.max(10, Math.min(200, Number(p.diffusionSteps ?? 25)));
       const maxSeqs = Math.max(1, Math.min(8, Number(p.maxSequences ?? 2)));
       const seed = Number(p.seed ?? 0);
 
-      await ensureLoaded(msg.id);
-      const runner = new lfModules.AlphaFoldMonomerGpu(gpuDevice);
+      await ensureModelLoaded(msg.id, modelKey);
       const targets = seqSet.candidates.slice(0, maxSeqs);
       const folds: FoldedCandidate[] = [];
 
-      for (let i = 0; i < targets.length; i++) {
-        const cand = targets[i];
-        const stripped = cand.sequence.toUpperCase().replace(/[\s/:,]+/g, '');
-        if (stripped.length === 0) {
-          throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
-        }
-        const validCount = (stripped.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
-        if (validCount / stripped.length < 0.5) {
-          throw new Error(
-            `Refusing to fold "${cand.id}": ${stripped.length - validCount}/${stripped.length} residues are unknown/non-canonical (>50% unknown). Check the upstream generator output.`,
+      if (!isAf3) {
+        const runner = new lfCore.AlphaFoldMonomerGpu(gpuDevice);
+        for (let i = 0; i < targets.length; i++) {
+          const cand = targets[i];
+          const stripped = cand.sequence.toUpperCase().replace(/[\s/:,]+/g, '');
+          if (stripped.length === 0) {
+            throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
+          }
+          const validCount = (stripped.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
+          if (validCount / stripped.length < 0.5) {
+            throw new Error(
+              `Refusing to fold "${cand.id}": ${stripped.length - validCount}/${stripped.length} residues are unknown/non-canonical (>50% unknown). Check the upstream generator output.`,
+            );
+          }
+          // Preserve 'X' natively (LocalFold encodes 'X' as aatype=20); map any other non-canonical char to 'X'
+          const cleanSeq = stripped.replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, 'X');
+          const chainLengths =
+            Array.isArray(cand.chainLengths) &&
+            cand.chainLengths.length > 0 &&
+            cand.chainLengths.every((n) => Number.isInteger(n) && n > 0) &&
+            cand.chainLengths.reduce((a, b) => a + b, 0) === cleanSeq.length
+              ? cand.chainLengths
+              : [cleanSeq.length];
+          const a3m = `>query\n${cleanSeq}\n`;
+          const foldStart = performance.now();
+
+          self.postMessage({
+            id: msg.id,
+            type: 'progress',
+            phase: 'fold',
+            progress: i / targets.length,
+            detail: `Folding ${cand.id} with AF2 ${modelKey} (${cleanSeq.length} aa, ${recycles} rec)...`,
+          });
+
+          const prediction = await runner.predictA3m(
+            a3m,
+            loadedAf2.weights,
+            loadedAf2.featureTables,
+            {
+              recycles,
+              randomSeed: seed + i,
+              maxMsaSequences: 1,
+              maxExtraSequences: 1,
+              maskFraction: 0,
+              chainLengths,
+              tolerance: 0.5,
+            },
+            loadedAf2.paeBreaks,
+            undefined,
+            (prog: { completed: number; total: number }) => {
+              const sub = prog.total > 0 ? Math.min(1, Math.max(0, prog.completed / prog.total)) : 0;
+              self.postMessage({
+                id: msg.id,
+                type: 'progress',
+                phase: 'fold',
+                progress: (i + sub) / targets.length,
+                detail: `Folding ${cand.id} (${i + 1}/${targets.length}): ${(sub * 100).toFixed(0)}%`,
+              });
+            },
           );
+
+          const fin = prediction.final;
+          const plddt = new Float32Array(fin.confidence.plddt as Float32Array);
+          let sumPlddt = 0;
+          for (let k = 0; k < plddt.length; k++) sumPlddt += plddt[k];
+          const meanPlddt = plddt.length ? sumPlddt / plddt.length : 0;
+
+          const { pdbText, caCoords } = atom37ToPdb(
+            fin.structure.atom37 as Float32Array,
+            fin.structure.atom37Mask as Float32Array,
+            cleanSeq,
+            plddt,
+          );
+
+          const paeRaw = fin.confidence.predictedAlignedError as Float32Array | undefined;
+          const ptmVal =
+            typeof fin.confidence.ptm === 'number'
+              ? fin.confidence.ptm
+              : typeof fin.confidence.predictedTmScore === 'number'
+                ? fin.confidence.predictedTmScore
+                : null;
+
+          folds.push({
+            sequenceId: cand.id,
+            sequence: cleanSeq,
+            foldModelId: `localfold-af2-${modelKey}-int5`,
+            pdbText,
+            caCoords,
+            plddt,
+            meanPlddt,
+            ptm: ptmVal,
+            pae: paeRaw ? new Float32Array(paeRaw) : undefined,
+            elapsedMs: performance.now() - foldStart,
+          });
         }
-        // Preserve 'X' natively (LocalFold encodes 'X' as aatype=20); map any other non-canonical char to 'X'
-        const cleanSeq = stripped.replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, 'X');
-        const chainLengths =
-          Array.isArray(cand.chainLengths) &&
-          cand.chainLengths.length > 0 &&
-          cand.chainLengths.every((n) => Number.isInteger(n) && n > 0) &&
-          cand.chainLengths.reduce((a, b) => a + b, 0) === cleanSeq.length
-            ? cand.chainLengths
-            : [cleanSeq.length];
-        const a3m = `>query\n${cleanSeq}\n`;
-        const foldStart = performance.now();
+      } else {
+        // AF3-lineage unified driver (RF3, Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, AF3)
+        const dialect = loadedAf3.weights.trunk.dialect;
+        const featOpts = lfAf3.featuriserDialect(dialect);
 
-        self.postMessage({
-          id: msg.id,
-          type: 'progress',
-          phase: 'fold',
-          progress: i / targets.length,
-          detail: `Folding ${cand.id} (${cleanSeq.length} aa, ${recycles} recycles)...`,
-        });
+        for (let i = 0; i < targets.length; i++) {
+          const cand = targets[i];
+          const stripped = cand.sequence.toUpperCase().replace(/[\s/:,]+/g, '');
+          if (stripped.length === 0) {
+            throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
+          }
+          const validCount = (stripped.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
+          if (validCount / stripped.length < 0.5) {
+            throw new Error(
+              `Refusing to fold "${cand.id}": ${stripped.length - validCount}/${stripped.length} residues are unknown/non-canonical (>50% unknown). Check the upstream generator output.`,
+            );
+          }
+          const cleanSeq = stripped.replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, 'X');
+          const chainLengths =
+            Array.isArray(cand.chainLengths) &&
+            cand.chainLengths.length > 0 &&
+            cand.chainLengths.every((n) => Number.isInteger(n) && n > 0) &&
+            cand.chainLengths.reduce((a, b) => a + b, 0) === cleanSeq.length
+              ? cand.chainLengths
+              : [cleanSeq.length];
+          const colonSeq = splitIntoColonChains(cleanSeq, chainLengths);
+          const foldStart = performance.now();
 
-        const prediction = await runner.predictA3m(
-          a3m,
-          loadedAf2.weights,
-          loadedAf2.featureTables,
-          {
+          self.postMessage({
+            id: msg.id,
+            type: 'progress',
+            phase: 'fold',
+            progress: i / targets.length,
+            detail: `Folding ${cand.id} with ${modelKey} (${cleanSeq.length} aa, ${recycles} rec, ${diffusionSteps} steps)...`,
+          });
+
+          const batch = lfAf3.featuriseProtein(colonSeq, featOpts);
+          const result = await lfAf3.foldBatch(gpuDevice, batch, loadedAf3.weights, {
+            mode: 'diffusion',
+            steps: diffusionSteps,
             recycles,
-            randomSeed: seed + i,
-            maxMsaSequences: 1,
-            maxExtraSequences: 1,
-            maskFraction: 0,
-            chainLengths,
-            tolerance: 0.5,
-          },
-          loadedAf2.paeBreaks,
-          undefined,
-          (prog: { completed: number; total: number }) => {
-            const sub = prog.total > 0 ? Math.min(1, Math.max(0, prog.completed / prog.total)) : 0;
-            self.postMessage({
-              id: msg.id,
-              type: 'progress',
-              phase: 'fold',
-              progress: (i + sub) / targets.length,
-              detail: `Folding ${cand.id} (${i + 1}/${targets.length}): ${(sub * 100).toFixed(0)}%`,
-            });
-          },
-        );
+            seed: seed + i,
+            onStage: (name: string, detail: Record<string, unknown> = {}) => {
+              let sub = 0.1;
+              let label = name;
+              if (name === 'pairformer-block') {
+                const idx = Number(detail.index ?? 0);
+                const tot = Math.max(1, Number(detail.total ?? 48));
+                const pass = Number(detail.pass ?? 0);
+                const passes = Math.max(1, Number(detail.passes ?? 1));
+                sub = 0.05 + 0.55 * ((pass + idx / tot) / passes);
+                label = `trunk ${pass + 1}/${passes} (${idx + 1}/${tot})`;
+              } else if (name === 'trunk-done') {
+                sub = 0.62;
+                label = 'trunk done';
+              } else if (name === 'confidence') {
+                sub = 0.94;
+                label = 'confidence head';
+              }
+              self.postMessage({
+                id: msg.id,
+                type: 'progress',
+                phase: 'fold',
+                progress: (i + sub) / targets.length,
+                detail: `${modelKey} ${cand.id}: ${label}`,
+              });
+            },
+            onStep: (stepInfo: { step?: number; total?: number }) => {
+              const s = Number(stepInfo.step ?? 0) + 1;
+              const tot = Math.max(1, Number(stepInfo.total ?? diffusionSteps));
+              const sub = 0.62 + 0.3 * Math.min(1, s / tot);
+              self.postMessage({
+                id: msg.id,
+                type: 'progress',
+                phase: 'fold',
+                progress: (i + sub) / targets.length,
+                detail: `${modelKey} ${cand.id}: diffusion ${s}/${tot}`,
+              });
+            },
+          });
 
-        const fin = prediction.final;
-        // ConfidenceHeadsGpu always emits pLDDT on the 0..100 scale
-        const plddt = new Float32Array(fin.confidence.plddt as Float32Array);
-        let sumPlddt = 0;
-        for (let k = 0; k < plddt.length; k++) sumPlddt += plddt[k];
-        const meanPlddt = plddt.length ? sumPlddt / plddt.length : 0;
+          const pdbText = String(result.pdb ?? '');
+          const parsed = parsePdbBackbone(pdbText);
+          const L = cleanSeq.length;
+          const plddt = new Float32Array(L);
+          if (Array.isArray(result.perResiduePlddt)) {
+            for (let k = 0; k < L; k++) {
+              const v = result.perResiduePlddt[k];
+              plddt[k] = typeof v === 'number' && Number.isFinite(v) ? v : 0;
+            }
+          }
+          let sumPlddt = 0;
+          for (let k = 0; k < plddt.length; k++) sumPlddt += plddt[k];
+          const meanPlddt =
+            typeof result.meanPlddt === 'number' && Number.isFinite(result.meanPlddt)
+              ? result.meanPlddt
+              : plddt.length
+                ? sumPlddt / plddt.length
+                : 0;
 
-        const { pdbText, caCoords } = atom37ToPdb(
-          fin.structure.atom37 as Float32Array,
-          fin.structure.atom37Mask as Float32Array,
-          cleanSeq,
-          plddt,
-        );
+          const paeRaw = result.scores?.pae as Float32Array | undefined;
+          const ptmVal =
+            typeof result.ptm === 'number' && Number.isFinite(result.ptm) ? result.ptm : null;
 
-        const paeRaw = fin.confidence.predictedAlignedError as Float32Array | undefined;
-        const ptmVal =
-          typeof fin.confidence.ptm === 'number'
-            ? fin.confidence.ptm
-            : typeof fin.confidence.predictedTmScore === 'number'
-              ? fin.confidence.predictedTmScore
-              : null;
-
-        folds.push({
-          sequenceId: cand.id,
-          sequence: cleanSeq,
-          foldModelId: 'localfold-af2-monomer-int5',
-          pdbText,
-          caCoords,
-          plddt,
-          meanPlddt,
-          ptm: ptmVal,
-          pae: paeRaw ? new Float32Array(paeRaw) : undefined,
-          elapsedMs: performance.now() - foldStart,
-        });
+          folds.push({
+            sequenceId: cand.id,
+            sequence: cleanSeq,
+            foldModelId: `localfold-${modelKey}-int5`,
+            pdbText,
+            caCoords: parsed.caCoords,
+            plddt,
+            meanPlddt,
+            ptm: ptmVal,
+            pae: paeRaw ? new Float32Array(paeRaw) : undefined,
+            elapsedMs: performance.now() - foldStart,
+          });
+        }
       }
 
       const runHash = fnv1a(
         JSON.stringify({
           seqSetId: seqSet.id,
+          modelKey,
           recycles,
+          diffusionSteps: isAf3 ? diffusionSteps : null,
           maxSequences: maxSeqs,
           seed,
         }),
@@ -269,7 +551,7 @@ self.onmessage = async (ev: MessageEvent) => {
 
       const out: FoldedStructure = {
         kind: 'FoldedStructure',
-        id: `folds-${seqSet.id}-r${recycles}-${runHash}`,
+        id: `folds-${modelKey}-${seqSet.id}-r${recycles}-${runHash}`,
         parentStructureId: seqSet.parentStructureId,
         folds,
       };

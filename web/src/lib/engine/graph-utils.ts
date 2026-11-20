@@ -67,7 +67,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         fixedPositions: '',
       };
     case 'localfold-af2':
-      return { recycles: 1, maxSequences: 2, seed: 0 };
+      return { model: 'monomer', recycles: 1, diffusionSteps: 25, maxSequences: 2, seed: 0 };
     case 'designability-scorer':
       return { scRmsdThreshold: 2.0, plddtThreshold: 70 };
     default:

@@ -1,5 +1,9 @@
 <script lang="ts">
-  import { ADAPTER_REGISTRY, RFD4_BENCHMARK_OPTIONS } from '$lib/engine/registry';
+  import {
+    ADAPTER_REGISTRY,
+    LOCALFOLD_MODEL_OPTIONS,
+    RFD4_BENCHMARK_OPTIONS,
+  } from '$lib/engine/registry';
   import { STAGE_COLORS } from '$lib/engine/graph-utils';
   import type { WorkflowNode } from '$lib/engine/types';
 
@@ -25,8 +29,11 @@
   let activeModelBadge = $derived.by((): string => {
     const p = node.params ?? {};
     switch (node.adapterId) {
-      case 'localfold-af2':
-        return 'AlphaFold2 · model_1_ptm (INT5, single-seq)';
+      case 'localfold-af2': {
+        const modelId = String(p.model ?? 'monomer');
+        const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
+        return `${meta.label} · INT5 (~${meta.approxMB} MB · ${meta.license})`;
+      }
       case 'rfd4-proteina': {
         const mode = String(p.mode ?? 'unconditional');
         const needsEnc =
@@ -563,6 +570,27 @@
       </details>
 
     {:else if node.adapterId === 'localfold-af2'}
+      {@const lfModelId = String(node.params.model ?? 'monomer')}
+      {@const lfMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === lfModelId) ?? LOCALFOLD_MODEL_OPTIONS[0]}
+      <label class="wide">
+        Model
+        <select
+          {disabled}
+          value={lfModelId}
+          onchange={(e) => setParam('model', e.currentTarget.value)}
+        >
+          <optgroup label="AlphaFold 2 (Monomer INT5)">
+            {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af2') as opt (opt.id)}
+              <option value={opt.id}>{opt.label} (~{opt.approxMB} MB)</option>
+            {/each}
+          </optgroup>
+          <optgroup label="All-Atom / AF3-Lineage (INT5)">
+            {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af3') as opt (opt.id)}
+              <option value={opt.id}>{opt.label} (~{opt.approxMB} MB · {opt.license})</option>
+            {/each}
+          </optgroup>
+        </select>
+      </label>
       <label>
         Recycles
         <input
@@ -574,6 +602,20 @@
           oninput={(e) => setNumParam('recycles', e.currentTarget.value)}
         />
       </label>
+      {#if lfMeta.family === 'af3'}
+        <label>
+          Diffusion steps
+          <input
+            type="number"
+            min="10"
+            max="200"
+            step="5"
+            {disabled}
+            value={Number(node.params.diffusionSteps ?? 25)}
+            oninput={(e) => setNumParam('diffusionSteps', e.currentTarget.value)}
+          />
+        </label>
+      {/if}
       <label>
         Max seqs to fold
         <input
@@ -585,6 +627,11 @@
           oninput={(e) => setNumParam('maxSequences', e.currentTarget.value)}
         />
       </label>
+      {#if lfMeta.nonCommercial}
+        <div class="full" style="font-size: 10.5px; color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-border); padding: 6px 8px; border-radius: 5px;">
+          AlphaFold 3 weights are subject to DeepMind's Non-Commercial Academic Terms. For permissive open weights, use <b>RoseTTAFold3</b> (BSD-3), <b>Boltz-2</b> (MIT), or <b>OpenBind-0</b> (Apache-2.0).
+        </div>
+      {/if}
 
       <details class="adv-details full">
         <summary>Advanced parameters</summary>
