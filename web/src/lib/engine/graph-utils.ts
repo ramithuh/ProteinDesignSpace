@@ -165,12 +165,17 @@ export function validateGraph(graph: WorkflowGraph): string[] {
   return errors;
 }
 
-/** Compute clean left-to-right topological positions for nodes lacking coordinates. */
+/**
+ * Compute crossing-minimized left-to-right layered positions (Sugiyama-style):
+ * 1. Longest-path column assignment.
+ * 2. Barycenter + output-port-index ordering inside each column to eliminate branch X-crossings.
+ * 3. Vertical lane offset when a long skip-edge spans > 1 column (e.g., Generator -> Scorer)
+ *    so the skip wire routes cleanly above intermediate nodes instead of cutting through them.
+ */
 export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
   const depth = new Map<string, number>();
   for (const n of graph.nodes) depth.set(n.id, 0);
 
-  // Relax longest path from sources (handles branching DAGs cleanly)
   for (let iter = 0; iter < graph.nodes.length; iter++) {
     let changed = false;
     for (const e of graph.edges) {
@@ -185,23 +190,64 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
   }
 
   const byCol = new Map<number, WorkflowNode[]>();
+  let maxCol = 0;
   for (const n of graph.nodes) {
     const col = depth.get(n.id) ?? 0;
+    if (col > maxCol) maxCol = col;
     const list = byCol.get(col) ?? [];
     list.push(n);
     byCol.set(col, list);
   }
 
-  const X_GAP = 290;
-  const Y_GAP = 165;
+  // Helper: port index on a node's outputs (0 = top handle, 1 = second handle, ...)
+  const outputPortIdx = (nodeId: string, portName: string): number => {
+    const node = graph.nodes.find((x) => x.id === nodeId);
+    if (!node) return 0;
+    const keys = Object.keys(ADAPTER_REGISTRY[node.adapterId]?.outputs ?? {});
+    const idx = keys.indexOf(portName);
+    return idx >= 0 ? idx : 0;
+  };
+
+  // Detect columns spanned by long skip-edges (colSpan >= 2) so intermediate single-row nodes
+  // drop into a clean lower lane, leaving a clear corridor along the top for the skip-edge.
+  const spannedCols = new Set<number>();
+  for (const e of graph.edges) {
+    const c1 = depth.get(e.fromNode) ?? 0;
+    const c2 = depth.get(e.toNode) ?? 0;
+    if (c2 - c1 >= 2) {
+      for (let c = c1 + 1; c < c2; c++) spannedCols.add(c);
+    }
+  }
+
+  const X_GAP = 285;
+  const Y_GAP = 185;
   const posMap = new Map<string, { x: number; y: number }>();
 
-  for (const [col, list] of byCol.entries()) {
-    const totalH = (list.length - 1) * Y_GAP;
+  // Sweep columns left-to-right, sorting each column by upstream barycenter + source handle order
+  for (let col = 0; col <= maxCol; col++) {
+    const list = byCol.get(col);
+    if (!list || list.length === 0) continue;
+
+    if (col > 0 && list.length > 1) {
+      const scoreOf = (node: WorkflowNode): number => {
+        const incoming = graph.edges.filter((e) => e.toNode === node.id);
+        if (incoming.length === 0) return 0;
+        let sum = 0;
+        for (const e of incoming) {
+          const upY = posMap.get(e.fromNode)?.y ?? 0;
+          const pIdx = outputPortIdx(e.fromNode, e.fromPort);
+          sum += upY + pIdx * 60;
+        }
+        return sum / incoming.length;
+      };
+      list.sort((a, b) => scoreOf(a) - scoreOf(b));
+    }
+
+    const laneShift = list.length === 1 && spannedCols.has(col) ? 95 : 0;
     list.forEach((n, idx) => {
       posMap.set(n.id, {
-        x: 40 + col * X_GAP,
-        y: 60 + idx * Y_GAP - totalH / 2 + 100,
+        x: 36 + col * X_GAP,
+        y: 36 + idx * Y_GAP + laneShift,
       });
     });
   }
@@ -210,7 +256,7 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
     ...graph,
     nodes: graph.nodes.map((n) => ({
       ...n,
-      position: posMap.get(n.id) ?? { x: 40, y: 80 },
+      position: posMap.get(n.id) ?? { x: 36, y: 36 },
     })),
   };
 }

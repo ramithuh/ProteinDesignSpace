@@ -101,6 +101,7 @@
         dstState === 'loading';
       return {
         id: `${e.fromNode}:${e.fromPort}->${e.toNode}:${e.toPort}`,
+        type: 'smoothstep',
         source: e.fromNode,
         sourceHandle: e.fromPort,
         target: e.toNode,
