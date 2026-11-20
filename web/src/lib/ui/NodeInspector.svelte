@@ -276,11 +276,20 @@
         <input
           type="number"
           min="10"
-          max="100"
+          max="120"
           {disabled}
-          value={Number(node.params.nsteps ?? 30)}
+          value={Number(node.params.nsteps ?? 60)}
           oninput={(e) => setParam('nsteps', Number(e.currentTarget.value))}
         />
+      </label>
+      <label class="inline-check">
+        <input
+          type="checkbox"
+          {disabled}
+          checked={node.params.earlyStop !== false}
+          onchange={(e) => setParam('earlyStop', e.currentTarget.checked)}
+        />
+        Early stop on convergence
       </label>
       <label>
         Recycle

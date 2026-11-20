@@ -240,8 +240,9 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
           label: 'RFD4-Proteina',
           params: {
             length: 70,
-            nsteps: 30,
+            nsteps: 60,
             recycleSchedule: 'low',
+            earlyStop: true,
             seed: 42,
             customSpecYaml: '',
           },
@@ -282,8 +283,9 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
           label: 'RFD4-Proteina',
           params: {
             length: 70,
-            nsteps: 30,
+            nsteps: 60,
             recycleSchedule: 'low',
+            earlyStop: true,
             seed: 42,
             customSpecYaml: '',
           },
@@ -336,7 +338,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
           id: 'gen',
           adapterId: 'rfd4-proteina',
           label: 'RFD4-Proteina',
-          params: { length: 65, nsteps: 25, recycleSchedule: 'low', seed: 42, customSpecYaml: '' },
+          params: { length: 65, nsteps: 60, recycleSchedule: 'low', earlyStop: true, seed: 42, customSpecYaml: '' },
           position: { x: 40, y: 24 },
         },
         {
@@ -422,8 +424,9 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
           params: {
             mode: 'conditioned',
             length: 70,
-            nsteps: 30,
+            nsteps: 60,
             recycleSchedule: 'low',
+            earlyStop: true,
             seed: 42,
             presetId: 'custom_cath_monomer',
             partialFraction: 0.5,

@@ -153,7 +153,14 @@ self.onmessage = async (ev: MessageEvent) => {
 
       for (let i = 0; i < targets.length; i++) {
         const cand = targets[i];
-        const cleanSeq = cand.sequence.replace(/[^ACDEFGHIKLMNPQRSTVWY]/gi, 'A').toUpperCase();
+        const rawUpper = cand.sequence.toUpperCase();
+        const validCount = (rawUpper.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
+        if (rawUpper.length > 0 && validCount / rawUpper.length < 0.5) {
+          throw new Error(
+            `Refusing to fold "${cand.id}": ${rawUpper.length - validCount}/${rawUpper.length} residues are unknown/non-canonical (would collapse to poly-ALA). Check the upstream generator output.`,
+          );
+        }
+        const cleanSeq = rawUpper.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, 'A');
         const a3m = `>query\n${cleanSeq}\n`;
         const foldStart = performance.now();
 

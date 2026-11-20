@@ -4,7 +4,7 @@
 // Upstream Benchmark Presets (PD-L1 binder, 1PRW motif, SAM H-bond pocket, DNA, CATH),
 // and custom ConditionSpec / YAML / JSON conditioning.
 
-import { parsePdbBackbone } from '$lib/protein-ops/pdb';
+import { AA3_TO_AA1, parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { fetchCachedBytes } from '$lib/engine/opfs-cache';
 import type { ConditionSpecArtifact, SequenceSet, StructureArtifact } from '$lib/engine/types';
@@ -99,12 +99,15 @@ async function ensureLoaded(id: number, needEncoder: boolean) {
       type: 'progress',
       phase: 'init',
       progress: 0.96,
-      detail: 'Uploading RFD4-Proteina weights to WebGPU...',
+      detail: 'Uploading RFD4-Proteina FP16 weights to WebGPU...',
     });
+    // Match upstream web.rfd4-proteina.org: always use packed FP16 weights ({ half: true })
+    // for half the VRAM, 2-3x faster kernels, and exact parity with upstream WebGPU CI gates.
     generator = await rfd4Mod.Rfd4pGeneratorGpu.create(
       gpuDevice,
       shardedBundle.tensors ?? shardedBundle,
       shardedBundle.config,
+      { half: true },
     );
   }
 }
@@ -144,8 +147,9 @@ self.onmessage = async (ev: MessageEvent) => {
       const p = msg.params ?? {};
       const mode = String(p.mode ?? 'unconditional');
       const length = Math.max(30, Math.min(256, Number(p.length ?? 70)));
-      const nsteps = Math.max(10, Math.min(120, Number(p.nsteps ?? 30)));
+      const nsteps = Math.max(10, Math.min(120, Number(p.nsteps ?? 60)));
       const recycleSchedule = (p.recycleSchedule ?? 'low') as 'low' | 'medium';
+      const earlyStop = p.earlyStop !== false;
       const seed = Number(p.seed ?? 42);
       const customSpecYaml = String(p.customSpecYaml ?? '').trim();
       const template = msg.inputs?.template as StructureArtifact | undefined;
@@ -167,11 +171,14 @@ self.onmessage = async (ev: MessageEvent) => {
       await ensureLoaded(msg.id, needEncoder);
 
       // Build input batch + generation options
-      let built: { batch: Record<string, unknown> };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let built: { batch: Record<string, any>; atoms?: any; n?: number };
       const genOpts: Record<string, unknown> = {
         seed,
         nsteps,
         recycleSchedule,
+        earlyStop,
+        inputFrame: true,
         onStep: (info: { step: number; nsteps: number }) => {
           self.postMessage({
             id: msg.id,
@@ -256,10 +263,127 @@ self.onmessage = async (ev: MessageEvent) => {
         );
       }
 
-      const res = await generator.generate(built.batch, genOpts);
+      if (built.atoms) {
+        genOpts.inputAtoms = built.atoms;
+      }
+
+      // Capture any silent WebGPU validation errors (which otherwise leave output buffers all-zero!)
+      gpuDevice?.pushErrorScope?.('validation');
+      let res = await generator.generate(built.batch, genOpts);
+      const gpuValErr = await gpuDevice?.popErrorScope?.().catch(() => null);
+      if (gpuValErr) {
+        console.error('[rfd4] WebGPU validation error during generate():', gpuValErr.message);
+      }
+
+      // Inspect trunk sequence logits & decoded residueType to catch all-zero / poly-ALA collapse
+      const logitsArr = res.logits as Float32Array | null | undefined;
+      let logitsNonZero = 0;
+      let logitsNan = 0;
+      let logitsMin = Infinity;
+      let logitsMax = -Infinity;
+      if (logitsArr) {
+        for (let i = 0; i < logitsArr.length; i++) {
+          const v = logitsArr[i];
+          if (Number.isNaN(v)) logitsNan++;
+          else {
+            if (v !== 0) logitsNonZero++;
+            if (v < logitsMin) logitsMin = v;
+            if (v > logitsMax) logitsMax = v;
+          }
+        }
+      }
+
+      const tokens: string[] = rfd4Mod.UNIFIED_ATOM37_TOKENS ?? [];
+      const rtToSeq = (rtArr: ArrayLike<number>): string => {
+        let s = '';
+        for (let i = 0; i < rtArr.length; i++) {
+          const rt = rtArr[i];
+          if (rt <= 0 || rt >= tokens.length) continue;
+          const aa1 = AA3_TO_AA1[tokens[rt]];
+          if (aa1) s += aa1;
+        }
+        return s;
+      };
+
+      let nativeSeq = rtToSeq(res.residueType ?? []);
+      const uniqueNativeAAs = new Set(nativeSeq.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, '').split('')).size;
+
+      // Fallback recovery: if trunk logits were zero/NaN or collapsed to a single residue (e.g. poly-ALA)
+      // while local_latents are valid, decode sequence directly using the autoencoder decoder's own
+      // logit_linear head (by passing unconditioned C_SEQ from the batch).
+      if (nativeSeq.length >= 10 && (logitsNonZero === 0 || logitsNan > 0 || uniqueNativeAAs <= 1)) {
+        console.warn('[rfd4] Degenerate trunk sequence readout detected; retrying via autoencoder decoder logit_linear head', {
+          logitsNonZero,
+          logitsNan,
+          logitsMin,
+          logitsMax,
+          uniqueNativeAAs,
+          seqSample: nativeSeq.slice(0, 24),
+          gpuValErr: gpuValErr?.message ?? null,
+        });
+        try {
+          const rawCondSeq = built.batch.condition_sequence_1_residue?.data ?? built.batch.condition_sequence_1_residue;
+          const maskedSeq = rawCondSeq ? Int32Array.from(rawCondSeq) : new Int32Array(res.n);
+          const decRecovered = await generator.decoder.decode(built.batch, {
+            n: res.n,
+            caNm: res.x.bb_ca,
+            z: res.x.local_latents,
+            seq: maskedSeq,
+          });
+          const formatted = rfd4Mod.formatSampleLocalLatents(built.batch, {
+            n: res.n,
+            caNm: res.x.bb_ca,
+            decoded: decRecovered,
+          });
+          const recSeq = rtToSeq(formatted.residueType ?? []);
+          const recUnique = new Set(recSeq.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, '').split('')).size;
+          if (recUnique > uniqueNativeAAs) {
+            const structure = rfd4Mod.processSampleToAtoms({
+              coors: formatted.coors,
+              atomMask: formatted.atomMask,
+              residueType: formatted.residueType,
+              paddingMask: built.batch.padding_mask?.data ?? built.batch.padding_mask,
+              insertionLogits: res.insertionLogits,
+              inputAtoms: built.atoms ?? built.batch.__atoms ?? null,
+              batch: built.batch,
+              inputFrame: true,
+            });
+            res = {
+              ...res,
+              residueType: formatted.residueType,
+              structure,
+              cif: rfd4Mod.toCifString(structure),
+              pdb: rfd4Mod.toPdbString(structure),
+            };
+            nativeSeq = recSeq;
+            console.info('[rfd4] Recovered sequence via decoder head:', recSeq.slice(0, 30), `(${recUnique} unique AAs)`);
+          }
+        } catch (recErr) {
+          console.warn('[rfd4] Decoder-head sequence recovery failed:', recErr);
+        }
+      }
+
       const pdbText: string = res.pdb;
       const cifText: string = res.cif;
       const parsed = parsePdbBackbone(pdbText);
+      const finalSeq =
+        parsed.sequence.length === parsed.nResidues && !parsed.sequence.includes('X')
+          ? parsed.sequence
+          : nativeSeq.length === parsed.nResidues
+            ? nativeSeq
+            : parsed.sequence;
+
+      const uniqueFinal = new Set(finalSeq.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, '').split('')).size;
+      console.info(
+        `[rfd4] L=${parsed.nResidues} steps=${res.stepsRun}/${res.nsteps} half=true logits=[${logitsMin.toFixed(2)},${logitsMax.toFixed(2)}] nz=${logitsNonZero} uniqueAA=${uniqueFinal} seq=${finalSeq.slice(0, 25)}...`,
+      );
+      if (parsed.nResidues >= 15 && uniqueFinal <= 1) {
+        const errHint = gpuValErr ? ` (WebGPU validation error: ${gpuValErr.message})` : '';
+        throw new Error(
+          `RFD4-Proteina produced a degenerate single-residue sequence (${finalSeq.slice(0, 12)}…, logits nz=${logitsNonZero}, nan=${logitsNan})${errHint}. Try reloading the page or switching browser/GPU backend.`,
+        );
+      }
+
       const geometry = computeGeometryStats(parsed.caCoords);
 
       const structArtifact: StructureArtifact = {
@@ -268,7 +392,7 @@ self.onmessage = async (ev: MessageEvent) => {
         label: `${runLabel} (L=${parsed.nResidues}, steps=${res.stepsRun})`,
         sourceModelId: 'rfd4-proteina',
         length: parsed.nResidues,
-        sequence: parsed.sequence,
+        sequence: finalSeq,
         caCoords: parsed.caCoords,
         backbone4Coords: parsed.backbone4Coords,
         pdbText,
@@ -284,7 +408,7 @@ self.onmessage = async (ev: MessageEvent) => {
         candidates: [
           {
             id: mode === 'inverse-folding' ? 'rfd4-invfold-1' : 'rfd4-native-1',
-            sequence: parsed.sequence,
+            sequence: finalSeq,
             score: null,
             globalScore: null,
             sourceModelId: 'rfd4-proteina',
