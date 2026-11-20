@@ -198,10 +198,14 @@
   $effect(() => {
     const laid = graph.nodes.some((n) => !n.position) ? autoLayoutGraph(graph) : graph;
     flowNodes = laid.nodes.map((n) => {
+      const inputPortsConnected: Record<string, boolean> = {};
       const inputPortsReady: Record<string, boolean> = {};
       for (const e of laid.edges) {
-        if (e.toNode === n.id && outputsByNode[e.fromNode]?.[e.fromPort]) {
-          inputPortsReady[e.toPort] = true;
+        if (e.toNode === n.id) {
+          inputPortsConnected[e.toPort] = true;
+          if (outputsByNode[e.fromNode]?.[e.fromPort]) {
+            inputPortsReady[e.toPort] = true;
+          }
         }
       }
       const outputPortsReady: Record<string, boolean> = {};
@@ -219,6 +223,7 @@
           params: n.params,
           state: nodeStates[n.id],
           outputs: outputsByNode[n.id],
+          inputPortsConnected,
           inputPortsReady,
           outputPortsReady,
           onDelete: disabled ? undefined : removeNode,

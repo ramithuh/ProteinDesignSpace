@@ -10,6 +10,7 @@
     params?: Record<string, unknown>;
     state?: NodeProgressEvent;
     outputs?: Record<string, CanonicalArtifact>;
+    inputPortsConnected?: Record<string, boolean>;
     inputPortsReady?: Record<string, boolean>;
     outputPortsReady?: Record<string, boolean>;
     onDelete?: (nodeId: string) => void;
@@ -93,7 +94,7 @@
         return `${fam} ${ckpt} · ${n} seq${n === 1 ? '' : 's'} · T=${t}`;
       }
       case 'localfold-af2': {
-        return `AF2 model_1_ptm (INT5) · ${Number(p.recycles ?? 1)} rec · max ${Number(p.maxSequences ?? 2)}`;
+        return `AF2 model_1_ptm · ${Number(p.recycles ?? 1)} rec · ×${Number(p.maxSequences ?? 2)}`;
       }
       case 'designability-scorer': {
         return `scRMSD < ${Number(p.scRmsdThreshold ?? 2.0).toFixed(1)} Å · pLDDT ≥ ${Number(p.plddtThreshold ?? 70)}`;
@@ -168,13 +169,16 @@
     <div class="col in-col">
       {#each inputs as [portName, spec] (portName)}
         {@const color = PORT_COLORS[spec.type]?.bg ?? '#94a3b8'}
+        {@const connected = Boolean(data.inputPortsConnected?.[portName])}
         {@const ready = Boolean(data.inputPortsReady?.[portName])}
         <div class="port-row left">
           <Handle
             type="target"
             position={Position.Left}
             id={portName}
-            style="background: {color}; border: 2px solid var(--bg-surface); width: 13px; height: 13px; left: -7px;"
+            style={connected
+              ? 'background: transparent; border: none; width: 10px; height: 14px; left: -1px;'
+              : `background: ${color}; border: 2px solid var(--bg-surface); width: 13px; height: 13px; left: -7px;`}
           />
           <button
             type="button"
