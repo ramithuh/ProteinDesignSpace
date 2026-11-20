@@ -190,14 +190,23 @@ export function validateGraph(graph: WorkflowGraph): string[] {
   return errors;
 }
 
+// Pixel geometry of ProteinNode.svelte (used for exact handle-to-handle alignment)
+const NODE_HEIGHT_1PORT = 122;
+const PORT0_Y = 70; // vertical offset of 1st port handle center from node top
+const PORT_STEP = 24; // vertical spacing between consecutive port handles
+
 /**
- * Compute crossing-minimized left-to-right layered positions (Sugiyama-style):
+ * Compute clean, crossing-minimized, handle-aligned left-to-right layout:
  * 1. Longest-path column assignment.
- * 2. Barycenter + output-port-index ordering inside each column to eliminate branch X-crossings.
- * 3. Vertical lane offset when a long skip-edge spans > 1 column (e.g., Generator -> Scorer)
- *    so the skip wire routes cleanly above intermediate nodes instead of cutting through them.
+ * 2. Barycenter + output-port-index ordering inside each column (no branch crossings).
+ * 3. Clear corridor (`NODE_HEIGHT + 44px`) below long skip-edges (`colSpan >= 2`) so
+ *    skip wires run as dead-straight horizontal tracks completely above intermediate cards.
+ * 4. Exact port-Y alignment for 1-to-1 horizontal chains so wires stay perfectly straight.
  */
 export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
+  if (graph.nodes.length === 0) return graph;
+
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const depth = new Map<string, number>();
   for (const n of graph.nodes) depth.set(n.id, 0);
 
@@ -224,64 +233,120 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
     byCol.set(col, list);
   }
 
-  // Helper: port index on a node's outputs (0 = top handle, 1 = second handle, ...)
-  const outputPortIdx = (nodeId: string, portName: string): number => {
-    const node = graph.nodes.find((x) => x.id === nodeId);
+  const portIdx = (nodeId: string, dir: 'inputs' | 'outputs', portName: string): number => {
+    const node = byId.get(nodeId);
     if (!node) return 0;
-    const keys = Object.keys(ADAPTER_REGISTRY[node.adapterId]?.outputs ?? {});
+    const keys = Object.keys(ADAPTER_REGISTRY[node.adapterId]?.[dir] ?? {});
     const idx = keys.indexOf(portName);
     return idx >= 0 ? idx : 0;
   };
 
-  // Detect columns spanned by long skip-edges (colSpan >= 2) so intermediate single-row nodes
-  // drop into a clean lower lane, leaving a clear corridor along the top for the skip-edge.
+  // Columns bridged by a long skip-edge (colSpan >= 2) need a clear top corridor
+  const skipTargetCols = new Set<number>();
   const spannedCols = new Set<number>();
   for (const e of graph.edges) {
     const c1 = depth.get(e.fromNode) ?? 0;
     const c2 = depth.get(e.toNode) ?? 0;
     if (c2 - c1 >= 2) {
+      skipTargetCols.add(c2);
       for (let c = c1 + 1; c < c2; c++) spannedCols.add(c);
     }
   }
 
-  const X_GAP = 285;
-  const Y_GAP = 185;
+  const X_START = 40;
+  const X_GAP = 300;
+  const TOP_Y = 24;
+  const CORRIDOR_Y = TOP_Y + NODE_HEIGHT_1PORT + 48; // 194px — completely below top skip wire!
+  const ROW_GAP = 188;
+
   const posMap = new Map<string, { x: number; y: number }>();
 
-  // Sweep columns left-to-right, sorting each column by upstream barycenter + source handle order
   for (let col = 0; col <= maxCol; col++) {
     const list = byCol.get(col);
     if (!list || list.length === 0) continue;
 
+    // Sort multi-node columns by upstream handle Y so branches never cross
     if (col > 0 && list.length > 1) {
-      const scoreOf = (node: WorkflowNode): number => {
-        const incoming = graph.edges.filter((e) => e.toNode === node.id);
-        if (incoming.length === 0) return 0;
+      const barycenter = (node: WorkflowNode): number => {
+        const inc = graph.edges.filter((e) => e.toNode === node.id);
+        if (inc.length === 0) return 0;
         let sum = 0;
-        for (const e of incoming) {
-          const upY = posMap.get(e.fromNode)?.y ?? 0;
-          const pIdx = outputPortIdx(e.fromNode, e.fromPort);
-          sum += upY + pIdx * 60;
+        for (const e of inc) {
+          const upY = posMap.get(e.fromNode)?.y ?? TOP_Y;
+          const outI = portIdx(e.fromNode, 'outputs', e.fromPort);
+          sum += upY + PORT0_Y + outI * PORT_STEP;
         }
-        return sum / incoming.length;
+        return sum / inc.length;
       };
-      list.sort((a, b) => scoreOf(a) - scoreOf(b));
+      list.sort((a, b) => barycenter(a) - barycenter(b));
     }
 
-    const laneShift = list.length === 1 && spannedCols.has(col) ? 95 : 0;
-    list.forEach((n, idx) => {
-      posMap.set(n.id, {
-        x: 36 + col * X_GAP,
-        y: 36 + idx * Y_GAP + laneShift,
-      });
-    });
+    const x = X_START + col * X_GAP;
+
+    if (list.length === 1) {
+      const n = list[0];
+      const inc = graph.edges.filter((e) => e.toNode === n.id);
+      let y = TOP_Y;
+
+      if (spannedCols.has(col)) {
+        // Intermediate node sitting beneath a top skip-edge: drop cleanly into the lower lane
+        const prevSingle = inc.find(
+          (e) => (depth.get(e.fromNode) ?? 0) === col - 1 && spannedCols.has(col - 1),
+        );
+        if (prevSingle) {
+          // Align exact handle Y with previous lower-lane node for a dead-straight wire!
+          const upY = posMap.get(prevSingle.fromNode)?.y ?? CORRIDOR_Y;
+          const outI = portIdx(prevSingle.fromNode, 'outputs', prevSingle.fromPort);
+          const inI = portIdx(n.id, 'inputs', prevSingle.toPort);
+          y = upY + (outI - inI) * PORT_STEP;
+        } else {
+          y = CORRIDOR_Y;
+        }
+      } else if (skipTargetCols.has(col)) {
+        // Sink receiving a top skip-edge: align exact port Y with the skip-edge source!
+        const skipEdge = inc.find((e) => col - (depth.get(e.fromNode) ?? 0) >= 2);
+        if (skipEdge) {
+          const upY = posMap.get(skipEdge.fromNode)?.y ?? TOP_Y;
+          const outI = portIdx(skipEdge.fromNode, 'outputs', skipEdge.fromPort);
+          const inI = portIdx(n.id, 'inputs', skipEdge.toPort);
+          y = Math.max(TOP_Y, upY + (outI - inI) * PORT_STEP);
+        }
+      } else if (inc.length === 1) {
+        // Pure 1-to-1 connection: align target handle exactly with source handle!
+        const e = inc[0];
+        const upY = posMap.get(e.fromNode)?.y ?? TOP_Y;
+        const outI = portIdx(e.fromNode, 'outputs', e.fromPort);
+        const inI = portIdx(n.id, 'inputs', e.toPort);
+        y = Math.max(TOP_Y, upY + (outI - inI) * PORT_STEP);
+      }
+
+      posMap.set(n.id, { x, y: Math.round(y) });
+    } else {
+      // Multi-row column (branched DAG): place rows with generous non-overlapping spacing
+      let cursorY = spannedCols.has(col) ? CORRIDOR_Y - 30 : TOP_Y;
+      for (const n of list) {
+        const inc = graph.edges.filter((e) => e.toNode === n.id);
+        let idealY = cursorY;
+        if (inc.length === 1) {
+          const e = inc[0];
+          const upY = posMap.get(e.fromNode)?.y;
+          if (upY !== undefined) {
+            const outI = portIdx(e.fromNode, 'outputs', e.fromPort);
+            const inI = portIdx(n.id, 'inputs', e.toPort);
+            idealY = Math.max(cursorY, upY + (outI - inI) * PORT_STEP);
+          }
+        }
+        posMap.set(n.id, { x, y: Math.round(idealY) });
+        cursorY = idealY + ROW_GAP;
+      }
+    }
   }
 
   return {
     ...graph,
     nodes: graph.nodes.map((n) => ({
       ...n,
-      position: posMap.get(n.id) ?? { x: 36, y: 36 },
+      position: posMap.get(n.id) ?? { x: X_START, y: TOP_Y },
     })),
   };
 }

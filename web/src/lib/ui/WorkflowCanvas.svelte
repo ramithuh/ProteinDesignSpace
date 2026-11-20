@@ -57,6 +57,7 @@
   let validationToast = $state<string | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let canvasEl: HTMLDivElement | null = $state(null);
+  let flowKey = $state(0);
 
   function flashToast(msg: string) {
     validationToast = msg;
@@ -110,6 +111,7 @@
         targetHandle: e.toPort,
         animated: active,
         style: `stroke: ${col}; stroke-width: 2px;`,
+        pathOptions: { borderRadius: 14, offset: 26 },
       };
     });
   });
@@ -215,6 +217,7 @@
 
   function handleAutoLayout() {
     onGraphChange(autoLayoutGraph(graph));
+    flowKey++;
   }
 
   function handleClear() {
@@ -310,30 +313,32 @@
       <div class="toast">{validationToast}</div>
     {/if}
 
-    <SvelteFlow
-      bind:nodes={flowNodes}
-      bind:edges={flowEdges}
-      {nodeTypes}
-      forceColorMode={theme}
-      fitView
-      fitViewOptions={{ padding: 0.18 }}
-      {isValidConnection}
-      onconnect={handleConnect}
-      onnodedragstop={handleNodeDragStop}
-      ondelete={handleDelete}
-      onnodeclick={({ node }) => onSelectNode(node.id)}
-      proOptions={{ hideAttribution: true }}
-    >
-      <Background gap={20} size={1} />
-      <Controls showLock={false} />
-      <MiniMap
-        nodeColor={(n) => {
-          const aid = (n.data as ProteinNodeData)?.adapterId;
-          const st = ADAPTER_REGISTRY[aid]?.stage ?? 'source';
-          return STAGE_COLORS[st] ?? '#475569';
-        }}
-      />
-    </SvelteFlow>
+    {#key `${graph.id}:${flowKey}`}
+      <SvelteFlow
+        bind:nodes={flowNodes}
+        bind:edges={flowEdges}
+        {nodeTypes}
+        forceColorMode={theme}
+        fitView
+        fitViewOptions={{ padding: 0.18 }}
+        {isValidConnection}
+        onconnect={handleConnect}
+        onnodedragstop={handleNodeDragStop}
+        ondelete={handleDelete}
+        onnodeclick={({ node }) => onSelectNode(node.id)}
+        proOptions={{ hideAttribution: true }}
+      >
+        <Background gap={20} size={1} />
+        <Controls showLock={false} />
+        <MiniMap
+          nodeColor={(n) => {
+            const aid = (n.data as ProteinNodeData)?.adapterId;
+            const st = ADAPTER_REGISTRY[aid]?.stage ?? 'source';
+            return STAGE_COLORS[st] ?? '#475569';
+          }}
+        />
+      </SvelteFlow>
+    {/key}
   </div>
 </div>
 
