@@ -159,6 +159,49 @@ export interface PresetDefinition {
 
 export const WORKFLOW_PRESETS: PresetDefinition[] = [
   {
+    id: 'rfd4-refold-native',
+    name: 'RFD4-Proteina → LocalFold AF2',
+    badge: 'All-Atom Co-Design + Designability',
+    summary:
+      'Generate a de novo protein (sequence + structure) on WebGPU with RFD4-Proteina INT8 (~330 MB), then immediately refold its native designed sequence with LocalFold AF2 and measure scRMSD.',
+    graph: {
+      id: 'rfd4-refold-native',
+      name: 'RFD4-Proteina → LocalFold AF2',
+      nodes: [
+        {
+          id: 'gen',
+          adapterId: 'rfd4-proteina',
+          label: 'RFD4-Proteina',
+          params: {
+            length: 70,
+            nsteps: 60,
+            recycleSchedule: 'low',
+            earlyStop: true,
+            seed: 42,
+            customSpecYaml: '',
+          },
+        },
+        {
+          id: 'fold',
+          adapterId: 'localfold-af2',
+          label: 'LocalFold AF2',
+          params: { recycles: 1, maxSequences: 1, seed: 0 },
+        },
+        {
+          id: 'score',
+          adapterId: 'designability-scorer',
+          label: 'scRMSD / scTM',
+          params: { scRmsdThreshold: 2.0, plddtThreshold: 70 },
+        },
+      ],
+      edges: [
+        { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    },
+  },
+  {
     id: 'pdb-refold-qc',
     name: 'PDB → ProteinMPNN → LocalFold AF2',
     badge: 'Fastest Test (~107 MB)',
@@ -204,49 +247,6 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         { fromNode: 'src', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
         { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
         { fromNode: 'src', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
-        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
-      ],
-    },
-  },
-  {
-    id: 'rfd4-refold-native',
-    name: 'RFD4-Proteina → LocalFold AF2',
-    badge: 'All-Atom Co-Design',
-    summary:
-      'Generate a de novo protein (sequence + structure) on WebGPU with RFD4-Proteina INT8 (~330 MB), then immediately refold its native designed sequence with LocalFold AF2 and measure scRMSD.',
-    graph: {
-      id: 'rfd4-refold-native',
-      name: 'RFD4-Proteina → LocalFold AF2',
-      nodes: [
-        {
-          id: 'gen',
-          adapterId: 'rfd4-proteina',
-          label: 'RFD4-Proteina',
-          params: {
-            length: 70,
-            nsteps: 60,
-            recycleSchedule: 'low',
-            earlyStop: true,
-            seed: 42,
-            customSpecYaml: '',
-          },
-        },
-        {
-          id: 'fold',
-          adapterId: 'localfold-af2',
-          label: 'LocalFold AF2',
-          params: { recycles: 1, maxSequences: 1, seed: 0 },
-        },
-        {
-          id: 'score',
-          adapterId: 'designability-scorer',
-          label: 'scRMSD / scTM',
-          params: { scRmsdThreshold: 2.0, plddtThreshold: 70 },
-        },
-      ],
-      edges: [
-        { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
-        { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
         { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
       ],
     },

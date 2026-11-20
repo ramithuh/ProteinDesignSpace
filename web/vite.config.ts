@@ -1,9 +1,27 @@
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 
+/**
+ * mpnn.worker.ts loads ONNX Runtime Web WASM binaries from jsDelivr CDN via `wasmPaths`.
+ * Stripping Vite's auto-emitted `ort-wasm-*.wasm` assets (~24–26 MiB each) keeps every
+ * output file well under Cloudflare Pages' 25 MiB single-file asset limit.
+ */
+function stripUnusedOrtWasm(): Plugin {
+  return {
+    name: 'strip-unused-ort-wasm',
+    generateBundle(_options, bundle) {
+      for (const fileName of Object.keys(bundle)) {
+        if (/ort-wasm.*\.wasm$/i.test(fileName)) {
+          delete bundle[fileName];
+        }
+      }
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [sveltekit()],
+  plugins: [sveltekit(), stripUnusedOrtWasm()],
   resolve: {
     alias: {
       // proteinmpnn-web ships TS source in GitHub installs (prepack only runs on publish).
@@ -18,8 +36,9 @@ export default defineConfig({
   },
   worker: {
     format: 'es',
+    plugins: () => [stripUnusedOrtWasm()],
   },
-  // Allow serving large model files via symlink out of /static + Tailscale HTTPS preview.
+  // Allow serving static assets + Tailscale HTTPS preview.
   server: {
     fs: { strict: false },
     allowedHosts: ['.ts.net', 'localhost'],
