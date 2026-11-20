@@ -35,12 +35,11 @@ async function ensureLoaded(id: number) {
   }
 
   if (!gpuDevice) {
-    if (!('gpu' in navigator) || !navigator.gpu) {
-      throw new Error('WebGPU is required for RFD4-Proteina but is not available in this browser');
+    const res = await rfd4Mod.requestWebGpuDevice();
+    if (!res?.device) {
+      throw new Error('No compatible WebGPU device found for RFD4-Proteina');
     }
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) throw new Error('No compatible WebGPU adapter found for RFD4-Proteina');
-    gpuDevice = await rfd4Mod.requestAlphaFoldDevice(adapter);
+    gpuDevice = res.device;
     void gpuDevice!.lost.then(() => {
       gpuDevice = null;
       generator = null;
