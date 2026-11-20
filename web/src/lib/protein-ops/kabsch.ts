@@ -184,30 +184,51 @@ function weightedKabsch(
 
   if (s0 > 1e-10) {
     U[0] = HV[0] / s0; U[3] = HV[3] / s0; U[6] = HV[6] / s0;
+    const l0 = Math.hypot(U[0], U[3], U[6]) || 1;
+    U[0] /= l0; U[3] /= l0; U[6] /= l0;
   } else {
     U[0] = 1; U[3] = 0; U[6] = 0;
   }
   if (s1 > 1e-10) {
-    U[1] = HV[1] / s1; U[4] = HV[4] / s1; U[7] = HV[7] / s1;
+    let u1x = HV[1] / s1;
+    let u1y = HV[4] / s1;
+    let u1z = HV[7] / s1;
+    // Gram-Schmidt orthogonalize against u0 for numerical stability
+    const dot = u1x * U[0] + u1y * U[3] + u1z * U[6];
+    u1x -= dot * U[0];
+    u1y -= dot * U[3];
+    u1z -= dot * U[6];
+    const l1 = Math.hypot(u1x, u1y, u1z);
+    if (l1 > 1e-10) {
+      U[1] = u1x / l1; U[4] = u1y / l1; U[7] = u1z / l1;
+    } else {
+      const ux = U[0], uy = U[3], uz = U[6];
+      let bx = 0, by = 1, bz = 0;
+      if (Math.abs(uy) > 0.9) { bx = 1; by = 0; }
+      const cx = uy * bz - uz * by;
+      const cy = uz * bx - ux * bz;
+      const cz = ux * by - uy * bx;
+      const cl = Math.hypot(cx, cy, cz) || 1;
+      U[1] = cx / cl; U[4] = cy / cl; U[7] = cz / cl;
+    }
   } else {
     // Orthogonal vector to u0
     const ux = U[0], uy = U[3], uz = U[6];
     let bx = 0, by = 1, bz = 0;
     if (Math.abs(uy) > 0.9) { bx = 1; by = 0; }
-    let cx = uy * bz - uz * by;
-    let cy = uz * bx - ux * bz;
-    let cz = ux * by - uy * bx;
+    const cx = uy * bz - uz * by;
+    const cy = uz * bx - ux * bz;
+    const cz = ux * by - uy * bx;
     const cl = Math.hypot(cx, cy, cz) || 1;
     U[1] = cx / cl; U[4] = cy / cl; U[7] = cz / cl;
   }
 
-  // Third column = sign * (u0 x u1) so det(V * U^T) = +1 (proper rotation)
+  // Third column = +(u0 x u1) unconditionally so det(U) = +1 and det(R) = det(V * U^T) = +1 (proper rotation)
   const u0x = U[0], u0y = U[3], u0z = U[6];
   const u1x = U[1], u1y = U[4], u1z = U[7];
-  const sign = mat3Det(H) < 0 ? -1 : 1;
-  U[2] = sign * (u0y * u1z - u0z * u1y);
-  U[5] = sign * (u0z * u1x - u0x * u1z);
-  U[8] = sign * (u0x * u1y - u0y * u1x);
+  U[2] = u0y * u1z - u0z * u1y;
+  U[5] = u0z * u1x - u0x * u1z;
+  U[8] = u0x * u1y - u0y * u1x;
 
   const R = mat3Mul(V, mat3Transpose(U));
   const t = new Float64Array([
@@ -340,11 +361,13 @@ export function applyTransformToPdb(
 }
 
 /** Fast Cα-only geometric quality & secondary structure estimator (P-SEA-inspired). */
-export function computeGeometryStats(caCoords: Float32Array): GeometryStats {
+export function computeGeometryStats(caCoords: Float32Array, chainIds?: string[]): GeometryStats {
   const L = Math.floor(caCoords.length / 3);
   if (L === 0) {
     return { length: 0, rg: 0, meanCaDist: 0, chainBreaks: 0, clashes: 0, helixPct: 0, sheetPct: 0, coilPct: 100 };
   }
+  const hasChains = Boolean(chainIds && chainIds.length === L);
+  const sameChain = (i: number, j: number): boolean => !hasChains || chainIds![i] === chainIds![j];
 
   let cx = 0, cy = 0, cz = 0;
   for (let i = 0; i < L; i++) {
@@ -364,21 +387,25 @@ export function computeGeometryStats(caCoords: Float32Array): GeometryStats {
   const rg = Math.sqrt(rgSq / L);
 
   let distSum = 0;
+  let bondedPairs = 0;
   let chainBreaks = 0;
   for (let i = 0; i + 1 < L; i++) {
+    if (!sameChain(i, i + 1)) continue;
     const d = Math.hypot(
       caCoords[(i + 1) * 3 + 0] - caCoords[i * 3 + 0],
       caCoords[(i + 1) * 3 + 1] - caCoords[i * 3 + 1],
       caCoords[(i + 1) * 3 + 2] - caCoords[i * 3 + 2],
     );
     distSum += d;
+    bondedPairs++;
     if (d > 4.5 || d < 2.8) chainBreaks++;
   }
-  const meanCaDist = L > 1 ? distSum / (L - 1) : 0;
+  const meanCaDist = bondedPairs > 0 ? distSum / bondedPairs : 0;
 
   let clashes = 0;
   for (let i = 0; i < L; i++) {
-    for (let j = i + 2; j < L; j++) {
+    for (let j = i + 1; j < L; j++) {
+      if (j === i + 1 && sameChain(i, j)) continue;
       const d = Math.hypot(
         caCoords[j * 3 + 0] - caCoords[i * 3 + 0],
         caCoords[j * 3 + 1] - caCoords[i * 3 + 1],
@@ -393,9 +420,9 @@ export function computeGeometryStats(caCoords: Float32Array): GeometryStats {
   let helix = 0;
   let sheet = 0;
   for (let i = 0; i < L; i++) {
-    const d2 = i + 2 < L ? dist(caCoords, i, i + 2) : 0;
-    const d3 = i + 3 < L ? dist(caCoords, i, i + 3) : 0;
-    const d4 = i + 4 < L ? dist(caCoords, i, i + 4) : 0;
+    const d2 = i + 2 < L && sameChain(i, i + 2) ? dist(caCoords, i, i + 2) : 0;
+    const d3 = i + 3 < L && sameChain(i, i + 3) ? dist(caCoords, i, i + 3) : 0;
+    const d4 = i + 4 < L && sameChain(i, i + 4) ? dist(caCoords, i, i + 4) : 0;
     if (d3 >= 4.6 && d3 <= 6.2 && d4 >= 5.2 && d4 <= 7.2) {
       helix++;
     } else if (d2 >= 5.9 && d2 <= 7.5 && d3 >= 8.5 && d3 <= 11.4) {

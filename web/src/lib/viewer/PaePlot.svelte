@@ -8,7 +8,7 @@
   let canvas: HTMLCanvasElement | null = $state(null);
   let hoverInfo = $state<string | null>(null);
 
-  let L = $derived(pae ? Math.round(Math.sqrt(pae.length)) : 0);
+  let L = $derived(pae ? Math.floor(Math.sqrt(pae.length)) : 0);
 
   $effect(() => {
     if (!canvas || !pae || L <= 0) return;
@@ -20,7 +20,8 @@
     const data = img.data;
     for (let i = 0; i < L * L; i++) {
       // Standard AlphaFold PAE color ramp: 0 Å = deep green (#004d25), 30 Å = near-white (#f8fafc)
-      const t = Math.max(0, Math.min(1, pae[i] / 30));
+      const val = pae[i];
+      const t = Number.isFinite(val) ? Math.max(0, Math.min(1, val / 30)) : 1;
       const r = Math.round(0 + t * 242);
       const g = Math.round(77 + t * 172);
       const b = Math.round(37 + t * 213);
@@ -35,9 +36,14 @@
   function onMove(ev: MouseEvent) {
     if (!canvas || !pae || L <= 0) return;
     const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
     const x = Math.min(L - 1, Math.max(0, Math.floor(((ev.clientX - rect.left) / rect.width) * L)));
     const y = Math.min(L - 1, Math.max(0, Math.floor(((ev.clientY - rect.top) / rect.height) * L)));
     const val = pae[y * L + x];
+    if (!Number.isFinite(val)) {
+      hoverInfo = null;
+      return;
+    }
     hoverInfo = `(${y + 1}, ${x + 1}) = ${val.toFixed(1)} Å`;
   }
 </script>

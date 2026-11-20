@@ -13,9 +13,10 @@ export const AA1_TO_AA3: Record<string, string> = {
   X: 'UNK',
 };
 
-export const AA3_TO_AA1: Record<string, string> = Object.fromEntries(
-  Object.entries(AA1_TO_AA3).map(([k, v]) => [v, k]),
-);
+export const AA3_TO_AA1: Record<string, string> = {
+  ...Object.fromEntries(Object.entries(AA1_TO_AA3).map(([k, v]) => [v, k])),
+  MSE: 'M',
+};
 
 // Standard AlphaFold2 37-atom order (identical to openfold / alphafold / localfold)
 export const AF2_ATOM37_NAMES = [
@@ -36,11 +37,17 @@ function padR(s: string, n: number): string {
  * Reconstruct planar peptide carbonyl oxygen O from 3-atom [L * 3 * 3] (N, CA, C)
  * coordinates into 4-atom [L * 4 * 3] (N, CA, C, O).
  * Uses the ideal peptide plane defined by (CA_i, C_i, N_{i+1}) with C=O = 1.231 Å
- * and angle CA-C-O = 120.8° (falls back to (N_i, CA_i, C_i) on the C-terminal residue).
+ * and angle CA-C-O = 120.8° (falls back to (N_i, CA_i, C_i) on C-termini, chain breaks,
+ * or whenever d(C_i, N_{i+1}) >= 2.0 Å).
  */
-export function reconstructBackboneOxygen(ncac: Float32Array, nResidues: number): Float32Array {
+export function reconstructBackboneOxygen(
+  ncac: Float32Array,
+  nResidues: number,
+  chainIds?: string[],
+): Float32Array {
   const out = new Float32Array(nResidues * 4 * 3);
   const CO_LEN = 1.231;
+  const hasChains = Boolean(chainIds && chainIds.length === nResidues);
 
   for (let r = 0; r < nResidues; r++) {
     const nOff = (r * 3 + 0) * 3;
@@ -62,28 +69,46 @@ export function reconstructBackboneOxygen(ncac: Float32Array, nResidues: number)
     v1x /= l1; v1y /= l1; v1z /= l1;
 
     let ox: number, oy: number, oz: number;
-    if (r + 1 < nResidues) {
-      // Peptide plane bisector opposite to CA_i and N_{i+1}
+    let usedPeptidePlane = false;
+    if (r + 1 < nResidues && (!hasChains || chainIds![r] === chainIds![r + 1])) {
+      // Peptide plane bisector opposite to CA_i and N_{i+1} (only if peptide bond < 2.0 Å)
       const nextNOff = ((r + 1) * 3 + 0) * 3;
-      let v2x = ncac[nextNOff] - cx;
-      let v2y = ncac[nextNOff + 1] - cy;
-      let v2z = ncac[nextNOff + 2] - cz;
-      const l2 = Math.hypot(v2x, v2y, v2z) || 1;
-      v2x /= l2; v2y /= l2; v2z /= l2;
+      const dx = ncac[nextNOff] - cx;
+      const dy = ncac[nextNOff + 1] - cy;
+      const dz = ncac[nextNOff + 2] - cz;
+      const l2 = Math.hypot(dx, dy, dz);
+      if (l2 > 1e-6 && l2 < 2.0) {
+        const v2x = dx / l2;
+        const v2y = dy / l2;
+        const v2z = dz / l2;
+        const bx = -(v1x + v2x);
+        const by = -(v1y + v2y);
+        const bz = -(v1z + v2z);
+        const bl = Math.hypot(bx, by, bz);
+        if (bl > 1e-6) {
+          ox = cx + (bx / bl) * CO_LEN;
+          oy = cy + (by / bl) * CO_LEN;
+          oz = cz + (bz / bl) * CO_LEN;
+          usedPeptidePlane = true;
+        }
+      }
+    }
 
-      let bx = -(v1x + v2x);
-      let by = -(v1y + v2y);
-      let bz = -(v1z + v2z);
-      const bl = Math.hypot(bx, by, bz) || 1;
-      ox = cx + (bx / bl) * CO_LEN;
-      oy = cy + (by / bl) * CO_LEN;
-      oz = cz + (bz / bl) * CO_LEN;
-    } else {
-      // C-terminal fallback: place O in (N, CA, C) plane at ~120.8° from C->CA
+    if (!usedPeptidePlane) {
+      // C-terminal / chain-break fallback: place O in (N, CA, C) plane at ~120.8° from C->CA
       let u2x = nx - cax, u2y = ny - cay, u2z = nz - caz;
       const dot = u2x * v1x + u2y * v1y + u2z * v1z;
       u2x -= dot * v1x; u2y -= dot * v1y; u2z -= dot * v1z;
-      const ul = Math.hypot(u2x, u2y, u2z) || 1;
+      let ul = Math.hypot(u2x, u2y, u2z);
+      if (ul < 1e-6) {
+        // Fallback orthogonal vector to v1
+        const bx = Math.abs(v1y) > 0.9 ? 1 : 0;
+        const by = Math.abs(v1y) > 0.9 ? 0 : 1;
+        u2x = v1y * 0 - v1z * by;
+        u2y = v1z * bx - v1x * 0;
+        u2z = v1x * by - v1y * bx;
+        ul = Math.hypot(u2x, u2y, u2z) || 1;
+      }
       u2x /= ul; u2y /= ul; u2z /= ul;
       const cosA = Math.cos((120.8 * Math.PI) / 180);
       const sinA = Math.sin((120.8 * Math.PI) / 180);
@@ -92,7 +117,7 @@ export function reconstructBackboneOxygen(ncac: Float32Array, nResidues: number)
       oz = cz + CO_LEN * (cosA * v1z + sinA * u2z);
     }
 
-    out[dst + 9] = ox; out[dst + 10] = oy; out[dst + 11] = oz;
+    out[dst + 9] = ox!; out[dst + 10] = oy!; out[dst + 11] = oz!;
   }
   return out;
 }
@@ -113,6 +138,19 @@ export function extractCaFromBackbone(
   return ca;
 }
 
+/** Format PDB residue number (cols 23-26) + insertion code (col 27) + 3 padding spaces. */
+function formatPdbResSeq(spec: number | string | undefined, fallbackNum: number): string {
+  if (spec === undefined || spec === '') {
+    return `${pad(String(fallbackNum), 4)}    `;
+  }
+  const s = String(spec).trim();
+  const m = /^(-?\d+)([A-Za-z])?$/.exec(s);
+  if (!m) return `${pad(String(fallbackNum), 4)}    `;
+  const numPart = m[1].slice(-4);
+  const iCode = m[2] ?? ' ';
+  return `${pad(numPart, 4)}${iCode}   `;
+}
+
 /**
  * Convert backbone coords [nResidues * atomsPerRes, 3] into a single-model PDB string.
  */
@@ -124,19 +162,33 @@ export function coordsToBackbonePdb(
     sequence?: string;
     bFactors?: Float32Array;
     chainId?: string;
+    chainIds?: string[];
+    resSeqs?: Array<number | string>;
+    caOnly?: boolean;
   } = {},
 ): string {
   const atomsPerRes = opts.atomsPerRes ?? 3;
   const names = atomsPerRes === 4 ? ATOM_NAMES_4 : ATOM_NAMES_3;
-  const chain = (opts.chainId ?? 'A')[0] ?? 'A';
+  const defaultChain = (opts.chainId ?? 'A')[0] ?? 'A';
   const lines: string[] = [];
   let atomIdx = 1;
+  let prevChain: string | null = null;
+  let prevResName = 'GLY';
+  let prevResSeqField = `${pad('1', 4)}    `;
 
   for (let r = 0; r < nResidues; r++) {
+    const chain = (opts.chainIds?.[r] ?? defaultChain)[0] ?? defaultChain;
+    if (prevChain !== null && chain !== prevChain) {
+      lines.push(`TER   ${pad(String(atomIdx), 5)}      ${prevResName} ${prevChain}${prevResSeqField.slice(0, 5)}`);
+      atomIdx++;
+    }
     const aa1 = opts.sequence?.[r]?.toUpperCase() ?? 'G';
     const resName = AA1_TO_AA3[aa1] ?? 'GLY';
     const bVal = opts.bFactors ? opts.bFactors[r] : 0.0;
-    for (let a = 0; a < atomsPerRes; a++) {
+    const resSeqField = formatPdbResSeq(opts.resSeqs?.[r], r + 1);
+    const atomSlots = opts.caOnly ? [1] : Array.from({ length: atomsPerRes }, (_, i) => i);
+
+    for (const a of atomSlots) {
       const flatIdx = r * atomsPerRes + a;
       const x = coords[flatIdx * 3 + 0];
       const y = coords[flatIdx * 3 + 1];
@@ -144,12 +196,15 @@ export function coordsToBackbonePdb(
       const name = names[a];
       const element = name[0];
       lines.push(
-        `ATOM  ${pad(String(atomIdx), 5)}  ${padR(name, 3)} ${resName} ${chain}${pad(String(r + 1), 4)}    ` +
+        `ATOM  ${pad(String(atomIdx), 5)}  ${padR(name, 3)} ${resName} ${chain}${resSeqField}` +
           `${pad(x.toFixed(3), 8)}${pad(y.toFixed(3), 8)}${pad(z.toFixed(3), 8)}` +
           `  1.00${pad(bVal.toFixed(2), 6)}           ${element}  `,
       );
       atomIdx++;
     }
+    prevChain = chain;
+    prevResName = resName;
+    prevResSeqField = resSeqField;
   }
   lines.push('END');
   return lines.join('\n') + '\n';
@@ -229,6 +284,7 @@ export function coordsToMultiModelPdb(
   nResidues: number,
   atomsPerRes: 3 | 4 = 3,
 ): string {
+  if (trajectory.length === 0) return 'END\n';
   const chunks: string[] = [];
   const terSerial = nResidues * atomsPerRes + 1;
   const terLine = `TER   ${pad(String(terSerial), 5)}      GLY A${pad(String(nResidues), 4)}`;
@@ -274,19 +330,56 @@ export function parseStructureText(text: string): ParsedStructure {
   return parsePdbBackbone(text);
 }
 
+/** Tokenize a single mmCIF data row while respecting single- and double-quoted strings. */
+function tokenizeCifLine(line: string): string[] {
+  const toks: string[] = [];
+  const n = line.length;
+  let i = 0;
+  while (i < n) {
+    while (i < n && (line[i] === ' ' || line[i] === '\t')) i++;
+    if (i >= n) break;
+    const ch = line[i];
+    if (ch === "'" || ch === '"') {
+      const quote = ch;
+      i++;
+      const start = i;
+      while (i < n) {
+        if (line[i] === quote && (i + 1 === n || line[i + 1] === ' ' || line[i + 1] === '\t')) {
+          break;
+        }
+        i++;
+      }
+      toks.push(line.slice(start, i));
+      if (i < n && line[i] === quote) i++;
+    } else {
+      const start = i;
+      while (i < n && line[i] !== ' ' && line[i] !== '\t') i++;
+      toks.push(line.slice(start, i));
+    }
+  }
+  return toks;
+}
+
 export function parsePdbBackbone(pdbText: string): ParsedStructure {
   interface ResAccum {
     chain: string;
     resKey: string;
     aa1: string;
+    resName: string;
+    resSeqCol: string;
     atoms: Record<string, [number, number, number]>;
   }
   const residues: ResAccum[] = [];
   const byKey = new Map<string, ResAccum>();
 
   const lines = pdbText.split('\n');
+  let maxSerial = 0;
   for (const line of lines) {
     if (line.startsWith('ENDMDL') && residues.length > 0) break;
+    if ((line.startsWith('ATOM  ') || line.startsWith('HETATM')) && line.length >= 11) {
+      const serial = parseInt(line.slice(6, 11).trim(), 10);
+      if (Number.isFinite(serial) && serial > maxSerial) maxSerial = serial;
+    }
     if (!line.startsWith('ATOM  ') || line.length < 54) continue;
     const altLoc = line[16];
     if (altLoc !== ' ' && altLoc !== 'A' && altLoc !== '1') continue;
@@ -295,7 +388,8 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
 
     const resName = line.slice(17, 20).trim();
     const chain = line[21]?.trim() || 'A';
-    const resSeq = line.slice(22, 27).trim();
+    const resSeqCol = line.slice(22, 27);
+    const resSeq = resSeqCol.trim();
     const key = `${chain}:${resSeq}`;
     const x = parseFloat(line.slice(30, 38));
     const y = parseFloat(line.slice(38, 46));
@@ -304,19 +398,27 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
 
     let entry = byKey.get(key);
     if (!entry) {
-      entry = { chain, resKey: key, aa1: AA3_TO_AA1[resName] ?? 'G', atoms: {} };
+      entry = {
+        chain,
+        resKey: key,
+        aa1: AA3_TO_AA1[resName] ?? 'X',
+        resName: resName || 'UNK',
+        resSeqCol,
+        atoms: {},
+      };
       byKey.set(key, entry);
       residues.push(entry);
     }
-    entry.atoms[atomName] = [x, y, z];
+    if (!entry.atoms[atomName]) {
+      entry.atoms[atomName] = [x, y, z];
+    }
   }
 
-  // Keep residues with at least N, CA, C (or CA alone)
+  // Keep residues with at least CA
   const valid = residues.filter((r) => r.atoms.CA !== undefined);
   const L = valid.length;
   const caCoords = new Float32Array(L * 3);
   const ncac = new Float32Array(L * 3 * 3);
-  let hasAllO = L > 0;
   let seq = '';
   const chainIds: string[] = [];
 
@@ -331,28 +433,67 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
     ncac[(i * 3 + 0) * 3 + 0] = n[0]; ncac[(i * 3 + 0) * 3 + 1] = n[1]; ncac[(i * 3 + 0) * 3 + 2] = n[2];
     ncac[(i * 3 + 1) * 3 + 0] = ca[0]; ncac[(i * 3 + 1) * 3 + 1] = ca[1]; ncac[(i * 3 + 1) * 3 + 2] = ca[2];
     ncac[(i * 3 + 2) * 3 + 0] = c[0]; ncac[(i * 3 + 2) * 3 + 1] = c[1]; ncac[(i * 3 + 2) * 3 + 2] = c[2];
-    if (!r.atoms.O) hasAllO = false;
   }
 
-  let backbone4Coords: Float32Array;
-  if (hasAllO) {
-    backbone4Coords = new Float32Array(L * 4 * 3);
-    for (let i = 0; i < L; i++) {
-      const r = valid[i];
-      const arr = [r.atoms.N ?? r.atoms.CA, r.atoms.CA, r.atoms.C ?? r.atoms.CA, r.atoms.O];
-      for (let a = 0; a < 4; a++) {
-        backbone4Coords[(i * 4 + a) * 3 + 0] = arr[a][0];
-        backbone4Coords[(i * 4 + a) * 3 + 1] = arr[a][1];
-        backbone4Coords[(i * 4 + a) * 3 + 2] = arr[a][2];
+  // Reconstruct O with chain-break guard, then preserve every real parsed O coordinate
+  const reconstructed = reconstructBackboneOxygen(ncac, L, chainIds);
+  const backbone4Coords = reconstructed;
+  const missingOByKey = new Map<string, [number, number, number]>();
+
+  for (let i = 0; i < L; i++) {
+    const r = valid[i];
+    if (r.atoms.O) {
+      backbone4Coords[(i * 4 + 3) * 3 + 0] = r.atoms.O[0];
+      backbone4Coords[(i * 4 + 3) * 3 + 1] = r.atoms.O[1];
+      backbone4Coords[(i * 4 + 3) * 3 + 2] = r.atoms.O[2];
+    } else if (r.atoms.N && r.atoms.C) {
+      // Only patch O into PDB when N & C are genuinely present (never synthesize for CA-only inputs)
+      missingOByKey.set(r.resKey, [
+        backbone4Coords[(i * 4 + 3) * 3 + 0],
+        backbone4Coords[(i * 4 + 3) * 3 + 1],
+        backbone4Coords[(i * 4 + 3) * 3 + 2],
+      ]);
+    }
+  }
+
+  // Patch only missing O atoms directly into the original PDB so multi-chain IDs,
+  // residue numbering, insertion codes, sidechains, and HETATM lines are preserved verbatim.
+  let normalizedPdb = pdbText;
+  if (missingOByKey.size > 0) {
+    const patchedLines: string[] = [];
+    let nextSerial = maxSerial;
+    let inModel1 = true;
+    let seenAtoms = false;
+    for (const line of lines) {
+      patchedLines.push(line);
+      if (inModel1 && line.startsWith('ENDMDL') && seenAtoms) {
+        inModel1 = false;
+        continue;
+      }
+      if (!inModel1 || !line.startsWith('ATOM  ') || line.length < 54) continue;
+      seenAtoms = true;
+      const altLoc = line[16];
+      if (altLoc !== ' ' && altLoc !== 'A' && altLoc !== '1') continue;
+      const atomName = line.slice(12, 16).trim();
+      if (atomName !== 'C') continue;
+      const chain = line[21]?.trim() || 'A';
+      const resSeq = line.slice(22, 27).trim();
+      const key = `${chain}:${resSeq}`;
+      const oCoord = missingOByKey.get(key);
+      if (oCoord) {
+        missingOByKey.delete(key);
+        nextSerial = Math.min(99999, nextSerial + 1);
+        const resMeta = line.slice(17, 27); // resName + space + chain + resSeq + iCode
+        const bFactorTail = line.length >= 66 ? line.slice(54, 66) : '  1.00  0.00';
+        patchedLines.push(
+          `ATOM  ${pad(String(nextSerial), 5)}  ${padR('O', 3)} ${resMeta}   ` +
+            `${pad(oCoord[0].toFixed(3), 8)}${pad(oCoord[1].toFixed(3), 8)}${pad(oCoord[2].toFixed(3), 8)}` +
+            `${bFactorTail}           O  `,
+        );
       }
     }
-  } else {
-    backbone4Coords = reconstructBackboneOxygen(ncac, L);
+    normalizedPdb = patchedLines.join('\n');
   }
-
-  const normalizedPdb = hasAllO
-    ? pdbText
-    : coordsToBackbonePdb(backbone4Coords, L, { atomsPerRes: 4, sequence: seq });
 
   return {
     sequence: seq,
@@ -366,11 +507,19 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
 }
 
 function parseMmcifBackbone(cifText: string): ParsedStructure {
+  interface CifRes {
+    chain: string;
+    seqId: string;
+    insCode: string;
+    aa1: string;
+    atoms: Record<string, [number, number, number]>;
+  }
   const lines = cifText.split('\n');
   const cols: string[] = [];
   let inAtomSite = false;
-  const residues: Array<{ chain: string; aa1: string; atoms: Record<string, [number, number, number]> }> = [];
-  const byKey = new Map<string, { chain: string; aa1: string; atoms: Record<string, [number, number, number]> }>();
+  let firstModelNum: string | null = null;
+  const residues: CifRes[] = [];
+  const byKey = new Map<string, CifRes>();
 
   for (const raw of lines) {
     const line = raw.trim();
@@ -384,7 +533,7 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
       continue;
     }
     if (!inAtomSite) continue;
-    const toks = line.split(/\s+/);
+    const toks = tokenizeCifLine(line);
     if (toks.length < cols.length) continue;
 
     const get = (name: string) => {
@@ -393,24 +542,40 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     };
     const group = get('group_PDB');
     if (group && group !== 'ATOM') continue;
+
+    // Filter to first model only
+    const modelNum = get('pdbx_PDB_model_num');
+    if (modelNum && modelNum !== '.' && modelNum !== '?') {
+      if (firstModelNum === null) firstModelNum = modelNum;
+      else if (modelNum !== firstModelNum) continue;
+    }
+
+    // Filter to primary altLoc only
+    const altId = get('label_alt_id');
+    if (altId && altId !== '.' && altId !== '?' && altId !== 'A' && altId !== '1') continue;
+
     const atomName = get('label_atom_id') || get('auth_atom_id');
     if (atomName !== 'N' && atomName !== 'CA' && atomName !== 'C' && atomName !== 'O') continue;
     const chain = get('auth_asym_id') || get('label_asym_id') || 'A';
     const seqId = get('auth_seq_id') || get('label_seq_id');
-    const comp = get('label_comp_id') || get('auth_comp_id') || 'GLY';
+    const rawIns = get('pdbx_PDB_ins_code');
+    const insCode = rawIns && rawIns !== '.' && rawIns !== '?' ? rawIns : '';
+    const comp = get('label_comp_id') || get('auth_comp_id') || 'UNK';
     const x = parseFloat(get('Cartn_x'));
     const y = parseFloat(get('Cartn_y'));
     const z = parseFloat(get('Cartn_z'));
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
 
-    const key = `${chain}:${seqId}`;
+    const key = `${chain}:${seqId}:${insCode}`;
     let entry = byKey.get(key);
     if (!entry) {
-      entry = { chain, aa1: AA3_TO_AA1[comp] ?? 'G', atoms: {} };
+      entry = { chain, seqId, insCode, aa1: AA3_TO_AA1[comp] ?? 'X', atoms: {} };
       byKey.set(key, entry);
       residues.push(entry);
     }
-    entry.atoms[atomName] = [x, y, z];
+    if (!entry.atoms[atomName]) {
+      entry.atoms[atomName] = [x, y, z];
+    }
   }
 
   const valid = residues.filter((r) => r.atoms.CA !== undefined);
@@ -419,10 +584,15 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
   const ncac = new Float32Array(L * 3 * 3);
   let seq = '';
   const chainIds: string[] = [];
+  const resSeqs: string[] = [];
+  let anyHasNC = false;
+
   for (let i = 0; i < L; i++) {
     const r = valid[i];
     seq += r.aa1;
     chainIds.push(r.chain);
+    resSeqs.push(`${r.seqId}${r.insCode}`);
+    if (r.atoms.N && r.atoms.C) anyHasNC = true;
     const ca = r.atoms.CA;
     const n = r.atoms.N ?? ca;
     const c = r.atoms.C ?? ca;
@@ -431,13 +601,30 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     ncac[(i * 3 + 1) * 3 + 0] = ca[0]; ncac[(i * 3 + 1) * 3 + 1] = ca[1]; ncac[(i * 3 + 1) * 3 + 2] = ca[2];
     ncac[(i * 3 + 2) * 3 + 0] = c[0]; ncac[(i * 3 + 2) * 3 + 1] = c[1]; ncac[(i * 3 + 2) * 3 + 2] = c[2];
   }
-  const backbone4Coords = reconstructBackboneOxygen(ncac, L);
-  const pdbText = coordsToBackbonePdb(backbone4Coords, L, { atomsPerRes: 4, sequence: seq });
+
+  const backbone4Coords = reconstructBackboneOxygen(ncac, L, chainIds);
+  // Preserve real parsed O coordinates wherever present in the mmCIF
+  for (let i = 0; i < L; i++) {
+    const o = valid[i].atoms.O;
+    if (o) {
+      backbone4Coords[(i * 4 + 3) * 3 + 0] = o[0];
+      backbone4Coords[(i * 4 + 3) * 3 + 1] = o[1];
+      backbone4Coords[(i * 4 + 3) * 3 + 2] = o[2];
+    }
+  }
+
+  const pdbText = coordsToBackbonePdb(backbone4Coords, L, {
+    atomsPerRes: 4,
+    sequence: seq,
+    chainIds,
+    resSeqs,
+    caOnly: L > 0 && !anyHasNC,
+  });
   return { sequence: seq, nResidues: L, caCoords, backbone4Coords, chainIds, pdbText, format: 'mmcif' };
 }
 
 /**
- * Generates an ideal 58-residue de novo 3-helix bundle backbone with exact ~3.80 Å
+ * Generates an ideal 53-residue de novo 3-helix bundle backbone with exact ~3.80 Å
  * Cα-Cα spacing, 0 chain breaks, 0 clashes, and proper N/CA/C/O peptide planes so
  * users can test ProteinMPNN -> LocalFold AF2 -> Kabsch scRMSD in 1 click.
  */

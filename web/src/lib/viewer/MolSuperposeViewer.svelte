@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
 
   interface Props {
     designedPdb: string | null;
@@ -36,6 +36,9 @@
   let canvasEl: HTMLCanvasElement | null = $state(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let plugin: any = $state(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let pluginPromise: Promise<any> | null = null;
+  let destroyed = false;
   let trajModelRef = $state<string | null>(null);
   let loadSeq = 0;
   let initError = $state<string | null>(null);
@@ -44,42 +47,88 @@
   let queuedFrame: number | null = null;
 
   async function ensurePlugin() {
+    if (destroyed) return null;
     if (plugin) return plugin;
+    if (pluginPromise) return pluginPromise;
     if (!containerEl || !canvasEl) return null;
 
-    const [{ PluginContext }, { DefaultPluginSpec }] = await Promise.all([
-      import('molstar/lib/mol-plugin/context'),
-      import('molstar/lib/mol-plugin/spec'),
-    ]);
+    const cEl = containerEl;
+    const cvEl = canvasEl;
 
-    const spec = DefaultPluginSpec();
-    const ctx = new PluginContext(spec);
-    await ctx.init();
-    const ok = await ctx.initViewerAsync(canvasEl, containerEl);
-    if (!ok) throw new Error('Failed to initialize Mol* WebGL2 canvas');
+    pluginPromise = (async () => {
+      const [{ PluginContext }, { DefaultPluginSpec }] = await Promise.all([
+        import('molstar/lib/mol-plugin/context'),
+        import('molstar/lib/mol-plugin/spec'),
+      ]);
+      if (destroyed) return null;
 
-    ctx.canvas3d?.setProps({
-      renderer: { backgroundColor: (theme === 'light' ? 0xf8fafc : 0x0d0e11) as unknown as never },
-      cameraFog: { name: 'off', params: {} },
-      cameraClipping: { far: false, radius: 0, minNear: 0.1 },
-    });
+      const spec = DefaultPluginSpec();
+      const ctx = new PluginContext(spec);
+      await ctx.init();
+      if (destroyed) {
+        try {
+          ctx.dispose();
+        } catch {
+          /* ignore */
+        }
+        return null;
+      }
 
-    // Click picking -> emit residue info for MPNN fixed-position / conditioning selection
-    const { StructureElement, StructureProperties } = await import('molstar/lib/mol-model/structure');
-    ctx.behaviors.interaction.click.subscribe((ev) => {
-      if (!onResidueClick) return;
-      const loci = ev.current.loci;
-      if (!StructureElement.Loci.is(loci) || loci.elements.length === 0) return;
-      const loc = StructureElement.Loci.getFirstLocation(loci);
-      if (!loc) return;
-      const chain = StructureProperties.chain.auth_asym_id(loc) || 'A';
-      const seqId = StructureProperties.residue.auth_seq_id(loc);
-      const compId = StructureProperties.atom.label_comp_id(loc) || 'UNK';
-      onResidueClick({ chain, seqId, compId });
-    });
+      const ok = await ctx.initViewerAsync(cvEl, cEl);
+      if (destroyed) {
+        try {
+          ctx.dispose();
+        } catch {
+          /* ignore */
+        }
+        return null;
+      }
+      if (!ok) {
+        try {
+          ctx.dispose();
+        } catch {
+          /* ignore */
+        }
+        throw new Error('Failed to initialize Mol* WebGL2 canvas');
+      }
 
-    plugin = ctx;
-    return ctx;
+      ctx.canvas3d?.setProps({
+        renderer: { backgroundColor: (theme === 'light' ? 0xf8fafc : 0x0d0e11) as unknown as never },
+        cameraFog: { name: 'off', params: {} },
+        cameraClipping: { far: false, radius: 0, minNear: 0.1 },
+      });
+
+      // Click picking -> emit residue info for MPNN fixed-position / conditioning selection
+      const { StructureElement, StructureProperties } = await import('molstar/lib/mol-model/structure');
+      if (destroyed) {
+        try {
+          ctx.dispose();
+        } catch {
+          /* ignore */
+        }
+        return null;
+      }
+      ctx.behaviors.interaction.click.subscribe((ev) => {
+        if (!onResidueClick) return;
+        const loci = ev.current.loci;
+        if (!StructureElement.Loci.is(loci) || loci.elements.length === 0) return;
+        const loc = StructureElement.Loci.getFirstLocation(loci);
+        if (!loc) return;
+        const chain = StructureProperties.chain.auth_asym_id(loc) || 'A';
+        const seqId = StructureProperties.residue.auth_seq_id(loc);
+        const compId = StructureProperties.atom.label_comp_id(loc) || 'UNK';
+        onResidueClick({ chain, seqId, compId });
+      });
+
+      plugin = ctx;
+      return ctx;
+    })();
+
+    try {
+      return await pluginPromise;
+    } finally {
+      pluginPromise = null;
+    }
   }
 
   async function renderScene(
@@ -101,13 +150,14 @@
 
     try {
       const ctx = await ensurePlugin();
-      if (!ctx || mySeq !== loadSeq) return;
+      if (destroyed || !ctx || mySeq !== loadSeq) return;
 
       await ctx.clear();
       trajModelRef = null;
-      if (mySeq !== loadSeq) return;
+      if (destroyed || mySeq !== loadSeq) return;
 
       const { Color } = await import('molstar/lib/mol-util/color');
+      if (destroyed || mySeq !== loadSeq) return;
       const hasOverlay = Boolean(sDesigned && dPdb && sRefold && rPdb && !useTraj);
 
       // 1. Designed structure (or multi-model trajectory)
@@ -121,6 +171,7 @@
         // Fixed off-by-one: MODEL 1 = index 0 (topology), frames 0..T-1 = indices 1..T
         const targetIdx = useTraj && fIdx !== undefined ? fIdx + 1 : 0;
         const model = await ctx.builders.structure.createModel(traj, { modelIndex: targetIdx });
+        if (destroyed || mySeq !== loadSeq) return;
         if (useTraj) trajModelRef = model.ref;
         const struct = await ctx.builders.structure.createStructure(model);
         await ctx.builders.structure.representation.addRepresentation(struct, {
@@ -131,7 +182,7 @@
         });
       }
 
-      if (mySeq !== loadSeq) return;
+      if (destroyed || mySeq !== loadSeq) return;
 
       // 2. Kabsch-aligned refolded structure colored by pLDDT (B-factor)
       if (sRefold && rPdb && !useTraj) {
@@ -148,35 +199,43 @@
         });
       }
 
-      if (mySeq !== loadSeq) return;
+      if (destroyed || mySeq !== loadSeq) return;
       applyIllustrative(illustrative);
       ctx.canvas3d?.requestCameraReset();
     } catch (err) {
-      if (mySeq === loadSeq) {
+      if (!destroyed && mySeq === loadSeq) {
         initError = err instanceof Error ? err.message : String(err);
       }
     }
   }
 
   async function scrubFrame(userFrameIdx: number) {
-    if (!plugin || !trajModelRef) return;
+    if (destroyed || !plugin || !trajModelRef) return;
     if (scrubPending) {
       queuedFrame = userFrameIdx;
       return;
     }
     scrubPending = true;
     try {
-      await plugin.state.data
+      const ctx = plugin;
+      const ref = trajModelRef;
+      if (destroyed || !ctx || !ref) return;
+      if (ctx.state?.data?.cells && !ctx.state.data.cells.has(ref)) return;
+      await ctx.state.data
         .build()
-        .to(trajModelRef)
+        .to(ref)
         .update({ modelIndex: userFrameIdx + 1 })
         .commit();
+    } catch {
+      /* ignore stale trajModelRef while scene reloads */
     } finally {
       scrubPending = false;
-      if (queuedFrame !== null) {
+      if (!destroyed && queuedFrame !== null) {
         const next = queuedFrame;
         queuedFrame = null;
         void scrubFrame(next);
+      } else {
+        queuedFrame = null;
       }
     }
   }
@@ -204,7 +263,7 @@
     const useT = showTrajectory && Boolean(t);
     const sd = showDesigned;
     const sr = showRefold;
-    void renderScene(d, r, t, useT, sd, sr, frameIndex);
+    void renderScene(d, r, t, useT, sd, sr, untrack(() => frameIndex));
   });
 
   // Fast incremental scrub when only frameIndex changes
@@ -229,6 +288,7 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
     loadSeq++;
     try {
       plugin?.dispose();

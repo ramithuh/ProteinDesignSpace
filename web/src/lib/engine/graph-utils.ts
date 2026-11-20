@@ -37,6 +37,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         length: 70,
         nsteps: 30,
         recycleSchedule: 'low',
+        earlyStop: true,
         seed: 42,
         presetId: 'custom_cath_monomer',
         partialFraction: 0.5,
@@ -161,32 +162,120 @@ export function validateConnection(
   return { valid: true };
 }
 
-/** Validate the full graph before execution (missing required inputs, cycles, unknown adapters). */
+/** Validate the full graph before execution (unique IDs, valid typed edges, single edge per target port, required inputs, cycle-free). */
 export function validateGraph(graph: WorkflowGraph): string[] {
   const errors: string[] = [];
   if (graph.nodes.length === 0) {
     errors.push('Canvas is empty — drag or add at least one block from the palette.');
     return errors;
   }
-  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+
+  const byId = new Map<string, WorkflowNode>();
   for (const node of graph.nodes) {
-    const manifest = ADAPTER_REGISTRY[node.adapterId];
-    if (!manifest) {
+    if (byId.has(node.id)) {
+      errors.push(`Duplicate node ID "${node.id}".`);
+    } else {
+      byId.set(node.id, node);
+    }
+    if (!ADAPTER_REGISTRY[node.adapterId]) {
       errors.push(`Node "${node.id}" references unknown adapter "${node.adapterId}".`);
+    }
+  }
+
+  // Validate edges: endpoints, ports, matching PortType, single edge per target port, self-loops
+  const targetPorts = new Set<string>();
+  const validConnectedTargets = new Set<string>();
+  const indeg = new Map<string, number>();
+  const adj = new Map<string, string[]>();
+  for (const id of byId.keys()) {
+    indeg.set(id, 0);
+    adj.set(id, []);
+  }
+
+  for (const e of graph.edges) {
+    const src = byId.get(e.fromNode);
+    const dst = byId.get(e.toNode);
+    if (!src) {
+      errors.push(`Edge references missing source node "${e.fromNode}".`);
       continue;
     }
+    if (!dst) {
+      errors.push(`Edge references missing target node "${e.toNode}".`);
+      continue;
+    }
+    if (e.fromNode === e.toNode) {
+      errors.push(`Self-loop detected on node "${e.fromNode}".`);
+    }
+
+    const srcManifest = ADAPTER_REGISTRY[src.adapterId];
+    const dstManifest = ADAPTER_REGISTRY[dst.adapterId];
+    let edgePortsOk = true;
+    if (srcManifest && dstManifest) {
+      const outSpec = srcManifest.outputs[e.fromPort];
+      const inSpec = dstManifest.inputs[e.toPort];
+      if (!outSpec) {
+        errors.push(`Node "${src.id}" has unknown output port "${e.fromPort}".`);
+        edgePortsOk = false;
+      }
+      if (!inSpec) {
+        errors.push(`Node "${dst.id}" has unknown input port "${e.toPort}".`);
+        edgePortsOk = false;
+      }
+      if (outSpec && inSpec && outSpec.type !== inSpec.type) {
+        errors.push(
+          `Type mismatch on wire ${src.id}.${e.fromPort} -> ${dst.id}.${e.toPort} (${outSpec.type} vs ${inSpec.type}).`,
+        );
+        edgePortsOk = false;
+      }
+    }
+
+    const targetKey = `${e.toNode}:${e.toPort}`;
+    if (targetPorts.has(targetKey)) {
+      errors.push(`Input port "${e.toNode}.${e.toPort}" has multiple incoming edges.`);
+    } else {
+      targetPorts.add(targetKey);
+    }
+    if (edgePortsOk) {
+      validConnectedTargets.add(targetKey);
+    }
+
+    adj.get(e.fromNode)!.push(e.toNode);
+    indeg.set(e.toNode, (indeg.get(e.toNode) ?? 0) + 1);
+  }
+
+  // Check required inputs
+  for (const node of byId.values()) {
+    const manifest = ADAPTER_REGISTRY[node.adapterId];
+    if (!manifest) continue;
     for (const [portName, spec] of Object.entries(manifest.inputs)) {
       if (spec.required === false) continue;
-      const connected = graph.edges.some(
-        (e) => e.toNode === node.id && e.toPort === portName && byId.has(e.fromNode),
-      );
-      if (!connected) {
+      if (!validConnectedTargets.has(`${node.id}:${portName}`)) {
         errors.push(
           `"${node.label ?? manifest.shortName}" is missing required input "${portName}" (${spec.type}).`,
         );
       }
     }
   }
+
+  // Cycle detection via Kahn's topological sort
+  const queue: string[] = [];
+  for (const [id, d] of indeg) {
+    if (d === 0) queue.push(id);
+  }
+  let visited = 0;
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    visited++;
+    for (const nxt of adj.get(cur) ?? []) {
+      const nd = (indeg.get(nxt) ?? 1) - 1;
+      indeg.set(nxt, nd);
+      if (nd === 0) queue.push(nxt);
+    }
+  }
+  if (visited !== byId.size) {
+    errors.push('Workflow graph contains a cycle (must be a directed acyclic graph).');
+  }
+
   return errors;
 }
 

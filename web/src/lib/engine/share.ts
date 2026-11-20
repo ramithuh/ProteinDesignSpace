@@ -34,14 +34,26 @@ function fromBase64Url(str: string): Uint8Array {
   return out;
 }
 
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function sanitizeParams(obj: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (FORBIDDEN_KEYS.has(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 async function deflateRaw(text: string): Promise<Uint8Array> {
   const input = new TextEncoder().encode(text);
   if (typeof CompressionStream === 'undefined') return input;
   const cs = new CompressionStream('deflate-raw');
+  const bufPromise = new Response(cs.readable).arrayBuffer();
   const writer = cs.writable.getWriter();
   await writer.write(input);
   await writer.close();
-  const buf = await new Response(cs.readable).arrayBuffer();
+  const buf = await bufPromise;
   return new Uint8Array(buf);
 }
 
@@ -50,10 +62,11 @@ async function inflateRaw(bytes: Uint8Array): Promise<string> {
     return new TextDecoder().decode(bytes);
   }
   const ds = new DecompressionStream('deflate-raw');
+  const bufPromise = new Response(ds.readable).arrayBuffer();
   const writer = ds.writable.getWriter();
   await writer.write(bytes.slice());
   await writer.close();
-  const buf = await new Response(ds.readable).arrayBuffer();
+  const buf = await bufPromise;
   return new TextDecoder().decode(buf);
 }
 
@@ -61,17 +74,29 @@ function diffParams(
   adapterId: string,
   params: Record<string, unknown>,
   base?: Record<string, unknown>,
+  resetModeOnStrip = false,
 ): { diff: Record<string, unknown>; strippedPdb: boolean } {
   const defaults = base ?? defaultParamsForAdapter(adapterId);
   const diff: Record<string, unknown> = {};
   let strippedPdb = false;
   for (const [k, v] of Object.entries(params)) {
+    if (FORBIDDEN_KEYS.has(k)) continue;
     if (k === 'pdbText' && typeof v === 'string' && v.length > 1500) {
       strippedPdb = true;
       continue;
     }
     if (JSON.stringify(v) !== JSON.stringify(defaults[k])) {
       diff[k] = v;
+    }
+  }
+  if (strippedPdb && resetModeOnStrip && adapterId === 'pdb-input') {
+    // Do not leave a broken mode:'custom' with an empty pdbText in shared links
+    if (defaults.mode === 'demo-bundle') {
+      delete diff.mode;
+      delete diff.filename;
+    } else {
+      diff.mode = 'demo-bundle';
+      delete diff.filename;
     }
   }
   return { diff, strippedPdb };
@@ -112,7 +137,7 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
     for (let i = 0; i < graph.nodes.length; i++) {
       const n = graph.nodes[i];
       const baseN = preset.graph.nodes[i];
-      const { diff, strippedPdb: s } = diffParams(n.adapterId, n.params, baseN.params);
+      const { diff, strippedPdb: s } = diffParams(n.adapterId, n.params, baseN.params, true);
       if (s) strippedPdb = true;
       for (const [k, v] of Object.entries(diff)) {
         qs.set(`${n.id}.${k}`, typeof v === 'string' ? v : JSON.stringify(v));
@@ -125,7 +150,7 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
   // 2. General DAG -> short-alias tuple representation -> deflate-raw -> base64url
   const compactNodes = graph.nodes.map((n) => {
     const a = ADAPTER_TO_SHORT[n.adapterId] ?? n.adapterId;
-    const { diff, strippedPdb: s } = diffParams(n.adapterId, n.params);
+    const { diff, strippedPdb: s } = diffParams(n.adapterId, n.params, undefined, true);
     if (s) strippedPdb = true;
     const tuple: unknown[] = [n.id, a];
     const hasDiff = Object.keys(diff).length > 0;
@@ -175,9 +200,12 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
       if (dot <= 0) continue;
       const nodeId = k.slice(0, dot);
       const paramKey = k.slice(dot + 1);
+      if (FORBIDDEN_KEYS.has(paramKey)) continue;
       const node = byId.get(nodeId);
       if (!node) continue;
-      node.params[paramKey] = parseParamValue(v, node.params[paramKey]);
+      const defaults = defaultParamsForAdapter(node.adapterId);
+      const templateVal = node.params[paramKey] !== undefined ? node.params[paramKey] : defaults[paramKey];
+      node.params[paramKey] = parseParamValue(v, templateVal);
     }
     return g.nodes.some((n) => !n.position) ? autoLayoutGraph(g) : g;
   }
@@ -198,7 +226,8 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
       const id = String(tuple[0]);
       const shortA = String(tuple[1]);
       const adapterId = SHORT_TO_ADAPTER[shortA] ?? shortA;
-      const overrides = (tuple[2] && typeof tuple[2] === 'object' ? tuple[2] : {}) as Record<string, unknown>;
+      const rawOverrides = (tuple[2] && typeof tuple[2] === 'object' ? tuple[2] : {}) as Record<string, unknown>;
+      const overrides = sanitizeParams(rawOverrides);
       const label = typeof tuple[3] === 'string' ? tuple[3] : ADAPTER_REGISTRY[adapterId]?.shortName ?? adapterId;
       return {
         id,
@@ -253,7 +282,33 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
     if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
       throw new Error('JSON must contain nodes[] and edges[]');
     }
-    return parsed.nodes.some((n) => !n.position) ? autoLayoutGraph(parsed) : parsed;
+    const validatedNodes: WorkflowNode[] = parsed.nodes.map((n, idx) => {
+      if (!n || typeof n !== 'object') {
+        throw new Error(`Invalid node at index ${idx}`);
+      }
+      const id = String(n.id ?? '').trim();
+      if (!id) throw new Error(`Node at index ${idx} is missing an id`);
+      const adapterId = String(n.adapterId ?? '');
+      if (!ADAPTER_REGISTRY[adapterId]) {
+        throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
+      }
+      const rawParams = n.params && typeof n.params === 'object' ? sanitizeParams(n.params) : {};
+      return {
+        ...n,
+        id,
+        adapterId,
+        label: typeof n.label === 'string' && n.label ? n.label : ADAPTER_REGISTRY[adapterId].shortName,
+        params: { ...defaultParamsForAdapter(adapterId), ...rawParams },
+      };
+    });
+    const normalized: WorkflowGraph = {
+      id: parsed.id || 'custom-recipe',
+      name: parsed.name || 'Custom Recipe',
+      description: parsed.description,
+      nodes: validatedNodes,
+      edges: parsed.edges,
+    };
+    return normalized.nodes.some((n) => !n.position) ? autoLayoutGraph(normalized) : normalized;
   }
 
   let name = 'Custom Recipe';
@@ -264,22 +319,25 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
   for (const rawLine of trimmed.split('\n')) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
-    if (line.startsWith('denovo:')) continue;
-    if (line.startsWith('name:')) {
-      const val = line.slice(5).trim();
-      try {
-        name = String(JSON.parse(val));
-      } catch {
-        name = val.replace(/^['"]|['"]$/g, '');
-      }
-      continue;
-    }
     if (line === 'nodes:') {
       section = 'nodes';
       continue;
     }
     if (line === 'wires:') {
       section = 'wires';
+      continue;
+    }
+    if (section === 'none') {
+      if (line.startsWith('denovo:')) continue;
+      if (line.startsWith('name:')) {
+        const val = line.slice(5).trim();
+        try {
+          name = String(JSON.parse(val));
+        } catch {
+          name = val.replace(/^['"]|['"]$/g, '');
+        }
+        continue;
+      }
       continue;
     }
 
@@ -294,7 +352,7 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
         throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
       }
       const label = typeof obj.label === 'string' ? obj.label : ADAPTER_REGISTRY[adapterId].shortName;
-      const rest = { ...obj };
+      const rest = sanitizeParams(obj);
       delete rest.model;
       delete rest.adapterId;
       delete rest.label;
