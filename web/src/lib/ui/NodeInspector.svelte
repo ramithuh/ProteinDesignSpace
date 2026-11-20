@@ -22,6 +22,45 @@
   let manifest = $derived(ADAPTER_REGISTRY[node.adapterId]);
   let stageColor = $derived(STAGE_COLORS[manifest?.stage ?? 'source'] ?? '#64748b');
 
+  let activeModelBadge = $derived.by((): string => {
+    const p = node.params ?? {};
+    switch (node.adapterId) {
+      case 'localfold-af2':
+        return 'AlphaFold2 · model_1_ptm (INT5, single-seq)';
+      case 'rfd4-proteina': {
+        const mode = String(p.mode ?? 'unconditional');
+        const needsEnc =
+          mode === 'partial' ||
+          mode === 'inverse-folding' ||
+          (mode === 'preset' &&
+            Boolean(RFD4_BENCHMARK_OPTIONS.find((o) => o.id === String(p.presetId ?? ''))?.needsEncoder));
+        return needsEnc
+          ? 'RFD4-Proteina · INT8 + 138M encoder'
+          : 'RFD4-Proteina · INT8 (FP16 compute)';
+      }
+      case 'web-protein-mpnn': {
+        const fam =
+          p.family === 'proteinmpnn'
+            ? 'ProteinMPNN'
+            : p.family === 'ca'
+              ? 'Cα-ProteinMPNN'
+              : 'SolubleMPNN';
+        const ckpt = String(p.modelName ?? 'v_48_020');
+        return `${fam} · ${ckpt} (ONNX)`;
+      }
+      case 'rfd4-conditioner':
+        return 'RFD4 condition_spec DSL';
+      case 'designability-scorer':
+        return 'Kabsch SVD · scRMSD / scTM';
+      case 'pdb-input':
+        return 'PDB / mmCIF parser';
+      case 'sequence-input':
+        return 'FASTA parser';
+      default:
+        return manifest?.shortName ?? node.adapterId;
+    }
+  });
+
   function setParam(key: string, value: unknown) {
     onUpdate(node.id, { ...node.params, [key]: value });
   }
@@ -70,9 +109,7 @@
     <div class="title-wrap">
       <span class="stage-dot" style="background: {stageColor}"></span>
       <h3>{node.label || manifest?.displayName || node.adapterId}</h3>
-      {#if manifest && manifest.shortName !== (node.label || manifest.shortName)}
-        <span class="sub-kind">{manifest.shortName}</span>
-      {/if}
+      <span class="sub-kind" title="Underlying model / engine">{activeModelBadge}</span>
     </div>
     {#if onRunUpTo}
       <button

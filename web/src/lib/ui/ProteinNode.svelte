@@ -74,11 +74,11 @@
       case 'rfd4-proteina': {
         const mode = String(p.mode ?? 'unconditional');
         const steps = Number(p.nsteps ?? 60);
-        if (mode === 'conditioned') return `conditioned · ${steps} steps`;
-        if (mode === 'preset') return `${String(p.presetId ?? 'preset')} · ${steps} steps`;
-        if (mode === 'partial') return `partial ${Number(p.partialFraction ?? 0.5)} · ${steps} steps`;
-        if (mode === 'inverse-folding') return `inv-fold · ${steps} steps`;
-        return `${Number(p.length ?? 70)} aa · ${steps} steps`;
+        if (mode === 'conditioned') return `INT8 · conditioned · ${steps} steps`;
+        if (mode === 'preset') return `INT8 · ${String(p.presetId ?? 'preset')} · ${steps} steps`;
+        if (mode === 'partial') return `INT8 · partial ${Number(p.partialFraction ?? 0.5)} · ${steps} steps`;
+        if (mode === 'inverse-folding') return `INT8 · inv-fold · ${steps} steps`;
+        return `INT8 · ${Number(p.length ?? 70)} aa · ${steps} steps`;
       }
       case 'web-protein-mpnn': {
         const fam =
@@ -87,12 +87,13 @@
             : p.family === 'ca'
               ? 'Cα-MPNN'
               : 'SolubleMPNN';
+        const ckpt = String(p.modelName ?? 'v_48_020');
         const n = Number(p.numSequences ?? 2);
         const t = Number(p.temperature ?? 0.1);
-        return `${fam} · ${n} seq${n === 1 ? '' : 's'} · T=${t}`;
+        return `${fam} ${ckpt} · ${n} seq${n === 1 ? '' : 's'} · T=${t}`;
       }
       case 'localfold-af2': {
-        return `${Number(p.recycles ?? 1)} rec · max ${Number(p.maxSequences ?? 2)}`;
+        return `AF2 model_1_ptm (INT5) · ${Number(p.recycles ?? 1)} rec · max ${Number(p.maxSequences ?? 2)}`;
       }
       case 'designability-scorer': {
         return `scRMSD < ${Number(p.scRmsdThreshold ?? 2.0).toFixed(1)} Å · pLDDT ≥ ${Number(p.plddtThreshold ?? 70)}`;
