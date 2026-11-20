@@ -37,6 +37,10 @@
 
   let activeTab = $state<'workbench' | 'campaign'>('workbench');
   let rightPanelTab = $state<'params' | 'peek'>('params');
+  let splitMode = $state<'horizontal' | 'vertical'>('horizontal');
+  let splitPct = $state<number>(54);
+  let draggingSplit = $state(false);
+  let splitWrapEl: HTMLDivElement | null = $state(null);
   let theme = $state<'dark' | 'light'>('dark');
   let webgpuSupported = $state<boolean | null>(null);
   let webgpuDetail = $state<string>('checking…');
@@ -104,6 +108,33 @@
     applyTheme(theme === 'dark' ? 'light' : 'dark');
   }
 
+  function toggleSplitMode() {
+    splitMode = splitMode === 'horizontal' ? 'vertical' : 'horizontal';
+    try {
+      localStorage.setItem('denovo-split-mode', splitMode);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function startSplitDrag(ev: PointerEvent) {
+    if (splitMode !== 'horizontal') return;
+    ev.preventDefault();
+    draggingSplit = true;
+  }
+
+  function handleWindowPointerMove(ev: PointerEvent) {
+    if (!draggingSplit || !splitWrapEl) return;
+    const rect = splitWrapEl.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const rawPct = ((ev.clientX - rect.left) / rect.width) * 100;
+    splitPct = Math.min(72, Math.max(32, Math.round(rawPct * 10) / 10));
+  }
+
+  function handleWindowPointerUp() {
+    if (draggingSplit) draggingSplit = false;
+  }
+
   function handleWindowPointerDown(ev: PointerEvent) {
     const target = ev.target as Node | null;
     if (!target) return;
@@ -131,6 +162,10 @@
         applyTheme('light');
       } else {
         applyTheme('dark');
+      }
+      const savedSplit = localStorage.getItem('denovo-split-mode');
+      if (savedSplit === 'horizontal' || savedSplit === 'vertical') {
+        splitMode = savedSplit;
       }
     } catch {
       applyTheme('dark');
@@ -740,7 +775,12 @@
   });
 </script>
 
-<svelte:window onpointerdown={handleWindowPointerDown} onkeydown={handleWindowKeydown} />
+<svelte:window
+  onpointerdown={handleWindowPointerDown}
+  onpointermove={handleWindowPointerMove}
+  onpointerup={handleWindowPointerUp}
+  onkeydown={handleWindowKeydown}
+/>
 
 <!-- Single Compact Top Header Bar (~48px) -->
 <header class="app-header">
@@ -850,6 +890,21 @@
       {/if}
     </div>
 
+    <!-- Layout Split Toggle (Horizontal Side-by-Side vs Vertical Stacked) -->
+    {#if activeTab === 'workbench'}
+      <button
+        type="button"
+        class="hdr-icon-btn"
+        onclick={toggleSplitMode}
+        title={splitMode === 'horizontal'
+          ? 'Switch to top/bottom stacked layout'
+          : 'Switch to left/right horizontal split'}
+        aria-label="Toggle horizontal or vertical split layout"
+      >
+        {splitMode === 'horizontal' ? '⬓' : '◫'}
+      </button>
+    {/if}
+
     <!-- Theme Toggle -->
     <button
       type="button"
@@ -942,196 +997,222 @@
 </header>
 
 {#if activeTab === 'workbench'}
-  <!-- Full-Width Interactive Node-Graph Canvas -->
-  <section class="flow-panel">
-    <SvelteFlowProvider>
-      <WorkflowCanvas
-        {graph}
-        {selectedNodeId}
-        {selectedEdgeId}
-        {nodeStates}
-        {outputsByNode}
-        {theme}
-        disabled={isRunning}
-        onGraphChange={handleGraphChange}
-        onSelectNode={handleSelectNode}
-        onBlockAdded={handleBlockAdded}
-        onSelectEdge={handleSelectEdge}
-        onPeekPort={handlePeekPort}
-      />
-    </SvelteFlowProvider>
+  <div
+    class="workbench-split"
+    class:horizontal={splitMode === 'horizontal'}
+    class:dragging={draggingSplit}
+    bind:this={splitWrapEl}
+    style={splitMode === 'horizontal' ? `--left-pane: ${splitPct}%;` : undefined}
+  >
+    <!-- Graph Canvas Pane (Left in Horizontal Split, Top in Vertical Split) -->
+    <section class="flow-panel">
+      <SvelteFlowProvider>
+        <WorkflowCanvas
+          {graph}
+          {selectedNodeId}
+          {selectedEdgeId}
+          {nodeStates}
+          {outputsByNode}
+          {theme}
+          disabled={isRunning}
+          fillHeight={splitMode === 'horizontal'}
+          onGraphChange={handleGraphChange}
+          onSelectNode={handleSelectNode}
+          onBlockAdded={handleBlockAdded}
+          onSelectEdge={handleSelectEdge}
+          onPeekPort={handlePeekPort}
+        />
+      </SvelteFlowProvider>
 
-    {#if shareToast}
-      <div class="share-toast">{shareToast}</div>
-    {/if}
+      {#if shareToast}
+        <div class="share-toast">{shareToast}</div>
+      {/if}
 
-    {#if showRecipe}
-      <RecipeDrawer {graph} disabled={isRunning} onApplyGraph={handleGraphChange} />
-    {/if}
-
-    {#if validationErrors.length > 0}
-      <div class="warn-banner">
-        <b>Wire check:</b> {validationErrors.join(' · ')}
-      </div>
-    {/if}
-
-    {#if runError}
-      <div class="error-banner">
-        <b>Pipeline error:</b> {runError}
-      </div>
-    {/if}
-  </section>
-
-  <!-- Side-by-Side Bottom Workspace: Mol* (Left) + Unified Tabbed Inspector (Right) -->
-  <section class="results-grid">
-    <div class="viewer-col">
-      <div class="viewer-bar">
-        <label><input type="checkbox" bind:checked={showDesigned} /> Designed</label>
-        <label><input type="checkbox" bind:checked={showRefold} /> Refold (pLDDT)</label>
-        <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
-        {#if viewerStructureMeta?.trajectoryPdb}
-          <label><input type="checkbox" bind:checked={showTrajectory} /> Trajectory</label>
-          {#if showTrajectory}
-            <input
-              type="range"
-              min="0"
-              max={Math.max(0, (viewerStructureMeta.trajectoryFrameCount ?? 1) - 1)}
-              bind:value={trajFrame}
-              class="slider"
-            />
-            <code class="mono">{trajFrame + 1}/{viewerStructureMeta.trajectoryFrameCount}</code>
-          {/if}
-        {/if}
-
-        {#if hasConditionerNode || hasMpnnNode}
-          <label class="pick-mode" title="Choose what clicking a 3D residue in Mol* modifies">
-            Pick:
-            <select class="pick-select" bind:value={molPickMode}>
-              <option value="auto">Auto</option>
-              <option value="off">Off</option>
-              {#if hasConditionerNode}
-                <option value="hotspots">Hotspots</option>
-                <option value="motif">Motif</option>
-              {/if}
-              {#if hasMpnnNode}
-                <option value="mpnn">Fix MPNN</option>
-              {/if}
-            </select>
-          </label>
-        {/if}
-
-        {#if lastPickedResidue}
-          <span class="picked">Clicked: <code>{lastPickedResidue}</code></span>
-        {/if}
-      </div>
-
-      <MolSuperposeViewer
-        designedPdb={viewerDesignedPdb}
-        refoldPdb={viewerRefoldPdb}
-        trajectoryPdb={viewerStructureMeta?.trajectoryPdb ?? null}
-        frameIndex={showTrajectory ? trajFrame : undefined}
-        {showDesigned}
-        {showRefold}
-        {showTrajectory}
-        {illustrative}
-        {theme}
-        height={460}
-        label={viewerLabel}
-        onResidueClick={handleResidueClick}
-      />
-
-      {#if viewerStructureMeta}
-        <div class="geom-strip">
-          <span>L = <b>{viewerStructureMeta.length} aa</b></span>
-          <span>R<sub>g</sub> = <b>{viewerStructureMeta.geometry.rg.toFixed(1)} Å</b></span>
-          <span>α <b>{viewerStructureMeta.geometry.helixPct.toFixed(0)}%</b> · β <b>{viewerStructureMeta.geometry.sheetPct.toFixed(0)}%</b></span>
-          <span>Cα breaks: <b>{viewerStructureMeta.geometry.chainBreaks}</b></span>
-          <span>Clashes: <b>{viewerStructureMeta.geometry.clashes}</b></span>
-          {#if totalElapsedMs !== null}
-            <span>Total: <b>{(totalElapsedMs / 1000).toFixed(1)}s</b></span>
-          {/if}
+      {#if showRecipe}
+        <div class="drawer-scroll">
+          <RecipeDrawer {graph} disabled={isRunning} onApplyGraph={handleGraphChange} />
         </div>
       {/if}
-    </div>
 
-    <div class="right-panel">
-      <div class="right-tabs" role="tablist" aria-label="Block inspector tabs">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={rightPanelTab === 'params'}
-          class="r-tab"
-          class:active={rightPanelTab === 'params'}
-          onclick={() => (rightPanelTab = 'params')}
-        >
-          Parameters
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={rightPanelTab === 'peek'}
-          class="r-tab"
-          class:active={rightPanelTab === 'peek'}
-          onclick={() => (rightPanelTab = 'peek')}
-        >
-          Peek
-          {#if hasPeekData}
-            <span class="live-dot" title="Outputs or inputs ready to inspect"></span>
+      {#if validationErrors.length > 0}
+        <div class="warn-banner">
+          <b>Wire check:</b> {validationErrors.join(' · ')}
+        </div>
+      {/if}
+
+      {#if runError}
+        <div class="error-banner">
+          <b>Pipeline error:</b> {runError}
+        </div>
+      {/if}
+    </section>
+
+    {#if splitMode === 'horizontal'}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="split-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize graph and output panes"
+        title="Drag to resize · Double-click to reset"
+        onpointerdown={startSplitDrag}
+        ondblclick={() => (splitPct = 54)}
+      >
+        <div class="split-bar"></div>
+      </div>
+    {/if}
+
+    <!-- Output & Inspector Pane (Right in Horizontal Split, Bottom in Vertical Split) -->
+    <section class="results-grid" class:stacked-pane={splitMode === 'horizontal'}>
+      <div class="viewer-col">
+        <div class="viewer-bar">
+          <label><input type="checkbox" bind:checked={showDesigned} /> Designed</label>
+          <label><input type="checkbox" bind:checked={showRefold} /> Refold (pLDDT)</label>
+          <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
+          {#if viewerStructureMeta?.trajectoryPdb}
+            <label><input type="checkbox" bind:checked={showTrajectory} /> Trajectory</label>
+            {#if showTrajectory}
+              <input
+                type="range"
+                min="0"
+                max={Math.max(0, (viewerStructureMeta.trajectoryFrameCount ?? 1) - 1)}
+                bind:value={trajFrame}
+                class="slider"
+              />
+              <code class="mono">{trajFrame + 1}/{viewerStructureMeta.trajectoryFrameCount}</code>
+            {/if}
           {/if}
-        </button>
-        {#if selectedNode}
-          <span class="tab-node-ctx" title={selectedNode.label ?? selectedNode.adapterId}>
-            {selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
-          </span>
+
+          {#if hasConditionerNode || hasMpnnNode}
+            <label class="pick-mode" title="Choose what clicking a 3D residue in Mol* modifies">
+              Pick:
+              <select class="pick-select" bind:value={molPickMode}>
+                <option value="auto">Auto</option>
+                <option value="off">Off</option>
+                {#if hasConditionerNode}
+                  <option value="hotspots">Hotspots</option>
+                  <option value="motif">Motif</option>
+                {/if}
+                {#if hasMpnnNode}
+                  <option value="mpnn">Fix MPNN</option>
+                {/if}
+              </select>
+            </label>
+          {/if}
+
+          {#if lastPickedResidue}
+            <span class="picked">Clicked: <code>{lastPickedResidue}</code></span>
+          {/if}
+        </div>
+
+        <MolSuperposeViewer
+          designedPdb={viewerDesignedPdb}
+          refoldPdb={viewerRefoldPdb}
+          trajectoryPdb={viewerStructureMeta?.trajectoryPdb ?? null}
+          frameIndex={showTrajectory ? trajFrame : undefined}
+          {showDesigned}
+          {showRefold}
+          {showTrajectory}
+          {illustrative}
+          {theme}
+          height={splitMode === 'horizontal' ? 350 : 460}
+          label={viewerLabel}
+          onResidueClick={handleResidueClick}
+        />
+
+        {#if viewerStructureMeta}
+          <div class="geom-strip">
+            <span>L = <b>{viewerStructureMeta.length} aa</b></span>
+            <span>R<sub>g</sub> = <b>{viewerStructureMeta.geometry.rg.toFixed(1)} Å</b></span>
+            <span>α <b>{viewerStructureMeta.geometry.helixPct.toFixed(0)}%</b> · β <b>{viewerStructureMeta.geometry.sheetPct.toFixed(0)}%</b></span>
+            <span>Cα breaks: <b>{viewerStructureMeta.geometry.chainBreaks}</b></span>
+            <span>Clashes: <b>{viewerStructureMeta.geometry.clashes}</b></span>
+            {#if totalElapsedMs !== null}
+              <span>Total: <b>{(totalElapsedMs / 1000).toFixed(1)}s</b></span>
+            {/if}
+          </div>
         {/if}
       </div>
 
-      <div class="right-body">
-        {#if rightPanelTab === 'params'}
+      <div class="right-panel">
+        <div class="right-tabs" role="tablist" aria-label="Block inspector tabs">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={rightPanelTab === 'params'}
+            class="r-tab"
+            class:active={rightPanelTab === 'params'}
+            onclick={() => (rightPanelTab = 'params')}
+          >
+            Parameters
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={rightPanelTab === 'peek'}
+            class="r-tab"
+            class:active={rightPanelTab === 'peek'}
+            onclick={() => (rightPanelTab = 'peek')}
+          >
+            Peek
+            {#if hasPeekData}
+              <span class="live-dot" title="Outputs or inputs ready to inspect"></span>
+            {/if}
+          </button>
           {#if selectedNode}
-            <NodeInspector
+            <span class="tab-node-ctx" title={selectedNode.label ?? selectedNode.adapterId}>
+              {selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
+            </span>
+          {/if}
+        </div>
+
+        <div class="right-body">
+          {#if rightPanelTab === 'params'}
+            {#if selectedNode}
+              <NodeInspector
+                node={selectedNode}
+                embedded
+                disabled={isRunning}
+                onUpdate={updateNodeParams}
+                onRunUpTo={(id) => runWorkflow(false, id)}
+              />
+            {:else}
+              <div class="empty-inspector">
+                Select a block on the canvas or click <b>+ Add Block</b> to configure parameters.
+              </div>
+            {/if}
+          {:else}
+            <ArtifactPeekPanel
               node={selectedNode}
               embedded
-              disabled={isRunning}
-              onUpdate={updateNodeParams}
-              onRunUpTo={(id) => runWorkflow(false, id)}
+              slots={peekSlots}
+              activeSlot={activePeekSlot}
+              {contextStructure}
+              {selectedRowIdx}
+              {selectedFoldIdx}
+              {scRmsdThreshold}
+              {plddtThreshold}
+              {isRunning}
+              hasScorerResult={Boolean(latestScorerHit && latestScorerHit.nodeId !== selectedNode?.id)}
+              onSelectSlot={handleSelectPeekSlot}
+              onSelectRow={(idx) => (selectedRowIdx = idx)}
+              onSelectFold={(idx) => (selectedFoldIdx = idx)}
+              onRunUpToNode={(id) => runWorkflow(false, id)}
+              onJumpToScorer={() => {
+                if (latestScorerHit) {
+                  selectedNodeId = latestScorerHit.nodeId;
+                  selectedPeekSlotId = null;
+                  selectedEdgeId = null;
+                  rightPanelTab = 'peek';
+                }
+              }}
+              onDownloadText={downloadText}
             />
-          {:else}
-            <div class="empty-inspector">
-              Select a block on the canvas or click <b>+ Add Block</b> to configure parameters.
-            </div>
           {/if}
-        {:else}
-          <ArtifactPeekPanel
-            node={selectedNode}
-            embedded
-            slots={peekSlots}
-            activeSlot={activePeekSlot}
-            {contextStructure}
-            {selectedRowIdx}
-            {selectedFoldIdx}
-            {scRmsdThreshold}
-            {plddtThreshold}
-            {isRunning}
-            hasScorerResult={Boolean(latestScorerHit && latestScorerHit.nodeId !== selectedNode?.id)}
-            onSelectSlot={handleSelectPeekSlot}
-            onSelectRow={(idx) => (selectedRowIdx = idx)}
-            onSelectFold={(idx) => (selectedFoldIdx = idx)}
-            onRunUpToNode={(id) => runWorkflow(false, id)}
-            onJumpToScorer={() => {
-              if (latestScorerHit) {
-                selectedNodeId = latestScorerHit.nodeId;
-                selectedPeekSlotId = null;
-                selectedEdgeId = null;
-                rightPanelTab = 'peek';
-              }
-            }}
-            onDownloadText={downloadText}
-          />
-        {/if}
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
+  </div>
 {:else}
   <CampaignViewer {campaign} {theme} onLoadCampaign={(c) => (campaign = c)} />
 {/if}
@@ -1421,11 +1502,60 @@
     cursor: not-allowed;
   }
 
+  .workbench-split {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .workbench-split.horizontal {
+    flex-direction: row;
+    align-items: stretch;
+    gap: 0;
+    height: calc(100dvh - 76px);
+    min-height: 620px;
+  }
+  .workbench-split.dragging {
+    user-select: none;
+    cursor: col-resize;
+  }
+  .workbench-split.horizontal > .flow-panel {
+    width: var(--left-pane, 54%);
+    flex-shrink: 0;
+    min-width: 0;
+    margin-bottom: 0;
+    height: 100%;
+  }
+  .drawer-scroll {
+    max-height: 240px;
+    overflow-y: auto;
+  }
+  .split-handle {
+    width: 12px;
+    flex-shrink: 0;
+    cursor: col-resize;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: none;
+  }
+  .split-bar {
+    width: 3px;
+    height: 44px;
+    border-radius: 999px;
+    background: var(--border-strong);
+    transition: background 0.15s ease, height 0.15s ease;
+  }
+  .split-handle:hover .split-bar,
+  .workbench-split.dragging .split-bar {
+    background: var(--accent);
+    height: 72px;
+  }
+
   .flow-panel {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    margin-bottom: 12px;
+    margin-bottom: 0;
   }
   .share-toast {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1461,6 +1591,47 @@
     grid-template-columns: 1.25fr 1fr;
     gap: 14px;
     align-items: start;
+  }
+  .results-grid.stacked-pane {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+  .results-grid.stacked-pane .right-panel {
+    flex: 1;
+    min-height: 240px;
+  }
+  .results-grid.stacked-pane .right-body {
+    max-height: none;
+    flex: 1;
+    overflow-y: auto;
+  }
+  @media (max-width: 1024px) {
+    .workbench-split.horizontal {
+      flex-direction: column;
+      height: auto;
+      min-height: 0;
+      gap: 12px;
+    }
+    .workbench-split.horizontal > .flow-panel {
+      width: 100%;
+      height: auto;
+    }
+    .split-handle {
+      display: none;
+    }
+    .results-grid.stacked-pane {
+      height: auto;
+      overflow: visible;
+    }
+    .results-grid.stacked-pane .right-body {
+      max-height: 520px;
+    }
   }
   @media (max-width: 960px) {
     .results-grid {

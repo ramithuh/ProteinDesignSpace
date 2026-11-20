@@ -37,6 +37,7 @@
     outputsByNode: Record<string, Record<string, CanonicalArtifact>>;
     theme?: 'dark' | 'light';
     disabled?: boolean;
+    fillHeight?: boolean;
     onGraphChange: (next: WorkflowGraph) => void;
     onSelectNode: (nodeId: string) => void;
     onBlockAdded?: (nodeId: string) => void;
@@ -52,6 +53,7 @@
     outputsByNode,
     theme = 'dark',
     disabled = false,
+    fillHeight = false,
     onGraphChange,
     onSelectNode,
     onBlockAdded = undefined,
@@ -365,6 +367,7 @@
 
 <div
   class="flow-wrap"
+  class:fill-height={fillHeight}
   bind:this={canvasEl}
   role="application"
   aria-label="Protein design workflow canvas"
@@ -495,15 +498,28 @@
     border-radius: 8px;
     overflow: visible;
   }
+  .flow-wrap.fill-height {
+    height: 100%;
+    min-height: 440px;
+    flex: 1;
+  }
   .flow-inner {
     width: 100%;
     height: 100%;
     border-radius: 7px;
     overflow: hidden;
   }
+  @media (max-width: 1024px) {
+    .flow-wrap.fill-height {
+      height: 340px;
+      min-height: 300px;
+    }
+  }
   @media (max-width: 780px) {
-    .flow-wrap {
+    .flow-wrap,
+    .flow-wrap.fill-height {
       height: 290px;
+      min-height: 260px;
     }
   }
   .canvas-left-tools {
