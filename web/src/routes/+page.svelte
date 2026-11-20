@@ -772,7 +772,7 @@
     <h1 class="brand-logo"><span class="accent">denovo</span>.run</h1>
 
     <label class="example-picker" class:disabled={isRunning}>
-      <span class="example-lbl">Example</span>
+      <span class="example-lbl">Example Workflow</span>
       <select
         class="preset-select"
         aria-label="Select an example workflow"
