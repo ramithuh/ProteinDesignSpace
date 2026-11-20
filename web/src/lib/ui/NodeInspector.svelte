@@ -352,8 +352,8 @@
 
 <style>
   .inspector {
-    background: #13151b;
-    border: 1px solid #262932;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 14px 16px;
     display: flex;
@@ -370,12 +370,12 @@
     margin: 0 0 4px;
     font-size: 14px;
     font-weight: 600;
-    color: #f1f5f9;
+    color: var(--text-primary);
   }
   .desc {
     margin: 0;
     font-size: 12px;
-    color: #94a3b8;
+    color: var(--text-muted);
     line-height: 1.45;
   }
   .meta {
@@ -386,9 +386,9 @@
   .pill {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10px;
-    color: #93c5fd;
-    background: #1e293b;
-    border: 1px solid #334155;
+    color: var(--accent-soft);
+    background: var(--bg-pill);
+    border: 1px solid var(--border-strong);
     padding: 2px 7px;
     border-radius: 999px;
   }
@@ -403,7 +403,7 @@
     flex-direction: column;
     gap: 4px;
     font-size: 11px;
-    color: #94a3b8;
+    color: var(--text-muted);
   }
   label.wide {
     min-width: 240px;
@@ -416,16 +416,16 @@
   details summary {
     cursor: pointer;
     font-size: 11px;
-    color: #93c5fd;
+    color: var(--accent-soft);
     margin-bottom: 6px;
   }
   input[type='number'],
   input[type='text'],
   select,
   textarea {
-    background: #0d0e11;
-    color: #f1f5f9;
-    border: 1px solid #334155;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border-strong);
     border-radius: 5px;
     padding: 6px 8px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -441,8 +441,8 @@
   }
   .license {
     font-size: 10px;
-    color: #64748b;
-    border-top: 1px solid #1e222b;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border-subtle);
     padding-top: 8px;
   }
 </style>

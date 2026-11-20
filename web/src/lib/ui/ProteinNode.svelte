@@ -88,7 +88,7 @@
             type="target"
             position={Position.Left}
             id={portName}
-            style="background: {color}; border: 2px solid #0b0c10; width: 11px; height: 11px; left: -6px;"
+            style="background: {color}; border: 2px solid var(--bg-surface); width: 11px; height: 11px; left: -6px;"
           />
           <span class="port-label" title={`${portName}: ${spec.type}${spec.required === false ? ' (optional)' : ''}`}>
             {portName}{#if spec.required === false}<span class="opt">?</span>{/if}
@@ -106,7 +106,7 @@
             type="source"
             position={Position.Right}
             id={portName}
-            style="background: {color}; border: 2px solid #0b0c10; width: 11px; height: 11px; right: -6px;"
+            style="background: {color}; border: 2px solid var(--bg-surface); width: 11px; height: 11px; right: -6px;"
           />
         </div>
       {/each}
@@ -139,17 +139,17 @@
   .p-node {
     position: relative;
     width: 224px;
-    background: #13161e;
-    border: 1px solid #2a2f3d;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
-    color: #e2e8f0;
+    color: var(--text-body);
     font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--node-shadow);
     overflow: visible;
   }
   .p-node.selected {
-    border-color: #60a5fa;
-    box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.35), 0 8px 22px rgba(0, 0, 0, 0.5);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3), var(--node-shadow);
   }
   .p-node.running {
     border-color: #f59e0b;
@@ -181,12 +181,12 @@
   }
   .rt {
     margin-left: auto;
-    color: #64748b;
+    color: var(--text-dim);
   }
   .del-btn {
-    background: #2a1820;
-    color: #fca5a5;
-    border: 1px solid #7f1d1d;
+    background: var(--err-bg);
+    color: var(--err-text);
+    border: 1px solid var(--err-border);
     border-radius: 3px;
     width: 16px;
     height: 16px;
@@ -196,14 +196,14 @@
     cursor: pointer;
   }
   .del-btn:hover {
-    background: #7f1d1d;
+    background: #dc2626;
     color: #fff;
   }
   .title {
     padding: 0 10px 6px;
     font-size: 13px;
     font-weight: 600;
-    color: #f8fafc;
+    color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -213,8 +213,8 @@
     justify-content: space-between;
     gap: 8px;
     padding: 4px 0 6px;
-    border-top: 1px solid #1e222e;
-    border-bottom: 1px solid #1e222e;
+    border-top: 1px solid var(--border-subtle);
+    border-bottom: 1px solid var(--border-subtle);
     min-height: 26px;
   }
   .col {
@@ -238,10 +238,10 @@
   .port-label {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10px;
-    color: #cbd5e1;
+    color: var(--text-secondary);
   }
   .opt {
-    color: #64748b;
+    color: var(--text-dim);
     margin-left: 1px;
   }
   .footer {
@@ -255,20 +255,20 @@
     text-overflow: ellipsis;
   }
   .status-line.muted {
-    color: #64748b;
+    color: var(--text-dim);
   }
   .status-line.active {
-    color: #fbbf24;
+    color: #d97706;
   }
   .status-line.ok-text {
-    color: #4ade80;
+    color: var(--ok-text);
   }
   .status-line.err-text {
-    color: #f87171;
+    color: var(--err-strong);
   }
   .cache-tag {
-    background: #1e293b;
-    color: #93c5fd;
+    background: var(--bg-pill);
+    color: var(--accent-soft);
     padding: 1px 4px;
     border-radius: 3px;
     font-size: 9px;
@@ -276,7 +276,7 @@
   }
   .pbar {
     height: 3px;
-    background: #1e222e;
+    background: var(--border-subtle);
     border-radius: 2px;
     overflow: hidden;
     margin-top: 4px;

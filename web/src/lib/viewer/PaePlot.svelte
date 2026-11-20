@@ -70,14 +70,14 @@
     display: flex;
     justify-content: space-between;
     font-size: 11px;
-    color: #94a3b8;
+    color: var(--text-muted);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
   .hover {
-    color: #cbd5e1;
+    color: var(--text-secondary);
   }
   .pae-canvas {
-    border: 1px solid #262932;
+    border: 1px solid var(--border);
     border-radius: 4px;
     image-rendering: pixelated;
     cursor: crosshair;
@@ -86,10 +86,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #12141a;
-    border: 1px solid #262932;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border);
     border-radius: 4px;
-    color: #525866;
+    color: var(--text-dim);
     font-size: 11px;
   }
 </style>

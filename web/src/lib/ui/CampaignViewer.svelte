@@ -5,10 +5,11 @@
 
   interface Props {
     campaign: CampaignState;
+    theme?: 'dark' | 'light';
     onLoadCampaign: (c: CampaignState) => void;
   }
 
-  let { campaign, onLoadCampaign }: Props = $props();
+  let { campaign, theme = 'dark', onLoadCampaign }: Props = $props();
   let selectedIdx = $state(0);
 
   let activeRound = $derived(campaign.rounds[selectedIdx] ?? campaign.rounds[0] ?? null);
@@ -113,6 +114,7 @@
         <MolSuperposeViewer
           designedPdb={activeRound.designedPdb ?? null}
           refoldPdb={activeRound.alignedFoldPdb ?? null}
+          {theme}
           height={360}
           label={`Round ${activeRound.round} best candidate`}
         />
@@ -132,24 +134,24 @@
     justify-content: space-between;
     align-items: flex-start;
     gap: 16px;
-    background: #13151b;
-    border: 1px solid #262932;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 16px;
   }
   h2 {
     margin: 0 0 6px;
     font-size: 16px;
-    color: #f8fafc;
+    color: var(--text-primary);
   }
   .goal {
     margin: 0 0 8px;
     font-size: 13px;
-    color: #94a3b8;
+    color: var(--text-muted);
   }
   .assay {
     font-size: 12px;
-    color: #cbd5e1;
+    color: var(--text-secondary);
   }
   .actions {
     display: flex;
@@ -157,9 +159,9 @@
     flex-shrink: 0;
   }
   .btn {
-    background: #1e293b;
-    color: #e2e8f0;
-    border: 1px solid #334155;
+    background: var(--bg-surface-2);
+    color: var(--text-body);
+    border: 1px solid var(--border-strong);
     padding: 6px 12px;
     border-radius: 6px;
     font-size: 12px;
@@ -167,7 +169,7 @@
     font-family: inherit;
   }
   .btn:hover {
-    background: #283548;
+    background: var(--bg-surface-hover);
   }
   .rounds {
     display: grid;
@@ -176,19 +178,19 @@
   }
   .round-card {
     text-align: left;
-    background: #13151b;
-    border: 1px solid #262932;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 12px;
-    color: #e2e8f0;
+    color: var(--text-body);
     cursor: pointer;
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
   .round-card.selected {
-    border-color: #3b82f6;
-    background: #171d29;
+    border-color: var(--accent);
+    background: var(--bg-surface-selected);
   }
   .r-top {
     display: flex;
@@ -197,14 +199,14 @@
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
   .r-num {
-    color: #93c5fd;
+    color: var(--accent-soft);
     font-weight: 600;
   }
   .r-hit {
-    color: #f59e0b;
+    color: #d97706;
   }
   .r-hit.good {
-    color: #4ade80;
+    color: var(--ok-text);
   }
   .r-label {
     font-size: 12px;
@@ -214,18 +216,18 @@
     display: flex;
     gap: 12px;
     font-size: 11px;
-    color: #94a3b8;
+    color: var(--text-muted);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
   .bar {
     height: 4px;
-    background: #1e222b;
+    background: var(--border-subtle);
     border-radius: 2px;
     overflow: hidden;
   }
   .bar > div {
     height: 100%;
-    background: #3b82f6;
+    background: var(--accent);
   }
   .detail-grid {
     display: grid;
@@ -238,14 +240,15 @@
     }
   }
   .detail-panel {
-    background: #13151b;
-    border: 1px solid #262932;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 14px;
   }
   h3 {
     margin: 0 0 10px;
     font-size: 14px;
+    color: var(--text-primary);
   }
   dl {
     margin: 0 0 12px;
@@ -255,26 +258,26 @@
     font-size: 12px;
   }
   dt {
-    color: #64748b;
+    color: var(--text-dim);
     font-weight: 500;
   }
   dd {
     margin: 0;
-    color: #e2e8f0;
+    color: var(--text-body);
   }
   .notes {
-    color: #cbd5e1;
+    color: var(--text-secondary);
     line-height: 1.45;
   }
   .seq {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
     word-break: break-all;
-    color: #93c5fd;
+    color: var(--accent-soft);
   }
   code {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
-    color: #93c5fd;
+    color: var(--accent-soft);
   }
 </style>

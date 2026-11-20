@@ -24,6 +24,7 @@
   const scheduler = new ExecutionScheduler();
 
   let activeTab = $state<'workbench' | 'campaign'>('workbench');
+  let theme = $state<'dark' | 'light'>('dark');
   let webgpuSupported = $state<boolean | null>(null);
   let webgpuDetail = $state<string>('checking…');
   let webMcpReady = $state(false);
@@ -53,7 +54,36 @@
   // Campaign Inspector state (BindClaw-style multi-round log)
   let campaign = $state<CampaignState>(structuredClone(SAMPLE_CAMPAIGN));
 
+  function applyTheme(next: 'dark' | 'light') {
+    theme = next;
+    if (typeof document !== 'undefined') {
+      document.documentElement.dataset.theme = next;
+    }
+    try {
+      localStorage.setItem('denovo-theme', next);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function toggleTheme() {
+    applyTheme(theme === 'dark' ? 'light' : 'dark');
+  }
+
   onMount(async () => {
+    try {
+      const saved = localStorage.getItem('denovo-theme');
+      if (saved === 'light' || saved === 'dark') {
+        applyTheme(saved);
+      } else if (window.matchMedia?.('(prefers-color-scheme: light)').matches) {
+        applyTheme('light');
+      } else {
+        applyTheme('dark');
+      }
+    } catch {
+      applyTheme('dark');
+    }
+
     if (!window.isSecureContext) {
       webgpuSupported = false;
       webgpuDetail = 'needs HTTPS/localhost';
@@ -300,6 +330,9 @@
     <button class="chip" onclick={handleClearCache} title="Clear OPFS & CacheStorage weight caches">
       Cache: {cacheUsedMB.toFixed(0)} MB · clear
     </button>
+    <button class="chip theme-btn" onclick={toggleTheme} title="Switch light / dark theme">
+      {theme === 'dark' ? '☀ Light' : '☾ Dark'}
+    </button>
   </div>
 </header>
 
@@ -360,6 +393,7 @@
       {selectedNodeId}
       {nodeStates}
       {outputsByNode}
+      {theme}
       disabled={isRunning}
       onGraphChange={handleGraphChange}
       onSelectNode={(id) => (selectedNodeId = id)}
@@ -416,6 +450,7 @@
         {showRefold}
         {showTrajectory}
         {illustrative}
+        {theme}
         height={440}
         label={activeRow
           ? `${selectedNode?.label ?? 'Scorer'} · ${activeRow.sequenceId} · scRMSD ${activeRow.scRmsd.toFixed(2)} Å · pLDDT ${activeRow.meanPlddt.toFixed(1)}`
@@ -555,7 +590,7 @@
     </div>
   </section>
 {:else}
-  <CampaignViewer {campaign} onLoadCampaign={(c) => (campaign = c)} />
+  <CampaignViewer {campaign} {theme} onLoadCampaign={(c) => (campaign = c)} />
 {/if}
 
 <style>
@@ -578,14 +613,14 @@
     font-size: 24px;
     font-weight: 700;
     letter-spacing: -0.5px;
-    color: #f8fafc;
+    color: var(--text-primary);
   }
   .accent {
-    color: #60a5fa;
+    color: var(--accent-bright);
   }
   .tagline {
     font-size: 12px;
-    color: #64748b;
+    color: var(--text-dim);
   }
   .sys-pills {
     display: flex;
@@ -596,9 +631,9 @@
   .chip {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
-    color: #94a3b8;
-    background: #13151b;
-    border: 1px solid #262932;
+    color: var(--text-muted);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     padding: 4px 9px;
     border-radius: 999px;
   }
@@ -606,41 +641,48 @@
     cursor: pointer;
   }
   button.chip:hover {
-    border-color: #475569;
-    color: #e2e8f0;
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+  }
+  .chip.theme-btn {
+    color: var(--text-body);
+    font-weight: 500;
   }
   .chip.ok {
-    color: #4ade80;
-    border-color: #166534;
+    color: var(--ok-text);
+    border-color: var(--ok-border);
+    background: var(--ok-bg);
   }
   .chip.bad {
-    color: #f87171;
-    border-color: #7f1d1d;
+    color: var(--err-strong);
+    border-color: var(--err-border);
+    background: var(--err-bg);
   }
   .chip.gpu {
-    color: #93c5fd;
-    border-color: #1d4ed8;
+    color: var(--accent-soft);
+    border-color: var(--accent);
+    background: var(--bg-pill);
   }
 
   .tabs {
     display: flex;
     gap: 6px;
-    border-bottom: 1px solid #1e222b;
+    border-bottom: 1px solid var(--border);
     margin-bottom: 14px;
   }
   .tabs button {
     background: transparent;
     border: none;
     border-bottom: 2px solid transparent;
-    color: #94a3b8;
+    color: var(--text-muted);
     padding: 8px 14px;
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
   }
   .tabs button.active {
-    color: #f8fafc;
-    border-bottom-color: #3b82f6;
+    color: var(--text-primary);
+    border-bottom-color: var(--accent);
   }
 
   .presets {
@@ -652,20 +694,20 @@
   }
   .preset-card {
     text-align: left;
-    background: #13151b;
-    border: 1px solid #262932;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 7px;
     padding: 8px 11px;
     cursor: pointer;
-    color: #e2e8f0;
+    color: var(--text-body);
     flex-shrink: 0;
   }
   .preset-card:hover:not(:disabled) {
-    border-color: #475569;
+    border-color: var(--border-strong);
   }
   .preset-card.selected {
-    border-color: #3b82f6;
-    background: #151c28;
+    border-color: var(--accent);
+    background: var(--bg-surface-selected);
   }
   .preset-card:disabled {
     opacity: 0.6;
@@ -683,8 +725,8 @@
   .p-badge {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10px;
-    color: #93c5fd;
-    background: #1e293b;
+    color: var(--accent-soft);
+    background: var(--bg-pill);
     padding: 2px 6px;
     border-radius: 4px;
     white-space: nowrap;
@@ -707,12 +749,12 @@
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.8px;
-    color: #94a3b8;
+    color: var(--text-muted);
   }
   .flow-sub {
     margin-left: 10px;
     font-size: 11px;
-    color: #64748b;
+    color: var(--text-dim);
   }
   .flow-actions {
     display: flex;
@@ -737,31 +779,31 @@
     cursor: not-allowed;
   }
   .btn-secondary {
-    background: #13151b;
-    color: #cbd5e1;
-    border: 1px solid #334155;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-strong);
     padding: 7px 12px;
     border-radius: 6px;
     font-size: 12px;
     cursor: pointer;
   }
   .btn-secondary:hover:not(:disabled) {
-    background: #1e293b;
+    background: var(--bg-surface-hover);
   }
 
   .warn-banner {
-    background: #291f0e;
-    border: 1px solid #b45309;
-    color: #fde68a;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-text);
     padding: 8px 12px;
     border-radius: 6px;
     font-size: 12px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
   .error-banner {
-    background: #2a1215;
-    border: 1px solid #991b1b;
-    color: #fecaca;
+    background: var(--err-bg);
+    border: 1px solid var(--err-border);
+    color: var(--err-text);
     padding: 10px 14px;
     border-radius: 6px;
     font-size: 12px;
@@ -787,7 +829,7 @@
     flex-wrap: wrap;
     margin-bottom: 8px;
     font-size: 12px;
-    color: #94a3b8;
+    color: var(--text-muted);
   }
   .viewer-bar label {
     display: inline-flex;
@@ -798,12 +840,12 @@
   .slider {
     flex: 1;
     min-width: 120px;
-    accent-color: #3b82f6;
+    accent-color: var(--accent);
   }
   .picked {
     margin-left: auto;
     font-size: 11px;
-    color: #93c5fd;
+    color: var(--accent-soft);
   }
   .geom-strip {
     display: flex;
@@ -811,20 +853,20 @@
     gap: 12px 18px;
     margin-top: 8px;
     padding: 8px 12px;
-    background: #13151b;
-    border: 1px solid #262932;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 6px;
     font-size: 11px;
-    color: #94a3b8;
+    color: var(--text-muted);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
   .geom-strip b {
-    color: #e2e8f0;
+    color: var(--text-primary);
   }
 
   .panel {
-    background: #13151b;
-    border: 1px solid #262932;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 14px;
     display: flex;
@@ -841,12 +883,12 @@
     font-size: 11px;
     padding: 2px 8px;
     border-radius: 999px;
-    background: #2a1c12;
-    color: #fbbf24;
+    background: var(--warn-bg);
+    color: var(--warn-text);
   }
   .pass-pill.good {
-    background: #0f291a;
-    color: #4ade80;
+    background: var(--ok-bg);
+    color: var(--ok-text);
   }
 
   table.scores {
@@ -859,42 +901,42 @@
     text-align: left;
     font-size: 10px;
     text-transform: uppercase;
-    color: #64748b;
+    color: var(--text-dim);
     padding: 6px 8px;
-    border-bottom: 1px solid #262932;
+    border-bottom: 1px solid var(--border);
   }
   table.scores td {
     padding: 7px 8px;
-    border-bottom: 1px solid #1e222b;
+    border-bottom: 1px solid var(--border-subtle);
   }
   table.scores tr {
     cursor: pointer;
   }
   table.scores tr:hover {
-    background: #191d26;
+    background: var(--bg-surface-hover);
   }
   table.scores tr.selected {
-    background: #172033;
+    background: var(--bg-surface-selected);
   }
   .good-val {
-    color: #4ade80;
+    color: var(--ok-text);
     font-weight: 600;
   }
   .verdict {
     font-size: 10px;
     padding: 2px 6px;
     border-radius: 4px;
-    background: #3f181c;
-    color: #fca5a5;
+    background: var(--err-bg);
+    color: var(--err-text);
   }
   .verdict.pass {
-    background: #123320;
-    color: #4ade80;
+    background: var(--ok-bg);
+    color: var(--ok-text);
   }
 
   .seq-box {
-    background: #0d0e11;
-    border: 1px solid #262932;
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 10px;
   }
@@ -903,7 +945,7 @@
     justify-content: space-between;
     align-items: center;
     font-size: 11px;
-    color: #94a3b8;
+    color: var(--text-muted);
     margin-bottom: 6px;
   }
   .dl-links {
@@ -913,7 +955,7 @@
   .link-btn {
     background: none;
     border: none;
-    color: #60a5fa;
+    color: var(--accent-bright);
     font-size: 11px;
     cursor: pointer;
     padding: 0;
@@ -925,7 +967,7 @@
   .seq-text {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
-    color: #cbd5e1;
+    color: var(--text-secondary);
     word-break: break-all;
     line-height: 1.5;
   }
@@ -940,7 +982,7 @@
     flex: 1;
     min-width: 160px;
     font-size: 12px;
-    color: #cbd5e1;
+    color: var(--text-secondary);
     display: flex;
     flex-direction: column;
     gap: 5px;
@@ -948,14 +990,14 @@
   .tip {
     margin: 8px 0 0;
     font-size: 11px;
-    color: #64748b;
+    color: var(--text-dim);
     line-height: 1.45;
   }
   .placeholder-box {
     padding: 20px 10px;
     text-align: center;
     font-size: 12px;
-    color: #64748b;
+    color: var(--text-dim);
     line-height: 1.6;
   }
   code,

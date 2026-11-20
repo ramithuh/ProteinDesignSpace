@@ -11,6 +11,7 @@
     showRefold?: boolean;
     showTrajectory?: boolean;
     illustrative?: boolean;
+    theme?: 'dark' | 'light';
     height?: number;
     label?: string;
     onResidueClick?: (info: { chain: string; seqId: number; compId: string }) => void;
@@ -25,6 +26,7 @@
     showRefold = true,
     showTrajectory = false,
     illustrative = false,
+    theme = 'dark',
     height = 420,
     label = undefined,
     onResidueClick = undefined,
@@ -57,7 +59,7 @@
     if (!ok) throw new Error('Failed to initialize Mol* WebGL2 canvas');
 
     ctx.canvas3d?.setProps({
-      renderer: { backgroundColor: 0x0d0e11 as unknown as never },
+      renderer: { backgroundColor: (theme === 'light' ? 0xf8fafc : 0x0d0e11) as unknown as never },
       cameraFog: { name: 'off', params: {} },
       cameraClipping: { far: false, radius: 0, minNear: 0.1 },
     });
@@ -217,6 +219,15 @@
     if (plugin) applyIllustrative(on);
   });
 
+  $effect(() => {
+    const bg = theme === 'light' ? 0xf8fafc : 0x0d0e11;
+    if (plugin?.canvas3d) {
+      plugin.canvas3d.setProps({
+        renderer: { backgroundColor: bg as unknown as never },
+      });
+    }
+  });
+
   onDestroy(() => {
     loadSeq++;
     try {
@@ -252,8 +263,8 @@
 <style>
   .mol-card {
     position: relative;
-    background: #0d0e11;
-    border: 1px solid #262932;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
   }
@@ -270,9 +281,9 @@
     z-index: 10;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
-    color: #cbd5e1;
-    background: rgba(13, 14, 17, 0.85);
-    border: 1px solid #262932;
+    color: var(--text-secondary);
+    background: var(--overlay-bg);
+    border: 1px solid var(--border);
     padding: 3px 8px;
     border-radius: 4px;
     pointer-events: none;
@@ -286,9 +297,9 @@
     align-items: center;
     gap: 8px;
     font-size: 11px;
-    color: #cbd5e1;
-    background: rgba(13, 14, 17, 0.85);
-    border: 1px solid #262932;
+    color: var(--text-secondary);
+    background: var(--overlay-bg);
+    border: 1px solid var(--border);
     padding: 4px 10px;
     border-radius: 4px;
     pointer-events: none;
@@ -312,7 +323,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #525866;
+    color: var(--text-dim);
     font-size: 13px;
     pointer-events: none;
   }
@@ -323,8 +334,8 @@
     align-items: center;
     justify-content: center;
     padding: 16px;
-    background: rgba(20, 10, 12, 0.9);
-    color: #fca5a5;
+    background: var(--err-bg);
+    color: var(--err-text);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 12px;
   }

@@ -33,6 +33,7 @@
     selectedNodeId: string;
     nodeStates: Record<string, NodeProgressEvent>;
     outputsByNode: Record<string, Record<string, CanonicalArtifact>>;
+    theme?: 'dark' | 'light';
     disabled?: boolean;
     onGraphChange: (next: WorkflowGraph) => void;
     onSelectNode: (nodeId: string) => void;
@@ -43,6 +44,7 @@
     selectedNodeId,
     nodeStates,
     outputsByNode,
+    theme = 'dark',
     disabled = false,
     onGraphChange,
     onSelectNode,
@@ -310,7 +312,7 @@
       bind:nodes={flowNodes}
       bind:edges={flowEdges}
       {nodeTypes}
-      forceColorMode="dark"
+      forceColorMode={theme}
       fitView
       fitViewOptions={{ padding: 0.18 }}
       {isValidConnection}
@@ -350,8 +352,8 @@
     }
   }
   .palette {
-    background: #111319;
-    border: 1px solid #262932;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 10px;
     overflow-y: auto;
@@ -363,14 +365,14 @@
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10px;
     font-weight: 700;
-    color: #cbd5e1;
+    color: var(--text-secondary);
     display: flex;
     justify-content: space-between;
     align-items: center;
   }
   .pal-hint {
     font-weight: 400;
-    color: #64748b;
+    color: var(--text-dim);
   }
   .pal-group {
     display: flex;
@@ -381,7 +383,7 @@
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    color: #64748b;
+    color: var(--text-dim);
     margin-bottom: 2px;
   }
   .pal-item {
@@ -390,17 +392,17 @@
     gap: 7px;
     width: 100%;
     text-align: left;
-    background: #171a23;
-    border: 1px solid #262b38;
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border);
     border-radius: 5px;
     padding: 6px 8px;
-    color: #e2e8f0;
+    color: var(--text-body);
     font-size: 11px;
     cursor: grab;
   }
   .pal-item:hover:not(:disabled) {
     border-color: var(--sc);
-    background: #1c202c;
+    background: var(--bg-surface-hover);
   }
   .pal-item:disabled {
     opacity: 0.5;
@@ -422,12 +424,12 @@
   .wt {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 9px;
-    color: #64748b;
+    color: var(--text-dim);
   }
   .legend-box {
     margin-top: auto;
     padding-top: 8px;
-    border-top: 1px solid #1e222e;
+    border-top: 1px solid var(--border-subtle);
     display: flex;
     flex-direction: column;
     gap: 3px;
@@ -437,7 +439,7 @@
     align-items: center;
     gap: 6px;
     font-size: 10px;
-    color: #94a3b8;
+    color: var(--text-muted);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
   .l-dot {
@@ -448,8 +450,8 @@
 
   .flow-wrap {
     position: relative;
-    background: #0d0e13;
-    border: 1px solid #262932;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
   }
@@ -462,9 +464,9 @@
     gap: 6px;
   }
   .c-btn {
-    background: rgba(19, 22, 30, 0.9);
-    color: #cbd5e1;
-    border: 1px solid #334155;
+    background: var(--overlay-bg);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-strong);
     border-radius: 5px;
     padding: 4px 9px;
     font-size: 11px;
@@ -472,11 +474,11 @@
     font-family: inherit;
   }
   .c-btn:hover:not(:disabled) {
-    background: #1e293b;
+    background: var(--bg-surface-hover);
   }
   .c-btn.danger:hover:not(:disabled) {
-    border-color: #991b1b;
-    color: #fca5a5;
+    border-color: var(--err-border);
+    color: var(--err-strong);
   }
   .toast {
     position: absolute;
@@ -484,9 +486,9 @@
     left: 50%;
     transform: translateX(-50%);
     z-index: 30;
-    background: #3f181c;
-    border: 1px solid #ef4444;
-    color: #fecaca;
+    background: var(--err-bg);
+    border: 1px solid var(--err-border);
+    color: var(--err-text);
     padding: 6px 12px;
     border-radius: 6px;
     font-size: 12px;
