@@ -71,7 +71,7 @@ export async function fetchCachedBytes(
       // Keep reported total >= loaded so callers computing loaded / total stay <= 1 (e.g. gzipped bodies)
       onProgress?.({ loaded, total: Math.max(total, loaded), fromCache: false });
     }
-    if (!contentEncoding && total > 0 && loaded !== total) {
+    if (!contentEncoding && total > 0 && loaded < total) {
       chunks.length = 0;
       throw new Error(`Truncated download for ${url}: received ${loaded} of ${total} bytes`);
     }
@@ -85,7 +85,7 @@ export async function fetchCachedBytes(
     chunks.length = 0;
   } else {
     bytes = new Uint8Array(await resp.arrayBuffer());
-    if (!contentEncoding && total > 0 && bytes.byteLength !== total) {
+    if (!contentEncoding && total > 0 && bytes.byteLength < total) {
       throw new Error(
         `Truncated download for ${url}: received ${bytes.byteLength} of ${total} bytes`,
       );
