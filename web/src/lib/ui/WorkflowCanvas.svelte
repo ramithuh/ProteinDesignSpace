@@ -3,6 +3,7 @@
   import {
     Background,
     Controls,
+    MarkerType,
     SvelteFlow,
     useSvelteFlow,
     type Connection,
@@ -246,6 +247,12 @@
         targetHandle: e.toPort,
         selected: isSel,
         animated: active,
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          width: 16,
+          height: 16,
+          color: col,
+        },
         style: isSel
           ? `stroke: ${col}; stroke-width: 3.5px; filter: drop-shadow(0 0 4px ${col}); cursor: pointer;`
           : `stroke: ${col}; stroke-width: 2px; cursor: pointer;`,
