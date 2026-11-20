@@ -771,21 +771,26 @@
   <div class="hdr-left">
     <h1 class="brand-logo"><span class="accent">denovo</span>.run</h1>
 
-    <select
-      class="preset-select"
-      aria-label="Workflow preset"
-      disabled={isRunning}
-      value={selectedPresetId}
-      title={activePreset?.summary ?? graph.name}
-      onchange={(e) => selectPreset(e.currentTarget.value)}
-    >
-      {#if !activePreset}
-        <option value={selectedPresetId}>Custom: {graph.name}</option>
-      {/if}
-      {#each WORKFLOW_PRESETS as p (p.id)}
-        <option value={p.id} title={p.summary}>{p.name} — {p.badge}</option>
-      {/each}
-    </select>
+    <label class="example-picker" class:disabled={isRunning}>
+      <span class="example-lbl">Example</span>
+      <select
+        class="preset-select"
+        aria-label="Select an example workflow"
+        disabled={isRunning}
+        value={selectedPresetId}
+        title={activePreset?.summary ?? graph.name}
+        onchange={(e) => selectPreset(e.currentTarget.value)}
+      >
+        {#if !activePreset}
+          <option value={selectedPresetId}>Custom: {graph.name}</option>
+        {/if}
+        <optgroup label="Select an example workflow">
+          {#each WORKFLOW_PRESETS as p (p.id)}
+            <option value={p.id} title={p.summary}>{p.name} — {p.badge}</option>
+          {/each}
+        </optgroup>
+      </select>
+    </label>
   </div>
 
   <div class="hdr-right">
@@ -1205,22 +1210,47 @@
     color: var(--accent-bright);
   }
 
+  .example-picker {
+    display: inline-flex;
+    align-items: center;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    overflow: hidden;
+    max-width: 100%;
+  }
+  .example-picker:hover:not(.disabled),
+  .example-picker:focus-within:not(.disabled) {
+    border-color: var(--accent);
+  }
+  .example-picker.disabled {
+    opacity: 0.6;
+  }
+  .example-lbl {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-dim);
+    background: var(--bg-surface-2);
+    border-right: 1px solid var(--border);
+    padding: 6px 9px;
+    white-space: nowrap;
+    user-select: none;
+  }
   .preset-select {
     background: var(--bg-surface);
     color: var(--text-body);
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
+    border: none;
+    outline: none;
     padding: 5px 10px;
     font-size: 12px;
     font-family: inherit;
     max-width: 340px;
     cursor: pointer;
   }
-  .preset-select:hover:not(:disabled) {
-    border-color: var(--accent);
-  }
   .preset-select:disabled {
-    opacity: 0.6;
     cursor: not-allowed;
   }
 
