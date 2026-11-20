@@ -3,7 +3,7 @@
 </script>
 
 <svelte:head>
-  <title>ProteinDesignSpace</title>
+  <title>denovo.run — Browser-Native WebGPU Protein Design</title>
 </svelte:head>
 
 <main>
@@ -13,13 +13,13 @@
 <style>
   :global(body) {
     margin: 0;
-    background: #0f0f10;
-    color: #e6e6e6;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0b0c10;
+    color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
   }
   main {
-    max-width: 1200px;
+    max-width: 1280px;
     margin: 0 auto;
-    padding: 24px 24px 48px;
+    padding: 20px 24px 64px;
   }
 </style>
