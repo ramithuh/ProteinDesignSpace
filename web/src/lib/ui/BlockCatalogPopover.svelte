@@ -113,11 +113,15 @@
     return groups;
   });
 
-  // Clamp active index whenever filtered list changes
+  // Reset active index to the top match whenever the search query changes
   $effect(() => {
-    if (filteredItems.length === 0) {
-      activeIdx = 0;
-    } else if (activeIdx >= filteredItems.length) {
+    void query;
+    activeIdx = 0;
+  });
+
+  // Clamp active index if filtered list shrinks
+  $effect(() => {
+    if (filteredItems.length === 0 || activeIdx >= filteredItems.length) {
       activeIdx = 0;
     }
   });
@@ -245,9 +249,10 @@
     position: absolute;
     top: 44px;
     left: 10px;
-    z-index: 40;
+    z-index: 45;
     width: 340px;
     max-width: calc(100% - 20px);
+    max-height: min(380px, 70vh);
     background: var(--bg-surface);
     border: 1px solid var(--border-strong);
     border-radius: 10px;
@@ -294,7 +299,8 @@
     padding: 1px 4px;
   }
   .catalog-list {
-    max-height: 244px;
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
     padding: 6px;
     display: flex;

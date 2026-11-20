@@ -442,44 +442,47 @@
     <div class="toast">{validationToast}</div>
   {/if}
 
-  {#key graph.id}
-    <SvelteFlow
-      bind:nodes={flowNodes}
-      bind:edges={flowEdges}
-      {nodeTypes}
-      forceColorMode={theme}
-      nodesDraggable={!disabled}
-      nodesConnectable={!disabled}
-      deleteKey={disabled ? null : ['Backspace', 'Delete']}
-      fitView
-      fitViewOptions={{ padding: 0.18 }}
-      {isValidConnection}
-      onconnect={handleConnect}
-      onnodedragstop={handleNodeDragStop}
-      ondelete={handleDelete}
-      onpaneclick={() => {
-        catalogOpen = false;
-        wireLegendOpen = false;
-      }}
-      onnodeclick={({ node }) => {
-        catalogOpen = false;
-        wireLegendOpen = false;
-        onSelectNode(node.id);
-      }}
-      onedgeclick={({ edge }) => {
-        catalogOpen = false;
-        wireLegendOpen = false;
-        const found = graph.edges.find(
-          (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === edge.id,
-        );
-        if (found) onSelectEdge?.(found);
-      }}
-      proOptions={{ hideAttribution: true }}
-    >
-      <Background gap={20} size={1} />
-      <Controls showLock={false} />
-    </SvelteFlow>
-  {/key}
+  <div class="flow-inner">
+    {#key graph.id}
+      <SvelteFlow
+        bind:nodes={flowNodes}
+        bind:edges={flowEdges}
+        {nodeTypes}
+        forceColorMode={theme}
+        nodesDraggable={!disabled}
+        nodesConnectable={!disabled}
+        zoomOnDoubleClick={false}
+        deleteKey={disabled ? null : ['Backspace', 'Delete']}
+        fitView
+        fitViewOptions={{ padding: 0.18 }}
+        {isValidConnection}
+        onconnect={handleConnect}
+        onnodedragstop={handleNodeDragStop}
+        ondelete={handleDelete}
+        onpaneclick={() => {
+          catalogOpen = false;
+          wireLegendOpen = false;
+        }}
+        onnodeclick={({ node }) => {
+          catalogOpen = false;
+          wireLegendOpen = false;
+          onSelectNode(node.id);
+        }}
+        onedgeclick={({ edge }) => {
+          catalogOpen = false;
+          wireLegendOpen = false;
+          const found = graph.edges.find(
+            (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === edge.id,
+          );
+          if (found) onSelectEdge?.(found);
+        }}
+        proOptions={{ hideAttribution: true }}
+      >
+        <Background gap={20} size={1} />
+        <Controls showLock={false} />
+      </SvelteFlow>
+    {/key}
+  </div>
 </div>
 
 <style>
@@ -490,6 +493,12 @@
     background: var(--bg-canvas);
     border: 1px solid var(--border);
     border-radius: 8px;
+    overflow: visible;
+  }
+  .flow-inner {
+    width: 100%;
+    height: 100%;
+    border-radius: 7px;
     overflow: hidden;
   }
   @media (max-width: 780px) {

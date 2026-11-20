@@ -437,6 +437,8 @@
       selectedPresetId = laid.id;
       handleGraphChange(laid);
       selectedNodeId = laid.nodes[0]?.id ?? '';
+      selectedPeekSlotId = null;
+      selectedEdgeId = null;
       rightPanelTab = 'params';
       showToastMessage(`Imported ${file.name}`);
     } catch {
