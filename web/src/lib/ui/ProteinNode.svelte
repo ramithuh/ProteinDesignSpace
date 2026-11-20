@@ -1,12 +1,13 @@
 <script lang="ts">
   import { Handle, Position } from '@xyflow/svelte';
-  import { ADAPTER_REGISTRY } from '$lib/engine/registry';
+  import { ADAPTER_REGISTRY, RFD4_BENCHMARK_OPTIONS } from '$lib/engine/registry';
   import { PORT_COLORS, STAGE_COLORS } from '$lib/engine/graph-utils';
   import type { CanonicalArtifact, NodeProgressEvent } from '$lib/engine/types';
 
   export interface ProteinNodeData {
     adapterId: string;
     label: string;
+    params?: Record<string, unknown>;
     state?: NodeProgressEvent;
     outputs?: Record<string, CanonicalArtifact>;
     inputPortsReady?: Record<string, boolean>;
@@ -29,6 +30,81 @@
   let outputs = $derived(Object.entries(manifest?.outputs ?? {}));
   let stageColor = $derived(STAGE_COLORS[manifest?.stage ?? 'source'] ?? '#64748b');
   let st = $derived(data.state);
+
+  let paramSummary = $derived.by((): string => {
+    const p = data.params ?? {};
+    switch (data.adapterId) {
+      case 'pdb-input': {
+        if (p.mode === 'custom') {
+          const fname = String(p.filename ?? '').trim();
+          return fname || 'custom PDB';
+        }
+        return '53 aa demo';
+      }
+      case 'sequence-input': {
+        const raw = String(p.sequence ?? '');
+        const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const headers = lines.filter((l) => l.startsWith('>')).length;
+        const aaLen = lines
+          .filter((l) => !l.startsWith('>'))
+          .join('')
+          .replace(/[^A-Za-z]/g, '').length;
+        if (headers > 1) return `${headers} seqs · ${aaLen} aa`;
+        return `${aaLen || 0} aa FASTA`;
+      }
+      case 'rfd4-conditioner': {
+        const tp = String(p.taskPreset ?? 'custom');
+        if (tp !== 'custom') {
+          const opt = RFD4_BENCHMARK_OPTIONS.find((o) => o.id === tp);
+          return opt ? `${opt.category} · ${tp}` : tp;
+        }
+        const bits: string[] = [];
+        const contig = String(p.contig ?? '').trim();
+        if (contig) bits.push(contig);
+        const hotCount = String(p.hotspots ?? '')
+          .split(/[,\s]+/)
+          .filter(Boolean).length;
+        if (hotCount > 0) bits.push(`${hotCount} hot`);
+        const motif = String(p.motifSpan ?? '').trim();
+        if (motif) bits.push('motif');
+        const cath = String(p.cathCode ?? '').trim();
+        if (cath) bits.push(`CATH ${cath}`);
+        return bits.join(' · ') || 'custom spec';
+      }
+      case 'rfd4-proteina': {
+        const mode = String(p.mode ?? 'unconditional');
+        const steps = Number(p.nsteps ?? 60);
+        if (mode === 'conditioned') return `conditioned · ${steps} steps`;
+        if (mode === 'preset') return `${String(p.presetId ?? 'preset')} · ${steps} steps`;
+        if (mode === 'partial') return `partial ${Number(p.partialFraction ?? 0.5)} · ${steps} steps`;
+        if (mode === 'inverse-folding') return `inv-fold · ${steps} steps`;
+        return `${Number(p.length ?? 70)} aa · ${steps} steps`;
+      }
+      case 'legacy-teacher': {
+        const sampler = p.sampler === 'euler-fm' ? 'ODE' : 'SDE';
+        return `${Number(p.length ?? 80)} aa · ${sampler} · ${Number(p.nfe ?? 32)} NFE`;
+      }
+      case 'web-protein-mpnn': {
+        const fam =
+          p.family === 'proteinmpnn'
+            ? 'ProteinMPNN'
+            : p.family === 'ca'
+              ? 'Cα-MPNN'
+              : 'SolubleMPNN';
+        const n = Number(p.numSequences ?? 2);
+        const t = Number(p.temperature ?? 0.1);
+        return `${fam} · ${n} seq${n === 1 ? '' : 's'} · T=${t}`;
+      }
+      case 'localfold-af2': {
+        return `${Number(p.recycles ?? 1)} rec · max ${Number(p.maxSequences ?? 2)}`;
+      }
+      case 'designability-scorer': {
+        return `scRMSD < ${Number(p.scRmsdThreshold ?? 2.0).toFixed(1)} Å · pLDDT ≥ ${Number(p.plddtThreshold ?? 70)}`;
+      }
+      default:
+        return '';
+    }
+  });
 
   let outputBadge = $derived.by((): string | null => {
     const outs = data.outputs;
@@ -68,10 +144,12 @@
   <div class="header">
     <span class="stage">{manifest?.stage ?? 'node'}</span>
     <span class="rt">{manifest?.runtime ?? 'cpu'}</span>
-    {#if selected && data.onDelete}
+    {#if data.onDelete}
       <button
+        type="button"
         class="del-btn"
         title="Remove block"
+        aria-label="Remove block"
         onclick={(e) => {
           e.stopPropagation();
           data.onDelete?.(id);
@@ -84,6 +162,10 @@
 
   <div class="title">{data.label || manifest?.shortName || data.adapterId}</div>
 
+  {#if paramSummary}
+    <div class="param-chip" title={paramSummary}>{paramSummary}</div>
+  {/if}
+
   <!-- Typed Input & Output Port Rows -->
   <div class="ports">
     <div class="col in-col">
@@ -95,7 +177,7 @@
             type="target"
             position={Position.Left}
             id={portName}
-            style="background: {color}; border: 2px solid var(--bg-surface); width: 11px; height: 11px; left: -6px;"
+            style="background: {color}; border: 2px solid var(--bg-surface); width: 13px; height: 13px; left: -7px;"
           />
           <button
             type="button"
@@ -134,7 +216,7 @@
             type="source"
             position={Position.Right}
             id={portName}
-            style="background: {color}; border: 2px solid var(--bg-surface); width: 11px; height: 11px; right: -6px;"
+            style="background: {color}; border: 2px solid var(--bg-surface); width: 13px; height: 13px; right: -7px;"
           />
         </div>
       {/each}
@@ -210,6 +292,8 @@
   .rt {
     margin-left: auto;
     color: var(--text-dim);
+    opacity: 0.72;
+    font-size: 8.5px;
   }
   .del-btn {
     background: var(--err-bg);
@@ -222,16 +306,38 @@
     padding: 0;
     font-size: 12px;
     cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+  }
+  .p-node:hover .del-btn,
+  .p-node.selected .del-btn,
+  .del-btn:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
   }
   .del-btn:hover {
     background: #dc2626;
     color: #fff;
   }
   .title {
-    padding: 0 10px 6px;
+    padding: 0 10px 3px;
     font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .param-chip {
+    margin: 0 10px 6px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border-subtle);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -254,13 +360,13 @@
     position: relative;
     display: flex;
     align-items: center;
-    height: 18px;
+    height: 20px;
   }
   .port-row.left {
-    padding-left: 12px;
+    padding-left: 15px;
   }
   .port-row.right {
-    padding-right: 12px;
+    padding-right: 15px;
     justify-content: flex-end;
   }
   .port-label {
@@ -271,7 +377,7 @@
   .port-btn {
     background: none;
     border: none;
-    padding: 1px 3px;
+    padding: 1px 4px;
     border-radius: 3px;
     cursor: pointer;
     display: inline-flex;

@@ -166,7 +166,7 @@ export function validateConnection(
 export function validateGraph(graph: WorkflowGraph): string[] {
   const errors: string[] = [];
   if (graph.nodes.length === 0) {
-    errors.push('Canvas is empty — drag or add at least one block from the palette.');
+    errors.push('Canvas is empty — click + Add Block to place a block.');
     return errors;
   }
 
@@ -437,5 +437,134 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
       ...n,
       position: posMap.get(n.id) ?? { x: X_START, y: TOP_Y },
     })),
+  };
+}
+
+export interface InsertBlockResult {
+  graph: WorkflowGraph;
+  nodeId: string;
+  wiredEdge?: WorkflowEdge;
+}
+
+/**
+ * Pure helper to insert a new block into a WorkflowGraph with:
+ * - collision-free deterministic node ID + readable label + default params
+ * - smart placement (dropPos if given, else 280px right of selectedNode with vertical nudge if occupied, else { x: 60, y: 60 })
+ * - auto-wiring of the first validateConnection-valid port pair without overwriting an already-occupied target input port.
+ */
+export function insertBlockSmart(
+  graph: WorkflowGraph,
+  adapterId: string,
+  selectedNodeId?: string | null,
+  dropPos?: { x: number; y: number },
+): InsertBlockResult {
+  const manifest = ADAPTER_REGISTRY[adapterId];
+  if (!manifest) {
+    throw new Error(`Unknown adapter "${adapterId}"`);
+  }
+
+  // Collision-free ID
+  const existingIds = new Set(graph.nodes.map((n) => n.id));
+  const prefix = adapterId.replace(/[^a-z0-9]/gi, '_');
+  let seq = 1;
+  let nodeId = `${prefix}_${seq}`;
+  while (existingIds.has(nodeId)) {
+    seq++;
+    nodeId = `${prefix}_${seq}`;
+  }
+
+  const sameCount = graph.nodes.filter((n) => n.adapterId === adapterId).length;
+  const label = sameCount > 0 ? `${manifest.shortName} #${sameCount + 1}` : manifest.shortName;
+
+  const selectedNode = selectedNodeId
+    ? graph.nodes.find((n) => n.id === selectedNodeId)
+    : undefined;
+
+  const isOccupied = (px: number, py: number): boolean =>
+    graph.nodes.some((n) => {
+      if (!n.position) return false;
+      return Math.abs(n.position.x - px) < 220 && Math.abs(n.position.y - py) < 130;
+    });
+
+  let position: { x: number; y: number };
+  if (dropPos) {
+    position = { x: Math.round(dropPos.x), y: Math.round(dropPos.y) };
+  } else if (selectedNode) {
+    const px = (selectedNode.position?.x ?? 60) + 280;
+    let py = selectedNode.position?.y ?? 60;
+    let guard = 0;
+    while (isOccupied(px, py) && guard < 24) {
+      py += 160;
+      guard++;
+    }
+    position = { x: Math.round(px), y: Math.round(py) };
+  } else {
+    const px = 60;
+    let py = 60;
+    let guard = 0;
+    while (isOccupied(px, py) && guard < 24) {
+      py += 160;
+      guard++;
+    }
+    position = { x: px, y: py };
+  }
+
+  const newNode: WorkflowNode = {
+    id: nodeId,
+    adapterId,
+    label,
+    params: defaultParamsForAdapter(adapterId),
+    position,
+  };
+
+  const graphWithNode: WorkflowGraph = {
+    ...graph,
+    nodes: [...graph.nodes, newNode],
+    edges: [...graph.edges],
+  };
+
+  let wiredEdge: WorkflowEdge | undefined;
+  if (selectedNode) {
+    const occupiedTargets = new Set(graph.edges.map((e) => `${e.toNode}:${e.toPort}`));
+
+    const findFirstValidEdge = (fromId: string, toId: string): WorkflowEdge | undefined => {
+      const fromNode = graphWithNode.nodes.find((n) => n.id === fromId);
+      const toNode = graphWithNode.nodes.find((n) => n.id === toId);
+      if (!fromNode || !toNode) return undefined;
+      const fromManifest = ADAPTER_REGISTRY[fromNode.adapterId];
+      const toManifest = ADAPTER_REGISTRY[toNode.adapterId];
+      if (!fromManifest || !toManifest) return undefined;
+
+      for (const fromPort of Object.keys(fromManifest.outputs)) {
+        for (const toPort of Object.keys(toManifest.inputs)) {
+          if (occupiedTargets.has(`${toId}:${toPort}`)) continue;
+          if (validateConnection(graphWithNode, fromId, fromPort, toId, toPort).valid) {
+            return { fromNode: fromId, fromPort, toNode: toId, toPort };
+          }
+        }
+      }
+      return undefined;
+    };
+
+    const selManifest = ADAPTER_REGISTRY[selectedNode.adapterId];
+    const insertUpstream =
+      manifest.stage === 'source' ||
+      (manifest.stage === 'condition' && selManifest?.stage !== 'source');
+
+    if (insertUpstream) {
+      wiredEdge = findFirstValidEdge(nodeId, selectedNode.id);
+    } else {
+      wiredEdge = findFirstValidEdge(selectedNode.id, nodeId);
+    }
+  }
+
+  const nextGraph: WorkflowGraph = wiredEdge
+    ? { ...graphWithNode, edges: [...graphWithNode.edges, wiredEdge] }
+    : graphWithNode;
+
+  return {
+    graph: nextGraph,
+    nodeId,
+    ...(wiredEdge ? { wiredEdge } : {}),
   };
 }

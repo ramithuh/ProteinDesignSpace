@@ -9,6 +9,7 @@ import {
   STAGE_COLORS,
   autoLayoutGraph,
   defaultParamsForAdapter,
+  insertBlockSmart,
   validateConnection,
   validateGraph,
   wouldCreateCycle,
@@ -294,5 +295,115 @@ describe('engine/registry & engine/graph-utils', () => {
         }
       }
     }
+  });
+
+  it('insertBlockSmart places at {60,60} on empty graph, respects dropPos, and nudges vertically on overlap', () => {
+    const empty: WorkflowGraph = { id: 'g', name: 'G', nodes: [], edges: [] };
+    const r1 = insertBlockSmart(empty, 'pdb-input');
+    expect(r1.wiredEdge).toBeUndefined();
+    expect(r1.graph.nodes).toHaveLength(1);
+    expect(r1.graph.nodes[0].id).toBe(r1.nodeId);
+    expect(r1.graph.nodes[0].position).toEqual({ x: 60, y: 60 });
+    expect(r1.graph.nodes[0].params).toEqual(defaultParamsForAdapter('pdb-input'));
+    expect(empty.nodes).toHaveLength(0); // pure, no mutation
+
+    // Explicit dropPos
+    const rDrop = insertBlockSmart(r1.graph, 'web-protein-mpnn', r1.nodeId, { x: 412.4, y: 198.7 });
+    const droppedNode = rDrop.graph.nodes.find((n) => n.id === rDrop.nodeId)!;
+    expect(droppedNode.position).toEqual({ x: 412, y: 199 });
+
+    // 280px to the right of selectedNode + vertical nudge when occupied
+    const r2 = insertBlockSmart(r1.graph, 'web-protein-mpnn', r1.nodeId);
+    const n2 = r2.graph.nodes.find((n) => n.id === r2.nodeId)!;
+    expect(n2.position).toEqual({ x: 340, y: 60 });
+
+    // Insert another node with r1 still selected -> same x=340 is occupied by n2, so y must nudge vertically
+    const r3 = insertBlockSmart(r2.graph, 'rfd4-conditioner', r1.nodeId);
+    const n3 = r3.graph.nodes.find((n) => n.id === r3.nodeId)!;
+    expect(n3.position!.x).toBe(340);
+    expect(n3.position!.y).toBeGreaterThan(60);
+    expect(Math.abs(n3.position!.y - n2.position!.y)).toBeGreaterThanOrEqual(130);
+  });
+
+  it('insertBlockSmart auto-wires downstream and upstream (source/conditioner) without overwriting occupied target ports', () => {
+    const base: WorkflowGraph = {
+      id: 'wire-test',
+      name: 'Wire Test',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', label: 'PDB Input', params: {}, position: { x: 60, y: 60 } },
+      ],
+      edges: [],
+    };
+
+    // Downstream auto-wire: pdb-input -> web-protein-mpnn
+    const rMpnn = insertBlockSmart(base, 'web-protein-mpnn', 'src');
+    expect(rMpnn.wiredEdge).toEqual({
+      fromNode: 'src',
+      fromPort: 'structure',
+      toNode: rMpnn.nodeId,
+      toPort: 'structure',
+    });
+    expect(rMpnn.graph.edges).toHaveLength(1);
+
+    // Inserting another pdb-input while mpnn is selected MUST NOT overwrite mpnn.structure (already occupied)
+    const rSrcDup = insertBlockSmart(rMpnn.graph, 'pdb-input', rMpnn.nodeId);
+    expect(rSrcDup.wiredEdge).toBeUndefined();
+    expect(rSrcDup.graph.edges).toEqual(rMpnn.graph.edges);
+
+    // Upstream auto-wire: inserting pdb-input when an UNWIRED mpnn is selected -> new pdb-input -> mpnn
+    const unwiredMpnn: WorkflowGraph = {
+      id: 'unwired',
+      name: 'Unwired',
+      nodes: [
+        { id: 'mpnn', adapterId: 'web-protein-mpnn', label: 'ProteinMPNN', params: {}, position: { x: 300, y: 60 } },
+      ],
+      edges: [],
+    };
+    const rUpstreamSrc = insertBlockSmart(unwiredMpnn, 'pdb-input', 'mpnn');
+    expect(rUpstreamSrc.wiredEdge).toEqual({
+      fromNode: rUpstreamSrc.nodeId,
+      fromPort: 'structure',
+      toNode: 'mpnn',
+      toPort: 'structure',
+    });
+
+    // Upstream conditioner auto-wire: inserting rfd4-conditioner when rfd4-proteina is selected
+    const rfd4Only: WorkflowGraph = {
+      id: 'rfd4-only',
+      name: 'RFD4',
+      nodes: [
+        { id: 'gen', adapterId: 'rfd4-proteina', label: 'RFD4-Proteina', params: {}, position: { x: 300, y: 60 } },
+      ],
+      edges: [],
+    };
+    const rCond = insertBlockSmart(rfd4Only, 'rfd4-conditioner', 'gen');
+    expect(rCond.wiredEdge).toEqual({
+      fromNode: rCond.nodeId,
+      fromPort: 'condition',
+      toNode: 'gen',
+      toPort: 'condition',
+    });
+
+    // Inserting a second conditioner while gen is selected must NOT overwrite gen.condition
+    const rCond2 = insertBlockSmart(rCond.graph, 'rfd4-conditioner', 'gen');
+    expect(rCond2.wiredEdge).toBeUndefined();
+    expect(rCond2.graph.edges).toHaveLength(1);
+  });
+
+  it('insertBlockSmart generates collision-free IDs and numbered labels', () => {
+    const g: WorkflowGraph = {
+      id: 'ids',
+      name: 'IDs',
+      nodes: [
+        { id: 'web_protein_mpnn_1', adapterId: 'web-protein-mpnn', label: 'ProteinMPNN', params: {}, position: { x: 60, y: 60 } },
+        { id: 'web_protein_mpnn_2', adapterId: 'web-protein-mpnn', label: 'ProteinMPNN #2', params: {}, position: { x: 60, y: 220 } },
+      ],
+      edges: [],
+    };
+    const r = insertBlockSmart(g, 'web-protein-mpnn');
+    expect(r.nodeId).toBe('web_protein_mpnn_3');
+    const added = r.graph.nodes.find((n) => n.id === r.nodeId)!;
+    expect(added.label).toBe('ProteinMPNN #3');
+    expect(new Set(r.graph.nodes.map((n) => n.id)).size).toBe(3);
   });
 });

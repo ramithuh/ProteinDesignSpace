@@ -1,16 +1,26 @@
 <script lang="ts">
   import { ADAPTER_REGISTRY, RFD4_BENCHMARK_OPTIONS } from '$lib/engine/registry';
+  import { STAGE_COLORS } from '$lib/engine/graph-utils';
   import type { WorkflowNode } from '$lib/engine/types';
 
   interface Props {
     node: WorkflowNode;
     disabled?: boolean;
+    embedded?: boolean;
     onUpdate: (nodeId: string, params: Record<string, unknown>) => void;
     onRunUpTo?: (nodeId: string) => void;
   }
 
-  let { node, disabled = false, onUpdate, onRunUpTo = undefined }: Props = $props();
+  let {
+    node,
+    disabled = false,
+    embedded = false,
+    onUpdate,
+    onRunUpTo = undefined,
+  }: Props = $props();
+
   let manifest = $derived(ADAPTER_REGISTRY[node.adapterId]);
+  let stageColor = $derived(STAGE_COLORS[manifest?.stage ?? 'source'] ?? '#64748b');
 
   function setParam(key: string, value: unknown) {
     onUpdate(node.id, { ...node.params, [key]: value });
@@ -20,6 +30,19 @@
     if (raw.trim() === '') return;
     const n = Number(raw);
     if (Number.isFinite(n)) setParam(key, n);
+  }
+
+  function parseResidueTokens(raw: unknown): string[] {
+    return String(raw ?? '')
+      .split(/[,\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  function removeResidueTokenAt(key: string, idx: number) {
+    const tokens = parseResidueTokens(node.params[key]);
+    tokens.splice(idx, 1);
+    setParam(key, tokens.join(', '));
   }
 
   async function handleFileUpload(ev: Event) {
@@ -42,34 +65,32 @@
   }
 </script>
 
-<div class="inspector">
+<div class="inspector" class:embedded>
   <div class="head">
-    <div>
-      <h3>{manifest?.displayName ?? node.adapterId}</h3>
-      <p class="desc">{manifest?.description}</p>
-    </div>
-    <div class="meta">
-      {#if onRunUpTo}
-        <button
-          type="button"
-          class="run-here-btn"
-          {disabled}
-          onclick={() => onRunUpTo(node.id)}
-          title="Execute only upstream blocks up to this block (memoized for full runs)"
-        >
-          ▶ Run to here
-        </button>
-      {/if}
-      <span class="pill">{manifest?.runtime}</span>
-      {#if manifest && manifest.approxWeightsMB > 0}
-        <span class="pill">~{manifest.approxWeightsMB} MB</span>
+    <div class="title-wrap">
+      <span class="stage-dot" style="background: {stageColor}"></span>
+      <h3>{node.label || manifest?.displayName || node.adapterId}</h3>
+      {#if manifest && manifest.shortName !== (node.label || manifest.shortName)}
+        <span class="sub-kind">{manifest.shortName}</span>
       {/if}
     </div>
+    {#if onRunUpTo}
+      <button
+        type="button"
+        class="run-here-btn"
+        {disabled}
+        onclick={() => onRunUpTo(node.id)}
+        title="Execute only upstream blocks up to this block (memoized for full runs)"
+      >
+        ▶ Run to here
+      </button>
+    {/if}
   </div>
 
+  <!-- Primary Scientific Parameters -->
   <div class="fields">
     {#if node.adapterId === 'pdb-input'}
-      <label>
+      <label class="wide">
         Source
         <select
           {disabled}
@@ -82,7 +103,7 @@
       </label>
 
       {#if node.params.mode === 'custom'}
-        <label class="file-row">
+        <label class="file-row full">
           Upload .pdb / .cif
           <input type="file" accept=".pdb,.cif,.mmcif,.ent,.txt" {disabled} onchange={handleFileUpload} />
         </label>
@@ -91,41 +112,51 @@
           <textarea
             rows="4"
             {disabled}
-            placeholder="Paste ATOM lines or mmCIF _atom_site block (e.g. exported from web.rfd4-proteina.org)..."
+            placeholder="Paste ATOM lines or mmCIF _atom_site block…"
             value={String(node.params.pdbText ?? '')}
             oninput={(e) => setParam('pdbText', e.currentTarget.value)}
           ></textarea>
         </label>
       {/if}
+
     {:else if node.adapterId === 'sequence-input'}
-      <label class="wide">
-        Label
-        <input
-          type="text"
-          {disabled}
-          value={String(node.params.label ?? 'custom-seq-1')}
-          oninput={(e) => setParam('label', e.currentTarget.value)}
-        />
-      </label>
       <label class="full">
         Amino acid sequence (plain or multi-FASTA)
         <textarea
-          rows="4"
+          rows="5"
           {disabled}
           placeholder=">seq1&#10;MKTAYIAKQRQISFVK..."
           value={String(node.params.sequence ?? '')}
           oninput={(e) => setParam('sequence', e.currentTarget.value)}
         ></textarea>
       </label>
+
+      <details class="adv-details full">
+        <summary>Advanced parameters</summary>
+        <div class="adv-fields">
+          <label class="wide">
+            Label
+            <input
+              type="text"
+              {disabled}
+              value={String(node.params.label ?? 'custom-seq-1')}
+              oninput={(e) => setParam('label', e.currentTarget.value)}
+            />
+          </label>
+        </div>
+      </details>
+
     {:else if node.adapterId === 'rfd4-conditioner'}
-      <label class="wide">
+      {@const hotspotTokens = parseResidueTokens(node.params.hotspots)}
+      {@const motifTokens = parseResidueTokens(node.params.motifSpan)}
+      <label class="full">
         Task / Benchmark Preset
         <select
           {disabled}
           value={String(node.params.taskPreset ?? 'custom')}
           onchange={(e) => setParam('taskPreset', e.currentTarget.value)}
         >
-          <option value="custom">Custom Conditioning Builder (below)</option>
+          <option value="custom">Custom Conditioning Builder</option>
           {#each RFD4_BENCHMARK_OPTIONS as opt (opt.id)}
             <option value={opt.id}>[{opt.category}] {opt.label}</option>
           {/each}
@@ -133,8 +164,8 @@
       </label>
 
       {#if String(node.params.taskPreset ?? 'custom') === 'custom'}
-        <label class="wide">
-          Contig (e.g. <code>70-70</code>, <code>A18-132,/0,70-70</code>, <code>10-20,A16-35,10-20</code>)
+        <label class="full">
+          Contig (e.g. <code>70-70</code>, <code>A18-132,/0,70-70</code>)
           <input
             type="text"
             {disabled}
@@ -142,107 +173,152 @@
             oninput={(e) => setParam('contig', e.currentTarget.value)}
           />
         </label>
-        <label>
-          Lock Chain
-          <input
-            type="text"
-            {disabled}
-            placeholder="e.g. A"
-            style="width: 72px"
-            value={String(node.params.lockChain ?? '')}
-            oninput={(e) => setParam('lockChain', e.currentTarget.value)}
-          />
-        </label>
-        <label>
-          CATH Fold
-          <input
-            type="text"
-            {disabled}
-            placeholder="e.g. 3.40.50"
-            style="width: 96px"
-            value={String(node.params.cathCode ?? '')}
-            oninput={(e) => setParam('cathCode', e.currentTarget.value)}
-          />
-        </label>
-        <label>
-          3D Click Brush
-          <select
-            {disabled}
-            value={String(node.params.paintBrush ?? 'hotspots')}
-            onchange={(e) => setParam('paintBrush', e.currentTarget.value)}
-          >
-            <option value="hotspots">Paint Hotspots (C_HOT)</option>
-            <option value="motifSpan">Paint Motif (C_CRDGRP)</option>
-          </select>
-        </label>
-        <label class="wide">
-          Hotspots (<code>C_HOT</code> — click in Mol* or type e.g. A54, A56, A66)
-          <input
-            type="text"
-            {disabled}
-            placeholder="A54, A56, A66, A115"
-            value={String(node.params.hotspots ?? '')}
-            oninput={(e) => setParam('hotspots', e.currentTarget.value)}
-          />
-        </label>
-        <label class="wide">
-          Fixed Motif (<code>C_CRDGRP</code> + <code>C_SEQ</code> — e.g. A16-35, A52-71)
-          <input
-            type="text"
-            {disabled}
-            placeholder="A16-35, A52-71"
-            value={String(node.params.motifSpan ?? '')}
-            oninput={(e) => setParam('motifSpan', e.currentTarget.value)}
-          />
-        </label>
-        <label class="inline-check">
-          <input
-            type="checkbox"
-            {disabled}
-            checked={Boolean(node.params.unindexedMotif)}
-            onchange={(e) => setParam('unindexedMotif', e.currentTarget.checked)}
-          />
-          Unindexed Motif (<code>C_IDX=false</code>)
-        </label>
-        <label>
-          H-Bond (<code>C_HB</code>)
-          <select
-            {disabled}
-            value={String(node.params.hbondMode ?? 'none')}
-            onchange={(e) => setParam('hbondMode', e.currentTarget.value)}
-          >
-            <option value="none">None</option>
-            <option value="ACCEPTOR">ACCEPTOR</option>
-            <option value="DONOR">DONOR</option>
-            <option value="BOTH">BOTH</option>
-          </select>
-        </label>
-        {#if String(node.params.hbondMode ?? 'none') !== 'none'}
-          <label class="wide">
-            H-Bond Selection (<code>sel(...)</code>, e.g. <code>B/SAM/*/*</code> or <code>A/*/42/OG</code>)
+
+        <div class="chip-field full">
+          <label>
+            Hotspots (<code>C_HOT</code> — click in Mol* or type e.g. A54, A56)
             <input
               type="text"
               {disabled}
-              placeholder="B/SAM/*/*"
-              value={String(node.params.hbondSelection ?? '')}
-              oninput={(e) => setParam('hbondSelection', e.currentTarget.value)}
+              placeholder="A54, A56, A66, A115"
+              value={String(node.params.hotspots ?? '')}
+              oninput={(e) => setParam('hotspots', e.currentTarget.value)}
             />
           </label>
-        {/if}
-        <details class="full">
-          <summary>Advanced: Raw RFD4 condition_spec JSON override</summary>
-          <textarea
-            rows="4"
-            {disabled}
-            placeholder={'{"contig": "70-70", "conditions": {"C_CATH": {"3.40.50": [{"select": "sel(\'*/*/*/*\')"}]}}}'}
-            value={String(node.params.rawJsonOverride ?? '')}
-            oninput={(e) => setParam('rawJsonOverride', e.currentTarget.value)}
-          ></textarea>
+          {#if hotspotTokens.length > 0}
+            <div class="res-chips">
+              {#each hotspotTokens as tok, i (`hot_${tok}_${i}`)}
+                <span class="res-chip">
+                  {tok}
+                  <button
+                    type="button"
+                    class="chip-x"
+                    {disabled}
+                    aria-label={`Remove hotspot ${tok}`}
+                    onclick={() => removeResidueTokenAt('hotspots', i)}
+                  >×</button>
+                </span>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+        <div class="chip-field full">
+          <label>
+            Fixed Motif (<code>C_CRDGRP</code> — e.g. A16-35, A52-71)
+            <input
+              type="text"
+              {disabled}
+              placeholder="A16-35, A52-71"
+              value={String(node.params.motifSpan ?? '')}
+              oninput={(e) => setParam('motifSpan', e.currentTarget.value)}
+            />
+          </label>
+          {#if motifTokens.length > 0}
+            <div class="res-chips">
+              {#each motifTokens as tok, i (`motif_${tok}_${i}`)}
+                <span class="res-chip">
+                  {tok}
+                  <button
+                    type="button"
+                    class="chip-x"
+                    {disabled}
+                    aria-label={`Remove motif ${tok}`}
+                    onclick={() => removeResidueTokenAt('motifSpan', i)}
+                  >×</button>
+                </span>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+        <details class="adv-details full">
+          <summary>Advanced parameters</summary>
+          <div class="adv-fields">
+            <label>
+              Lock Chain
+              <input
+                type="text"
+                {disabled}
+                placeholder="e.g. A"
+                style="width: 72px"
+                value={String(node.params.lockChain ?? '')}
+                oninput={(e) => setParam('lockChain', e.currentTarget.value)}
+              />
+            </label>
+            <label>
+              CATH Fold
+              <input
+                type="text"
+                {disabled}
+                placeholder="e.g. 3.40.50"
+                style="width: 96px"
+                value={String(node.params.cathCode ?? '')}
+                oninput={(e) => setParam('cathCode', e.currentTarget.value)}
+              />
+            </label>
+            <label>
+              3D Click Brush
+              <select
+                {disabled}
+                value={String(node.params.paintBrush ?? 'hotspots')}
+                onchange={(e) => setParam('paintBrush', e.currentTarget.value)}
+              >
+                <option value="hotspots">Paint Hotspots (C_HOT)</option>
+                <option value="motifSpan">Paint Motif (C_CRDGRP)</option>
+              </select>
+            </label>
+            <label class="inline-check">
+              <input
+                type="checkbox"
+                {disabled}
+                checked={Boolean(node.params.unindexedMotif)}
+                onchange={(e) => setParam('unindexedMotif', e.currentTarget.checked)}
+              />
+              Unindexed Motif (<code>C_IDX=false</code>)
+            </label>
+            <label>
+              H-Bond (<code>C_HB</code>)
+              <select
+                {disabled}
+                value={String(node.params.hbondMode ?? 'none')}
+                onchange={(e) => setParam('hbondMode', e.currentTarget.value)}
+              >
+                <option value="none">None</option>
+                <option value="ACCEPTOR">ACCEPTOR</option>
+                <option value="DONOR">DONOR</option>
+                <option value="BOTH">BOTH</option>
+              </select>
+            </label>
+            {#if String(node.params.hbondMode ?? 'none') !== 'none'}
+              <label class="full">
+                H-Bond Selection (<code>sel(...)</code>, e.g. <code>B/SAM/*/*</code>)
+                <input
+                  type="text"
+                  {disabled}
+                  placeholder="B/SAM/*/*"
+                  value={String(node.params.hbondSelection ?? '')}
+                  oninput={(e) => setParam('hbondSelection', e.currentTarget.value)}
+                />
+              </label>
+            {/if}
+            <label class="full">
+              Raw RFD4 <code>condition_spec</code> JSON override
+              <textarea
+                rows="3"
+                {disabled}
+                placeholder={'{"contig": "70-70", "conditions": {"C_CATH": {"3.40.50": [{"select": "sel(\'*/*/*/*\')"}]}}}'}
+                value={String(node.params.rawJsonOverride ?? '')}
+                oninput={(e) => setParam('rawJsonOverride', e.currentTarget.value)}
+              ></textarea>
+            </label>
+          </div>
         </details>
       {/if}
+
     {:else if node.adapterId === 'rfd4-proteina'}
       {@const rfdMode = String(node.params.mode ?? 'unconditional')}
-      <label>
+      <label class="wide">
         Mode
         <select
           {disabled}
@@ -269,7 +345,7 @@
           />
         </label>
       {:else if rfdMode === 'preset'}
-        <label class="wide">
+        <label class="full">
           Upstream Benchmark
           <select
             {disabled}
@@ -295,61 +371,79 @@
           />
         </label>
       {/if}
-      <label>
-        Steps
-        <input
-          type="number"
-          min="10"
-          max="120"
-          {disabled}
-          value={Number(node.params.nsteps ?? 60)}
-          oninput={(e) => setNumParam('nsteps', e.currentTarget.value)}
-        />
-      </label>
-      <label class="inline-check">
-        <input
-          type="checkbox"
-          {disabled}
-          checked={node.params.earlyStop !== false}
-          onchange={(e) => setParam('earlyStop', e.currentTarget.checked)}
-        />
-        Early stop on convergence
-      </label>
-      <label>
-        Recycle
-        <select
-          {disabled}
-          value={String(node.params.recycleSchedule ?? 'low')}
-          onchange={(e) => setParam('recycleSchedule', e.currentTarget.value)}
-        >
-          <option value="low">low (fast)</option>
-          <option value="medium">medium (higher quality)</option>
-        </select>
-      </label>
-      <label>
-        Seed
-        <input
-          type="number"
-          min="0"
-          {disabled}
-          value={Number(node.params.seed ?? 42)}
-          oninput={(e) => setNumParam('seed', e.currentTarget.value)}
-        />
-      </label>
-      {#if rfdMode === 'unconditional'}
-        <details class="full">
-          <summary>Optional inline RFD4 YAML/JSON spec</summary>
-          <textarea
-            rows="3"
-            {disabled}
-            placeholder={'Leave blank for pure monomer, or wire an RFD4 Condition block into the condition port.'}
-            value={String(node.params.customSpecYaml ?? '')}
-            oninput={(e) => setParam('customSpecYaml', e.currentTarget.value)}
-          ></textarea>
-        </details>
-      {/if}
+
+      <details class="adv-details full">
+        <summary>Advanced parameters</summary>
+        <div class="adv-fields">
+          <label>
+            Steps
+            <input
+              type="number"
+              min="10"
+              max="120"
+              {disabled}
+              value={Number(node.params.nsteps ?? 60)}
+              oninput={(e) => setNumParam('nsteps', e.currentTarget.value)}
+            />
+          </label>
+          <label>
+            Recycle
+            <select
+              {disabled}
+              value={String(node.params.recycleSchedule ?? 'low')}
+              onchange={(e) => setParam('recycleSchedule', e.currentTarget.value)}
+            >
+              <option value="low">low (fast)</option>
+              <option value="medium">medium (higher quality)</option>
+            </select>
+          </label>
+          <label>
+            Seed
+            <input
+              type="number"
+              min="0"
+              {disabled}
+              value={Number(node.params.seed ?? 42)}
+              oninput={(e) => setNumParam('seed', e.currentTarget.value)}
+            />
+          </label>
+          <label class="inline-check">
+            <input
+              type="checkbox"
+              {disabled}
+              checked={node.params.earlyStop !== false}
+              onchange={(e) => setParam('earlyStop', e.currentTarget.checked)}
+            />
+            Early stop on convergence
+          </label>
+          {#if rfdMode === 'unconditional'}
+            <label class="full">
+              Inline RFD4 YAML/JSON spec
+              <textarea
+                rows="3"
+                {disabled}
+                placeholder="Leave blank for pure monomer, or wire an RFD4 Condition block into the condition port."
+                value={String(node.params.customSpecYaml ?? '')}
+                oninput={(e) => setParam('customSpecYaml', e.currentTarget.value)}
+              ></textarea>
+            </label>
+          {/if}
+        </div>
+      </details>
+
     {:else if node.adapterId === 'legacy-teacher'}
       <label>
+        Length (aa)
+        <input
+          type="number"
+          min="30"
+          max="200"
+          {disabled}
+          value={Number(node.params.length ?? 80)}
+          oninput={(e) => setNumParam('length', e.currentTarget.value)}
+        />
+      </label>
+      <label class="wide">
         Sampler
         <select
           {disabled}
@@ -360,66 +454,63 @@
           <option value="euler-fm">Euler-FM (ODE)</option>
         </select>
       </label>
-      <label>
-        Length
-        <input
-          type="number"
-          min="30"
-          max="200"
-          {disabled}
-          value={Number(node.params.length ?? 80)}
-          oninput={(e) => setNumParam('length', e.currentTarget.value)}
-        />
-      </label>
-      <label>
-        NFE
-        <input
-          type="number"
-          min="4"
-          max="400"
-          {disabled}
-          value={Number(node.params.nfe ?? 32)}
-          oninput={(e) => setNumParam('nfe', e.currentTarget.value)}
-        />
-      </label>
-      <label>
-        Seed
-        <input
-          type="number"
-          min="0"
-          {disabled}
-          value={Number(node.params.seed ?? 42)}
-          oninput={(e) => setNumParam('seed', e.currentTarget.value)}
-        />
-      </label>
-      {#if node.params.sampler === 'sde-proteina'}
-        <label>
-          γ
-          <input
-            type="number"
-            min="0"
-            max="2"
-            step="0.05"
-            {disabled}
-            value={Number(node.params.sdeGamma ?? 0.1)}
-            oninput={(e) => setNumParam('sdeGamma', e.currentTarget.value)}
-          />
-        </label>
-        <label>
-          g(t) max
-          <input
-            type="number"
-            min="0"
-            max="20"
-            step="0.5"
-            {disabled}
-            value={Number(node.params.sdeGtMax ?? 3.0)}
-            oninput={(e) => setNumParam('sdeGtMax', e.currentTarget.value)}
-          />
-        </label>
-      {/if}
+
+      <details class="adv-details full">
+        <summary>Advanced parameters</summary>
+        <div class="adv-fields">
+          <label>
+            NFE
+            <input
+              type="number"
+              min="4"
+              max="400"
+              {disabled}
+              value={Number(node.params.nfe ?? 32)}
+              oninput={(e) => setNumParam('nfe', e.currentTarget.value)}
+            />
+          </label>
+          {#if node.params.sampler === 'sde-proteina'}
+            <label>
+              γ
+              <input
+                type="number"
+                min="0"
+                max="2"
+                step="0.05"
+                {disabled}
+                value={Number(node.params.sdeGamma ?? 0.1)}
+                oninput={(e) => setNumParam('sdeGamma', e.currentTarget.value)}
+              />
+            </label>
+            <label>
+              g(t) max
+              <input
+                type="number"
+                min="0"
+                max="20"
+                step="0.5"
+                {disabled}
+                value={Number(node.params.sdeGtMax ?? 3.0)}
+                oninput={(e) => setNumParam('sdeGtMax', e.currentTarget.value)}
+              />
+            </label>
+          {/if}
+          <label>
+            Seed
+            <input
+              type="number"
+              min="0"
+              {disabled}
+              value={Number(node.params.seed ?? 42)}
+              oninput={(e) => setNumParam('seed', e.currentTarget.value)}
+            />
+          </label>
+        </div>
+      </details>
+
     {:else if node.adapterId === 'web-protein-mpnn'}
-      <label>
+      {@const fixedTokens = parseResidueTokens(node.params.fixedPositions)}
+      <label class="wide">
         Family
         <select
           {disabled}
@@ -429,17 +520,6 @@
           <option value="solublempnn">SolubleMPNN</option>
           <option value="proteinmpnn">ProteinMPNN (vanilla)</option>
           <option value="ca">ProteinMPNN (Cα-only)</option>
-        </select>
-      </label>
-      <label>
-        Checkpoint
-        <select
-          {disabled}
-          value={String(node.params.modelName ?? 'v_48_020')}
-          onchange={(e) => setParam('modelName', e.currentTarget.value)}
-        >
-          <option value="v_48_020">v_48_020 (default)</option>
-          <option value="v_48_010">v_48_010</option>
         </select>
       </label>
       <label>
@@ -465,26 +545,63 @@
           oninput={(e) => setNumParam('temperature', e.currentTarget.value)}
         />
       </label>
-      <label>
-        Seed
-        <input
-          type="number"
-          min="0"
-          {disabled}
-          value={Number(node.params.seed ?? 42)}
-          oninput={(e) => setNumParam('seed', e.currentTarget.value)}
-        />
-      </label>
-      <label class="wide">
-        Fixed positions (click residues in Mol* or type e.g. A10,A12-15)
-        <input
-          type="text"
-          {disabled}
-          placeholder="e.g. A5,A10-14"
-          value={String(node.params.fixedPositions ?? '')}
-          oninput={(e) => setParam('fixedPositions', e.currentTarget.value)}
-        />
-      </label>
+
+      <div class="chip-field full">
+        <label>
+          Fixed positions (click residues in Mol* or type e.g. A10, A12-15)
+          <input
+            type="text"
+            {disabled}
+            placeholder="e.g. A5, A10-14"
+            value={String(node.params.fixedPositions ?? '')}
+            oninput={(e) => setParam('fixedPositions', e.currentTarget.value)}
+          />
+        </label>
+        {#if fixedTokens.length > 0}
+          <div class="res-chips">
+            {#each fixedTokens as tok, i (`fix_${tok}_${i}`)}
+              <span class="res-chip">
+                {tok}
+                <button
+                  type="button"
+                  class="chip-x"
+                  {disabled}
+                  aria-label={`Remove fixed position ${tok}`}
+                  onclick={() => removeResidueTokenAt('fixedPositions', i)}
+                >×</button>
+              </span>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+      <details class="adv-details full">
+        <summary>Advanced parameters</summary>
+        <div class="adv-fields">
+          <label class="wide">
+            Checkpoint
+            <select
+              {disabled}
+              value={String(node.params.modelName ?? 'v_48_020')}
+              onchange={(e) => setParam('modelName', e.currentTarget.value)}
+            >
+              <option value="v_48_020">v_48_020 (default)</option>
+              <option value="v_48_010">v_48_010</option>
+            </select>
+          </label>
+          <label>
+            Seed
+            <input
+              type="number"
+              min="0"
+              {disabled}
+              value={Number(node.params.seed ?? 42)}
+              oninput={(e) => setNumParam('seed', e.currentTarget.value)}
+            />
+          </label>
+        </div>
+      </details>
+
     {:else if node.adapterId === 'localfold-af2'}
       <label>
         Recycles
@@ -508,19 +625,26 @@
           oninput={(e) => setNumParam('maxSequences', e.currentTarget.value)}
         />
       </label>
-      <label>
-        Seed
-        <input
-          type="number"
-          min="0"
-          {disabled}
-          value={Number(node.params.seed ?? 0)}
-          oninput={(e) => setNumParam('seed', e.currentTarget.value)}
-        />
-      </label>
+
+      <details class="adv-details full">
+        <summary>Advanced parameters</summary>
+        <div class="adv-fields">
+          <label>
+            Seed
+            <input
+              type="number"
+              min="0"
+              {disabled}
+              value={Number(node.params.seed ?? 0)}
+              oninput={(e) => setNumParam('seed', e.currentTarget.value)}
+            />
+          </label>
+        </div>
+      </details>
+
     {:else if node.adapterId === 'designability-scorer'}
       <label>
-        scRMSD pass (&lt; Å)
+        scRMSD &lt; Å
         <input
           type="number"
           min="0.5"
@@ -532,7 +656,7 @@
         />
       </label>
       <label>
-        pLDDT pass (&ge;)
+        pLDDT &ge;
         <input
           type="number"
           min="30"
@@ -546,8 +670,19 @@
     {/if}
   </div>
 
-  {#if manifest?.licenseNote}
-    <div class="license">{manifest.licenseNote}</div>
+  {#if manifest}
+    <footer class="info-footer">
+      <p class="desc">{manifest.description}</p>
+      <div class="foot-meta">
+        <span>{manifest.runtime}</span>
+        {#if manifest.approxWeightsMB > 0}
+          <span>· ~{manifest.approxWeightsMB} MB</span>
+        {/if}
+        {#if manifest.licenseNote}
+          <span>· {manifest.licenseNote}</span>
+        {/if}
+      </div>
+    </footer>
   {/if}
 </div>
 
@@ -561,40 +696,56 @@
     flex-direction: column;
     gap: 12px;
   }
+  .inspector.embedded {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 12px 14px 14px;
+  }
   .head {
     display: flex;
     justify-content: space-between;
-    align-items: flex-start;
-    gap: 12px;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .stage-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
   }
   h3 {
-    margin: 0 0 4px;
-    font-size: 14px;
+    margin: 0;
+    font-size: 13.5px;
     font-weight: 600;
     color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .desc {
-    margin: 0;
-    font-size: 12px;
-    color: var(--text-muted);
-    line-height: 1.45;
-  }
-  .meta {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    flex-shrink: 0;
+  .sub-kind {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    color: var(--text-dim);
   }
   .run-here-btn {
     background: var(--bg-surface-2);
     color: var(--accent-bright);
     border: 1px solid var(--border-strong);
     border-radius: 5px;
-    padding: 3px 9px;
+    padding: 4px 10px;
     font-size: 11px;
     font-weight: 600;
     cursor: pointer;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
+    flex-shrink: 0;
   }
   .run-here-btn:hover:not(:disabled) {
     background: var(--bg-surface-hover);
@@ -604,19 +755,10 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-  .pill {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10px;
-    color: var(--accent-soft);
-    background: var(--bg-pill);
-    border: 1px solid var(--border-strong);
-    padding: 2px 7px;
-    border-radius: 999px;
-  }
   .fields {
     display: flex;
     flex-wrap: wrap;
-    gap: 10px 14px;
+    gap: 10px 12px;
     align-items: flex-end;
   }
   label {
@@ -627,11 +769,10 @@
     color: var(--text-muted);
   }
   label.wide {
-    min-width: 240px;
+    min-width: 180px;
     flex: 1;
   }
-  label.full,
-  details.full {
+  .full {
     width: 100%;
   }
   label.inline-check {
@@ -639,12 +780,69 @@
     align-items: center;
     gap: 6px;
     padding-bottom: 6px;
+    cursor: pointer;
   }
-  details summary {
+  .chip-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .res-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .res-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    color: var(--accent-soft);
+    background: var(--bg-pill);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 2px 6px 2px 8px;
+  }
+  .chip-x {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 0 2px;
+    border-radius: 50%;
+  }
+  .chip-x:hover:not(:disabled) {
+    color: var(--err-strong);
+  }
+  .chip-x:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .adv-details {
+    border-top: 1px solid var(--border-subtle);
+    padding-top: 8px;
+    margin-top: 2px;
+  }
+  .adv-details summary {
     cursor: pointer;
     font-size: 11px;
-    color: var(--accent-soft);
-    margin-bottom: 6px;
+    font-weight: 500;
+    color: var(--text-muted);
+    user-select: none;
+    padding: 2px 0;
+  }
+  .adv-details summary:hover {
+    color: var(--text-primary);
+  }
+  .adv-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 12px;
+    align-items: flex-end;
+    margin-top: 10px;
   }
   input[type='number'],
   input[type='text'],
@@ -659,17 +857,38 @@
     font-size: 12px;
   }
   input[type='number'] {
-    width: 84px;
+    width: 82px;
   }
   textarea {
     width: 100%;
     box-sizing: border-box;
     resize: vertical;
   }
-  .license {
+  code {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+  }
+  .info-footer {
+    margin-top: 4px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .desc {
+    margin: 0;
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.45;
+  }
+  .foot-meta {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10px;
     color: var(--text-dim);
-    border-top: 1px solid var(--border-subtle);
-    padding-top: 8px;
+    opacity: 0.85;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
   }
 </style>

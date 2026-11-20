@@ -21,6 +21,7 @@
     scRmsdThreshold: number;
     plddtThreshold: number;
     isRunning: boolean;
+    embedded?: boolean;
     hasScorerResult?: boolean;
     onSelectSlot: (slotId: string) => void;
     onSelectRow: (idx: number) => void;
@@ -40,6 +41,7 @@
     scRmsdThreshold,
     plddtThreshold,
     isRunning,
+    embedded = false,
     hasScorerResult = false,
     onSelectSlot,
     onSelectRow,
@@ -104,7 +106,7 @@
   }
 </script>
 
-<div class="panel">
+<div class="panel" class:embedded>
   <div class="panel-head">
     <div class="head-left">
       <span class="section-title">
@@ -483,7 +485,7 @@
           </button>
         {/if}
       {:else}
-        Wire any blocks on the canvas (or pick a preset above) and click <b>▶ Run Canvas</b>.
+        Wire any blocks on the canvas (or pick a preset above) and click <b>▶ Run</b>.
       {/if}
       <div class="hint-foot">
         Click any block, port label, or colored wire to peek at intermediate structures, sequences, folds, or conditioning specs.
@@ -501,6 +503,12 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+  .panel.embedded {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 12px 14px 14px;
   }
   .panel-head {
     display: flex;

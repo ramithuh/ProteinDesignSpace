@@ -36,12 +36,19 @@
   const scheduler = new ExecutionScheduler();
 
   let activeTab = $state<'workbench' | 'campaign'>('workbench');
+  let rightPanelTab = $state<'params' | 'peek'>('params');
   let theme = $state<'dark' | 'light'>('dark');
   let webgpuSupported = $state<boolean | null>(null);
   let webgpuDetail = $state<string>('checking…');
   let webMcpReady = $state(false);
   let activeGpuWorker = $state<string | null>(null);
   let cacheUsedMB = $state<number>(0);
+
+  // Header popovers
+  let sysMenuOpen = $state(false);
+  let moreMenuOpen = $state(false);
+  let sysWrapEl: HTMLDivElement | null = $state(null);
+  let moreWrapEl: HTMLDivElement | null = $state(null);
 
   // Active workflow state
   let selectedPresetId = $state(WORKFLOW_PRESETS[0].id);
@@ -50,6 +57,7 @@
   let isRunning = $state(false);
   let showRecipe = $state(false);
   let shareToast = $state<string | null>(null);
+  let shareToastTimer: ReturnType<typeof setTimeout> | null = null;
   let runError = $state<string | null>(null);
   let totalElapsedMs = $state<number | null>(null);
 
@@ -66,10 +74,19 @@
   let showTrajectory = $state(false);
   let illustrative = $state(false);
   let trajFrame = $state(0);
+  let molPickMode = $state<'auto' | 'off' | 'hotspots' | 'motif' | 'mpnn'>('auto');
   let lastPickedResidue = $state<string | null>(null);
 
   // Campaign Inspector state (BindClaw-style multi-round log)
   let campaign = $state<CampaignState>(structuredClone(SAMPLE_CAMPAIGN));
+
+  function showToastMessage(msg: string, ms = 3200) {
+    shareToast = msg;
+    if (shareToastTimer) clearTimeout(shareToastTimer);
+    shareToastTimer = setTimeout(() => {
+      shareToast = null;
+    }, ms);
+  }
 
   function applyTheme(next: 'dark' | 'light') {
     theme = next;
@@ -85,6 +102,24 @@
 
   function toggleTheme() {
     applyTheme(theme === 'dark' ? 'light' : 'dark');
+  }
+
+  function handleWindowPointerDown(ev: PointerEvent) {
+    const target = ev.target as Node | null;
+    if (!target) return;
+    if (sysMenuOpen && !sysWrapEl?.contains(target)) {
+      sysMenuOpen = false;
+    }
+    if (moreMenuOpen && !moreWrapEl?.contains(target)) {
+      moreMenuOpen = false;
+    }
+  }
+
+  function handleWindowKeydown(ev: KeyboardEvent) {
+    if (ev.key === 'Escape') {
+      sysMenuOpen = false;
+      moreMenuOpen = false;
+    }
   }
 
   onMount(async () => {
@@ -136,8 +171,7 @@
           graph = decoded;
           selectedPresetId = decoded.id;
           selectedNodeId = decoded.nodes[0]?.id ?? '';
-          shareToast = 'Loaded shared workflow from URL';
-          setTimeout(() => (shareToast = null), 3000);
+          showToastMessage('Loaded shared workflow from URL', 3000);
         }
       } catch {
         /* ignore malformed hash */
@@ -148,6 +182,7 @@
   });
 
   onDestroy(() => {
+    if (shareToastTimer) clearTimeout(shareToastTimer);
     void scheduler.releaseActiveGpu();
   });
 
@@ -171,6 +206,7 @@
     selectedNodeId = graph.nodes[0]?.id ?? '';
     selectedPeekSlotId = null;
     selectedEdgeId = null;
+    rightPanelTab = 'params';
     nodeStates = {};
     outputsByNode = {};
     runError = null;
@@ -178,18 +214,36 @@
     selectedRowIdx = 0;
     selectedFoldIdx = 0;
     showTrajectory = false;
+    lastPickedResidue = null;
   }
 
   function handleSelectNode(nodeId: string) {
     selectedNodeId = nodeId;
     selectedPeekSlotId = null;
     selectedEdgeId = null;
+    const clicked = graph.nodes.find((n) => n.id === nodeId);
+    const hasOutputs = Boolean(
+      nodeId && outputsByNode[nodeId] && Object.keys(outputsByNode[nodeId]).length > 0,
+    );
+    if (clicked?.adapterId === 'designability-scorer' && hasOutputs) {
+      rightPanelTab = 'peek';
+    } else {
+      rightPanelTab = 'params';
+    }
+  }
+
+  function handleBlockAdded(nodeId: string) {
+    selectedNodeId = nodeId;
+    selectedPeekSlotId = null;
+    selectedEdgeId = null;
+    rightPanelTab = 'params';
   }
 
   function handleSelectEdge(edge: WorkflowEdge) {
     selectedNodeId = edge.toNode;
     selectedPeekSlotId = `in:${edge.toPort}`;
     selectedEdgeId = makeEdgeId(edge.fromNode, edge.fromPort, edge.toNode, edge.toPort);
+    rightPanelTab = 'peek';
   }
 
   function handlePeekPort(nodeId: string, direction: 'in' | 'out', portName: string) {
@@ -201,6 +255,7 @@
     } else {
       selectedEdgeId = null;
     }
+    rightPanelTab = 'peek';
   }
 
   function handleSelectPeekSlot(slotId: string) {
@@ -251,6 +306,7 @@
 
   async function runWorkflow(bypassCache = false, upToNodeId?: string) {
     if (isRunning) return;
+    moreMenuOpen = false;
     const plainGraph = $state.snapshot(graph) as WorkflowGraph;
     const targetGraph = upToNodeId ? extractSubgraphUpTo(plainGraph, upToNodeId) : plainGraph;
     const errs = validateGraph(targetGraph);
@@ -297,9 +353,17 @@
         // Auto-focus a scorer or fold node if present so results appear immediately
         const lastScorer = [...graph.nodes].reverse().find((n) => n.adapterId === 'designability-scorer');
         const lastFold = [...graph.nodes].reverse().find((n) => n.adapterId === 'localfold-af2');
-        if (lastScorer) handleSelectNode(lastScorer.id);
-        else if (lastFold) handleSelectNode(lastFold.id);
+        if (lastScorer) {
+          selectedNodeId = lastScorer.id;
+          selectedPeekSlotId = null;
+          selectedEdgeId = null;
+        } else if (lastFold) {
+          selectedNodeId = lastFold.id;
+          selectedPeekSlotId = null;
+          selectedEdgeId = null;
+        }
       }
+      rightPanelTab = 'peek';
 
       await refreshCacheStats();
     } catch (err) {
@@ -326,22 +390,25 @@
   }
 
   async function copyQuickShareLink() {
+    moreMenuOpen = false;
     try {
       const plain = $state.snapshot(graph) as WorkflowGraph;
       const { hash, mode, strippedPdb } = await encodeGraphToHash(plain);
       const url = `${window.location.origin}${window.location.pathname}${hash}`;
       window.history.replaceState(null, '', hash);
       await navigator.clipboard.writeText(url);
-      shareToast = strippedPdb
-        ? `Copied ${url.length}-char link (${mode}; large PDB omitted)`
-        : `Copied ${url.length}-char link (${mode})`;
-      setTimeout(() => (shareToast = null), 3200);
+      showToastMessage(
+        strippedPdb
+          ? `Copied ${url.length}-char link (${mode}; large PDB omitted)`
+          : `Copied ${url.length}-char link (${mode})`,
+      );
     } catch (err) {
       runError = err instanceof Error ? err.message : String(err);
     }
   }
 
   function exportWorkflowJson() {
+    moreMenuOpen = false;
     const plain = $state.snapshot(graph);
     const blob = new Blob([JSON.stringify(plain, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -350,6 +417,33 @@
     a.download = `${graph.id}.denovo.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function importGraphJson(ev: Event) {
+    const input = ev.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    moreMenuOpen = false;
+    if (!file || isRunning) {
+      input.value = '';
+      return;
+    }
+    try {
+      const parsed = JSON.parse(await file.text()) as WorkflowGraph;
+      if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
+        runError = 'Invalid workflow JSON (expected nodes[] and edges[])';
+        return;
+      }
+      const laid = parsed.nodes.some((n) => !n.position) ? autoLayoutGraph(parsed) : parsed;
+      selectedPresetId = laid.id;
+      handleGraphChange(laid);
+      selectedNodeId = laid.nodes[0]?.id ?? '';
+      rightPanelTab = 'params';
+      showToastMessage(`Imported ${file.name}`);
+    } catch {
+      runError = 'Failed to parse workflow JSON';
+    } finally {
+      input.value = '';
+    }
   }
 
   function downloadText(text: string, filename: string) {
@@ -362,40 +456,93 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  function appendToken(prevRaw: unknown, tag: string): string | null {
+    const prev = String(prevRaw ?? '').trim();
+    const parts = prev ? prev.split(/[,\s]+/).filter(Boolean) : [];
+    if (parts.includes(tag)) return null;
+    parts.push(tag);
+    return parts.join(', ');
+  }
+
   function handleResidueClick(info: { chain: string; seqId: number; compId: string }) {
     const tag = `${info.chain}${info.seqId}`;
-    lastPickedResidue = `${tag} (${info.compId})`;
+    const baseLabel = `${tag} (${info.compId})`;
 
-    // If an RFD4 Condition block is selected, paint into its active brush field (hotspots or motifSpan)
-    if (selectedNode?.adapterId === 'rfd4-conditioner') {
-      const brush = String(selectedNode.params.paintBrush ?? 'hotspots');
-      const key = brush === 'motifSpan' ? 'motifSpan' : 'hotspots';
-      const prev = String(selectedNode.params[key] ?? '').trim();
-      const parts = prev ? prev.split(/[,\s]+/).filter(Boolean) : [];
-      if (!parts.includes(tag)) {
-        parts.push(tag);
-        updateNodeParams(selectedNode.id, {
-          ...selectedNode.params,
-          taskPreset: 'custom',
-          [key]: parts.join(', '),
-        });
-      }
+    if (molPickMode === 'off') {
+      lastPickedResidue = baseLabel;
       return;
     }
 
-    const mpnnNode =
+    const condTarget =
+      (selectedNode?.adapterId === 'rfd4-conditioner' ? selectedNode : null) ??
+      graph.nodes.find((n) => n.adapterId === 'rfd4-conditioner') ??
+      null;
+    const mpnnTarget =
       (selectedNode?.adapterId === 'web-protein-mpnn' ? selectedNode : null) ??
-      graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn');
-    if (!mpnnNode) return;
-    const prev = String(mpnnNode.params.fixedPositions ?? '').trim();
-    const parts = prev ? prev.split(/[,\s]+/).filter(Boolean) : [];
-    if (!parts.includes(tag)) {
-      parts.push(tag);
-      updateNodeParams(mpnnNode.id, { ...mpnnNode.params, fixedPositions: parts.join(', ') });
+      graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn') ??
+      null;
+
+    if (molPickMode === 'hotspots' || molPickMode === 'motif') {
+      if (!condTarget) {
+        lastPickedResidue = baseLabel;
+        return;
+      }
+      const key = molPickMode === 'motif' ? 'motifSpan' : 'hotspots';
+      const updated = appendToken(condTarget.params[key], tag);
+      if (updated !== null) {
+        updateNodeParams(condTarget.id, {
+          ...condTarget.params,
+          taskPreset: 'custom',
+          [key]: updated,
+        });
+      }
+      lastPickedResidue = `${baseLabel} → ${molPickMode === 'motif' ? 'Motif' : 'Hotspots'}`;
+      return;
     }
+
+    if (molPickMode === 'mpnn') {
+      if (!mpnnTarget) {
+        lastPickedResidue = baseLabel;
+        return;
+      }
+      const updated = appendToken(mpnnTarget.params.fixedPositions, tag);
+      if (updated !== null) {
+        updateNodeParams(mpnnTarget.id, { ...mpnnTarget.params, fixedPositions: updated });
+      }
+      lastPickedResidue = `${baseLabel} → Fix MPNN`;
+      return;
+    }
+
+    // Auto mode: target the selected conditioner or MPNN block explicitly (never silently mutate an unrelated block)
+    if (selectedNode?.adapterId === 'rfd4-conditioner') {
+      const brush = String(selectedNode.params.paintBrush ?? 'hotspots');
+      const key = brush === 'motifSpan' ? 'motifSpan' : 'hotspots';
+      const updated = appendToken(selectedNode.params[key], tag);
+      if (updated !== null) {
+        updateNodeParams(selectedNode.id, {
+          ...selectedNode.params,
+          taskPreset: 'custom',
+          [key]: updated,
+        });
+      }
+      lastPickedResidue = `${baseLabel} → ${key === 'motifSpan' ? 'Motif' : 'Hotspots'}`;
+      return;
+    }
+
+    if (selectedNode?.adapterId === 'web-protein-mpnn') {
+      const updated = appendToken(selectedNode.params.fixedPositions, tag);
+      if (updated !== null) {
+        updateNodeParams(selectedNode.id, { ...selectedNode.params, fixedPositions: updated });
+      }
+      lastPickedResidue = `${baseLabel} → Fix MPNN`;
+      return;
+    }
+
+    lastPickedResidue = baseLabel;
   }
 
   function recordRunToCampaign() {
+    moreMenuOpen = false;
     if (!metricsArtifact) return;
     const nextRoundNum = (campaign.rounds.at(-1)?.round ?? 0) + 1;
     const genNode =
@@ -435,12 +582,27 @@
     activeTab = 'campaign';
   }
 
+  // Preset & pick-target helpers
+  let activePreset = $derived(WORKFLOW_PRESETS.find((p) => p.id === selectedPresetId) ?? null);
+  let hasConditionerNode = $derived(graph.nodes.some((n) => n.adapterId === 'rfd4-conditioner'));
+  let hasMpnnNode = $derived(graph.nodes.some((n) => n.adapterId === 'web-protein-mpnn'));
+
+  $effect(() => {
+    if ((molPickMode === 'hotspots' || molPickMode === 'motif') && !hasConditionerNode) {
+      molPickMode = 'auto';
+    } else if (molPickMode === 'mpnn' && !hasMpnnNode) {
+      molPickMode = 'auto';
+    }
+  });
+
   // Node- and port-scoped intermediate peek state
   let selectedNode = $derived(graph.nodes.find((n) => n.id === selectedNodeId) ?? graph.nodes[0] ?? null);
 
   let peekSlots = $derived.by(() =>
     selectedNode ? getNodePeekSlots(graph, selectedNode.id, outputsByNode) : [],
   );
+
+  let hasPeekData = $derived(peekSlots.some((s) => s.artifact !== null));
 
   let resolvedPeekSlotId = $derived.by(() => {
     if (selectedPeekSlotId && peekSlots.some((s) => s.id === selectedPeekSlotId)) {
@@ -576,91 +738,210 @@
   });
 </script>
 
-<header class="topbar">
-  <div class="brand">
-    <h1><span class="accent">denovo</span>.run</h1>
-    <span class="tagline">model-agnostic WebGPU protein design canvas</span>
+<svelte:window onpointerdown={handleWindowPointerDown} onkeydown={handleWindowKeydown} />
+
+<!-- Single Compact Top Header Bar (~48px) -->
+<header class="app-header">
+  <div class="hdr-left">
+    <h1 class="brand-logo"><span class="accent">denovo</span>.run</h1>
+
+    <div class="seg-tabs" role="tablist" aria-label="Workspace view">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={activeTab === 'workbench'}
+        class:active={activeTab === 'workbench'}
+        onclick={() => (activeTab = 'workbench')}
+      >
+        Workbench
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={activeTab === 'campaign'}
+        class:active={activeTab === 'campaign'}
+        onclick={() => (activeTab = 'campaign')}
+      >
+        Campaign ({campaign.rounds.length})
+      </button>
+    </div>
+
+    {#if activeTab === 'workbench'}
+      <select
+        class="preset-select"
+        aria-label="Workflow preset"
+        disabled={isRunning}
+        value={selectedPresetId}
+        title={activePreset?.summary ?? graph.name}
+        onchange={(e) => selectPreset(e.currentTarget.value)}
+      >
+        {#if !activePreset}
+          <option value={selectedPresetId}>Custom: {graph.name}</option>
+        {/if}
+        {#each WORKFLOW_PRESETS as p (p.id)}
+          <option value={p.id} title={p.summary}>{p.name} — {p.badge}</option>
+        {/each}
+      </select>
+    {/if}
   </div>
-  <div class="sys-pills">
-    <span class="chip" class:ok={webgpuSupported} class:bad={webgpuSupported === false}>
-      WebGPU: {webgpuDetail}
-    </span>
-    {#if activeGpuWorker}
-      <button class="chip gpu" disabled={isRunning} onclick={freeVram} title="Dispose & terminate active WebGPU worker">
-        GPU: {activeGpuWorker} · free VRAM ×
+
+  <div class="hdr-right">
+    <!-- System Status Pill & Popover -->
+    <div class="pop-wrap" bind:this={sysWrapEl}>
+      <button
+        type="button"
+        class="hdr-pill"
+        class:ok={webgpuSupported && !activeGpuWorker}
+        class:bad={webgpuSupported === false}
+        class:gpu={Boolean(activeGpuWorker)}
+        aria-expanded={sysMenuOpen}
+        onclick={() => {
+          moreMenuOpen = false;
+          sysMenuOpen = !sysMenuOpen;
+        }}
+        title="WebGPU status, VRAM & weight cache"
+      >
+        <span class="status-dot"></span>
+        {activeGpuWorker ? `GPU: ${activeGpuWorker}` : 'WebGPU'}
+      </button>
+
+      {#if sysMenuOpen}
+        <div class="hdr-popover sys-pop" role="dialog" aria-label="System & WebGPU status">
+          <div class="pop-row">
+            <span class="pop-k">WebGPU</span>
+            <span class="pop-v" class:ok-t={webgpuSupported} class:bad-t={webgpuSupported === false}>
+              {webgpuDetail}
+            </span>
+          </div>
+          {#if webMcpReady}
+            <div class="pop-row">
+              <span class="pop-k">Agent API</span>
+              <span class="badge-ok">WebMCP active</span>
+            </div>
+          {/if}
+          {#if activeGpuWorker}
+            <div class="pop-row">
+              <span class="pop-k">Active worker</span>
+              <button
+                type="button"
+                class="pop-action"
+                disabled={isRunning}
+                onclick={freeVram}
+              >
+                Free VRAM ({activeGpuWorker})
+              </button>
+            </div>
+          {/if}
+          <div class="pop-row">
+            <span class="pop-k">Cache: {cacheUsedMB.toFixed(0)} MB</span>
+            <button
+              type="button"
+              class="pop-action danger"
+              disabled={isRunning}
+              onclick={handleClearCache}
+              title="Clear OPFS & CacheStorage weight caches"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      {/if}
+    </div>
+
+    <!-- Theme Toggle -->
+    <button
+      type="button"
+      class="hdr-icon-btn"
+      onclick={toggleTheme}
+      title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+      aria-label="Toggle color theme"
+    >
+      {theme === 'dark' ? '☀' : '☾'}
+    </button>
+
+    {#if activeTab === 'workbench'}
+      <!-- Overflow ⋯ Menu Popover -->
+      <div class="pop-wrap" bind:this={moreWrapEl}>
+        <button
+          type="button"
+          class="hdr-icon-btn"
+          class:active={moreMenuOpen}
+          aria-expanded={moreMenuOpen}
+          aria-label="Workflow actions menu"
+          title="Recipe, Share, Import/Export & Run options"
+          onclick={() => {
+            sysMenuOpen = false;
+            moreMenuOpen = !moreMenuOpen;
+          }}
+        >
+          ⋯
+        </button>
+
+        {#if moreMenuOpen}
+          <div class="hdr-popover menu-pop" role="menu">
+            <button
+              type="button"
+              class="menu-item"
+              role="menuitem"
+              onclick={() => {
+                showRecipe = !showRecipe;
+                moreMenuOpen = false;
+              }}
+            >
+              <span>{showRecipe ? 'Hide Recipe' : '</> Recipe'}</span>
+            </button>
+            <button type="button" class="menu-item" role="menuitem" onclick={copyQuickShareLink}>
+              <span>🔗 Share Link</span>
+            </button>
+            <button type="button" class="menu-item" role="menuitem" onclick={exportWorkflowJson}>
+              <span>Export JSON</span>
+            </button>
+            <label class="menu-item" class:disabled={isRunning}>
+              <span>Import JSON</span>
+              <input
+                type="file"
+                accept=".json"
+                hidden
+                disabled={isRunning}
+                onchange={importGraphJson}
+              />
+            </label>
+            {#if metricsArtifact}
+              <div class="menu-sep"></div>
+              <button type="button" class="menu-item accent" role="menuitem" onclick={recordRunToCampaign}>
+                <span>+ Save to Campaign</span>
+              </button>
+            {/if}
+            <div class="menu-sep"></div>
+            <button
+              type="button"
+              class="menu-item"
+              role="menuitem"
+              disabled={isRunning || validationErrors.length > 0}
+              onclick={() => runWorkflow(true)}
+            >
+              <span>Re-run Fresh</span>
+            </button>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Primary Run CTA -->
+      <button
+        type="button"
+        class="btn-primary"
+        disabled={isRunning || validationErrors.length > 0}
+        onclick={() => runWorkflow(false)}
+      >
+        {isRunning ? 'Running…' : '▶ Run'}
       </button>
     {/if}
-    {#if webMcpReady}
-      <span class="chip ok">WebMCP active</span>
-    {/if}
-    <button class="chip" disabled={isRunning} onclick={handleClearCache} title="Clear OPFS & CacheStorage weight caches">
-      Cache: {cacheUsedMB.toFixed(0)} MB · clear
-    </button>
-    <button class="chip theme-btn" onclick={toggleTheme} title="Switch light / dark theme">
-      {theme === 'dark' ? '☀ Light' : '☾ Dark'}
-    </button>
   </div>
 </header>
 
-<nav class="tabs">
-  <button class:active={activeTab === 'workbench'} onclick={() => (activeTab = 'workbench')}>
-    Node Canvas &amp; Workbench
-  </button>
-  <button class:active={activeTab === 'campaign'} onclick={() => (activeTab = 'campaign')}>
-    Campaign Inspector (BindClaw-style · {campaign.rounds.length} rounds)
-  </button>
-</nav>
-
 {#if activeTab === 'workbench'}
-  <!-- Compact Preset Strip -->
-  <section class="presets">
-    {#each WORKFLOW_PRESETS as p (p.id)}
-      <button
-        class="preset-card"
-        class:selected={p.id === selectedPresetId}
-        disabled={isRunning}
-        onclick={() => selectPreset(p.id)}
-      >
-        <div class="p-top">
-          <span class="p-name">{p.name}</span>
-          <span class="p-badge">{p.badge}</span>
-        </div>
-      </button>
-    {/each}
-  </section>
-
-  <!-- Interactive Node-Graph Canvas + Run Bar -->
+  <!-- Full-Width Interactive Node-Graph Canvas -->
   <section class="flow-panel">
-    <div class="flow-head">
-      <div>
-        <span class="section-title">WORKFLOW CANVAS</span>
-        <span class="flow-sub">drag blocks · connect colored ports · click any block, port, or wire to peek intermediate data</span>
-      </div>
-      <div class="flow-actions">
-        {#if shareToast}
-          <span class="share-toast">{shareToast}</span>
-        {/if}
-        <button class="btn-secondary" onclick={() => (showRecipe = !showRecipe)}>
-          {showRecipe ? 'Hide Recipe' : '</> Recipe'}
-        </button>
-        <button class="btn-secondary" onclick={copyQuickShareLink}>🔗 Share Link</button>
-        <button class="btn-secondary" onclick={exportWorkflowJson}>Export JSON</button>
-        {#if metricsArtifact}
-          <button class="btn-secondary" onclick={recordRunToCampaign}>+ Save to Campaign</button>
-        {/if}
-        <button class="btn-secondary" disabled={isRunning} onclick={() => runWorkflow(true)}>
-          Re-run Fresh
-        </button>
-        <button
-          class="btn-primary"
-          disabled={isRunning || validationErrors.length > 0}
-          onclick={() => runWorkflow(false)}
-        >
-          {isRunning ? 'Running on WebGPU…' : '▶ Run Canvas'}
-        </button>
-      </div>
-    </div>
-
     <SvelteFlowProvider>
       <WorkflowCanvas
         {graph}
@@ -672,10 +953,15 @@
         disabled={isRunning}
         onGraphChange={handleGraphChange}
         onSelectNode={handleSelectNode}
+        onBlockAdded={handleBlockAdded}
         onSelectEdge={handleSelectEdge}
         onPeekPort={handlePeekPort}
       />
     </SvelteFlowProvider>
+
+    {#if shareToast}
+      <div class="share-toast">{shareToast}</div>
+    {/if}
 
     {#if showRecipe}
       <RecipeDrawer {graph} disabled={isRunning} onApplyGraph={handleGraphChange} />
@@ -692,18 +978,9 @@
         <b>Pipeline error:</b> {runError}
       </div>
     {/if}
-
-    {#if selectedNode}
-      <NodeInspector
-        node={selectedNode}
-        disabled={isRunning}
-        onUpdate={updateNodeParams}
-        onRunUpTo={(id) => runWorkflow(false, id)}
-      />
-    {/if}
   </section>
 
-  <!-- Live Results & Intermediate Peek: Mol* Viewport + Modality Inspector -->
+  <!-- Side-by-Side Bottom Workspace: Mol* (Left) + Unified Tabbed Inspector (Right) -->
   <section class="results-grid">
     <div class="viewer-col">
       <div class="viewer-bar">
@@ -723,6 +1000,24 @@
             <code class="mono">{trajFrame + 1}/{viewerStructureMeta.trajectoryFrameCount}</code>
           {/if}
         {/if}
+
+        {#if hasConditionerNode || hasMpnnNode}
+          <label class="pick-mode" title="Choose what clicking a 3D residue in Mol* modifies">
+            Pick:
+            <select class="pick-select" bind:value={molPickMode}>
+              <option value="auto">Auto</option>
+              <option value="off">Off</option>
+              {#if hasConditionerNode}
+                <option value="hotspots">Hotspots</option>
+                <option value="motif">Motif</option>
+              {/if}
+              {#if hasMpnnNode}
+                <option value="mpnn">Fix MPNN</option>
+              {/if}
+            </select>
+          </label>
+        {/if}
+
         {#if lastPickedResidue}
           <span class="picked">Clicked: <code>{lastPickedResidue}</code></span>
         {/if}
@@ -738,7 +1033,7 @@
         {showTrajectory}
         {illustrative}
         {theme}
-        height={440}
+        height={460}
         label={viewerLabel}
         onResidueClick={handleResidueClick}
       />
@@ -757,27 +1052,82 @@
       {/if}
     </div>
 
-    <div class="metrics-col">
-      <ArtifactPeekPanel
-        node={selectedNode}
-        slots={peekSlots}
-        activeSlot={activePeekSlot}
-        {contextStructure}
-        {selectedRowIdx}
-        {selectedFoldIdx}
-        {scRmsdThreshold}
-        {plddtThreshold}
-        {isRunning}
-        hasScorerResult={Boolean(latestScorerHit && latestScorerHit.nodeId !== selectedNode?.id)}
-        onSelectSlot={handleSelectPeekSlot}
-        onSelectRow={(idx) => (selectedRowIdx = idx)}
-        onSelectFold={(idx) => (selectedFoldIdx = idx)}
-        onRunUpToNode={(id) => runWorkflow(false, id)}
-        onJumpToScorer={() => {
-          if (latestScorerHit) handleSelectNode(latestScorerHit.nodeId);
-        }}
-        onDownloadText={downloadText}
-      />
+    <div class="right-panel">
+      <div class="right-tabs" role="tablist" aria-label="Block inspector tabs">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={rightPanelTab === 'params'}
+          class="r-tab"
+          class:active={rightPanelTab === 'params'}
+          onclick={() => (rightPanelTab = 'params')}
+        >
+          Parameters
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={rightPanelTab === 'peek'}
+          class="r-tab"
+          class:active={rightPanelTab === 'peek'}
+          onclick={() => (rightPanelTab = 'peek')}
+        >
+          Peek
+          {#if hasPeekData}
+            <span class="live-dot" title="Outputs or inputs ready to inspect"></span>
+          {/if}
+        </button>
+        {#if selectedNode}
+          <span class="tab-node-ctx" title={selectedNode.label ?? selectedNode.adapterId}>
+            {selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
+          </span>
+        {/if}
+      </div>
+
+      <div class="right-body">
+        {#if rightPanelTab === 'params'}
+          {#if selectedNode}
+            <NodeInspector
+              node={selectedNode}
+              embedded
+              disabled={isRunning}
+              onUpdate={updateNodeParams}
+              onRunUpTo={(id) => runWorkflow(false, id)}
+            />
+          {:else}
+            <div class="empty-inspector">
+              Select a block on the canvas or click <b>+ Add Block</b> to configure parameters.
+            </div>
+          {/if}
+        {:else}
+          <ArtifactPeekPanel
+            node={selectedNode}
+            embedded
+            slots={peekSlots}
+            activeSlot={activePeekSlot}
+            {contextStructure}
+            {selectedRowIdx}
+            {selectedFoldIdx}
+            {scRmsdThreshold}
+            {plddtThreshold}
+            {isRunning}
+            hasScorerResult={Boolean(latestScorerHit && latestScorerHit.nodeId !== selectedNode?.id)}
+            onSelectSlot={handleSelectPeekSlot}
+            onSelectRow={(idx) => (selectedRowIdx = idx)}
+            onSelectFold={(idx) => (selectedFoldIdx = idx)}
+            onRunUpToNode={(id) => runWorkflow(false, id)}
+            onJumpToScorer={() => {
+              if (latestScorerHit) {
+                selectedNodeId = latestScorerHit.nodeId;
+                selectedPeekSlotId = null;
+                selectedEdgeId = null;
+                rightPanelTab = 'peek';
+              }
+            }}
+            onDownloadText={downloadText}
+          />
+        {/if}
+      </div>
     </div>
   </section>
 {:else}
@@ -785,196 +1135,281 @@
 {/if}
 
 <style>
-  .topbar {
+  .app-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 10px;
+    min-height: 46px;
+    padding: 4px 0 10px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--border);
     flex-wrap: wrap;
-    gap: 12px;
-    margin-bottom: 14px;
   }
-  .brand {
+  .hdr-left {
     display: flex;
-    align-items: baseline;
-    gap: 12px;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .hdr-right {
+    display: flex;
+    align-items: center;
+    gap: 7px;
     flex-wrap: wrap;
   }
-  h1 {
+  .brand-logo {
     margin: 0;
-    font-size: 24px;
+    font-size: 18px;
     font-weight: 700;
-    letter-spacing: -0.5px;
+    letter-spacing: -0.4px;
     color: var(--text-primary);
+    white-space: nowrap;
   }
   .accent {
     color: var(--accent-bright);
   }
-  .tagline {
+
+  .seg-tabs {
+    display: inline-flex;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 2px;
+    gap: 2px;
+  }
+  .seg-tabs button {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    padding: 4px 10px;
+    border-radius: 5px;
     font-size: 12px;
-    color: var(--text-dim);
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+    white-space: nowrap;
   }
-  .sys-pills {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
+  .seg-tabs button:hover {
+    color: var(--text-primary);
+  }
+  .seg-tabs button.active {
+    background: var(--bg-surface-selected);
+    color: var(--text-primary);
+    font-weight: 600;
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+
+  .preset-select {
+    background: var(--bg-surface);
+    color: var(--text-body);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-family: inherit;
+    max-width: 340px;
+    cursor: pointer;
+  }
+  .preset-select:hover:not(:disabled) {
+    border-color: var(--accent);
+  }
+  .preset-select:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .pop-wrap {
+    position: relative;
+  }
+  .hdr-pill {
+    display: inline-flex;
     align-items: center;
-  }
-  .chip {
+    gap: 6px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
     color: var(--text-muted);
     background: var(--bg-surface);
     border: 1px solid var(--border);
-    padding: 4px 9px;
+    padding: 5px 10px;
     border-radius: 999px;
-  }
-  button.chip {
     cursor: pointer;
+    white-space: nowrap;
   }
-  button.chip:hover:not(:disabled) {
+  .hdr-pill:hover {
     border-color: var(--border-strong);
     color: var(--text-primary);
   }
-  button.chip:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .chip.theme-btn {
-    color: var(--text-body);
-    font-weight: 500;
-  }
-  .chip.ok {
+  .hdr-pill.ok {
     color: var(--ok-text);
     border-color: var(--ok-border);
     background: var(--ok-bg);
   }
-  .chip.bad {
+  .hdr-pill.bad {
     color: var(--err-strong);
     border-color: var(--err-border);
     background: var(--err-bg);
   }
-  .chip.gpu {
+  .hdr-pill.gpu {
     color: var(--accent-soft);
     border-color: var(--accent);
     background: var(--bg-pill);
   }
-
-  .tabs {
-    display: flex;
-    gap: 6px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 14px;
-  }
-  .tabs button {
-    background: transparent;
-    border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--text-muted);
-    padding: 8px 14px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-  }
-  .tabs button.active {
-    color: var(--text-primary);
-    border-bottom-color: var(--accent);
-  }
-
-  .presets {
-    display: flex;
-    gap: 8px;
-    overflow-x: auto;
-    padding-bottom: 4px;
-    margin-bottom: 12px;
-  }
-  .preset-card {
-    text-align: left;
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    padding: 8px 11px;
-    cursor: pointer;
-    color: var(--text-body);
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
     flex-shrink: 0;
   }
-  .preset-card:hover:not(:disabled) {
-    border-color: var(--border-strong);
-  }
-  .preset-card.selected {
-    border-color: var(--accent);
-    background: var(--bg-surface-selected);
-  }
-  .preset-card:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .p-top {
-    display: flex;
+
+  .hdr-icon-btn {
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    width: 30px;
+    height: 30px;
+    display: inline-flex;
     align-items: center;
-    gap: 8px;
+    justify-content: center;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 0;
   }
-  .p-name {
-    font-size: 12px;
-    font-weight: 600;
-  }
-  .p-badge {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10px;
-    color: var(--accent-soft);
-    background: var(--bg-pill);
-    padding: 2px 6px;
-    border-radius: 4px;
-    white-space: nowrap;
+  .hdr-icon-btn:hover,
+  .hdr-icon-btn.active {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+    border-color: var(--accent);
   }
 
-  .flow-panel {
+  .hdr-popover {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 60;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35), var(--node-shadow);
+  }
+  .sys-pop {
+    width: 260px;
+    padding: 10px 12px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    margin-bottom: 18px;
+    gap: 8px;
+    font-size: 11.5px;
   }
-  .flow-head {
+  .pop-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    flex-wrap: wrap;
     gap: 10px;
   }
-  .section-title {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.8px;
+  .pop-k {
     color: var(--text-muted);
-  }
-  .flow-sub {
-    margin-left: 10px;
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-  .flow-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    align-items: center;
-  }
-  .share-toast {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
+  }
+  .pop-v {
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    text-align: right;
+  }
+  .pop-v.ok-t {
+    color: var(--ok-text);
+  }
+  .pop-v.bad-t {
+    color: var(--err-strong);
+  }
+  .badge-ok {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
     color: var(--ok-text);
     background: var(--ok-bg);
     border: 1px solid var(--ok-border);
-    padding: 4px 8px;
-    border-radius: 5px;
+    padding: 1px 7px;
+    border-radius: 999px;
   }
+  .pop-action {
+    background: var(--bg-surface-2);
+    color: var(--text-body);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    cursor: pointer;
+  }
+  .pop-action:hover:not(:disabled) {
+    background: var(--bg-surface-hover);
+    border-color: var(--accent);
+  }
+  .pop-action.danger:hover:not(:disabled) {
+    border-color: var(--err-border);
+    color: var(--err-strong);
+  }
+  .pop-action:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .menu-pop {
+    min-width: 178px;
+    padding: 5px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    box-sizing: border-box;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--text-body);
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .menu-item:hover:not(:disabled):not(.disabled) {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+  }
+  .menu-item.accent {
+    color: var(--accent-bright);
+    font-weight: 600;
+  }
+  .menu-item:disabled,
+  .menu-item.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .menu-sep {
+    height: 1px;
+    background: var(--border-subtle);
+    margin: 3px 4px;
+  }
+
   .btn-primary {
     background: #2563eb;
     color: #fff;
     border: 1px solid #3b82f6;
-    padding: 7px 16px;
+    padding: 6px 14px;
     border-radius: 6px;
-    font-size: 13px;
+    font-size: 12.5px;
     font-weight: 600;
     cursor: pointer;
+    white-space: nowrap;
   }
   .btn-primary:hover:not(:disabled) {
     background: #1d4ed8;
@@ -983,24 +1418,27 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-  .btn-secondary {
-    background: var(--bg-surface);
-    color: var(--text-secondary);
-    border: 1px solid var(--border-strong);
-    padding: 7px 12px;
-    border-radius: 6px;
-    font-size: 12px;
-    cursor: pointer;
-  }
-  .btn-secondary:hover:not(:disabled) {
-    background: var(--bg-surface-hover);
-  }
 
+  .flow-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .share-toast {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--ok-text);
+    background: var(--ok-bg);
+    border: 1px solid var(--ok-border);
+    padding: 6px 10px;
+    border-radius: 6px;
+  }
   .warn-banner {
     background: var(--warn-bg);
     border: 1px solid var(--warn-border);
     color: var(--warn-text);
-    padding: 8px 12px;
+    padding: 7px 12px;
     border-radius: 6px;
     font-size: 12px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1009,7 +1447,7 @@
     background: var(--err-bg);
     border: 1px solid var(--err-border);
     color: var(--err-text);
-    padding: 10px 14px;
+    padding: 8px 12px;
     border-radius: 6px;
     font-size: 12px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1019,7 +1457,7 @@
   .results-grid {
     display: grid;
     grid-template-columns: 1.25fr 1fr;
-    gap: 16px;
+    gap: 14px;
     align-items: start;
   }
   @media (max-width: 960px) {
@@ -1030,9 +1468,9 @@
   .viewer-bar {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 12px;
     flex-wrap: wrap;
-    margin-bottom: 8px;
+    margin-bottom: 6px;
     font-size: 12px;
     color: var(--text-muted);
   }
@@ -1042,9 +1480,26 @@
     gap: 5px;
     cursor: pointer;
   }
+  .pick-mode {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-secondary);
+    font-size: 11.5px;
+  }
+  .pick-select {
+    background: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 2px 6px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    cursor: pointer;
+  }
   .slider {
     flex: 1;
-    min-width: 120px;
+    min-width: 100px;
     accent-color: var(--accent);
   }
   .picked {
@@ -1055,9 +1510,9 @@
   .geom-strip {
     display: flex;
     flex-wrap: wrap;
-    gap: 12px 18px;
+    gap: 10px 16px;
     margin-top: 8px;
-    padding: 8px 12px;
+    padding: 7px 12px;
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -1067,6 +1522,76 @@
   }
   .geom-strip b {
     color: var(--text-primary);
+  }
+
+  /* Unified Tabbed Right Panel */
+  .right-panel {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .right-tabs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 10px 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-surface-2);
+  }
+  .r-tab {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    padding: 7px 12px 8px;
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+    margin-bottom: -1px;
+  }
+  .r-tab:hover {
+    color: var(--text-primary);
+  }
+  .r-tab.active {
+    color: var(--text-primary);
+    font-weight: 600;
+    border-bottom-color: var(--accent);
+  }
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ok-text);
+    box-shadow: 0 0 0 2px var(--ok-bg);
+  }
+  .tab-node-ctx {
+    margin-left: auto;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    color: var(--text-dim);
+    padding-bottom: 4px;
+    max-width: 180px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .right-body {
+    max-height: 520px;
+    overflow-y: auto;
+  }
+  .empty-inspector {
+    padding: 28px 16px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-dim);
   }
   code,
   .mono {

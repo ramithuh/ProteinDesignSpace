@@ -1,8 +1,8 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import {
     Background,
     Controls,
-    MiniMap,
     SvelteFlow,
     useSvelteFlow,
     type Connection,
@@ -16,9 +16,8 @@
   import { makeEdgeId } from '$lib/engine/peek';
   import {
     PORT_COLORS,
-    STAGE_COLORS,
     autoLayoutGraph,
-    defaultParamsForAdapter,
+    insertBlockSmart,
     validateConnection,
   } from '$lib/engine/graph-utils';
   import type {
@@ -26,9 +25,9 @@
     NodeProgressEvent,
     WorkflowEdge,
     WorkflowGraph,
-    WorkflowNode,
   } from '$lib/engine/types';
   import ProteinNode, { type ProteinNodeData } from './ProteinNode.svelte';
+  import BlockCatalogPopover from './BlockCatalogPopover.svelte';
 
   interface Props {
     graph: WorkflowGraph;
@@ -40,6 +39,7 @@
     disabled?: boolean;
     onGraphChange: (next: WorkflowGraph) => void;
     onSelectNode: (nodeId: string) => void;
+    onBlockAdded?: (nodeId: string) => void;
     onSelectEdge?: (edge: WorkflowEdge) => void;
     onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
   }
@@ -54,6 +54,7 @@
     disabled = false,
     onGraphChange,
     onSelectNode,
+    onBlockAdded = undefined,
     onSelectEdge = undefined,
     onPeekPort = undefined,
   }: Props = $props();
@@ -65,14 +66,65 @@
   let validationToast = $state<string | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let canvasEl: HTMLDivElement | null = $state(null);
-  let flowKey = $state(0);
-  let blockCounter = 0;
+  let addBtnEl: HTMLButtonElement | null = $state(null);
+  let wireBtnEl: HTMLButtonElement | null = $state(null);
+  let wirePopoverEl: HTMLDivElement | null = $state(null);
+  let catalogOpen = $state(false);
+  let wireLegendOpen = $state(false);
 
   let flowApi: ReturnType<typeof useSvelteFlow> | null = null;
   try {
     flowApi = useSvelteFlow();
   } catch {
     flowApi = null;
+  }
+
+  // Cleanup toast timer on destroy
+  $effect(() => {
+    return () => {
+      if (toastTimer) clearTimeout(toastTimer);
+    };
+  });
+
+  // Close wire legend on click-outside
+  $effect(() => {
+    if (!wireLegendOpen) return;
+    function handlePointerDown(ev: PointerEvent) {
+      const target = ev.target;
+      if (!(target instanceof globalThis.Node)) return;
+      if (wirePopoverEl?.contains(target) || wireBtnEl?.contains(target)) return;
+      wireLegendOpen = false;
+    }
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+    };
+  });
+
+  function isEditableElement(el: EventTarget | null): boolean {
+    if (!(el instanceof HTMLElement)) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  }
+
+  function handleWindowKeydown(ev: KeyboardEvent) {
+    if (ev.key === 'Escape') {
+      if (wireLegendOpen) {
+        wireLegendOpen = false;
+      }
+      if (catalogOpen) {
+        catalogOpen = false;
+      }
+      return;
+    }
+    if (disabled || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    if (isEditableElement(ev.target) || isEditableElement(document.activeElement)) return;
+
+    if (ev.key === '/' || (ev.shiftKey && (ev.key === 'A' || ev.key === 'a'))) {
+      ev.preventDefault();
+      wireLegendOpen = false;
+      catalogOpen = true;
+    }
   }
 
   function flashToast(msg: string) {
@@ -114,6 +166,7 @@
         data: {
           adapterId: n.adapterId,
           label: n.label ?? ADAPTER_REGISTRY[n.adapterId]?.shortName ?? n.adapterId,
+          params: n.params,
           state: nodeStates[n.id],
           outputs: outputsByNode[n.id],
           inputPortsReady,
@@ -223,29 +276,25 @@
 
   function addBlock(adapterId: string, dropPos?: { x: number; y: number }) {
     if (disabled) return;
-    const manifest = ADAPTER_REGISTRY[adapterId];
-    if (!manifest) return;
-    const count = graph.nodes.filter((n) => n.adapterId === adapterId).length;
-    const existingIds = new Set(graph.nodes.map((n) => n.id));
-    const prefix = adapterId.replace(/[^a-z0-9]/gi, '_');
-    let id = `${prefix}_${++blockCounter}`;
-    while (existingIds.has(id)) {
-      id = `${prefix}_${++blockCounter}`;
-    }
-    const maxX = graph.nodes.reduce((m, n) => Math.max(m, n.position?.x ?? 0), 0);
-    const pos = dropPos ?? {
-      x: graph.nodes.length === 0 ? 50 : Math.min(maxX + 60, 700),
-      y: 60 + (graph.nodes.length % 4) * 90,
-    };
-    const newNode: WorkflowNode = {
-      id,
+    if (!ADAPTER_REGISTRY[adapterId]) return;
+    const { graph: nextGraph, nodeId } = insertBlockSmart(
+      graph,
       adapterId,
-      label: count > 0 ? `${manifest.shortName} #${count + 1}` : manifest.shortName,
-      params: defaultParamsForAdapter(adapterId),
-      position: pos,
-    };
-    onGraphChange({ ...graph, nodes: [...graph.nodes, newNode] });
-    onSelectNode(id);
+      selectedNodeId || undefined,
+      dropPos,
+    );
+    catalogOpen = false;
+    onGraphChange(nextGraph);
+    if (onBlockAdded) {
+      onBlockAdded(nodeId);
+    } else {
+      onSelectNode(nodeId);
+    }
+    void tick().then(() => {
+      requestAnimationFrame(() => {
+        void flowApi?.fitView({ padding: 0.18, duration: 220 });
+      });
+    });
   }
 
   function handleDragStart(ev: DragEvent, adapterId: string) {
@@ -272,276 +321,239 @@
     addBlock(adapterId, dropPos);
   }
 
-  function handleAutoLayout() {
+  function handlePaneDblClick(ev: MouseEvent) {
+    if (disabled) return;
+    const target = ev.target as HTMLElement | null;
+    if (
+      target?.closest(
+        '.svelte-flow__node, .svelte-flow__edge, .canvas-overlay, .svelte-flow__controls, .catalog-popover, .wire-popover',
+      )
+    ) {
+      return;
+    }
+    wireLegendOpen = false;
+    catalogOpen = true;
+  }
+
+  async function handleAutoLayout() {
     if (disabled) return;
     onGraphChange(autoLayoutGraph(graph));
-    flowKey++;
+    await tick();
+    requestAnimationFrame(() => {
+      void flowApi?.fitView({ padding: 0.18, duration: 250 });
+    });
   }
 
   function handleClear() {
     if (disabled) return;
+    catalogOpen = false;
+    wireLegendOpen = false;
     onGraphChange({ ...graph, nodes: [], edges: [] });
     onSelectNode('');
   }
 
-  async function importGraphJson(ev: Event) {
-    const input = ev.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file || disabled) {
-      input.value = '';
-      return;
-    }
-    try {
-      const parsed = JSON.parse(await file.text()) as WorkflowGraph;
-      if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
-        flashToast('Invalid workflow JSON (expected nodes[] and edges[])');
-        return;
-      }
-      const laid = parsed.nodes.some((n) => !n.position) ? autoLayoutGraph(parsed) : parsed;
-      onGraphChange(laid);
-      onSelectNode(laid.nodes[0]?.id ?? '');
-    } catch {
-      flashToast('Failed to parse workflow JSON');
-    } finally {
-      input.value = '';
-    }
-  }
-
-  const PALETTE_GROUPS = [
-    { title: 'Inputs', ids: ['pdb-input', 'sequence-input'] },
-    { title: 'Conditioning', ids: ['rfd4-conditioner'] },
-    { title: 'Design / Generate', ids: ['rfd4-proteina', 'legacy-teacher'] },
-    { title: 'Inverse Fold', ids: ['web-protein-mpnn'] },
-    { title: 'Structure Fold', ids: ['localfold-af2'] },
-    { title: 'Evaluate', ids: ['designability-scorer'] },
+  const WIRE_LEGEND_ITEMS = [
+    PORT_COLORS.StructureArtifact,
+    PORT_COLORS.ConditionSpec,
+    PORT_COLORS.SequenceSet,
+    PORT_COLORS.FoldedStructure,
+    PORT_COLORS.DesignabilityMetrics,
   ];
 </script>
 
-<div class="canvas-shell">
-  <!-- Left Block Palette -->
-  <aside class="palette">
-    <div class="pal-head">BLOCKS <span class="pal-hint">drag or click</span></div>
-    {#each PALETTE_GROUPS as grp (grp.title)}
-      <div class="pal-group">
-        <div class="pal-title">{grp.title}</div>
-        {#each grp.ids as aid (aid)}
-          {@const m = ADAPTER_REGISTRY[aid]}
-          {#if m}
-            <button
-              class="pal-item"
-              draggable={!disabled}
-              {disabled}
-              ondragstart={(e) => handleDragStart(e, aid)}
-              onclick={() => addBlock(aid)}
-              style="--sc: {STAGE_COLORS[m.stage] ?? '#64748b'}"
-              title={m.description}
-            >
-              <span class="dot"></span>
-              <span class="name">{m.shortName}</span>
-              <span class="wt">{m.approxWeightsMB ? `${m.approxWeightsMB}M` : 'CPU'}</span>
-            </button>
-          {/if}
-        {/each}
-      </div>
-    {/each}
+<svelte:window onkeydown={handleWindowKeydown} />
 
-    <div class="legend-box">
-      <div class="pal-title">Typed Wires</div>
-      <div class="leg-item"><span class="l-dot" style="background: {PORT_COLORS.StructureArtifact.bg}"></span> Structure</div>
-      <div class="leg-item"><span class="l-dot" style="background: {PORT_COLORS.ConditionSpec.bg}"></span> Condition</div>
-      <div class="leg-item"><span class="l-dot" style="background: {PORT_COLORS.SequenceSet.bg}"></span> Sequences</div>
-      <div class="leg-item"><span class="l-dot" style="background: {PORT_COLORS.FoldedStructure.bg}"></span> Folds</div>
-      <div class="leg-item"><span class="l-dot" style="background: {PORT_COLORS.DesignabilityMetrics.bg}"></span> Metrics</div>
-    </div>
-  </aside>
-
-  <!-- Interactive SvelteFlow DAG Canvas -->
-  <div
-    class="flow-wrap"
-    bind:this={canvasEl}
-    role="application"
-    aria-label="Protein design workflow canvas"
-    ondragover={(e) => e.preventDefault()}
-    ondrop={handleDrop}
-  >
-    <div class="canvas-tools">
-      <button class="c-btn" {disabled} onclick={handleAutoLayout}>Auto Layout</button>
-      <label class="c-btn">
-        Import JSON
-        <input type="file" accept=".json" hidden {disabled} onchange={importGraphJson} />
-      </label>
-      <button class="c-btn danger" {disabled} onclick={handleClear}>Clear</button>
-    </div>
-
-    {#if validationToast}
-      <div class="toast">{validationToast}</div>
-    {/if}
-
-    {#key `${graph.id}:${flowKey}`}
-      <SvelteFlow
-        bind:nodes={flowNodes}
-        bind:edges={flowEdges}
-        {nodeTypes}
-        forceColorMode={theme}
-        nodesDraggable={!disabled}
-        nodesConnectable={!disabled}
-        deleteKey={disabled ? null : ['Backspace', 'Delete']}
-        fitView
-        fitViewOptions={{ padding: 0.18 }}
-        {isValidConnection}
-        onconnect={handleConnect}
-        onnodedragstop={handleNodeDragStop}
-        ondelete={handleDelete}
-        onnodeclick={({ node }) => onSelectNode(node.id)}
-        onedgeclick={({ edge }) => {
-          const found = graph.edges.find(
-            (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === edge.id,
-          );
-          if (found) onSelectEdge?.(found);
-        }}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background gap={20} size={1} />
-        <Controls showLock={false} />
-        <MiniMap
-          nodeColor={(n) => {
-            const aid = (n.data as ProteinNodeData)?.adapterId;
-            const st = ADAPTER_REGISTRY[aid]?.stage ?? 'source';
-            return STAGE_COLORS[st] ?? '#475569';
-          }}
-        />
-      </SvelteFlow>
-    {/key}
+<div
+  class="flow-wrap"
+  bind:this={canvasEl}
+  role="application"
+  aria-label="Protein design workflow canvas"
+  ondragover={(e) => e.preventDefault()}
+  ondrop={handleDrop}
+  ondblclick={handlePaneDblClick}
+>
+  <!-- Floating Top-Left: + Add Block trigger & searchable catalog -->
+  <div class="canvas-left-tools canvas-overlay">
+    <button
+      bind:this={addBtnEl}
+      type="button"
+      class="add-block-btn"
+      class:open={catalogOpen}
+      {disabled}
+      onclick={() => {
+        wireLegendOpen = false;
+        catalogOpen = !catalogOpen;
+      }}
+      title="Add a workflow block (shortcut: / or Shift+A, or double-click canvas)"
+    >
+      <span class="plus">+</span> Add Block
+      <kbd class="kbd-hint">/</kbd>
+    </button>
   </div>
+
+  {#if catalogOpen}
+    <BlockCatalogPopover
+      {disabled}
+      triggerEl={addBtnEl}
+      onInsert={(aid) => addBlock(aid)}
+      onDragStart={handleDragStart}
+      onClose={() => (catalogOpen = false)}
+    />
+  {/if}
+
+  <!-- Floating Top-Right: Compact canvas controls -->
+  <div class="canvas-tools canvas-overlay">
+    <button type="button" class="c-btn" {disabled} onclick={handleAutoLayout} title="Re-arrange DAG cleanly and fit view">
+      Auto Layout
+    </button>
+    <button
+      bind:this={wireBtnEl}
+      type="button"
+      class="c-btn icon-q"
+      class:active={wireLegendOpen}
+      onclick={() => {
+        catalogOpen = false;
+        wireLegendOpen = !wireLegendOpen;
+      }}
+      title="Typed wire colors"
+      aria-label="Typed wire colors"
+    >
+      ?
+    </button>
+    <button type="button" class="c-btn danger" {disabled} onclick={handleClear} title="Remove all blocks from canvas">
+      Clear
+    </button>
+  </div>
+
+  {#if wireLegendOpen}
+    <div class="wire-popover canvas-overlay" bind:this={wirePopoverEl} role="dialog" aria-label="Typed wire colors">
+      <div class="wire-pop-title">Typed Wire Colors</div>
+      {#each WIRE_LEGEND_ITEMS as item (item.label)}
+        <div class="wire-row">
+          <span class="wire-dot" style="background: {item.bg}"></span>
+          <span>{item.label}</span>
+        </div>
+      {/each}
+      <div class="wire-pop-hint">Only matching port types connect. Click any wire or port label to peek data.</div>
+    </div>
+  {/if}
+
+  {#if validationToast}
+    <div class="toast">{validationToast}</div>
+  {/if}
+
+  {#key graph.id}
+    <SvelteFlow
+      bind:nodes={flowNodes}
+      bind:edges={flowEdges}
+      {nodeTypes}
+      forceColorMode={theme}
+      nodesDraggable={!disabled}
+      nodesConnectable={!disabled}
+      deleteKey={disabled ? null : ['Backspace', 'Delete']}
+      fitView
+      fitViewOptions={{ padding: 0.18 }}
+      {isValidConnection}
+      onconnect={handleConnect}
+      onnodedragstop={handleNodeDragStop}
+      ondelete={handleDelete}
+      onpaneclick={() => {
+        catalogOpen = false;
+        wireLegendOpen = false;
+      }}
+      onnodeclick={({ node }) => {
+        catalogOpen = false;
+        wireLegendOpen = false;
+        onSelectNode(node.id);
+      }}
+      onedgeclick={({ edge }) => {
+        catalogOpen = false;
+        wireLegendOpen = false;
+        const found = graph.edges.find(
+          (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === edge.id,
+        );
+        if (found) onSelectEdge?.(found);
+      }}
+      proOptions={{ hideAttribution: true }}
+    >
+      <Background gap={20} size={1} />
+      <Controls showLock={false} />
+    </SvelteFlow>
+  {/key}
 </div>
 
 <style>
-  .canvas-shell {
-    display: grid;
-    grid-template-columns: 196px 1fr;
-    gap: 10px;
-    height: 410px;
-  }
-  @media (max-width: 780px) {
-    .canvas-shell {
-      grid-template-columns: 1fr;
-      height: auto;
-    }
-    .flow-wrap {
-      height: 360px;
-    }
-  }
-  .palette {
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .pal-head {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--text-secondary);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  .pal-hint {
-    font-weight: 400;
-    color: var(--text-dim);
-  }
-  .pal-group {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .pal-title {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-dim);
-    margin-bottom: 2px;
-  }
-  .pal-item {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    width: 100%;
-    text-align: left;
-    background: var(--bg-surface-2);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 6px 8px;
-    color: var(--text-body);
-    font-size: 11px;
-    cursor: grab;
-  }
-  .pal-item:hover:not(:disabled) {
-    border-color: var(--sc);
-    background: var(--bg-surface-hover);
-  }
-  .pal-item:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--sc);
-    flex-shrink: 0;
-  }
-  .name {
-    flex: 1;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .wt {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 9px;
-    color: var(--text-dim);
-  }
-  .legend-box {
-    margin-top: auto;
-    padding-top: 8px;
-    border-top: 1px solid var(--border-subtle);
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-  }
-  .leg-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 10px;
-    color: var(--text-muted);
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-  }
-  .l-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-  }
-
   .flow-wrap {
     position: relative;
+    width: 100%;
+    height: 340px;
     background: var(--bg-canvas);
     border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
   }
+  @media (max-width: 780px) {
+    .flow-wrap {
+      height: 290px;
+    }
+  }
+  .canvas-left-tools {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 25;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .add-block-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    box-shadow: var(--node-shadow);
+  }
+  .add-block-btn:hover:not(:disabled),
+  .add-block-btn.open {
+    border-color: var(--accent);
+    background: var(--bg-surface-selected);
+  }
+  .add-block-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .plus {
+    color: var(--accent-bright);
+    font-size: 14px;
+    line-height: 1;
+    font-weight: 700;
+  }
+  .kbd-hint {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    color: var(--text-dim);
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 4px;
+    line-height: 1.4;
+  }
   .canvas-tools {
     position: absolute;
     top: 10px;
     right: 10px;
-    z-index: 20;
+    z-index: 25;
     display: flex;
     gap: 6px;
+    align-items: center;
   }
   .c-btn {
     background: var(--overlay-bg);
@@ -552,13 +564,74 @@
     font-size: 11px;
     cursor: pointer;
     font-family: inherit;
+    backdrop-filter: blur(6px);
   }
-  .c-btn:hover:not(:disabled) {
+  .c-btn:hover:not(:disabled),
+  .c-btn.active {
     background: var(--bg-surface-hover);
+    color: var(--text-primary);
+    border-color: var(--accent);
+  }
+  .c-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .c-btn.icon-q {
+    width: 24px;
+    padding: 4px 0;
+    text-align: center;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-weight: 700;
   }
   .c-btn.danger:hover:not(:disabled) {
     border-color: var(--err-border);
     color: var(--err-strong);
+  }
+  .wire-popover {
+    position: absolute;
+    top: 40px;
+    right: 10px;
+    z-index: 35;
+    width: 210px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 10px 12px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3), var(--node-shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .wire-pop-title {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+  }
+  .wire-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text-body);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  .wire-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .wire-pop-hint {
+    margin-top: 4px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border-subtle);
+    font-size: 10px;
+    color: var(--text-dim);
+    line-height: 1.4;
   }
   .toast {
     position: absolute;

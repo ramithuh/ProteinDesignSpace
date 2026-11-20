@@ -88,8 +88,8 @@
     transition: background 0.15s ease, color 0.15s ease;
   }
   main {
-    max-width: 1280px;
+    max-width: 1600px;
     margin: 0 auto;
-    padding: 20px 24px 64px;
+    padding: 10px 18px 24px;
   }
 </style>
