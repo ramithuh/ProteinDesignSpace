@@ -38,6 +38,7 @@
     outputsByNode: Record<string, Record<string, CanonicalArtifact>>;
     theme?: 'dark' | 'light';
     disabled?: boolean;
+    isRunning?: boolean;
     fillHeight?: boolean;
     onGraphChange: (next: WorkflowGraph) => void;
     onSelectNode: (nodeId: string) => void;
@@ -54,6 +55,7 @@
     outputsByNode,
     theme = 'dark',
     disabled = false,
+    isRunning = false,
     fillHeight = false,
     onGraphChange,
     onSelectNode,
@@ -223,6 +225,7 @@
           params: n.params,
           state: nodeStates[n.id],
           outputs: outputsByNode[n.id],
+          isPipelineRunning: isRunning,
           inputPortsConnected,
           inputPortsReady,
           outputPortsReady,
@@ -237,12 +240,30 @@
       const col = edgeColor(e.fromNode, e.fromPort);
       const srcState = nodeStates[e.fromNode]?.status;
       const dstState = nodeStates[e.toNode]?.status;
-      const active =
-        srcState === 'running' ||
-        srcState === 'loading' ||
-        dstState === 'running' ||
-        dstState === 'loading';
+      const srcDone = srcState === 'done' || srcState === 'cached';
+      const dstRunning = dstState === 'running' || dstState === 'loading';
+      const dstDone = dstState === 'done' || dstState === 'cached';
       const isSel = eid === selectedEdgeId;
+
+      // Only animate incoming edges actively feeding the currently running block
+      const activeFeed = isRunning && srcDone && dstRunning;
+      const completedEdge = isRunning && srcDone && dstDone;
+      const unreachedEdge = isRunning && !activeFeed && !completedEdge;
+
+      let style: string;
+      if (isSel) {
+        style = `stroke: ${col}; stroke-width: 3.5px; opacity: 1; filter: drop-shadow(0 0 4px ${col}); cursor: pointer;`;
+      } else if (activeFeed) {
+        style = `stroke: ${col}; stroke-width: 2.5px; opacity: 1; filter: drop-shadow(0 0 4px ${col}); cursor: pointer;`;
+      } else if (completedEdge) {
+        style = `stroke: ${col}; stroke-width: 2px; opacity: 0.78; cursor: pointer;`;
+      } else if (unreachedEdge) {
+        const dimOpacity = theme === 'light' ? 0.34 : 0.25;
+        style = `stroke: ${col}; stroke-width: 1.5px; stroke-dasharray: 4 4; opacity: ${dimOpacity}; cursor: pointer;`;
+      } else {
+        style = `stroke: ${col}; stroke-width: 2px; cursor: pointer;`;
+      }
+
       return {
         id: eid,
         type: 'smoothstep',
@@ -251,16 +272,14 @@
         target: e.toNode,
         targetHandle: e.toPort,
         selected: isSel,
-        animated: active,
+        animated: activeFeed,
         markerEnd: {
           type: MarkerType.ArrowClosed,
           width: 16,
           height: 16,
           color: col,
         },
-        style: isSel
-          ? `stroke: ${col}; stroke-width: 3.5px; filter: drop-shadow(0 0 4px ${col}); cursor: pointer;`
-          : `stroke: ${col}; stroke-width: 2px; cursor: pointer;`,
+        style,
         pathOptions: { borderRadius: 14, offset: 26 },
       };
     });
@@ -420,6 +439,7 @@
 <div
   class="flow-wrap"
   class:fill-height={fillHeight}
+  class:is-running={isRunning}
   bind:this={canvasEl}
   role="application"
   aria-label="Protein design workflow canvas"
@@ -552,6 +572,9 @@
     height: 100%;
     min-height: 440px;
     flex: 1;
+  }
+  .flow-wrap.is-running :global(.svelte-flow__node) {
+    cursor: pointer;
   }
   .flow-inner {
     width: 100%;

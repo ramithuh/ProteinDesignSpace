@@ -14,6 +14,7 @@
     params?: Record<string, unknown>;
     state?: NodeProgressEvent;
     outputs?: Record<string, CanonicalArtifact>;
+    isPipelineRunning?: boolean;
     inputPortsConnected?: Record<string, boolean>;
     inputPortsReady?: Record<string, boolean>;
     outputPortsReady?: Record<string, boolean>;
@@ -35,6 +36,10 @@
   let outputs = $derived(Object.entries(manifest?.outputs ?? {}));
   let stageColor = $derived(STAGE_COLORS[manifest?.stage ?? 'source'] ?? '#64748b');
   let st = $derived(data.state);
+  let isPipelineRunning = $derived(Boolean(data.isPipelineRunning));
+  let isNodeRunning = $derived(st?.status === 'running' || st?.status === 'loading');
+  let isNodeDone = $derived(st?.status === 'done' || st?.status === 'cached');
+  let isNodeQueued = $derived(isPipelineRunning && (!st || st.status === 'idle'));
 
   let paramSummary = $derived.by((): string => {
     const p = data.params ?? {};
@@ -143,8 +148,11 @@
 <div
   class="p-node"
   class:selected
-  class:running={st?.status === 'running' || st?.status === 'loading'}
-  class:done={st?.status === 'done' || st?.status === 'cached'}
+  class:pipeline-running={isPipelineRunning}
+  class:queued={isNodeQueued}
+  class:running={isNodeRunning}
+  class:loading={st?.status === 'loading'}
+  class:done={isNodeDone}
   class:err={st?.status === 'error'}
   style="--stage-color: {stageColor}"
 >
@@ -249,6 +257,8 @@
         {#if st?.status === 'cached'}<span class="cache-tag">CACHED</span>{/if}
         {outputBadge}
       </div>
+    {:else if isNodeQueued}
+      <div class="status-line queued-text">queued…</div>
     {:else}
       <div class="status-line muted">
         {manifest?.approxWeightsMB ? `~${manifest.approxWeightsMB} MB` : 'ready'}
@@ -268,24 +278,124 @@
     font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
     box-shadow: var(--node-shadow);
     overflow: visible;
-  }
-  .p-node.selected {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3), var(--node-shadow);
+    transition:
+      opacity 180ms ease,
+      filter 180ms ease,
+      border-color 180ms ease,
+      box-shadow 180ms ease;
   }
   .p-node.running {
-    border-color: #f59e0b;
+    opacity: 1;
+    border: 1.5px solid #f59e0b;
+    box-shadow:
+      0 0 0 3px rgba(245, 158, 11, 0.22),
+      0 8px 22px rgba(245, 158, 11, 0.16);
+    animation: runner-breathe 2s ease-in-out infinite;
   }
   .p-node.done {
-    border-color: #22c55e;
+    border-color: rgba(34, 197, 94, 0.7);
+  }
+  .p-node.pipeline-running.done {
+    opacity: 0.86;
+  }
+  .p-node.pipeline-running.done:hover {
+    opacity: 1;
+  }
+  .p-node.queued {
+    opacity: 0.48;
+    filter: saturate(0.35);
+    border-style: dashed;
+    border-color: var(--border-strong);
+  }
+  .p-node.queued:hover {
+    opacity: 0.8;
+    filter: saturate(0.75);
   }
   .p-node.err {
+    opacity: 1;
+    filter: none;
+    border: 1.5px solid #ef4444;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.22), var(--node-shadow);
+  }
+  /* Selected / peeking focus ring stays visible alongside state border & overrides dimming */
+  .p-node.selected {
+    opacity: 1;
+    filter: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2.5px rgba(59, 130, 246, 0.35), var(--node-shadow);
+  }
+  .p-node.selected.running {
+    border-color: #f59e0b;
+    box-shadow:
+      0 0 0 2.5px var(--accent),
+      0 0 0 5px rgba(245, 158, 11, 0.24),
+      var(--node-shadow);
+  }
+  .p-node.selected.done {
+    border-color: #22c55e;
+    box-shadow: 0 0 0 2.5px rgba(59, 130, 246, 0.4), var(--node-shadow);
+  }
+  .p-node.selected.err {
     border-color: #ef4444;
+    box-shadow:
+      0 0 0 2.5px var(--accent),
+      0 0 0 5px rgba(239, 68, 68, 0.22),
+      var(--node-shadow);
   }
   .stripe {
+    position: relative;
     height: 3px;
     background: var(--stage-color);
     border-radius: 7px 7px 0 0;
+    overflow: hidden;
+  }
+  .p-node.loading .stripe::after,
+  .p-node.running .stripe::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.65) 50%,
+      transparent 100%
+    );
+    animation: stripe-sheen 1.4s linear infinite;
+  }
+  .status-line.queued-text {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+  @keyframes runner-breathe {
+    0%,
+    100% {
+      box-shadow:
+        0 0 0 3px rgba(245, 158, 11, 0.2),
+        0 6px 18px rgba(245, 158, 11, 0.14);
+    }
+    50% {
+      box-shadow:
+        0 0 0 4.5px rgba(245, 158, 11, 0.34),
+        0 10px 26px rgba(245, 158, 11, 0.24);
+    }
+  }
+  @keyframes stripe-sheen {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(100%);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .p-node.running {
+      animation: none;
+    }
+    .p-node.loading .stripe::after,
+    .p-node.running .stripe::after {
+      animation: none;
+      display: none;
+    }
   }
   .header {
     display: flex;

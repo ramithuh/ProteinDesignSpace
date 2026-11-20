@@ -56,6 +56,7 @@
   let graph = $state<WorkflowGraph>(autoLayoutGraph(structuredClone(WORKFLOW_PRESETS[0].graph)));
   let selectedNodeId = $state<string>(WORKFLOW_PRESETS[0].graph.nodes[0].id);
   let isRunning = $state(false);
+  let runTargetIds = $state<string[]>([]);
   let showRecipe = $state(false);
   let shareToast = $state<string | null>(null);
   let shareToastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -375,6 +376,7 @@
       return;
     }
     isRunning = true;
+    runTargetIds = targetGraph.nodes.map((n) => n.id);
     runError = null;
     if (!upToNodeId) {
       totalElapsedMs = null;
@@ -430,6 +432,7 @@
       runError = err instanceof Error ? err.message : String(err);
     } finally {
       isRunning = false;
+      runTargetIds = [];
       activeGpuWorker = scheduler.getActiveGpuAdapter();
     }
   }
@@ -730,6 +733,22 @@
       : 'denovo.run viewport';
   });
 
+  // Active run step counter for Run button ("Running 2/4…")
+  let runStepLabel = $derived.by((): string => {
+    if (!isRunning) return '▶ Run';
+    const total = runTargetIds.length || graph.nodes.length;
+    if (total <= 0) return 'Running…';
+    let doneCount = 0;
+    let activeCount = 0;
+    for (const id of runTargetIds) {
+      const st = nodeStates[id]?.status;
+      if (st === 'done' || st === 'cached') doneCount++;
+      else if (st === 'running' || st === 'loading') activeCount++;
+    }
+    const current = Math.min(total, doneCount + (activeCount > 0 ? 1 : 0));
+    return current > 0 ? `Running ${current}/${total}…` : `Running 1/${total}…`;
+  });
+
   // Active scorer thresholds (for dynamic table highlights)
   let activeScorerNode = $derived(
     selectedNode?.adapterId === 'designability-scorer'
@@ -944,12 +963,16 @@
     <button
       type="button"
       class="btn-primary"
+      class:is-running={isRunning}
       disabled={isRunning || validationErrors.length > 0}
       onclick={() => runWorkflow(false)}
       title="Run workflow (R or ⌘↵ / Ctrl+Enter)"
     >
-      {isRunning ? 'Running…' : '▶ Run'}
-      {#if !isRunning}
+      {#if isRunning}
+        <span class="run-pulse"></span>
+        {runStepLabel}
+      {:else}
+        ▶ Run
         <kbd class="run-kbd">R</kbd>
       {/if}
     </button>
@@ -974,6 +997,7 @@
           {outputsByNode}
           {theme}
           disabled={isRunning}
+          {isRunning}
           fillHeight={splitMode === 'horizontal'}
           onGraphChange={handleGraphChange}
           onSelectNode={handleSelectNode}
@@ -1461,6 +1485,35 @@
   .btn-primary:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  .btn-primary.is-running:disabled {
+    opacity: 0.9;
+    background: #b45309;
+    border-color: #f59e0b;
+  }
+  .run-pulse {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #fde68a;
+    animation: run-dot-pulse 1.2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  @keyframes run-dot-pulse {
+    0%,
+    100% {
+      opacity: 0.45;
+      transform: scale(0.85);
+    }
+    50% {
+      opacity: 1;
+      transform: scale(1.15);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .run-pulse {
+      animation: none;
+    }
   }
 
   .workbench-split {
