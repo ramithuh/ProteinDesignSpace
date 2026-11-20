@@ -3,6 +3,7 @@
   import { ExecutionScheduler, attachProgrammaticApi } from '$lib/engine/scheduler';
   import { ADAPTER_REGISTRY, SAMPLE_CAMPAIGN, WORKFLOW_PRESETS } from '$lib/engine/registry';
   import { autoLayoutGraph, validateGraph } from '$lib/engine/graph-utils';
+  import { decodeHashToGraph, encodeGraphToHash } from '$lib/engine/share';
   import { clearAllModelCaches, getCacheStats } from '$lib/engine/opfs-cache';
   import type {
     CampaignState,
@@ -19,6 +20,7 @@
   import PaePlot from '$lib/viewer/PaePlot.svelte';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
   import WorkflowCanvas from '$lib/ui/WorkflowCanvas.svelte';
+  import RecipeDrawer from '$lib/ui/RecipeDrawer.svelte';
   import CampaignViewer from '$lib/ui/CampaignViewer.svelte';
 
   const scheduler = new ExecutionScheduler();
@@ -36,6 +38,8 @@
   let graph = $state<WorkflowGraph>(autoLayoutGraph(structuredClone(WORKFLOW_PRESETS[0].graph)));
   let selectedNodeId = $state<string>(WORKFLOW_PRESETS[0].graph.nodes[0].id);
   let isRunning = $state(false);
+  let showRecipe = $state(false);
+  let shareToast = $state<string | null>(null);
   let runError = $state<string | null>(null);
   let totalElapsedMs = $state<number | null>(null);
 
@@ -110,6 +114,23 @@
     }
     const { webMcpRegistered } = attachProgrammaticApi(scheduler, handleProgress);
     webMcpReady = webMcpRegistered;
+
+    // Load shared workflow from URL hash (#p=... or #g=...) if present
+    if (window.location.hash.length > 2) {
+      try {
+        const decoded = await decodeHashToGraph(window.location.hash);
+        if (decoded) {
+          graph = decoded;
+          selectedPresetId = decoded.id;
+          selectedNodeId = decoded.nodes[0]?.id ?? '';
+          shareToast = 'Loaded shared workflow from URL';
+          setTimeout(() => (shareToast = null), 3000);
+        }
+      } catch {
+        /* ignore malformed hash */
+      }
+    }
+
     await refreshCacheStats();
   });
 
@@ -203,6 +224,22 @@
     await clearAllModelCaches();
     await refreshCacheStats();
     activeGpuWorker = null;
+  }
+
+  async function copyQuickShareLink() {
+    try {
+      const plain = $state.snapshot(graph) as WorkflowGraph;
+      const { hash, mode, strippedPdb } = await encodeGraphToHash(plain);
+      const url = `${window.location.origin}${window.location.pathname}${hash}`;
+      window.history.replaceState(null, '', hash);
+      await navigator.clipboard.writeText(url);
+      shareToast = strippedPdb
+        ? `Copied ${url.length}-char link (${mode}; large PDB omitted)`
+        : `Copied ${url.length}-char link (${mode})`;
+      setTimeout(() => (shareToast = null), 3200);
+    } catch (err) {
+      runError = err instanceof Error ? err.message : String(err);
+    }
   }
 
   function exportWorkflowJson() {
@@ -371,6 +408,13 @@
         <span class="flow-sub">drag blocks · connect matching colored ports · Backspace deletes · click any block to inspect its parameters &amp; outputs</span>
       </div>
       <div class="flow-actions">
+        {#if shareToast}
+          <span class="share-toast">{shareToast}</span>
+        {/if}
+        <button class="btn-secondary" onclick={() => (showRecipe = !showRecipe)}>
+          {showRecipe ? 'Hide Recipe' : '</> Recipe'}
+        </button>
+        <button class="btn-secondary" onclick={copyQuickShareLink}>🔗 Share Link</button>
         <button class="btn-secondary" onclick={exportWorkflowJson}>Export JSON</button>
         {#if metricsArtifact}
           <button class="btn-secondary" onclick={recordRunToCampaign}>+ Save to Campaign</button>
@@ -398,6 +442,10 @@
       onGraphChange={handleGraphChange}
       onSelectNode={(id) => (selectedNodeId = id)}
     />
+
+    {#if showRecipe}
+      <RecipeDrawer {graph} disabled={isRunning} onApplyGraph={handleGraphChange} />
+    {/if}
 
     {#if validationErrors.length > 0}
       <div class="warn-banner">
@@ -760,6 +808,16 @@
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+    align-items: center;
+  }
+  .share-toast {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--ok-text);
+    background: var(--ok-bg);
+    border: 1px solid var(--ok-border);
+    padding: 4px 8px;
+    border-radius: 5px;
   }
   .btn-primary {
     background: #2563eb;
