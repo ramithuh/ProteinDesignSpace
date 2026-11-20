@@ -38,7 +38,7 @@
   let activeTab = $state<'workbench' | 'campaign'>('workbench');
   let rightPanelTab = $state<'params' | 'peek'>('params');
   let splitMode = $state<'horizontal' | 'vertical'>('horizontal');
-  let splitPct = $state<number>(54);
+  let splitPct = $state<number>(65);
   let draggingSplit = $state(false);
   let splitWrapEl: HTMLDivElement | null = $state(null);
   let theme = $state<'dark' | 'light'>('dark');
@@ -128,7 +128,7 @@
     const rect = splitWrapEl.getBoundingClientRect();
     if (rect.width <= 0) return;
     const rawPct = ((ev.clientX - rect.left) / rect.width) * 100;
-    splitPct = Math.min(72, Math.max(32, Math.round(rawPct * 10) / 10));
+    splitPct = Math.min(78, Math.max(32, Math.round(rawPct * 10) / 10));
   }
 
   function handleWindowPointerUp() {
@@ -1056,7 +1056,7 @@
         aria-label="Resize graph and output panes"
         title="Drag to resize · Double-click to reset"
         onpointerdown={startSplitDrag}
-        ondblclick={() => (splitPct = 54)}
+        ondblclick={() => (splitPct = 65)}
       >
         <div class="split-bar"></div>
       </div>
@@ -1519,7 +1519,7 @@
     cursor: col-resize;
   }
   .workbench-split.horizontal > .flow-panel {
-    width: var(--left-pane, 54%);
+    width: var(--left-pane, 65%);
     flex-shrink: 0;
     min-width: 0;
     margin-bottom: 0;
