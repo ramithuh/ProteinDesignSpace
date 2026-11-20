@@ -2,12 +2,14 @@
   import { onDestroy, onMount } from 'svelte';
   import { ExecutionScheduler, attachProgrammaticApi } from '$lib/engine/scheduler';
   import { ADAPTER_REGISTRY, SAMPLE_CAMPAIGN, WORKFLOW_PRESETS } from '$lib/engine/registry';
+  import { autoLayoutGraph, validateGraph } from '$lib/engine/graph-utils';
   import { clearAllModelCaches, getCacheStats } from '$lib/engine/opfs-cache';
   import type {
     CampaignState,
     CanonicalArtifact,
     DesignabilityMetrics,
     DesignabilityRow,
+    FoldedStructure,
     NodeProgressEvent,
     SequenceSet,
     StructureArtifact,
@@ -16,6 +18,7 @@
   import MolSuperposeViewer from '$lib/viewer/MolSuperposeViewer.svelte';
   import PaePlot from '$lib/viewer/PaePlot.svelte';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
+  import WorkflowCanvas from '$lib/ui/WorkflowCanvas.svelte';
   import CampaignViewer from '$lib/ui/CampaignViewer.svelte';
 
   const scheduler = new ExecutionScheduler();
@@ -29,7 +32,7 @@
 
   // Active workflow state
   let selectedPresetId = $state(WORKFLOW_PRESETS[0].id);
-  let graph = $state<WorkflowGraph>(structuredClone(WORKFLOW_PRESETS[0].graph));
+  let graph = $state<WorkflowGraph>(autoLayoutGraph(structuredClone(WORKFLOW_PRESETS[0].graph)));
   let selectedNodeId = $state<string>(WORKFLOW_PRESETS[0].graph.nodes[0].id);
   let isRunning = $state(false);
   let runError = $state<string | null>(null);
@@ -99,7 +102,8 @@
     const preset = WORKFLOW_PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
     selectedPresetId = presetId;
-    graph = structuredClone(preset.graph);
+    const g = structuredClone(preset.graph);
+    graph = g.nodes.some((n) => !n.position) ? autoLayoutGraph(g) : g;
     selectedNodeId = graph.nodes[0]?.id ?? '';
     nodeStates = {};
     outputsByNode = {};
@@ -109,6 +113,11 @@
     showTrajectory = false;
   }
 
+  function handleGraphChange(next: WorkflowGraph) {
+    graph = next;
+    runError = null;
+  }
+
   function updateNodeParams(nodeId: string, params: Record<string, unknown>) {
     graph = {
       ...graph,
@@ -116,8 +125,15 @@
     };
   }
 
+  let validationErrors = $derived(validateGraph(graph));
+
   async function runWorkflow(bypassCache = false) {
     if (isRunning) return;
+    const errs = validateGraph(graph);
+    if (errs.length > 0) {
+      runError = errs.join('\n');
+      return;
+    }
     isRunning = true;
     runError = null;
     totalElapsedMs = null;
@@ -130,6 +146,13 @@
       selectedRowIdx = 0;
       showTrajectory = false;
       activeGpuWorker = scheduler.getActiveGpuAdapter();
+
+      // Auto-focus a scorer or fold node if present so results appear immediately
+      const lastScorer = [...graph.nodes].reverse().find((n) => n.adapterId === 'designability-scorer');
+      const lastFold = [...graph.nodes].reverse().find((n) => n.adapterId === 'localfold-af2');
+      if (lastScorer) selectedNodeId = lastScorer.id;
+      else if (lastFold) selectedNodeId = lastFold.id;
+
       await refreshCacheStats();
     } catch (err) {
       runError = err instanceof Error ? err.message : String(err);
@@ -153,7 +176,8 @@
   }
 
   function exportWorkflowJson() {
-    const blob = new Blob([JSON.stringify(graph, null, 2)], { type: 'application/json' });
+    const plain = $state.snapshot(graph);
+    const blob = new Blob([JSON.stringify(plain, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -175,8 +199,9 @@
   function handleResidueClick(info: { chain: string; seqId: number; compId: string }) {
     const tag = `${info.chain}${info.seqId}`;
     lastPickedResidue = `${tag} (${info.compId})`;
-    // If an MPNN node exists in the current workflow, append clicked residue to fixedPositions
-    const mpnnNode = graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn');
+    const mpnnNode =
+      (selectedNode?.adapterId === 'web-protein-mpnn' ? selectedNode : null) ??
+      graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn');
     if (!mpnnNode) return;
     const prev = String(mpnnNode.params.fixedPositions ?? '').trim();
     const parts = prev ? prev.split(/[,\s]+/).filter(Boolean) : [];
@@ -194,7 +219,7 @@
     const newRound = {
       round: nextRoundNum,
       timestamp: new Date().toISOString(),
-      label: `Round ${nextRoundNum} — ${graph.name}`,
+      label: `Round ${nextRoundNum} — ${selectedNode?.label ?? graph.name}`,
       generator: ADAPTER_REGISTRY[genNode?.adapterId ?? '']?.displayName ?? genNode?.adapterId ?? 'unknown',
       folder: 'LocalFold AF2 (WebGPU INT5)',
       nDesigned: metricsArtifact.rows.length,
@@ -213,47 +238,52 @@
     activeTab = 'campaign';
   }
 
-  // Derived outputs from the current run
-  let selectedNode = $derived(graph.nodes.find((n) => n.id === selectedNodeId) ?? graph.nodes[0]);
+  // Node-scoped artifact lookup (prefers the currently selected canvas node so branched DAGs can be compared!)
+  let selectedNode = $derived(graph.nodes.find((n) => n.id === selectedNodeId) ?? graph.nodes[0] ?? null);
 
-  let structureArtifact = $derived.by((): StructureArtifact | null => {
-    for (const outs of Object.values(outputsByNode)) {
+  function findArtifact<T extends CanonicalArtifact>(kind: T['kind']): T | null {
+    const selOuts = selectedNodeId ? outputsByNode[selectedNodeId] : undefined;
+    if (selOuts) {
+      for (const art of Object.values(selOuts)) {
+        if (art.kind === kind) return art as T;
+      }
+    }
+    // Fallback to most recent node emitting this kind
+    for (const n of [...graph.nodes].reverse()) {
+      const outs = outputsByNode[n.id];
+      if (!outs) continue;
       for (const art of Object.values(outs)) {
-        if (art.kind === 'StructureArtifact') return art;
+        if (art.kind === kind) return art as T;
       }
     }
     return null;
-  });
+  }
 
-  let sequenceArtifact = $derived.by((): SequenceSet | null => {
-    for (const outs of Object.values(outputsByNode)) {
-      for (const art of Object.values(outs)) {
-        if (art.kind === 'SequenceSet') return art;
-      }
-    }
-    return null;
-  });
-
-  let metricsArtifact = $derived.by((): DesignabilityMetrics | null => {
-    for (const outs of Object.values(outputsByNode)) {
-      for (const art of Object.values(outs)) {
-        if (art.kind === 'DesignabilityMetrics') return art;
-      }
-    }
-    return null;
-  });
+  let structureArtifact = $derived.by(() => findArtifact<StructureArtifact>('StructureArtifact'));
+  let sequenceArtifact = $derived.by(() => findArtifact<SequenceSet>('SequenceSet'));
+  let foldArtifact = $derived.by(() => findArtifact<FoldedStructure>('FoldedStructure'));
+  let metricsArtifact = $derived.by(() => findArtifact<DesignabilityMetrics>('DesignabilityMetrics'));
 
   let activeRow = $derived<DesignabilityRow | null>(
     metricsArtifact?.rows[selectedRowIdx] ?? metricsArtifact?.best ?? null,
   );
 
-  let activePreset = $derived(WORKFLOW_PRESETS.find((p) => p.id === selectedPresetId));
+  // If the user selected a standalone LocalFold node (e.g. Sequence Input -> LocalFold without a Scorer)
+  let standaloneFold = $derived(
+    !activeRow && foldArtifact?.folds[0] ? foldArtifact.folds[0] : null,
+  );
+
+  // Reset row index when switching between different scorer branches
+  $effect(() => {
+    void metricsArtifact?.id;
+    selectedRowIdx = 0;
+  });
 </script>
 
 <header class="topbar">
   <div class="brand">
     <h1><span class="accent">denovo</span>.run</h1>
-    <span class="tagline">browser-native WebGPU protein design &amp; refolding orchestrator</span>
+    <span class="tagline">model-agnostic WebGPU protein design canvas</span>
   </div>
   <div class="sys-pills">
     <span class="chip" class:ok={webgpuSupported} class:bad={webgpuSupported === false}>
@@ -275,7 +305,7 @@
 
 <nav class="tabs">
   <button class:active={activeTab === 'workbench'} onclick={() => (activeTab = 'workbench')}>
-    Pipeline Workbench
+    Node Canvas &amp; Workbench
   </button>
   <button class:active={activeTab === 'campaign'} onclick={() => (activeTab = 'campaign')}>
     Campaign Inspector (BindClaw-style · {campaign.rounds.length} rounds)
@@ -283,7 +313,7 @@
 </nav>
 
 {#if activeTab === 'workbench'}
-  <!-- 1-Click Presets -->
+  <!-- Compact Preset Strip -->
   <section class="presets">
     {#each WORKFLOW_PRESETS as p (p.id)}
       <button
@@ -296,17 +326,16 @@
           <span class="p-name">{p.name}</span>
           <span class="p-badge">{p.badge}</span>
         </div>
-        <div class="p-desc">{p.summary}</div>
       </button>
     {/each}
   </section>
 
-  <!-- Visual Flowchart Stage Strip -->
+  <!-- Interactive Node-Graph Canvas + Run Bar -->
   <section class="flow-panel">
     <div class="flow-head">
       <div>
-        <span class="section-title">WORKFLOW GRAPH</span>
-        <span class="flow-sub">click any node to edit parameters · upstream results memoize automatically</span>
+        <span class="section-title">WORKFLOW CANVAS</span>
+        <span class="flow-sub">drag blocks · connect matching colored ports · Backspace deletes · click any block to inspect its parameters &amp; outputs</span>
       </div>
       <div class="flow-actions">
         <button class="btn-secondary" onclick={exportWorkflowJson}>Export JSON</button>
@@ -316,39 +345,31 @@
         <button class="btn-secondary" disabled={isRunning} onclick={() => runWorkflow(true)}>
           Re-run Fresh
         </button>
-        <button class="btn-primary" disabled={isRunning} onclick={() => runWorkflow(false)}>
-          {isRunning ? 'Running on WebGPU…' : '▶ Run Pipeline'}
+        <button
+          class="btn-primary"
+          disabled={isRunning || validationErrors.length > 0}
+          onclick={() => runWorkflow(false)}
+        >
+          {isRunning ? 'Running on WebGPU…' : '▶ Run Canvas'}
         </button>
       </div>
     </div>
 
-    <div class="stage-strip">
-      {#each graph.nodes as node, idx (node.id)}
-        {@const st = nodeStates[node.id]}
-        {@const manifest = ADAPTER_REGISTRY[node.adapterId]}
-        {#if idx > 0}
-          <div class="arrow">→</div>
-        {/if}
-        <button
-          class="node-box"
-          class:selected={node.id === selectedNodeId}
-          class:running={st?.status === 'running' || st?.status === 'loading'}
-          class:done={st?.status === 'done' || st?.status === 'cached'}
-          class:err={st?.status === 'error'}
-          onclick={() => (selectedNodeId = node.id)}
-        >
-          <div class="n-top">
-            <span class="n-stage">{manifest?.stage ?? 'node'}</span>
-            <span class="n-status">{st?.status ?? 'idle'}</span>
-          </div>
-          <div class="n-title">{node.label ?? manifest?.shortName ?? node.adapterId}</div>
-          <div class="n-detail">{st?.detail ?? (manifest?.approxWeightsMB ? `~${manifest.approxWeightsMB} MB · ${manifest.runtime}` : manifest?.runtime)}</div>
-          {#if st && (st.status === 'loading' || st.status === 'running') && typeof st.progress === 'number'}
-            <div class="n-bar"><div style="width: {Math.round(st.progress * 100)}%"></div></div>
-          {/if}
-        </button>
-      {/each}
-    </div>
+    <WorkflowCanvas
+      {graph}
+      {selectedNodeId}
+      {nodeStates}
+      {outputsByNode}
+      disabled={isRunning}
+      onGraphChange={handleGraphChange}
+      onSelectNode={(id) => (selectedNodeId = id)}
+    />
+
+    {#if validationErrors.length > 0}
+      <div class="warn-banner">
+        <b>Wire check:</b> {validationErrors.join(' · ')}
+      </div>
+    {/if}
 
     {#if runError}
       <div class="error-banner">
@@ -388,7 +409,7 @@
 
       <MolSuperposeViewer
         designedPdb={activeRow?.designedPdb ?? structureArtifact?.pdbText ?? null}
-        refoldPdb={activeRow?.alignedFoldPdb ?? null}
+        refoldPdb={activeRow?.alignedFoldPdb ?? standaloneFold?.pdbText ?? null}
         trajectoryPdb={structureArtifact?.trajectoryPdb ?? null}
         frameIndex={showTrajectory ? trajFrame : undefined}
         {showDesigned}
@@ -397,8 +418,10 @@
         {illustrative}
         height={440}
         label={activeRow
-          ? `${activeRow.sequenceId} · scRMSD ${activeRow.scRmsd.toFixed(2)} Å · pLDDT ${activeRow.meanPlddt.toFixed(1)}`
-          : structureArtifact?.label ?? activePreset?.name}
+          ? `${selectedNode?.label ?? 'Scorer'} · ${activeRow.sequenceId} · scRMSD ${activeRow.scRmsd.toFixed(2)} Å · pLDDT ${activeRow.meanPlddt.toFixed(1)}`
+          : standaloneFold
+            ? `${standaloneFold.sequenceId} · pLDDT ${standaloneFold.meanPlddt.toFixed(1)}`
+            : structureArtifact?.label ?? 'denovo.run viewport'}
         onResidueClick={handleResidueClick}
       />
 
@@ -419,7 +442,9 @@
     <div class="metrics-col">
       <div class="panel">
         <div class="panel-head">
-          <span class="section-title">DESIGNABILITY &amp; REFOLDING RESULTS</span>
+          <span class="section-title">
+            {selectedNode ? `OUTPUTS · ${selectedNode.label ?? selectedNode.adapterId}` : 'PIPELINE OUTPUTS'}
+          </span>
           {#if metricsArtifact}
             <span class="pass-pill" class:good={metricsArtifact.passRate > 0}>
               {(metricsArtifact.passRate * 100).toFixed(0)}% designable
@@ -489,20 +514,41 @@
                 <div><b>Refold R<sub>g</sub>:</b> {activeRow.geometry.rg.toFixed(1)} Å</div>
                 <div><b>Refold α/β:</b> {activeRow.geometry.helixPct.toFixed(0)}% / {activeRow.geometry.sheetPct.toFixed(0)}%</div>
                 <p class="tip">
-                  Tip: Click any residue in the 3D viewer to pin it in ProteinMPNN's fixed positions, then click <b>Run Pipeline</b> — upstream generation stays memoized.
+                  Tip: In branched graphs (like <b>RFD4 Fork</b>), click each Scorer block on the canvas to compare its superposition &amp; PAE!
                 </p>
               </div>
             </div>
           {/if}
+        {:else if standaloneFold}
+          <div class="seq-box">
+            <div class="seq-head">
+              <span>Folded {standaloneFold.sequenceId} · pLDDT {standaloneFold.meanPlddt.toFixed(1)}</span>
+              <button
+                class="link-btn"
+                onclick={() => downloadText(standaloneFold.pdbText, `${standaloneFold.sequenceId}_af2.pdb`)}
+              >
+                ↓ Folded PDB
+              </button>
+            </div>
+            <div class="seq-text">{standaloneFold.sequence}</div>
+          </div>
+          <PaePlot pae={standaloneFold.pae} size={200} />
         {:else if sequenceArtifact}
-          <div class="placeholder-box">
-            Designed {sequenceArtifact.candidates.length} sequence(s). Refolding in progress…
+          <div class="seq-box">
+            <div class="seq-head">
+              <span>{sequenceArtifact.candidates.length} Sequence(s) · {sequenceArtifact.sourceModelId}</span>
+            </div>
+            {#each sequenceArtifact.candidates as c (c.id)}
+              <div class="seq-text" style="margin-bottom: 6px">
+                <b>{c.id}</b> {c.score !== null ? `(score ${c.score.toFixed(2)})` : ''}: {c.sequence}
+              </div>
+            {/each}
           </div>
         {:else}
           <div class="placeholder-box">
-            Pick a preset above and click <b>▶ Run Pipeline</b> to execute the full client-side WebGPU loop.
+            Wire any blocks on the canvas (or pick a preset above) and click <b>▶ Run Canvas</b>.
             <br /><br />
-            Start with <b>PDB → ProteinMPNN → LocalFold AF2</b> (~107 MB total, cached after first run) for the fastest end-to-end refolding test.
+            Try <b>RFD4 Fork: Native vs SolubleMPNN</b> to see branched DAG execution comparing two folding arms on one RFD4 backbone!
           </div>
         {/if}
       </div>
@@ -519,7 +565,7 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 12px;
-    margin-bottom: 16px;
+    margin-bottom: 14px;
   }
   .brand {
     display: flex;
@@ -580,7 +626,7 @@
     display: flex;
     gap: 6px;
     border-bottom: 1px solid #1e222b;
-    margin-bottom: 16px;
+    margin-bottom: 14px;
   }
   .tabs button {
     background: transparent;
@@ -598,22 +644,21 @@
   }
 
   .presets {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-    gap: 10px;
-    margin-bottom: 16px;
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    margin-bottom: 12px;
   }
   .preset-card {
     text-align: left;
     background: #13151b;
     border: 1px solid #262932;
-    border-radius: 8px;
-    padding: 12px 14px;
+    border-radius: 7px;
+    padding: 8px 11px;
     cursor: pointer;
     color: #e2e8f0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
+    flex-shrink: 0;
   }
   .preset-card:hover:not(:disabled) {
     border-color: #475569;
@@ -628,12 +673,11 @@
   }
   .p-top {
     display: flex;
-    justify-content: space-between;
     align-items: center;
     gap: 8px;
   }
   .p-name {
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
   }
   .p-badge {
@@ -645,16 +689,11 @@
     border-radius: 4px;
     white-space: nowrap;
   }
-  .p-desc {
-    font-size: 11px;
-    color: #94a3b8;
-    line-height: 1.4;
-  }
 
   .flow-panel {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
     margin-bottom: 18px;
   }
   .flow-head {
@@ -694,8 +733,8 @@
     background: #1d4ed8;
   }
   .btn-primary:disabled {
-    opacity: 0.6;
-    cursor: wait;
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .btn-secondary {
     background: #13151b;
@@ -710,85 +749,15 @@
     background: #1e293b;
   }
 
-  .stage-strip {
-    display: flex;
-    align-items: stretch;
-    gap: 8px;
-    overflow-x: auto;
-    padding-bottom: 4px;
-  }
-  .arrow {
-    display: flex;
-    align-items: center;
-    color: #475569;
-    font-size: 18px;
-    font-weight: 700;
-  }
-  .node-box {
-    min-width: 190px;
-    flex: 1;
-    text-align: left;
-    background: #13151b;
-    border: 1px solid #262932;
-    border-radius: 8px;
-    padding: 10px 12px;
-    color: #e2e8f0;
-    cursor: pointer;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .node-box.selected {
-    border-color: #60a5fa;
-    box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.35);
-  }
-  .node-box.running {
-    border-color: #f59e0b;
-  }
-  .node-box.done {
-    border-color: #22c55e;
-  }
-  .node-box.err {
-    border-color: #ef4444;
-  }
-  .n-top {
-    display: flex;
-    justify-content: space-between;
+  .warn-banner {
+    background: #291f0e;
+    border: 1px solid #b45309;
+    color: #fde68a;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 12px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10px;
-    text-transform: uppercase;
   }
-  .n-stage {
-    color: #64748b;
-  }
-  .n-status {
-    color: #93c5fd;
-  }
-  .n-title {
-    font-size: 13px;
-    font-weight: 600;
-  }
-  .n-detail {
-    font-size: 11px;
-    color: #94a3b8;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .n-bar {
-    height: 3px;
-    background: #1e222b;
-    border-radius: 2px;
-    overflow: hidden;
-    margin-top: 4px;
-  }
-  .n-bar > div {
-    height: 100%;
-    background: #3b82f6;
-    transition: width 0.12s;
-  }
-
   .error-banner {
     background: #2a1215;
     border: 1px solid #991b1b;
