@@ -140,10 +140,41 @@
     }
   }
 
+  function isEditableElement(el: EventTarget | null): boolean {
+    if (!(el instanceof HTMLElement)) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  }
+
   function handleWindowKeydown(ev: KeyboardEvent) {
     if (ev.key === 'Escape') {
       sysMenuOpen = false;
       moreMenuOpen = false;
+      return;
+    }
+
+    // Cmd/Ctrl + Enter runs workflow from anywhere (never hijacks Cmd+R browser reload)
+    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey) && !ev.altKey) {
+      if (!isRunning && validationErrors.length === 0) {
+        ev.preventDefault();
+        void runWorkflow(false);
+      }
+      return;
+    }
+
+    // Bare 'R' runs workflow when not typing in an input/textarea/select
+    if (
+      (ev.key === 'r' || ev.key === 'R') &&
+      !ev.metaKey &&
+      !ev.ctrlKey &&
+      !ev.altKey &&
+      !isEditableElement(ev.target) &&
+      !isEditableElement(document.activeElement)
+    ) {
+      if (!isRunning && validationErrors.length === 0) {
+        ev.preventDefault();
+        void runWorkflow(false);
+      }
     }
   }
 
@@ -910,8 +941,12 @@
       class="btn-primary"
       disabled={isRunning || validationErrors.length > 0}
       onclick={() => runWorkflow(false)}
+      title="Run workflow (R or ⌘↵ / Ctrl+Enter)"
     >
       {isRunning ? 'Running…' : '▶ Run'}
+      {#if !isRunning}
+        <kbd class="run-kbd">R</kbd>
+      {/if}
     </button>
   </div>
 </header>
@@ -1366,15 +1401,29 @@
   }
 
   .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
     background: #2563eb;
     color: #fff;
     border: 1px solid #3b82f6;
-    padding: 6px 14px;
+    padding: 6px 13px;
     border-radius: 6px;
     font-size: 12.5px;
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
+  }
+  .run-kbd {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.85);
+    background: rgba(255, 255, 255, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 3px;
+    padding: 0 4px;
+    line-height: 1.4;
   }
   .btn-primary:hover:not(:disabled) {
     background: #1d4ed8;
