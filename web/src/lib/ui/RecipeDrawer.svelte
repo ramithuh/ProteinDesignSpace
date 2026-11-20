@@ -35,8 +35,27 @@
     parseErr = null;
     try {
       const next = parseRecipeToGraph(editorText);
+      // Preserve existing inline pdbText when YAML recipe omitted oversized pdbText
+      const prevById = new Map(graph.nodes.map((n) => [n.id, n]));
+      const mergedNodes = next.nodes.map((n) => {
+        if (
+          n.adapterId === 'pdb-input' &&
+          n.params.mode === 'custom' &&
+          !String(n.params.pdbText ?? '').trim()
+        ) {
+          const prev = prevById.get(n.id);
+          if (
+            prev?.adapterId === 'pdb-input' &&
+            typeof prev.params.pdbText === 'string' &&
+            prev.params.pdbText.length > 0
+          ) {
+            return { ...n, params: { ...n.params, pdbText: prev.params.pdbText } };
+          }
+        }
+        return n;
+      });
       dirty = false;
-      onApplyGraph(next);
+      onApplyGraph({ ...next, nodes: mergedNodes });
       shareStatus = 'Applied recipe to canvas';
       setTimeout(() => (shareStatus = null), 2000);
     } catch (err) {

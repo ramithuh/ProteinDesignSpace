@@ -4,6 +4,7 @@
     Controls,
     MiniMap,
     SvelteFlow,
+    useSvelteFlow,
     type Connection,
     type Edge,
     type IsValidConnection,
@@ -58,6 +59,14 @@
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let canvasEl: HTMLDivElement | null = $state(null);
   let flowKey = $state(0);
+  let blockCounter = 0;
+
+  let flowApi: ReturnType<typeof useSvelteFlow> | null = null;
+  try {
+    flowApi = useSvelteFlow();
+  } catch {
+    flowApi = null;
+  }
 
   function flashToast(msg: string) {
     validationToast = msg;
@@ -117,6 +126,7 @@
   });
 
   const isValidConnection: IsValidConnection = (conn) => {
+    if (disabled) return false;
     const src = conn.source;
     const dst = conn.target;
     const srcHandle = conn.sourceHandle ?? '';
@@ -142,15 +152,22 @@
     onGraphChange({ ...graph, edges: [...filtered, newEdge] });
   }
 
-  function handleNodeDragStop({ targetNode }: { targetNode: Node | null }) {
-    if (!targetNode) return;
+  function handleNodeDragStop({ targetNode, nodes: draggedNodes }: { targetNode: Node | null; nodes: Node[] }) {
+    if (disabled) return;
+    const moved = new Map<string, { x: number; y: number }>();
+    for (const dn of draggedNodes ?? []) {
+      moved.set(dn.id, { x: Math.round(dn.position.x), y: Math.round(dn.position.y) });
+    }
+    if (targetNode) {
+      moved.set(targetNode.id, { x: Math.round(targetNode.position.x), y: Math.round(targetNode.position.y) });
+    }
+    if (moved.size === 0) return;
     onGraphChange({
       ...graph,
-      nodes: graph.nodes.map((n) =>
-        n.id === targetNode.id
-          ? { ...n, position: { x: Math.round(targetNode.position.x), y: Math.round(targetNode.position.y) } }
-          : n,
-      ),
+      nodes: graph.nodes.map((n) => {
+        const pos = moved.get(n.id);
+        return pos ? { ...n, position: pos } : n;
+      }),
     });
   }
 
@@ -182,7 +199,12 @@
     const manifest = ADAPTER_REGISTRY[adapterId];
     if (!manifest) return;
     const count = graph.nodes.filter((n) => n.adapterId === adapterId).length;
-    const id = `${adapterId.replace(/[^a-z0-9]/gi, '_')}_${Date.now().toString(36).slice(-4)}`;
+    const existingIds = new Set(graph.nodes.map((n) => n.id));
+    const prefix = adapterId.replace(/[^a-z0-9]/gi, '_');
+    let id = `${prefix}_${++blockCounter}`;
+    while (existingIds.has(id)) {
+      id = `${prefix}_${++blockCounter}`;
+    }
     const maxX = graph.nodes.reduce((m, n) => Math.max(m, n.position?.x ?? 0), 0);
     const pos = dropPos ?? {
       x: graph.nodes.length === 0 ? 50 : Math.min(maxX + 60, 700),
@@ -206,16 +228,25 @@
 
   function handleDrop(ev: DragEvent) {
     ev.preventDefault();
+    if (disabled) return;
     const adapterId = ev.dataTransfer?.getData('application/denovo-adapter');
     if (!adapterId || !canvasEl) return;
-    const rect = canvasEl.getBoundingClientRect();
-    addBlock(adapterId, {
-      x: Math.max(20, Math.round(ev.clientX - rect.left - 110)),
-      y: Math.max(20, Math.round(ev.clientY - rect.top - 40)),
-    });
+    let dropPos: { x: number; y: number };
+    if (flowApi) {
+      const flowPos = flowApi.screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
+      dropPos = { x: Math.round(flowPos.x - 110), y: Math.round(flowPos.y - 40) };
+    } else {
+      const rect = canvasEl.getBoundingClientRect();
+      dropPos = {
+        x: Math.max(20, Math.round(ev.clientX - rect.left - 110)),
+        y: Math.max(20, Math.round(ev.clientY - rect.top - 40)),
+      };
+    }
+    addBlock(adapterId, dropPos);
   }
 
   function handleAutoLayout() {
+    if (disabled) return;
     onGraphChange(autoLayoutGraph(graph));
     flowKey++;
   }
@@ -227,8 +258,12 @@
   }
 
   async function importGraphJson(ev: Event) {
-    const file = (ev.currentTarget as HTMLInputElement).files?.[0];
-    if (!file) return;
+    const input = ev.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file || disabled) {
+      input.value = '';
+      return;
+    }
     try {
       const parsed = JSON.parse(await file.text()) as WorkflowGraph;
       if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
@@ -240,6 +275,8 @@
       onSelectNode(laid.nodes[0]?.id ?? '');
     } catch {
       flashToast('Failed to parse workflow JSON');
+    } finally {
+      input.value = '';
     }
   }
 
@@ -301,7 +338,7 @@
     ondrop={handleDrop}
   >
     <div class="canvas-tools">
-      <button class="c-btn" onclick={handleAutoLayout}>Auto Layout</button>
+      <button class="c-btn" {disabled} onclick={handleAutoLayout}>Auto Layout</button>
       <label class="c-btn">
         Import JSON
         <input type="file" accept=".json" hidden {disabled} onchange={importGraphJson} />
@@ -319,6 +356,9 @@
         bind:edges={flowEdges}
         {nodeTypes}
         forceColorMode={theme}
+        nodesDraggable={!disabled}
+        nodesConnectable={!disabled}
+        deleteKey={disabled ? null : ['Backspace', 'Delete']}
         fitView
         fitViewOptions={{ padding: 0.18 }}
         {isValidConnection}

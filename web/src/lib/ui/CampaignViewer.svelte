@@ -15,16 +15,36 @@
   let activeRound = $derived(campaign.rounds[selectedIdx] ?? campaign.rounds[0] ?? null);
 
   async function importJson(ev: Event) {
-    const file = (ev.currentTarget as HTMLInputElement).files?.[0];
+    const input = ev.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
     if (!file) return;
-    const text = await file.text();
-    const parsed = JSON.parse(text) as CampaignState;
-    if (parsed.schema !== 'denovo.campaign/v1' || !Array.isArray(parsed.rounds)) {
-      alert('Expected a denovo.campaign/v1 JSON file');
-      return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as Partial<CampaignState>;
+      if (parsed.schema !== 'denovo.campaign/v1' || !Array.isArray(parsed.rounds)) {
+        alert('Expected a denovo.campaign/v1 JSON file');
+        return;
+      }
+      const normalized: CampaignState = {
+        schema: 'denovo.campaign/v1',
+        campaignId: parsed.campaignId || 'imported-campaign',
+        title: parsed.title || 'Imported Campaign',
+        goal: parsed.goal || '',
+        assay: {
+          scRmsdThreshold: parsed.assay?.scRmsdThreshold ?? 2.0,
+          plddtThreshold: parsed.assay?.plddtThreshold ?? 70,
+          targetName: parsed.assay?.targetName,
+          offTargetName: parsed.assay?.offTargetName,
+        },
+        rounds: parsed.rounds,
+      };
+      onLoadCampaign(normalized);
+      selectedIdx = Math.max(0, normalized.rounds.length - 1);
+    } catch (err) {
+      alert(`Failed to import campaign JSON: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      input.value = '';
     }
-    onLoadCampaign(parsed);
-    selectedIdx = Math.max(0, parsed.rounds.length - 1);
   }
 
   function exportJson() {
@@ -34,7 +54,7 @@
     a.href = url;
     a.download = `${campaign.campaignId}.json`;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 </script>
 
@@ -61,7 +81,7 @@
   </div>
 
   <div class="rounds">
-    {#each campaign.rounds as r, i (r.round)}
+    {#each campaign.rounds as r, i (`${r.round}_${i}`)}
       <button
         class="round-card"
         class:selected={i === selectedIdx}

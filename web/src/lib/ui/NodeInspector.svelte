@@ -15,17 +15,29 @@
     onUpdate(node.id, { ...node.params, [key]: value });
   }
 
+  function setNumParam(key: string, raw: string) {
+    if (raw.trim() === '') return;
+    const n = Number(raw);
+    if (Number.isFinite(n)) setParam(key, n);
+  }
+
   async function handleFileUpload(ev: Event) {
     const input = ev.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
-    const text = await file.text();
-    onUpdate(node.id, {
-      ...node.params,
-      mode: 'custom',
-      filename: file.name,
-      pdbText: text,
-    });
+    const targetNodeId = node.id;
+    const baseParams = { ...node.params };
+    try {
+      const text = await file.text();
+      onUpdate(targetNodeId, {
+        ...baseParams,
+        mode: 'custom',
+        filename: file.name,
+        pdbText: text,
+      });
+    } finally {
+      input.value = '';
+    }
   }
 </script>
 
@@ -52,7 +64,7 @@
           value={String(node.params.mode ?? 'demo-bundle')}
           onchange={(e) => setParam('mode', e.currentTarget.value)}
         >
-          <option value="demo-bundle">Built-in 56 aa 3-helix bundle demo</option>
+          <option value="demo-bundle">Built-in 53 aa 3-helix bundle demo</option>
           <option value="custom">Upload or paste PDB / mmCIF</option>
         </select>
       </label>
@@ -241,7 +253,7 @@
             max="200"
             {disabled}
             value={Number(node.params.length ?? 70)}
-            oninput={(e) => setParam('length', Number(e.currentTarget.value))}
+            oninput={(e) => setNumParam('length', e.currentTarget.value)}
           />
         </label>
       {:else if rfdMode === 'preset'}
@@ -267,7 +279,7 @@
             step="0.05"
             {disabled}
             value={Number(node.params.partialFraction ?? 0.5)}
-            oninput={(e) => setParam('partialFraction', Number(e.currentTarget.value))}
+            oninput={(e) => setNumParam('partialFraction', e.currentTarget.value)}
           />
         </label>
       {/if}
@@ -279,7 +291,7 @@
           max="120"
           {disabled}
           value={Number(node.params.nsteps ?? 60)}
-          oninput={(e) => setParam('nsteps', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('nsteps', e.currentTarget.value)}
         />
       </label>
       <label class="inline-check">
@@ -309,7 +321,7 @@
           min="0"
           {disabled}
           value={Number(node.params.seed ?? 42)}
-          oninput={(e) => setParam('seed', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('seed', e.currentTarget.value)}
         />
       </label>
       {#if rfdMode === 'unconditional'}
@@ -344,7 +356,7 @@
           max="200"
           {disabled}
           value={Number(node.params.length ?? 80)}
-          oninput={(e) => setParam('length', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('length', e.currentTarget.value)}
         />
       </label>
       <label>
@@ -355,7 +367,7 @@
           max="400"
           {disabled}
           value={Number(node.params.nfe ?? 32)}
-          oninput={(e) => setParam('nfe', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('nfe', e.currentTarget.value)}
         />
       </label>
       <label>
@@ -365,7 +377,7 @@
           min="0"
           {disabled}
           value={Number(node.params.seed ?? 42)}
-          oninput={(e) => setParam('seed', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('seed', e.currentTarget.value)}
         />
       </label>
       {#if node.params.sampler === 'sde-proteina'}
@@ -378,7 +390,7 @@
             step="0.05"
             {disabled}
             value={Number(node.params.sdeGamma ?? 0.1)}
-            oninput={(e) => setParam('sdeGamma', Number(e.currentTarget.value))}
+            oninput={(e) => setNumParam('sdeGamma', e.currentTarget.value)}
           />
         </label>
         <label>
@@ -390,7 +402,7 @@
             step="0.5"
             {disabled}
             value={Number(node.params.sdeGtMax ?? 3.0)}
-            oninput={(e) => setParam('sdeGtMax', Number(e.currentTarget.value))}
+            oninput={(e) => setNumParam('sdeGtMax', e.currentTarget.value)}
           />
         </label>
       {/if}
@@ -426,7 +438,7 @@
           max="8"
           {disabled}
           value={Number(node.params.numSequences ?? 2)}
-          oninput={(e) => setParam('numSequences', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('numSequences', e.currentTarget.value)}
         />
       </label>
       <label>
@@ -438,7 +450,7 @@
           step="0.05"
           {disabled}
           value={Number(node.params.temperature ?? 0.1)}
-          oninput={(e) => setParam('temperature', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('temperature', e.currentTarget.value)}
         />
       </label>
       <label>
@@ -448,7 +460,7 @@
           min="0"
           {disabled}
           value={Number(node.params.seed ?? 42)}
-          oninput={(e) => setParam('seed', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('seed', e.currentTarget.value)}
         />
       </label>
       <label class="wide">
@@ -470,7 +482,7 @@
           max="4"
           {disabled}
           value={Number(node.params.recycles ?? 1)}
-          oninput={(e) => setParam('recycles', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('recycles', e.currentTarget.value)}
         />
       </label>
       <label>
@@ -481,7 +493,7 @@
           max="8"
           {disabled}
           value={Number(node.params.maxSequences ?? 2)}
-          oninput={(e) => setParam('maxSequences', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('maxSequences', e.currentTarget.value)}
         />
       </label>
       <label>
@@ -491,7 +503,7 @@
           min="0"
           {disabled}
           value={Number(node.params.seed ?? 0)}
-          oninput={(e) => setParam('seed', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('seed', e.currentTarget.value)}
         />
       </label>
     {:else if node.adapterId === 'designability-scorer'}
@@ -504,7 +516,7 @@
           step="0.1"
           {disabled}
           value={Number(node.params.scRmsdThreshold ?? 2.0)}
-          oninput={(e) => setParam('scRmsdThreshold', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('scRmsdThreshold', e.currentTarget.value)}
         />
       </label>
       <label>
@@ -516,7 +528,7 @@
           step="5"
           {disabled}
           value={Number(node.params.plddtThreshold ?? 70)}
-          oninput={(e) => setParam('plddtThreshold', Number(e.currentTarget.value))}
+          oninput={(e) => setNumParam('plddtThreshold', e.currentTarget.value)}
         />
       </label>
     {/if}

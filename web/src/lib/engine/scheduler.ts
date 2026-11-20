@@ -70,6 +70,7 @@ export interface RunResult {
 interface ActiveGpuSlot {
   adapterId: string;
   worker: Worker;
+  abortActive?: (err: Error) => void;
 }
 
 export class ExecutionScheduler {
@@ -92,27 +93,35 @@ export class ExecutionScheduler {
     if (!slot) return;
     this.activeGpu = null;
 
+    if (slot.abortActive) {
+      const abort = slot.abortActive;
+      slot.abortActive = undefined;
+      abort(new Error(`GPU worker "${slot.adapterId}" was released while running`));
+    }
+
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        slot.worker.terminate();
-        resolve();
-      }, 500);
       const id = this.reqCounter++;
+      const finish = () => {
+        clearTimeout(timer);
+        slot.worker.removeEventListener('message', onMsg);
+        try {
+          slot.worker.terminate();
+        } catch {
+          /* ignore */
+        }
+        resolve();
+      };
+      const timer = setTimeout(finish, 500);
       const onMsg = (ev: MessageEvent) => {
         if (ev.data?.id === id && ev.data?.type === 'disposed') {
-          clearTimeout(timer);
-          slot.worker.removeEventListener('message', onMsg);
-          slot.worker.terminate();
-          resolve();
+          finish();
         }
       };
       slot.worker.addEventListener('message', onMsg);
       try {
         slot.worker.postMessage({ id, type: 'dispose' });
       } catch {
-        clearTimeout(timer);
-        slot.worker.terminate();
-        resolve();
+        finish();
       }
     });
   }
@@ -154,10 +163,25 @@ export class ExecutionScheduler {
       this.activeGpu = { adapterId: node.adapterId, worker };
     }
 
-    const worker = this.activeGpu.worker;
+    const slot = this.activeGpu;
+    const worker = slot.worker;
     const id = this.reqCounter++;
 
     return await new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        worker.removeEventListener('message', onMessage);
+        worker.removeEventListener('error', onError);
+        if (slot.abortActive === abort) {
+          slot.abortActive = undefined;
+        }
+      };
+      const abort = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
       const onMessage = (ev: MessageEvent) => {
         const m = ev.data;
         if (m?.id !== id) return;
@@ -170,27 +194,42 @@ export class ExecutionScheduler {
             detail: m.detail,
           });
         } else if (m.type === 'result') {
+          if (settled) return;
+          settled = true;
           cleanup();
           resolve({ outputs: m.outputs, elapsedMs: m.elapsedMs ?? 0 });
         } else if (m.type === 'error') {
+          if (settled) return;
+          settled = true;
           cleanup();
           reject(new Error(m.message || `Worker ${node.adapterId} failed`));
         }
       };
       const onError = (err: ErrorEvent) => {
+        if (settled) return;
+        settled = true;
         cleanup();
+        if (this.activeGpu === slot) {
+          this.activeGpu = null;
+        }
+        try {
+          worker.terminate();
+        } catch {
+          /* ignore */
+        }
         reject(new Error(err.message || `Worker ${node.adapterId} crashed`));
       };
-      const cleanup = () => {
-        worker.removeEventListener('message', onMessage);
-        worker.removeEventListener('error', onError);
-      };
 
+      slot.abortActive = abort;
       worker.addEventListener('message', onMessage);
       worker.addEventListener('error', onError);
-      // Plain-object clone strips any reactive Proxy (e.g. Svelte 5 $state) before postMessage.
-      const plainParams = JSON.parse(JSON.stringify(node.params ?? {}));
-      worker.postMessage({ id, type: 'run', params: plainParams, inputs });
+      try {
+        // Plain-object clone strips any reactive Proxy (e.g. Svelte 5 $state) before postMessage.
+        const plainParams = JSON.parse(JSON.stringify(node.params ?? {}));
+        worker.postMessage({ id, type: 'run', params: plainParams, inputs });
+      } catch (err) {
+        abort(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 
@@ -205,13 +244,13 @@ export class ExecutionScheduler {
           ? String(node.params.pdbText)
           : generateSampleHelixBundlePdb();
       const filename = String(
-        mode === 'custom' ? node.params.filename || 'uploaded.pdb' : 'demo_3helix_56aa.pdb',
+        mode === 'custom' ? node.params.filename || 'uploaded.pdb' : 'demo_3helix_53aa.pdb',
       );
       const parsed = parseStructureText(rawText);
       if (parsed.nResidues < 3) {
         throw new Error('Input PDB/mmCIF must contain at least 3 residues with Cα atoms');
       }
-      const geometry = computeGeometryStats(parsed.caCoords);
+      const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
       const art: StructureArtifact = {
         kind: 'StructureArtifact',
         id: `pdb-${fnv1a(rawText)}`,
@@ -240,12 +279,16 @@ export class ExecutionScheduler {
       }> = [];
       if (raw.includes('>')) {
         const blocks = raw.split(/^>/m).filter((b) => b.trim().length > 0);
+        const seenIds = new Map<string, number>();
         blocks.forEach((b, idx) => {
           const lines = b.split('\n');
-          const header = lines[0].trim().split(/\s+/)[0] || `seq-${idx + 1}`;
+          const baseHeader = lines[0].trim().split(/\s+/)[0] || `seq-${idx + 1}`;
           const seq = lines.slice(1).join('').replace(/[^ACDEFGHIKLMNPQRSTVWY]/gi, '').toUpperCase();
           if (seq.length >= 5) {
-            candidates.push({ id: header, sequence: seq, score: null, globalScore: null, sourceModelId: 'sequence-input' });
+            const count = seenIds.get(baseHeader) ?? 0;
+            seenIds.set(baseHeader, count + 1);
+            const id = count === 0 ? baseHeader : `${baseHeader}_${count + 1}`;
+            candidates.push({ id, sequence: seq, score: null, globalScore: null, sourceModelId: 'sequence-input' });
           }
         });
       } else {
@@ -282,7 +325,7 @@ export class ExecutionScheduler {
         const parsed = JSON.parse(rawOverride) as Record<string, unknown>;
         const art: ConditionSpecArtifact = {
           kind: 'ConditionSpec',
-          id: `cond-raw-${fnv1a(rawOverride)}`,
+          id: `cond-raw-${fnv1a(JSON.stringify({ rawOverride, tpl: template?.id }))}`,
           label: 'Custom JSON Spec',
           contig: String(parsed.contig ?? p.contig ?? '70-70'),
           conditions: (parsed.conditions as Record<string, unknown>) ?? {},
@@ -320,7 +363,7 @@ export class ExecutionScheduler {
 
       const hotspots = String(p.hotspots ?? '').trim();
       if (hotspots) {
-        // Group residues by chain (e.g. "A54, A56, A66" -> sel('A/*/54,56,66/*'))
+        // Group residues by chain (e.g. "A54, A56, A66" -> sel('A/*/[54,56,66]/*'))
         const byChain = new Map<string, string[]>();
         for (const tok of hotspots.split(/[,\s]+/).filter(Boolean)) {
           const m = /^([A-Za-z])?:?(\d+(?:-\d+)?)$/.exec(tok);
@@ -330,7 +373,7 @@ export class ExecutionScheduler {
           list.push(m[2]);
           byChain.set(ch, list);
         }
-        const exprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/${nums.join(',')}/*')`);
+        const exprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/[${nums.join(',')}]/*')`);
         if (exprs.length > 0) {
           conditions.C_HOT = { true: [{ select: exprs.join(' | ') }] };
           tags.push(`hot:${hotspots}`);
@@ -348,12 +391,13 @@ export class ExecutionScheduler {
           list.push(m[2]);
           byChain.set(ch, list);
         }
-        const exprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/${nums.join(',')}/*')`);
+        const exprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/[${nums.join(',')}]/*')`);
         if (exprs.length > 0) {
           const sel = exprs.join(' | ');
           conditions.C_CRDGRP = { 1: [{ select: sel }] };
-          conditions.C_SEQ = { true: [{ select: sel }] };
-          if (p.unindexedMotif) conditions.C_IDX = { false: [{ select: sel }] };
+          const prevSeqTrue = (conditions.C_SEQ as { true?: Array<{ select: string }> } | undefined)?.true ?? [];
+          conditions.C_SEQ = { true: [...prevSeqTrue, { select: sel }] };
+          if (p.unindexedMotif) conditions.C_IDX = { false: [{ select: sel, group: 'motif' }] };
           tags.push(p.unindexedMotif ? `unidx-motif:${motifSpan}` : `motif:${motifSpan}`);
         }
       }
@@ -395,10 +439,18 @@ export class ExecutionScheduler {
       const plddtThresh = Number(node.params.plddtThreshold ?? 70);
 
       const rows: DesignabilityRow[] = folds.folds.map((f) => {
+        if (f.caCoords.length !== structure.caCoords.length) {
+          const foldLen = Math.floor(f.caCoords.length / 3);
+          const structLen = Math.floor(structure.caCoords.length / 3);
+          throw new Error(
+            `Length mismatch in designability-scorer: refolded "${f.sequenceId}" has ${foldLen} residues, ` +
+              `but designed structure "${structure.label}" has ${structLen} residues.`,
+          );
+        }
         const align = kabschAlign(f.caCoords, structure.caCoords);
         const alignedFoldPdb = applyTransformToPdb(f.pdbText, align.rotation, align.translation);
         const geom = computeGeometryStats(f.caCoords);
-        const designable = align.rmsd < scThresh && f.meanPlddt >= plddtThresh;
+        const designable = Number.isFinite(align.rmsd) && align.rmsd < scThresh && f.meanPlddt >= plddtThresh;
         return {
           structureId: structure.id,
           sequenceId: f.sequenceId,
@@ -417,7 +469,14 @@ export class ExecutionScheduler {
         };
       });
 
-      rows.sort((a, b) => a.scRmsd - b.scRmsd);
+      rows.sort((a, b) => {
+        const af = Number.isFinite(a.scRmsd);
+        const bf = Number.isFinite(b.scRmsd);
+        if (af && bf) return a.scRmsd - b.scRmsd;
+        if (af) return -1;
+        if (bf) return 1;
+        return 0;
+      });
       const passed = rows.filter((r) => r.designable).length;
       const metrics: DesignabilityMetrics = {
         kind: 'DesignabilityMetrics',

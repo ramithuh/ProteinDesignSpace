@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import { SvelteFlowProvider } from '@xyflow/svelte';
   import { ExecutionScheduler, attachProgrammaticApi } from '$lib/engine/scheduler';
   import { ADAPTER_REGISTRY, SAMPLE_CAMPAIGN, WORKFLOW_PRESETS } from '$lib/engine/registry';
   import { autoLayoutGraph, validateGraph } from '$lib/engine/graph-utils';
@@ -44,7 +45,7 @@
   let totalElapsedMs = $state<number | null>(null);
 
   let nodeStates = $state<Record<string, NodeProgressEvent>>({});
-  let outputsByNode = $state<Record<string, Record<string, CanonicalArtifact>>>({});
+  let outputsByNode = $state.raw<Record<string, Record<string, CanonicalArtifact>>>({});
 
   // Viewer toggles
   let selectedRowIdx = $state(0);
@@ -165,7 +166,33 @@
   }
 
   function handleGraphChange(next: WorkflowGraph) {
+    const nextById = new Map(next.nodes.map((n) => [n.id, n]));
+    const prevById = new Map(graph.nodes.map((n) => [n.id, n]));
+
+    const nextOutputs: Record<string, Record<string, CanonicalArtifact>> = {};
+    for (const [id, outs] of Object.entries(outputsByNode)) {
+      const cur = nextById.get(id);
+      const prev = prevById.get(id);
+      if (cur && prev && cur.adapterId === prev.adapterId) {
+        nextOutputs[id] = outs;
+      }
+    }
+    outputsByNode = nextOutputs;
+
+    const nextStates: Record<string, NodeProgressEvent> = {};
+    for (const [id, st] of Object.entries(nodeStates)) {
+      const cur = nextById.get(id);
+      const prev = prevById.get(id);
+      if (cur && prev && cur.adapterId === prev.adapterId) {
+        nextStates[id] = st;
+      }
+    }
+    nodeStates = nextStates;
+
     graph = next;
+    if (!nextById.has(selectedNodeId)) {
+      selectedNodeId = next.nodes[0]?.id ?? '';
+    }
     runError = null;
   }
 
@@ -214,11 +241,13 @@
   }
 
   async function freeVram() {
+    if (isRunning) return;
     await scheduler.releaseActiveGpu();
     activeGpuWorker = null;
   }
 
   async function handleClearCache() {
+    if (isRunning) return;
     await scheduler.releaseActiveGpu();
     scheduler.clearMemo();
     await clearAllModelCaches();
@@ -250,7 +279,7 @@
     a.href = url;
     a.download = `${graph.id}.denovo.json`;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   function downloadText(text: string, filename: string) {
@@ -260,7 +289,7 @@
     a.href = url;
     a.download = filename;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   function handleResidueClick(info: { chain: string; seqId: number; compId: string }) {
@@ -299,20 +328,33 @@
   function recordRunToCampaign() {
     if (!metricsArtifact) return;
     const nextRoundNum = (campaign.rounds.at(-1)?.round ?? 0) + 1;
-    const genNode = graph.nodes[0];
+    const genNode =
+      graph.nodes.find((n) => ADAPTER_REGISTRY[n.adapterId]?.stage === 'generate') ??
+      graph.nodes.find((n) => ADAPTER_REGISTRY[n.adapterId]?.stage === 'source') ??
+      graph.nodes[0];
+    const condNode = graph.nodes.find((n) => n.adapterId === 'rfd4-conditioner');
+    const foldNode = graph.nodes.find((n) => ADAPTER_REGISTRY[n.adapterId]?.stage === 'fold');
+    const cleanParams: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(genNode?.params ?? {})) {
+      if (k === 'pdbText' || k === 'rawJsonOverride' || k === 'customSpecYaml') continue;
+      cleanParams[k] = v;
+    }
+    const condSummary = condNode
+      ? `cond(${String(condNode.params.taskPreset !== 'custom' ? condNode.params.taskPreset : condNode.params.contig ?? '')}) · `
+      : '';
     const best = metricsArtifact.best;
     const newRound = {
       round: nextRoundNum,
       timestamp: new Date().toISOString(),
       label: `Round ${nextRoundNum} — ${selectedNode?.label ?? graph.name}`,
       generator: ADAPTER_REGISTRY[genNode?.adapterId ?? '']?.displayName ?? genNode?.adapterId ?? 'unknown',
-      folder: 'LocalFold AF2 (WebGPU INT5)',
+      folder: ADAPTER_REGISTRY[foldNode?.adapterId ?? '']?.displayName ?? 'LocalFold AF2 (WebGPU INT5)',
       nDesigned: metricsArtifact.rows.length,
       nPassed: metricsArtifact.rows.filter((r) => r.designable).length,
       hitRate: metricsArtifact.passRate,
       bestScRmsd: best ? best.scRmsd : null,
       bestPlddt: best ? best.meanPlddt : null,
-      conditioningSummary: JSON.stringify(genNode?.params ?? {}).slice(0, 120),
+      conditioningSummary: `${condSummary}${JSON.stringify(cleanParams)}`.slice(0, 120),
       agentNotes: `Recorded live in browser from denovo.run (${((totalElapsedMs ?? 0) / 1000).toFixed(1)}s).`,
       designedPdb: best?.designedPdb,
       alignedFoldPdb: best?.alignedFoldPdb,
@@ -358,10 +400,25 @@
     !activeRow && foldArtifact?.folds[0] ? foldArtifact.folds[0] : null,
   );
 
+  // Active scorer thresholds (for dynamic table highlights)
+  let activeScorerNode = $derived(
+    selectedNode?.adapterId === 'designability-scorer'
+      ? selectedNode
+      : [...graph.nodes].reverse().find((n) => n.adapterId === 'designability-scorer') ?? null,
+  );
+  let scRmsdThreshold = $derived(Number(activeScorerNode?.params.scRmsdThreshold ?? 2.0));
+  let plddtThreshold = $derived(Number(activeScorerNode?.params.plddtThreshold ?? 70));
+
   // Reset row index when switching between different scorer branches
   $effect(() => {
     void metricsArtifact?.id;
     selectedRowIdx = 0;
+  });
+
+  // Reset trajectory frame index when structure changes so modelIndex never goes out of bounds
+  $effect(() => {
+    void structureArtifact?.id;
+    trajFrame = 0;
   });
 </script>
 
@@ -375,14 +432,14 @@
       WebGPU: {webgpuDetail}
     </span>
     {#if activeGpuWorker}
-      <button class="chip gpu" onclick={freeVram} title="Dispose & terminate active WebGPU worker">
+      <button class="chip gpu" disabled={isRunning} onclick={freeVram} title="Dispose & terminate active WebGPU worker">
         GPU: {activeGpuWorker} · free VRAM ×
       </button>
     {/if}
     {#if webMcpReady}
       <span class="chip ok">WebMCP active</span>
     {/if}
-    <button class="chip" onclick={handleClearCache} title="Clear OPFS & CacheStorage weight caches">
+    <button class="chip" disabled={isRunning} onclick={handleClearCache} title="Clear OPFS & CacheStorage weight caches">
       Cache: {cacheUsedMB.toFixed(0)} MB · clear
     </button>
     <button class="chip theme-btn" onclick={toggleTheme} title="Switch light / dark theme">
@@ -450,16 +507,18 @@
       </div>
     </div>
 
-    <WorkflowCanvas
-      {graph}
-      {selectedNodeId}
-      {nodeStates}
-      {outputsByNode}
-      {theme}
-      disabled={isRunning}
-      onGraphChange={handleGraphChange}
-      onSelectNode={(id) => (selectedNodeId = id)}
-    />
+    <SvelteFlowProvider>
+      <WorkflowCanvas
+        {graph}
+        {selectedNodeId}
+        {nodeStates}
+        {outputsByNode}
+        {theme}
+        disabled={isRunning}
+        onGraphChange={handleGraphChange}
+        onSelectNode={(id) => (selectedNodeId = id)}
+      />
+    </SvelteFlowProvider>
 
     {#if showRecipe}
       <RecipeDrawer {graph} disabled={isRunning} onApplyGraph={handleGraphChange} />
@@ -566,15 +625,15 @@
               </tr>
             </thead>
             <tbody>
-              {#each metricsArtifact.rows as row, i (row.sequenceId)}
+              {#each metricsArtifact.rows as row, i (`${row.sequenceId}_${i}`)}
                 <tr
                   class:selected={i === selectedRowIdx}
                   onclick={() => (selectedRowIdx = i)}
                 >
                   <td><code>{row.sequenceId}</code></td>
-                  <td class:good-val={row.scRmsd < 2.0}>{row.scRmsd.toFixed(2)} Å</td>
+                  <td class:good-val={row.scRmsd < scRmsdThreshold}>{row.scRmsd.toFixed(2)} Å</td>
                   <td>{row.scTm.toFixed(3)}</td>
-                  <td class:good-val={row.meanPlddt >= 70}>{row.meanPlddt.toFixed(1)}</td>
+                  <td class:good-val={row.meanPlddt >= plddtThreshold}>{row.meanPlddt.toFixed(1)}</td>
                   <td>{row.ptm !== null ? row.ptm.toFixed(2) : '—'}</td>
                   <td>
                     <span class="verdict" class:pass={row.designable}>
@@ -639,7 +698,7 @@
             <div class="seq-head">
               <span>{sequenceArtifact.candidates.length} Sequence(s) · {sequenceArtifact.sourceModelId}</span>
             </div>
-            {#each sequenceArtifact.candidates as c (c.id)}
+            {#each sequenceArtifact.candidates as c, i (`${c.id}_${i}`)}
               <div class="seq-text" style="margin-bottom: 6px">
                 <b>{c.id}</b> {c.score !== null ? `(score ${c.score.toFixed(2)})` : ''}: {c.sequence}
               </div>
@@ -706,9 +765,13 @@
   button.chip {
     cursor: pointer;
   }
-  button.chip:hover {
+  button.chip:hover:not(:disabled) {
     border-color: var(--border-strong);
     color: var(--text-primary);
+  }
+  button.chip:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .chip.theme-btn {
     color: var(--text-body);

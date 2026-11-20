@@ -13,7 +13,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 0,
     licenseNote: 'Built-in parser',
     description:
-      'Use a built-in 56 aa 3-helix bundle demo, paste/upload any PDB or mmCIF (e.g., from web.rfd4-proteina.org or RFdiffusion), and pipe it into inverse folding & refolding.',
+      'Use a built-in 53 aa 3-helix bundle demo, paste/upload any PDB or mmCIF (e.g., from web.rfd4-proteina.org or RFdiffusion), and pipe it into inverse folding & refolding.',
     inputs: {},
     outputs: {
       structure: { type: 'StructureArtifact' },
@@ -179,7 +179,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
     name: 'PDB → ProteinMPNN → LocalFold AF2',
     badge: 'Fastest Test (~107 MB)',
     summary:
-      'Start from the built-in 56 aa 3-helix bundle (or drop any PDB/mmCIF), design sequences with SolubleMPNN, refold in WebGPU with LocalFold AF2, and inspect live Kabsch scRMSD + Mol* superposition.',
+      'Start from the built-in 53 aa 3-helix bundle (or drop any PDB/mmCIF), design sequences with SolubleMPNN, refold in WebGPU with LocalFold AF2, and inspect live Kabsch scRMSD + Mol* superposition.',
     graph: {
       id: 'pdb-refold-qc',
       name: 'PDB → ProteinMPNN → LocalFold AF2',
@@ -188,7 +188,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
           id: 'src',
           adapterId: 'pdb-input',
           label: 'Backbone Input',
-          params: { mode: 'demo-bundle', pdbText: '', filename: 'demo_3helix_56aa.pdb' },
+          params: { mode: 'demo-bundle', pdbText: '', filename: 'demo_3helix_53aa.pdb' },
         },
         {
           id: 'mpnn',
