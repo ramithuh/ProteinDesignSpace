@@ -2,6 +2,16 @@
 // Runs in both Dedicated Web Workers (where OPFS is fastest) and main thread.
 
 const CACHE_NAME = 'denovo-run-weights-v1';
+const CACHE_PUT_TIMEOUT_MS = 5000;
+
+function fnv1a(str: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
 
 export interface FetchProgress {
   loaded: number;
@@ -44,7 +54,9 @@ export async function fetchCachedBytes(
   // 3. Stream from network
   const resp = await fetch(url, { signal });
   if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
-  const total = Number(resp.headers.get('content-length') ?? 0);
+  const contentEncoding = resp.headers.get('content-encoding');
+  const rawTotal = Number(resp.headers.get('content-length') ?? 0);
+  const total = Number.isFinite(rawTotal) && rawTotal > 0 ? rawTotal : 0;
 
   let bytes: Uint8Array;
   if (resp.body) {
@@ -56,16 +68,28 @@ export async function fetchCachedBytes(
       if (done) break;
       chunks.push(value);
       loaded += value.byteLength;
-      onProgress?.({ loaded, total: total || loaded, fromCache: false });
+      // Keep reported total >= loaded so callers computing loaded / total stay <= 1 (e.g. gzipped bodies)
+      onProgress?.({ loaded, total: Math.max(total, loaded), fromCache: false });
+    }
+    if (!contentEncoding && total > 0 && loaded !== total) {
+      chunks.length = 0;
+      throw new Error(`Truncated download for ${url}: received ${loaded} of ${total} bytes`);
     }
     bytes = new Uint8Array(loaded);
     let off = 0;
-    for (const c of chunks) {
-      bytes.set(c, off);
-      off += c.byteLength;
+    for (let i = 0; i < chunks.length; i++) {
+      bytes.set(chunks[i], off);
+      off += chunks[i].byteLength;
     }
+    // Release chunk references before persisting to OPFS to avoid holding ~2x RAM during write
+    chunks.length = 0;
   } else {
     bytes = new Uint8Array(await resp.arrayBuffer());
+    if (!contentEncoding && total > 0 && bytes.byteLength !== total) {
+      throw new Error(
+        `Truncated download for ${url}: received ${bytes.byteLength} of ${total} bytes`,
+      );
+    }
     onProgress?.({ loaded: bytes.byteLength, total: bytes.byteLength, fromCache: false });
   }
 
@@ -74,14 +98,42 @@ export async function fetchCachedBytes(
   if (!storedOpfs && typeof caches !== 'undefined') {
     try {
       const cache = await caches.open(CACHE_NAME);
-      const body = bytes.slice().buffer;
-      await cache.put(url, new Response(body, { status: 200 }));
+      await cache.put(url, new Response(bytes as unknown as BodyInit, { status: 200 }));
     } catch {
       /* ignore quota / private-mode errors */
     }
   }
 
   return bytes;
+}
+
+async function cachePutSafe(cache: Cache, url: string, resp: Response): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const putPromise = cache.put(url, resp).catch(() => {});
+    await Promise.race([
+      putPromise,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, CACHE_PUT_TIMEOUT_MS);
+      }),
+    ]);
+  } catch {
+    /* ignore quota / private-mode errors */
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** Evict one or more URLs from the Cache API weight cache (e.g. after integrity mismatch). */
+export async function evictCachedUrls(urls: Iterable<string>): Promise<void> {
+  if (typeof caches === 'undefined') return;
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    const unique = new Set(urls);
+    await Promise.all([...unique].map((u) => cache.delete(u).catch(() => false)));
+  } catch {
+    /* ignore cache errors */
+  }
 }
 
 /**
@@ -103,7 +155,7 @@ export function makeCachedFetch(
         }
         const resp = await fetch(input, init);
         if (resp.ok) {
-          void cache.put(url, resp.clone()).catch(() => {});
+          await cachePutSafe(cache, url, resp.clone());
         }
         onFile?.(url, false);
         return resp;
@@ -117,7 +169,14 @@ export function makeCachedFetch(
 }
 
 function sanitizeKey(key: string): string {
-  return key.replace(/[^a-zA-Z0-9._-]/g, '_');
+  let safe = key.replace(/[^a-zA-Z0-9._-]/g, '_');
+  if (!safe || safe === '.' || safe === '..') {
+    safe = `k_${fnv1a(key)}`;
+  }
+  if (safe.length > 200) {
+    safe = `${safe.slice(0, 191)}_${fnv1a(key)}`;
+  }
+  return safe;
 }
 
 async function getWeightsDir(create: boolean): Promise<FileSystemDirectoryHandle | null> {
@@ -146,13 +205,16 @@ async function readFromOpfs(key: string): Promise<Uint8Array | null> {
 async function writeToOpfs(key: string, bytes: Uint8Array): Promise<boolean> {
   const dir = await getWeightsDir(true);
   if (!dir) return false;
+  const safeName = sanitizeKey(key);
+  let writable: FileSystemWritableFileStream | null = null;
   try {
-    const fh = await dir.getFileHandle(sanitizeKey(key), { create: true });
+    const fh = await dir.getFileHandle(safeName, { create: true });
     // Prefer createWritable when available (works on main thread & modern workers)
     if (typeof fh.createWritable === 'function') {
-      const writable = await fh.createWritable();
-      await writable.write(bytes.slice());
+      writable = await fh.createWritable();
+      await writable.write(bytes as unknown as BufferSource);
       await writable.close();
+      writable = null;
       return true;
     }
     // Worker-only sync access handle fallback
@@ -169,7 +231,10 @@ async function writeToOpfs(key: string, bytes: Uint8Array): Promise<boolean> {
     if (syncHandle) {
       try {
         syncHandle.truncate(0);
-        syncHandle.write(bytes.slice(), { at: 0 });
+        const written = syncHandle.write(bytes as unknown as BufferSource, { at: 0 });
+        if (written !== bytes.byteLength) {
+          throw new Error(`Short OPFS write: ${written}/${bytes.byteLength} bytes`);
+        }
         syncHandle.flush();
       } finally {
         syncHandle.close();
@@ -178,6 +243,10 @@ async function writeToOpfs(key: string, bytes: Uint8Array): Promise<boolean> {
     }
     return false;
   } catch {
+    if (writable) {
+      await writable.abort().catch(() => {});
+    }
+    await dir.removeEntry(safeName).catch(() => {});
     return false;
   }
 }
