@@ -1,5 +1,10 @@
 <script lang="ts">
-  import { encodeGraphToHash, graphToYamlRecipe, parseRecipeToGraph } from '$lib/engine/share';
+  import {
+    encodeGraphToHash,
+    graphToYamlRecipe,
+    parseRecipeToGraph,
+    serializeWorkflowJson,
+  } from '$lib/engine/share';
   import type { WorkflowGraph } from '$lib/engine/types';
 
   interface Props {
@@ -19,10 +24,8 @@
 
   $effect(() => {
     if (dirty) return;
-    editorText =
-      format === 'yaml'
-        ? graphToYamlRecipe(graph)
-        : JSON.stringify($state.snapshot(graph), null, 2);
+    const plain = $state.snapshot(graph) as WorkflowGraph;
+    editorText = format === 'yaml' ? graphToYamlRecipe(plain) : serializeWorkflowJson(plain);
   });
 
   function switchFormat(next: 'yaml' | 'json') {
@@ -35,21 +38,27 @@
     parseErr = null;
     try {
       const next = parseRecipeToGraph(editorText);
-      // Preserve existing inline pdbText when YAML recipe omitted oversized pdbText
+      // When applying a YAML recipe that omitted an oversized inline pdbText (>1500 chars),
+      // restore the canvas node's existing custom PDB so editing another param never wipes it.
       const prevById = new Map(graph.nodes.map((n) => [n.id, n]));
       const mergedNodes = next.nodes.map((n) => {
-        if (
-          n.adapterId === 'pdb-input' &&
-          n.params.mode === 'custom' &&
-          !String(n.params.pdbText ?? '').trim()
-        ) {
+        if (format === 'yaml' && n.adapterId === 'pdb-input' && !String(n.params.pdbText ?? '').trim()) {
           const prev = prevById.get(n.id);
           if (
             prev?.adapterId === 'pdb-input' &&
+            prev.params.mode === 'custom' &&
             typeof prev.params.pdbText === 'string' &&
-            prev.params.pdbText.length > 0
+            prev.params.pdbText.length > 1500
           ) {
-            return { ...n, params: { ...n.params, pdbText: prev.params.pdbText } };
+            return {
+              ...n,
+              params: {
+                ...n.params,
+                mode: 'custom',
+                filename: prev.params.filename,
+                pdbText: prev.params.pdbText,
+              },
+            };
           }
         }
         return n;

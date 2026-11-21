@@ -5,7 +5,9 @@ import {
   decodeHashToGraph,
   encodeGraphToHash,
   graphToYamlRecipe,
+  normalizeWorkflowGraph,
   parseRecipeToGraph,
+  serializeWorkflowJson,
 } from '$lib/engine/share';
 import { generateSampleHelixBundlePdb } from '$lib/protein-ops/pdb';
 import type { WorkflowGraph } from '$lib/engine/types';
@@ -311,5 +313,96 @@ describe('engine/share', () => {
     expect(aliasParsed.nodes[0].params.model).toBe('boltz2');
     expect(aliasParsed.nodes[1].adapterId).toBe('localfold-af2');
     expect(aliasParsed.nodes[1].params.model).toBe('rosettafold3');
+  });
+
+  it('fixes YAML sequence-input label collision, #p= JSON-string corruption, large-PDB strip, and rejects invalid prose/edges', async () => {
+    // 1. sequence-input params.label vs node display label must not collide in YAML
+    const seqGraph: WorkflowGraph = {
+      id: 'seq-label-test',
+      name: 'Seq Label Test',
+      nodes: [
+        {
+          id: 's1',
+          adapterId: 'sequence-input',
+          label: 'My Sequence Block',
+          params: {
+            ...defaultParamsForAdapter('sequence-input'),
+            label: 'binder-alpha-1',
+            sequence: 'MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ',
+          },
+        },
+      ],
+      edges: [],
+    };
+    const seqYaml = graphToYamlRecipe(seqGraph);
+    expect(seqYaml).toContain('"seqLabel":"binder-alpha-1"');
+    const seqParsed = parseRecipeToGraph(seqYaml);
+    expect(seqParsed.nodes[0].label).toBe('My Sequence Block');
+    expect(seqParsed.nodes[0].params.label).toBe('binder-alpha-1');
+
+    // 2. #p= URL params whose template value is a string (e.g. rawJsonOverride / customSpecYaml)
+    // must remain strings even when starting with '{' or '['
+    const condPreset = structuredClone(WORKFLOW_PRESETS.find((p) => p.id === 'rfd4-conditioned-cath')!.graph);
+    const jsonOverride = '{"contig":"60-60","seed":7}';
+    condPreset.nodes[0].params.rawJsonOverride = jsonOverride;
+    const encCond = await encodeGraphToHash(condPreset);
+    expect(encCond.mode).toBe('preset-diff');
+    const decCond = await decodeHashToGraph(encCond.hash);
+    expect(typeof decCond!.nodes[0].params.rawJsonOverride).toBe('string');
+    expect(decCond!.nodes[0].params.rawJsonOverride).toBe(jsonOverride);
+
+    // 3. YAML strips >1500-char pdbText cleanly and resets mode so standalone YAML stays runnable
+    const hugePdb = generateSampleHelixBundlePdb();
+    const pdbGraph: WorkflowGraph = {
+      id: 'pdb-yaml-strip',
+      name: 'PDB Strip',
+      nodes: [
+        {
+          id: 'p1',
+          adapterId: 'pdb-input',
+          params: { mode: 'custom', pdbText: hugePdb, filename: 'big.pdb' },
+        },
+      ],
+      edges: [],
+    };
+    const pdbYaml = graphToYamlRecipe(pdbGraph);
+    expect(pdbYaml).toContain('oversized inline PDB');
+    const pdbParsed = parseRecipeToGraph(pdbYaml);
+    expect(pdbParsed.nodes[0].params.mode).toBe('demo-bundle');
+    expect(pdbParsed.nodes[0].params.pdbText).toBe('');
+
+    // 4. Rejects malformed non-JSON prose, missing nodes: section, duplicate IDs, and dangling wires
+    expect(() => parseRecipeToGraph('')).toThrow(/empty/i);
+    expect(() => parseRecipeToGraph('hello world this is not a recipe')).toThrow(/Unexpected line/);
+    expect(() => parseRecipeToGraph('denovo: v1\nname: "No Nodes"\n')).toThrow(/nodes:/);
+    expect(() =>
+      normalizeWorkflowGraph({
+        nodes: [
+          { id: 'a', adapterId: 'pdb-input', params: {} },
+          { id: 'a', adapterId: 'pdb-input', params: {} },
+        ],
+        edges: [],
+      }),
+    ).toThrow(/Duplicate node id/);
+    expect(() =>
+      normalizeWorkflowGraph({
+        nodes: [{ id: 'a', adapterId: 'pdb-input', params: {} }],
+        edges: [{ fromNode: 'a', fromPort: 'structure', toNode: 'ghost', toPort: 'structure' }],
+      }),
+    ).toThrow(/unknown target node/i);
+
+    // 5. Genie 3 custom DAG round-trips with short alias and serializeWorkflowJson round-trips cleanly
+    const genieDag: WorkflowGraph = {
+      id: 'genie-custom',
+      name: 'Genie Custom',
+      nodes: [{ id: 'g1', adapterId: 'genie3', params: { ...defaultParamsForAdapter('genie3'), length: 96 } }],
+      edges: [],
+    };
+    const encG = await encodeGraphToHash(genieDag);
+    expect(encG.mode).toBe('compressed-dag');
+    const decG = await decodeHashToGraph(encG.hash);
+    expect(decG!.nodes[0].adapterId).toBe('genie3');
+    expect(decG!.nodes[0].params.length).toBe(96);
+    expect(parseRecipeToGraph(serializeWorkflowJson(genieDag)).nodes[0].params.length).toBe(96);
   });
 });

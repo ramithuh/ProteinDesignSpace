@@ -10,6 +10,7 @@ const ADAPTER_TO_SHORT: Record<string, string> = {
   'sequence-input': 'q',
   'rfd4-conditioner': 'c',
   'rfd4-proteina': 'r',
+  genie3: 'g',
   'web-protein-mpnn': 'm',
   'localfold-af2': 'f',
   'designability-scorer': 's',
@@ -173,12 +174,101 @@ function parseParamValue(raw: string, templateVal: unknown): unknown {
     return Number.isFinite(n) ? n : templateVal;
   }
   if (typeof templateVal === 'boolean') return raw === 'true';
+  if (typeof templateVal === 'string') return raw;
   try {
     if (raw.startsWith('{') || raw.startsWith('[') || raw === 'null') return JSON.parse(raw);
   } catch {
     /* keep as string */
   }
   return raw;
+}
+
+/**
+ * Canonical graph validator & normalizer shared across URL hash decoding,
+ * YAML/JSON recipe parsing, and JSON file import.
+ */
+export function normalizeWorkflowGraph(
+  raw: unknown,
+  fallbackId = 'custom-recipe',
+  fallbackName = 'Custom Recipe',
+  fillDefaults = true,
+): WorkflowGraph {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Workflow must be a JSON object with nodes[] and edges[]');
+  }
+  const parsed = raw as Partial<WorkflowGraph>;
+  if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
+    throw new Error('Workflow must contain nodes[] and edges[]');
+  }
+
+  const seenIds = new Set<string>();
+  const validatedNodes: WorkflowNode[] = parsed.nodes.map((n, idx) => {
+    if (!n || typeof n !== 'object') {
+      throw new Error(`Invalid node at index ${idx}`);
+    }
+    const id = String(n.id ?? '').trim();
+    if (!id) throw new Error(`Node at index ${idx} is missing an id`);
+    if (seenIds.has(id)) throw new Error(`Duplicate node id "${id}"`);
+    seenIds.add(id);
+
+    const adapterId = String(n.adapterId ?? '');
+    if (!ADAPTER_REGISTRY[adapterId]) {
+      throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
+    }
+    const rawParams = n.params && typeof n.params === 'object' ? sanitizeParams(n.params) : {};
+    const pos =
+      n.position &&
+      typeof n.position === 'object' &&
+      typeof n.position.x === 'number' &&
+      Number.isFinite(n.position.x) &&
+      typeof n.position.y === 'number' &&
+      Number.isFinite(n.position.y)
+        ? { x: n.position.x, y: n.position.y }
+        : undefined;
+
+    return {
+      id,
+      adapterId,
+      label: typeof n.label === 'string' && n.label.trim() ? n.label : ADAPTER_REGISTRY[adapterId].shortName,
+      params: fillDefaults ? { ...defaultParamsForAdapter(adapterId), ...rawParams } : rawParams,
+      ...(pos ? { position: pos } : {}),
+    };
+  });
+
+  const validatedEdges: WorkflowEdge[] = parsed.edges.map((e, idx) => {
+    if (!e || typeof e !== 'object') {
+      throw new Error(`Invalid wire at index ${idx}`);
+    }
+    const fromNode = String(e.fromNode ?? '').trim();
+    const fromPort = String(e.fromPort ?? '').trim();
+    const toNode = String(e.toNode ?? '').trim();
+    const toPort = String(e.toPort ?? '').trim();
+    if (!fromNode || !fromPort || !toNode || !toPort) {
+      throw new Error(`Wire at index ${idx} is missing node or port name`);
+    }
+    if (!seenIds.has(fromNode)) {
+      throw new Error(`Wire references unknown source node "${fromNode}"`);
+    }
+    if (!seenIds.has(toNode)) {
+      throw new Error(`Wire references unknown target node "${toNode}"`);
+    }
+    return { fromNode, fromPort, toNode, toPort };
+  });
+
+  const normalized: WorkflowGraph = {
+    id: typeof parsed.id === 'string' && parsed.id.trim() ? parsed.id.trim() : fallbackId,
+    name: typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : fallbackName,
+    ...(typeof parsed.description === 'string' ? { description: parsed.description } : {}),
+    nodes: validatedNodes,
+    edges: validatedEdges,
+  };
+
+  return normalized.nodes.some((n) => !n.position) ? autoLayoutGraph(normalized) : normalized;
+}
+
+/** Serialize a WorkflowGraph cleanly as pretty-printed canonical JSON. */
+export function serializeWorkflowJson(graph: WorkflowGraph): string {
+  return JSON.stringify(graph, null, 2);
 }
 
 /** Decode `#p=...` or `#g=...` back into a full WorkflowGraph (with auto-layout). */
@@ -206,7 +296,7 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
       const templateVal = node.params[paramKey] !== undefined ? node.params[paramKey] : defaults[paramKey];
       node.params[paramKey] = parseParamValue(v, templateVal);
     }
-    return g.nodes.some((n) => !n.position) ? autoLayoutGraph(g) : g;
+    return normalizeWorkflowGraph(g, preset.id, preset.name, false);
   }
 
   if (clean.startsWith('g=')) {
@@ -241,12 +331,15 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
       toNode: e[2],
       toPort: e[3],
     }));
-    return autoLayoutGraph({
-      id: 'shared-workflow',
-      name: 'Shared Workflow',
-      nodes,
-      edges,
-    });
+    try {
+      return normalizeWorkflowGraph(
+        { id: 'shared-workflow', name: 'Shared Workflow', nodes, edges },
+        'shared-workflow',
+        'Shared Workflow',
+      );
+    } catch {
+      return null;
+    }
   }
 
   return null;
@@ -257,19 +350,30 @@ export function graphToYamlRecipe(graph: WorkflowGraph): string {
   const lines: string[] = [
     `denovo: v1`,
     `name: ${JSON.stringify(graph.name || graph.id)}`,
-    `nodes:`,
   ];
+  let anyStrippedPdb = false;
+  const nodeLines: string[] = [];
   for (const n of graph.nodes) {
-    const { diff } = diffParams(n.adapterId, n.params);
+    const { diff, strippedPdb } = diffParams(n.adapterId, n.params, undefined, true);
+    if (strippedPdb) anyStrippedPdb = true;
     const kv: Record<string, unknown> = { model: n.adapterId };
     if (n.label && n.label !== ADAPTER_REGISTRY[n.adapterId]?.shortName) kv.label = n.label;
     if (n.adapterId === 'localfold-af2' && 'model' in diff) {
       diff.foldModel = diff.model;
       delete diff.model;
     }
+    if (n.adapterId === 'sequence-input' && 'label' in diff) {
+      diff.seqLabel = diff.label;
+      delete diff.label;
+    }
     Object.assign(kv, diff);
-    lines.push(`  ${n.id}: ${JSON.stringify(kv)}`);
+    nodeLines.push(`  ${n.id}: ${JSON.stringify(kv)}`);
   }
+  if (anyStrippedPdb) {
+    lines.push(`# Note: oversized inline PDB (>1500 chars) omitted; use Full JSON or Export JSON to preserve it`);
+  }
+  lines.push(`nodes:`);
+  lines.push(...nodeLines);
   lines.push(`wires:`);
   for (const e of graph.edges) {
     lines.push(`  - ${e.fromNode}.${e.fromPort} -> ${e.toNode}.${e.toPort}`);
@@ -280,42 +384,17 @@ export function graphToYamlRecipe(graph: WorkflowGraph): string {
 /** Parse either the concise YAML recipe format or full WorkflowGraph JSON back into a graph. */
 export function parseRecipeToGraph(text: string): WorkflowGraph {
   const trimmed = text.trim();
+  if (!trimmed) {
+    throw new Error('Recipe is empty');
+  }
   if (trimmed.startsWith('{')) {
-    const parsed = JSON.parse(trimmed) as WorkflowGraph;
-    if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
-      throw new Error('JSON must contain nodes[] and edges[]');
-    }
-    const validatedNodes: WorkflowNode[] = parsed.nodes.map((n, idx) => {
-      if (!n || typeof n !== 'object') {
-        throw new Error(`Invalid node at index ${idx}`);
-      }
-      const id = String(n.id ?? '').trim();
-      if (!id) throw new Error(`Node at index ${idx} is missing an id`);
-      const adapterId = String(n.adapterId ?? '');
-      if (!ADAPTER_REGISTRY[adapterId]) {
-        throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
-      }
-      const rawParams = n.params && typeof n.params === 'object' ? sanitizeParams(n.params) : {};
-      return {
-        ...n,
-        id,
-        adapterId,
-        label: typeof n.label === 'string' && n.label ? n.label : ADAPTER_REGISTRY[adapterId].shortName,
-        params: { ...defaultParamsForAdapter(adapterId), ...rawParams },
-      };
-    });
-    const normalized: WorkflowGraph = {
-      id: parsed.id || 'custom-recipe',
-      name: parsed.name || 'Custom Recipe',
-      description: parsed.description,
-      nodes: validatedNodes,
-      edges: parsed.edges,
-    };
-    return normalized.nodes.some((n) => !n.position) ? autoLayoutGraph(normalized) : normalized;
+    const parsed = JSON.parse(trimmed) as unknown;
+    return normalizeWorkflowGraph(parsed, 'custom-recipe', 'Custom Recipe');
   }
 
   let name = 'Custom Recipe';
   let section: 'none' | 'nodes' | 'wires' = 'none';
+  let sawNodesSection = false;
   const nodes: WorkflowNode[] = [];
   const edges: WorkflowEdge[] = [];
 
@@ -324,6 +403,7 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
     if (!line || line.startsWith('#')) continue;
     if (line === 'nodes:') {
       section = 'nodes';
+      sawNodesSection = true;
       continue;
     }
     if (line === 'wires:') {
@@ -341,7 +421,7 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
         }
         continue;
       }
-      continue;
+      throw new Error(`Unexpected line before "nodes:": "${line}"`);
     }
 
     if (section === 'nodes') {
@@ -369,6 +449,14 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
         delete rest.foldModel;
         delete rest.checkpoint;
       }
+      if (adapterId === 'sequence-input') {
+        const seqLabel = obj.seqLabel ?? obj.sequenceLabel;
+        if (typeof seqLabel === 'string' && seqLabel) {
+          rest.label = seqLabel;
+        }
+        delete rest.seqLabel;
+        delete rest.sequenceLabel;
+      }
       nodes.push({
         id,
         adapterId,
@@ -383,10 +471,13 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
     }
   }
 
-  return autoLayoutGraph({
-    id: 'custom-recipe',
+  if (!sawNodesSection) {
+    throw new Error('Invalid recipe: expected JSON or "denovo: v1" YAML with a "nodes:" section');
+  }
+
+  return normalizeWorkflowGraph(
+    { id: 'custom-recipe', name, nodes, edges },
+    'custom-recipe',
     name,
-    nodes,
-    edges,
-  });
+  );
 }

@@ -11,7 +11,12 @@
     makeEdgeId,
     pickDefaultPeekSlot,
   } from '$lib/engine/peek';
-  import { decodeHashToGraph, encodeGraphToHash } from '$lib/engine/share';
+  import {
+    decodeHashToGraph,
+    encodeGraphToHash,
+    parseRecipeToGraph,
+    serializeWorkflowJson,
+  } from '$lib/engine/share';
   import { clearAllModelCaches, getCacheStats } from '$lib/engine/opfs-cache';
   import { COMPARE_PALETTE, buildComparisonState } from '$lib/engine/compare';
   import { estimateRunRequirements, type RunPreflightSummary } from '$lib/engine/run-preflight';
@@ -597,10 +602,32 @@
     }
   }
 
+  function loadFullWorkflowGraph(next: WorkflowGraph, opts?: { clearOutputs?: boolean }) {
+    const laid = next.nodes.some((n) => !n.position) ? autoLayoutGraph(next) : next;
+    selectedPresetId = laid.id;
+    graph = laid;
+    setSingleSelection(laid.nodes[0]?.id ?? '');
+    branchCandidateIdx = {};
+    selectedPeekSlotId = null;
+    selectedEdgeId = null;
+    showSeqParentBackbone = false;
+    rightPanelTab = 'params';
+    if (opts?.clearOutputs !== false) {
+      nodeStates = {};
+      outputsByNode = {};
+      runError = null;
+      totalElapsedMs = null;
+      selectedRowIdx = 0;
+      selectedFoldIdx = 0;
+      showTrajectory = false;
+      lastPickedResidue = null;
+    }
+  }
+
   function exportWorkflowJson() {
     moreMenuOpen = false;
-    const plain = $state.snapshot(graph);
-    const blob = new Blob([JSON.stringify(plain, null, 2)], { type: 'application/json' });
+    const plain = $state.snapshot(graph) as WorkflowGraph;
+    const blob = new Blob([serializeWorkflowJson(plain)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -618,21 +645,12 @@
       return;
     }
     try {
-      const parsed = JSON.parse(await file.text()) as WorkflowGraph;
-      if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
-        runError = 'Invalid workflow JSON (expected nodes[] and edges[])';
-        return;
-      }
-      const laid = parsed.nodes.some((n) => !n.position) ? autoLayoutGraph(parsed) : parsed;
-      selectedPresetId = laid.id;
-      handleGraphChange(laid);
-      setSingleSelection(laid.nodes[0]?.id ?? '');
-      selectedPeekSlotId = null;
-      selectedEdgeId = null;
-      rightPanelTab = 'params';
+      const text = await file.text();
+      const normalized = parseRecipeToGraph(text);
+      loadFullWorkflowGraph(normalized, { clearOutputs: true });
       showToastMessage(`Imported ${file.name}`);
-    } catch {
-      runError = 'Failed to parse workflow JSON';
+    } catch (err) {
+      runError = err instanceof Error ? err.message : 'Failed to parse workflow JSON';
     } finally {
       input.value = '';
     }
