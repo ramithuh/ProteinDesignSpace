@@ -24,6 +24,7 @@
     autoModeHint?: string;
     onDelete?: (nodeId: string) => void;
     onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
+    onOpenStudio?: (nodeId: string) => void;
     [key: string]: unknown;
   }
 
@@ -295,6 +296,24 @@
   <div class="header">
     <span class="stage">{stageLabel}</span>
     <span class="rt">{runtimeLabel}</span>
+    {#if data.onOpenStudio}
+      <button
+        type="button"
+        class="studio-btn"
+        title="Inspect in Studio (Space)"
+        aria-label="Inspect in Studio"
+        onclick={(e) => {
+          e.stopPropagation();
+          data.onOpenStudio?.(id);
+        }}
+      >
+        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <rect x="1.8" y="2.4" width="12.4" height="11.2" rx="2" stroke="currentColor" stroke-width="1.4" />
+          <path d="M6.2 2.6V13.4" stroke="currentColor" stroke-width="1.3" />
+          <path d="M8.6 6H11.8M8.6 8.5H11.8M8.6 11H10.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+        </svg>
+      </button>
+    {/if}
   </div>
 
   <div class="title">{displayTitle}</div>
@@ -640,6 +659,35 @@
     color: var(--text-dim);
     opacity: 0.72;
     font-size: 8.5px;
+  }
+  .studio-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease,
+      color 120ms ease;
+  }
+  .p-node:hover .studio-btn,
+  .p-node.selected .studio-btn {
+    color: var(--text-secondary);
+  }
+  .studio-btn:hover,
+  .studio-btn:focus-visible {
+    background: var(--bg-pill);
+    border-color: var(--accent);
+    color: var(--accent-bright);
+    outline: none;
   }
   .del-btn {
     position: absolute;

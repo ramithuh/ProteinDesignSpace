@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import type { ViewerModelSpec } from '$lib/engine/compare';
+  import { expandResidueTokenList } from '$lib/engine/residue-tokens';
+  import type { ResidueHighlightLayer } from '$lib/engine/studio-types';
   import type { AtomGranularity, BfactorSemantics } from '$lib/engine/types';
 
   interface Props {
@@ -25,6 +27,12 @@
     label?: string;
     atomGranularity?: AtomGranularity;
     bfactorSemantics?: BfactorSemantics;
+    /** Zero-reload GPU overpaint layers (fixed, hotspot, motif, tied, cropped). */
+    highlightLayers?: ResidueHighlightLayer[];
+    /** Residue token currently hovered in sequence view (e.g. 'A54', 'H100A'). */
+    hoveredToken?: string | null;
+    /** Residue token to smoothly focus the camera onto (e.g. 'A54', 'H100A'). */
+    focusToken?: string | null;
     emptyMessage?: string;
     emptyActionLabel?: string;
     onEmptyAction?: () => void;
@@ -60,6 +68,9 @@
     label = undefined,
     atomGranularity = undefined,
     bfactorSemantics = undefined,
+    highlightLayers = undefined,
+    hoveredToken = null,
+    focusToken = null,
     emptyMessage = undefined,
     emptyActionLabel = undefined,
     onEmptyAction = undefined,
@@ -138,6 +149,9 @@
   );
   let lastStructureKey = '';
   let lastRenderedKey = '';
+  let sceneRenderEpoch = $state(0);
+  let overpaintSeq = 0;
+  let lastAppliedOverpaintKey = '';
 
   /**
    * Build a Mol* `'uncertainty'` (B-factor continuous ramp) color argument, adapting the
@@ -722,6 +736,8 @@
       }
       lastStructureKey = styleOpts.structureKey;
       lastRenderedKey = styleOpts.fullKey;
+      lastAppliedOverpaintKey = '';
+      sceneRenderEpoch += 1;
     } catch (err) {
       if (!destroyed && mySeq === loadSeq) {
         lastRenderedKey = '';
@@ -947,6 +963,8 @@
       }
       lastStructureKey = styleOpts.structureKey;
       lastRenderedKey = styleOpts.fullKey;
+      lastAppliedOverpaintKey = '';
+      sceneRenderEpoch += 1;
     } catch (err) {
       if (!destroyed && mySeq === loadSeq) {
         lastRenderedKey = '';
@@ -974,6 +992,267 @@
       /* ignore transient state updates */
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Zero-reload GPU Overpaint, Hover Highlight, and Camera Focus (Node Studio)
+  // ---------------------------------------------------------------------------
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function collectOverpaintComponents(ctx: any): any[] {
+    const out: any[] = [];
+    const structs = ctx?.managers?.structure?.hierarchy?.current?.structures ?? [];
+    for (const s of structs) {
+      for (const c of s.components ?? []) {
+        if (c?.representations?.length > 0) out.push(c);
+      }
+      const directReprs = (s.genericRepresentations ?? []).filter(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (r: any) => Boolean(r?.cell?.obj?.data?.sourceData),
+      );
+      if (directReprs.length > 0) {
+        out.push({ representations: directReprs });
+      }
+    }
+    return out;
+  }
+
+  function resolveLayerResidues(
+    layer: ResidueHighlightLayer,
+  ): Array<{ chain: string; seqId: number; insCode: string }> {
+    if (layer.residues && layer.residues.length > 0) {
+      return layer.residues.map((r) => ({
+        chain: (r.chain || 'A').trim(),
+        seqId: r.seqId,
+        insCode: (r.insCode ?? '').trim(),
+      }));
+    }
+    if (layer.tokens && layer.tokens.length > 0) {
+      const parsed = expandResidueTokenList(layer.tokens.join(','));
+      return parsed.tokens.map((t) => ({
+        chain: t.chain,
+        seqId: t.seqId,
+        insCode: t.insCode,
+      }));
+    }
+    return [];
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function buildResiduesExpression(
+    MS: any,
+    residues: ReadonlyArray<{ chain: string; seqId: number; insCode: string }>,
+  ) {
+    if (residues.length === 0) return null;
+    // Group by (chain, insCode) so large residue sets share one fast `core.set.has` query per chain
+    const grouped = new Map<string, { chain: string; insCode: string; seqIds: number[] }>();
+    for (const r of residues) {
+      const key = `${r.chain}::${r.insCode}`;
+      let g = grouped.get(key);
+      if (!g) {
+        g = { chain: r.chain, insCode: r.insCode, seqIds: [] };
+        grouped.set(key, g);
+      }
+      g.seqIds.push(r.seqId);
+    }
+
+    const queries = [...grouped.values()].map((g) => {
+      const seqTest =
+        g.seqIds.length === 1
+          ? MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_seq_id(), g.seqIds[0]])
+          : MS.core.set.has([
+              MS.set(...g.seqIds),
+              MS.struct.atomProperty.macromolecular.auth_seq_id(),
+            ]);
+      const insTest = MS.core.rel.eq([
+        MS.struct.atomProperty.macromolecular.pdbx_PDB_ins_code(),
+        g.insCode,
+      ]);
+      return MS.struct.generator.atomGroups({
+        'chain-test': MS.core.rel.eq([
+          MS.struct.atomProperty.macromolecular.auth_asym_id(),
+          g.chain,
+        ]),
+        'residue-test': MS.core.logic.and([seqTest, insTest]),
+      });
+    });
+
+    return queries.length === 1 ? queries[0] : MS.struct.combinator.merge(queries);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function resolveTokenLoci(ctx: any, token: string): Promise<any | null> {
+    const parsed = expandResidueTokenList(token);
+    const first = parsed.tokens[0];
+    if (!first) return null;
+    const structs = ctx?.managers?.structure?.hierarchy?.current?.structures ?? [];
+    if (structs.length === 0) return null;
+
+    const [{ MolScriptBuilder: MS }, { Script }, { StructureSelection }, { Loci }] =
+      await Promise.all([
+        import('molstar/lib/mol-script/language/builder'),
+        import('molstar/lib/mol-script/script'),
+        import('molstar/lib/mol-model/structure'),
+        import('molstar/lib/mol-model/loci'),
+      ]);
+    const expr = buildResiduesExpression(MS, [
+      { chain: first.chain, seqId: first.seqId, insCode: first.insCode },
+    ]);
+    if (!expr) return null;
+
+    for (const sRef of structs) {
+      const structData = sRef?.cell?.obj?.data;
+      if (!structData) continue;
+      const sel = Script.getStructureSelection(expr, structData);
+      const loci = StructureSelection.toLociWithSourceUnits(sel);
+      if (loci && !Loci.isEmpty(loci)) {
+        return loci;
+      }
+    }
+    return null;
+  }
+
+  async function applyHighlightOverpaint(layers: ResidueHighlightLayer[], sigKey: string) {
+    if (destroyed || !plugin) return;
+    const mySeq = ++overpaintSeq;
+    try {
+      const ctx = plugin;
+      const components = collectOverpaintComponents(ctx);
+      if (components.length === 0) return;
+
+      const [
+        { setStructureOverpaint, clearStructureOverpaint },
+        { setStructureTransparency, clearStructureTransparency },
+        { MolScriptBuilder: MS },
+        { Script },
+        { StructureSelection },
+        { Color },
+        { EmptyLoci },
+      ] = await Promise.all([
+        import('molstar/lib/mol-plugin-state/helpers/structure-overpaint'),
+        import('molstar/lib/mol-plugin-state/helpers/structure-transparency'),
+        import('molstar/lib/mol-script/language/builder'),
+        import('molstar/lib/mol-script/script'),
+        import('molstar/lib/mol-model/structure'),
+        import('molstar/lib/mol-util/color'),
+        import('molstar/lib/mol-model/loci'),
+      ]);
+      if (destroyed || mySeq !== overpaintSeq || !plugin) return;
+
+      // Clear previous overpaint & transparency without clearing structure or touching camera
+      await clearStructureOverpaint(ctx, components);
+      await clearStructureTransparency(ctx, components);
+      if (destroyed || mySeq !== overpaintSeq || !plugin) return;
+
+      for (const layer of layers) {
+        const residues = resolveLayerResidues(layer);
+        if (residues.length === 0) continue;
+        const expr = buildResiduesExpression(MS, residues);
+        if (!expr) continue;
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const lociGetter = async (structure: any) => {
+          try {
+            const sel = Script.getStructureSelection(expr, structure);
+            return StructureSelection.toLociWithSourceUnits(sel);
+          } catch {
+            return EmptyLoci;
+          }
+        };
+
+        await setStructureOverpaint(ctx, components, Color(layer.colorHex), lociGetter);
+        if (destroyed || mySeq !== overpaintSeq || !plugin) return;
+
+        if (typeof layer.alpha === 'number' && layer.alpha >= 0 && layer.alpha < 0.99) {
+          const transparency = Math.max(0, Math.min(1, 1 - layer.alpha));
+          await setStructureTransparency(ctx, components, transparency, lociGetter);
+          if (destroyed || mySeq !== overpaintSeq || !plugin) return;
+        }
+      }
+
+      lastAppliedOverpaintKey = sigKey;
+    } catch {
+      /* degrade safely if Mol* internal structure state is mid-transition */
+    }
+  }
+
+  let highlightSig = $derived.by((): string => {
+    if (!highlightLayers || highlightLayers.length === 0) return '';
+    return highlightLayers
+      .map((l) => {
+        const resPart =
+          l.residues && l.residues.length > 0
+            ? l.residues.map((r) => `${r.chain}:${r.seqId}:${r.insCode ?? ''}`).join(',')
+            : (l.tokens ?? []).join(',');
+        return `${l.id}|${l.colorHex}|${l.alpha ?? ''}|${resPart}`;
+      })
+      .join(';;');
+  });
+
+  // Zero-reload GPU overpaint effect: triggers ONLY on serialized highlightSig or scene load completion
+  $effect(() => {
+    const epoch = sceneRenderEpoch;
+    const sig = highlightSig;
+    const ctx = plugin;
+    if (!ctx || epoch === 0) return;
+    const key = `${epoch}##${sig}`;
+    if (key === lastAppliedOverpaintKey) return;
+    const layersSnapshot = untrack(() => highlightLayers ?? []);
+    if (layersSnapshot.length === 0 && !lastAppliedOverpaintKey) {
+      lastAppliedOverpaintKey = key;
+      return;
+    }
+    void applyHighlightOverpaint(layersSnapshot, key);
+  });
+
+  // Lightweight 3D hover highlight synced with hoveredToken
+  $effect(() => {
+    const tok = hoveredToken;
+    const ctx = plugin;
+    const epoch = sceneRenderEpoch;
+    if (!ctx || epoch === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!tok) {
+          ctx.managers?.interactivity?.lociHighlights?.clearHighlights?.();
+          return;
+        }
+        const loci = await resolveTokenLoci(ctx, tok);
+        if (cancelled || destroyed) return;
+        if (loci) {
+          ctx.managers?.interactivity?.lociHighlights?.highlightOnly?.({ loci });
+        } else {
+          ctx.managers?.interactivity?.lociHighlights?.clearHighlights?.();
+        }
+      } catch {
+        /* ignore hover highlight errors */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  // Smooth camera focus when focusToken changes
+  $effect(() => {
+    const tok = focusToken;
+    const ctx = plugin;
+    const epoch = sceneRenderEpoch;
+    if (!ctx || epoch === 0 || !tok) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const loci = await resolveTokenLoci(ctx, tok);
+        if (cancelled || destroyed || !loci) return;
+        ctx.managers?.camera?.focusLoci?.(loci, { durationMs: 250 });
+      } catch {
+        /* ignore camera focus errors */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
 
   // Structural signature for multi-model mode (excludes `visible` so eye/solo toggles never reload or reset camera)
   let multiRenderKey = $derived.by((): string | null => {

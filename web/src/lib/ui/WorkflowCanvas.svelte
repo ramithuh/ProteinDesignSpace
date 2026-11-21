@@ -55,6 +55,8 @@
     onBlockAdded?: (nodeId: string) => void;
     onSelectEdge?: (edge: WorkflowEdge) => void;
     onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
+    onNodeDoubleClick?: (nodeId: string) => void;
+    onOpenStudio?: (nodeId: string) => void;
     onOpenTour?: () => void;
   }
 
@@ -78,6 +80,8 @@
     onBlockAdded = undefined,
     onSelectEdge = undefined,
     onPeekPort = undefined,
+    onNodeDoubleClick = undefined,
+    onOpenStudio = undefined,
     onOpenTour = undefined,
   }: Props = $props();
 
@@ -433,6 +437,7 @@
           autoModeHint,
           onDelete: disabled ? undefined : removeNode,
           onPeekPort,
+          onOpenStudio: onOpenStudio ?? onNodeDoubleClick,
         },
       };
     });
@@ -691,11 +696,21 @@
   }
 
   function handlePaneDblClick(ev: MouseEvent) {
-    if (disabled) return;
     const target = ev.target as HTMLElement | null;
+    const nodeEl = target?.closest('.svelte-flow__node') as HTMLElement | null;
+    if (nodeEl) {
+      if (target?.closest('button, input, select, textarea, .svelte-flow__handle')) return;
+      const nodeId = nodeEl.dataset.id || nodeEl.getAttribute('data-id');
+      const openStudioCb = onNodeDoubleClick ?? onOpenStudio;
+      if (nodeId && openStudioCb) {
+        openStudioCb(nodeId);
+      }
+      return;
+    }
+    if (disabled) return;
     if (
       target?.closest(
-        '.svelte-flow__node, .svelte-flow__edge, .canvas-overlay, .svelte-flow__controls, .catalog-shell, .catalog-popover, .catalog-flyout, .wire-popover',
+        '.svelte-flow__edge, .canvas-overlay, .svelte-flow__controls, .catalog-shell, .catalog-popover, .catalog-flyout, .wire-popover',
       )
     ) {
       return;

@@ -50,6 +50,7 @@
     onUpdateLabel?: (nodeId: string, label: string) => void;
     onSyncTaskToSiblings?: (nodeId: string) => void;
     onRunUpTo?: (nodeId: string) => void;
+    onOpenStudio?: () => void;
   }
 
   let {
@@ -65,6 +66,7 @@
     onUpdateLabel = undefined,
     onSyncTaskToSiblings = undefined,
     onRunUpTo = undefined,
+    onOpenStudio = undefined,
   }: Props = $props();
 
   let liveStructure = $derived<StructureArtifact | null>(
@@ -663,19 +665,41 @@
       {/if}
       <span class="sub-kind" title="Underlying model / engine">{activeModelBadge}</span>
     </div>
-    {#if onRunUpTo}
-      <button
-        type="button"
-        class="run-here-btn"
-        {disabled}
-        onclick={() => {
-          flushPendingTextCommit();
-          onRunUpTo(node.id);
-        }}
-        title="Execute only upstream blocks up to this block (memoized for full runs)"
-      >
-        ▶ Run to here
-      </button>
+    {#if (!embedded && onOpenStudio) || onRunUpTo}
+      <div class="head-actions">
+        {#if !embedded && onOpenStudio}
+          <button
+            type="button"
+            class="studio-open-btn"
+            onclick={() => {
+              flushPendingTextCommit();
+              onOpenStudio();
+            }}
+            title="Inspect what the model sees & paint residue constraints in Studio (Space)"
+          >
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="1.8" y="2.4" width="12.4" height="11.2" rx="2" stroke="currentColor" stroke-width="1.4" />
+              <path d="M6.2 2.6V13.4" stroke="currentColor" stroke-width="1.3" />
+              <path d="M8.6 6H11.8M8.6 8.5H11.8M8.6 11H10.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+            </svg>
+            Inspect Studio
+          </button>
+        {/if}
+        {#if onRunUpTo}
+          <button
+            type="button"
+            class="run-here-btn"
+            {disabled}
+            onclick={() => {
+              flushPendingTextCommit();
+              onRunUpTo(node.id);
+            }}
+            title="Execute only upstream blocks up to this block (memoized for full runs)"
+          >
+            ▶ Run to here
+          </button>
+        {/if}
+      </div>
     {/if}
   </div>
 
@@ -2091,6 +2115,33 @@
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10px;
     color: var(--text-dim);
+  }
+  .head-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .studio-open-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 4px 9px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .studio-open-btn:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
   }
   .run-here-btn {
     background: var(--bg-surface-2);
