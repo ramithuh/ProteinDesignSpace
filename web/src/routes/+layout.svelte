@@ -1,5 +1,16 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+
   let { children } = $props();
+
+  onMount(() => {
+    const el = document.getElementById('denovo-preloader');
+    if (!el) return;
+    requestAnimationFrame(() => {
+      el.classList.add('is-done');
+      setTimeout(() => el.remove(), 260);
+    });
+  });
 </script>
 
 <svelte:head>
