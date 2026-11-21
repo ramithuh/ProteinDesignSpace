@@ -933,16 +933,31 @@ export function computeGeometryStats(
   }
   const meanCaDist = bondedPairs > 0 ? distSum / bondedPairs : 0;
 
-  let clashes = 0;
+  // Sweep in x so pairs separated by at least the clash radius need no distance test.
+  // Nonfinite coordinates cannot contribute a finite distance and must not disrupt sorting.
+  const byX: number[] = [];
   for (let i = 0; i < L; i++) {
-    for (let j = i + 1; j < L; j++) {
-      if (j === i + 1 && isBonded(i)) continue;
-      const d = Math.hypot(
-        caCoords[j * 3 + 0] - caCoords[i * 3 + 0],
-        caCoords[j * 3 + 1] - caCoords[i * 3 + 1],
-        caCoords[j * 3 + 2] - caCoords[i * 3 + 2],
-      );
-      if (d < 3.0) clashes++;
+    if (
+      Number.isFinite(caCoords[i * 3]) &&
+      Number.isFinite(caCoords[i * 3 + 1]) &&
+      Number.isFinite(caCoords[i * 3 + 2])
+    ) {
+      byX.push(i);
+    }
+  }
+  byX.sort((a, b) => caCoords[a * 3] - caCoords[b * 3]);
+  let clashes = 0;
+  for (let a = 0; a < byX.length; a++) {
+    const i = byX[a];
+    for (let b = a + 1; b < byX.length; b++) {
+      const j = byX[b];
+      const dx = caCoords[j * 3] - caCoords[i * 3];
+      if (dx >= 3) break;
+      const dy = caCoords[j * 3 + 1] - caCoords[i * 3 + 1];
+      const dz = caCoords[j * 3 + 2] - caCoords[i * 3 + 2];
+      if (Math.abs(dy) >= 3 || Math.abs(dz) >= 3) continue;
+      if (Math.abs(i - j) === 1 && isBonded(Math.min(i, j))) continue;
+      if (Math.hypot(dx, dy, dz) < 3) clashes++;
     }
   }
 

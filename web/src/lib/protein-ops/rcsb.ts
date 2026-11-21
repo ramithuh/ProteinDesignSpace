@@ -1,5 +1,6 @@
 // Fetch 3D structures directly from RCSB PDB (with PDBe fallback) by 4-char PDB ID.
 
+import { ResultMemo } from '../engine/result-memo';
 import { parseStructureText } from './pdb';
 
 export interface FetchedPdbStructure {
@@ -21,7 +22,8 @@ export const QUICK_PDB_EXAMPLES: { id: string; name: string }[] = [
   { id: '4JHW', name: 'RSV-F' },
 ];
 
-const memoryCache = new Map<string, FetchedPdbStructure>();
+const memoryCache = new ResultMemo<FetchedPdbStructure>(16 * 1024 * 1024, 16);
+const pending = new Map<string, Promise<FetchedPdbStructure>>();
 
 /** Normalize user-entered PDB IDs (e.g. " 1prw.cif " -> "1PRW", "pdb_00001prw" -> "PDB_00001PRW"). */
 export function normalizePdbId(raw: string): string {
@@ -41,6 +43,7 @@ export function isValidPdbId(raw: string): boolean {
 
 export function clearRcsbCache(): void {
   memoryCache.clear();
+  pending.clear();
 }
 
 /**
@@ -59,6 +62,22 @@ export async function fetchStructureByPdbId(
   const cached = memoryCache.get(pdbId);
   if (cached) return cached;
 
+  const inFlight = pending.get(pdbId);
+  if (inFlight) return inFlight;
+
+  const request = fetchStructure(pdbId, fetchImpl);
+  pending.set(pdbId, request);
+  try {
+    const result = await request;
+    if (pending.get(pdbId) === request) memoryCache.set(pdbId, result);
+    return result;
+  } finally {
+    // A cache clear may have started a newer request for this ID.
+    if (pending.get(pdbId) === request) pending.delete(pdbId);
+  }
+}
+
+async function fetchStructure(pdbId: string, fetchImpl: typeof fetch): Promise<FetchedPdbStructure> {
   const candidates: Array<{ url: string; format: 'mmcif' | 'pdb'; filename: string }> = [
     {
       url: `https://files.rcsb.org/download/${encodeURIComponent(pdbId)}.cif`,
@@ -99,7 +118,7 @@ export async function fetchStructureByPdbId(
         lastStatus = 'no protein, nucleic-acid, or ligand atoms found';
         continue;
       }
-      const entry: FetchedPdbStructure = {
+      return {
         pdbId,
         format: parsed.format,
         filename: cand.filename,
@@ -110,8 +129,6 @@ export async function fetchStructureByPdbId(
         ligandNames: parsed.diagnostics.ligandNames,
         nucleicAcidChains: parsed.diagnostics.nucleicAcidChains,
       };
-      memoryCache.set(pdbId, entry);
-      return entry;
     } catch (err) {
       lastStatus = err instanceof Error ? err.message : String(err);
     }

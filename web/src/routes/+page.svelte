@@ -7,7 +7,7 @@
     materializePdbInputNode,
     materializeSequenceInputNode,
   } from '$lib/engine/scheduler';
-  import { isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
+  import { clearRcsbCache, isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
   import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from '$lib/engine/registry';
   import { getBenchmarkById } from '$lib/engine/benchmarks';
   import { autoLayoutGraph, defaultParamsForAdapter, insertBlockSmart, validateGraph } from '$lib/engine/graph-utils';
@@ -1205,6 +1205,7 @@
     if (isRunning) return;
     await scheduler.releaseActiveGpu();
     scheduler.clearMemo();
+    clearRcsbCache();
     await clearAllModelCaches();
     await refreshCacheStats();
     activeGpuWorker = null;

@@ -15,6 +15,7 @@ import { fetchStructureByPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
 import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/protein-ops/kabsch';
 import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
 import { validateGraph } from './graph-utils';
+import { ResultMemo } from './result-memo';
 import { normalizeWorkflowGraph } from './share';
 import { splitMultiChainSequence, validateRuntimeNodeInputs } from './bio-capabilities';
 import { buildCanonicalConditionIntent, compileConditionToRfd4 } from './conditioning';
@@ -240,7 +241,7 @@ interface ActiveGpuSlot {
 
 export class ExecutionScheduler {
   private activeGpu: ActiveGpuSlot | null = null;
-  private memo = new Map<string, Record<string, CanonicalArtifact>>();
+  private readonly memo = new ResultMemo<Record<string, CanonicalArtifact>>();
   private reqCounter = 1;
   private running = false;
 
@@ -778,8 +779,9 @@ export class ExecutionScheduler {
         let nodeOutputs: Record<string, CanonicalArtifact>;
         let elapsedMs = 0;
 
-        if (!opts.bypassCache && this.memo.has(cacheKey)) {
-          nodeOutputs = this.memo.get(cacheKey)!;
+        const cached = opts.bypassCache ? undefined : this.memo.get(cacheKey);
+        if (cached) {
+          nodeOutputs = cached;
           onProgress({
             nodeId: node.id,
             status: 'cached',

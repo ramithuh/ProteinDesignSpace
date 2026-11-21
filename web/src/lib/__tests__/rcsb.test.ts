@@ -75,6 +75,33 @@ describe('RCSB PDB ID input', () => {
     expect(calls).toHaveLength(2);
   });
 
+  it('shares one download and parse across concurrent requests for the same PDB', async () => {
+    const sample = generateSampleHelixBundlePdb();
+    const mockFetch = vi.fn(async () => new Response(sample));
+    const results = await Promise.all(
+      ['1prw', '1PRW.cif', ' 1PRW '].map(id => fetchStructureByPdbId(id, mockFetch)),
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(results[0]).toBe(results[1]);
+    expect(results[0]).toBe(results[2]);
+  });
+
+  it('retries failed lookups and ignores a result superseded by a cache clear', async () => {
+    const unavailable = vi.fn(async () => new Response(null, { status: 404 }));
+    await expect(fetchStructureByPdbId('1PRW', unavailable)).rejects.toThrow(/Could not fetch/);
+    expect(unavailable).toHaveBeenCalledTimes(3);
+
+    const sample = generateSampleHelixBundlePdb();
+    let resolveOld!: (r: Response) => void;
+    const oldRequest = fetchStructureByPdbId('1PRW', () => new Promise(r => { resolveOld = r; }));
+    clearRcsbCache();
+    const newResult = await fetchStructureByPdbId('1PRW', async () => new Response(sample));
+    resolveOld(new Response(sample + '\n'));
+    expect((await oldRequest).text).toBe(sample + '\n');
+    expect(await fetchStructureByPdbId('1PRW', unavailable)).toBe(newResult);
+    expect(unavailable).toHaveBeenCalledTimes(3);
+  });
+
   it('scheduler auto-fetches PDB ID when pdbText is not yet cached in params', async () => {
     const samplePdb = generateSampleHelixBundlePdb();
     vi.stubGlobal(

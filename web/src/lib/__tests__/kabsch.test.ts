@@ -280,6 +280,23 @@ describe('protein-ops/kabsch', () => {
     expect(brStats.clashes).toBe(2);
   });
 
+  it('matches exhaustive clashes for shuffled coordinates, cutoff ties and missing observations', () => {
+    const coords = Float32Array.from({ length: 192 }, (_, k) => ((k * 79) % 97 - 48) / 6);
+    coords.set([3, 0, 0, 0, 0, 0, 2.99999, 0, 0, NaN, 0, 0, Infinity, 0, 0, 0, NaN, 0, 0, 0, -Infinity]);
+    const n = coords.length / 3;
+    const chainIds = Array.from({ length: n }, (_, i) => i < 30 ? 'A' : 'B');
+    const resNums = Array.from({ length: n }, (_, i) => i < 15 ? i : i + 3);
+    let expected = 0;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        if (j === i + 1 && chainIds[i] === chainIds[j] && resNums[j] === resNums[i] + 1) continue;
+        if (Math.hypot(coords[i*3] - coords[j*3], coords[i*3+1] - coords[j*3+1],
+          coords[i*3+2] - coords[j*3+2]) < 3) expected++;
+      }
+    }
+    expect(computeGeometryStats(coords, chainIds, resNums).clashes).toBe(expected);
+  });
+
   it('computeGeometryStats with chainIds ignores inter-chain jumps while catching intra-chain breaks & inter-chain clashes', () => {
     // Chain A (3 residues spaced 3.8 A) + Chain B (3 residues spaced 3.8 A, offset by +50 A in Z)
     const twoChains = new Float32Array([

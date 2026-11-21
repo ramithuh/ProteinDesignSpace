@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
+  clearAllModelCaches,
   evictCachedUrls,
   fetchCachedBytes,
   makeCachedFetch,
@@ -118,6 +119,30 @@ describe('engine/opfs-cache', () => {
     await expect(fetchCachedBytes('err-key', 'https://example.test/missing.bin')).rejects.toThrow(
       /HTTP 404/,
     );
+  });
+
+  it('propagates a network failure after a cache miss without fetching twice', async () => {
+    vi.stubGlobal('caches', { open: async () => ({ match: async () => undefined }) });
+    const network = vi.fn().mockRejectedValue(new Error('connection interrupted'));
+    vi.stubGlobal('fetch', network);
+    await expect(makeCachedFetch()('https://example.test/model')).rejects.toThrow('connection interrupted');
+    expect(network).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the independently consumable cache match without cloning its body', async () => {
+    const hit = new Response('cached bytes');
+    vi.stubGlobal('caches', { open: async () => ({ match: async () => hit }) });
+    expect(await makeCachedFetch()('https://example.test/model')).toBe(hit);
+  });
+
+  it('clears vendored Genie weight caches and preserves unrelated caches', async () => {
+    const remove = vi.fn().mockResolvedValue(true);
+    vi.stubGlobal('caches', {
+      keys: async () => ['genie3-weights-fp16-1', 'genie3-unrelated', 'other-cache'],
+      delete: remove,
+    });
+    await clearAllModelCaches();
+    expect(remove.mock.calls).toEqual([['genie3-weights-fp16-1']]);
   });
 
   it('makeCachedFetch caches on miss, hits on repeat, and evictCachedUrls removes cached entries', async () => {

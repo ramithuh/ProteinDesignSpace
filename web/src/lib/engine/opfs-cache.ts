@@ -150,26 +150,27 @@ export function makeCachedFetch(
 ): typeof globalThis.fetch {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    let cache: Cache | undefined;
+    let hit: Response | undefined;
     if (typeof caches !== 'undefined') {
       try {
-        const cache = await caches.open(CACHE_NAME);
-        const hit = await cache.match(url);
-        if (hit) {
-          onFile?.(url, true);
-          return hit.clone();
-        }
-        const resp = await fetch(input, init);
-        if (resp.ok) {
-          await cachePutSafe(cache, url, resp.clone());
-        }
-        onFile?.(url, false);
-        return resp;
+        cache = await caches.open(CACHE_NAME);
+        hit = await cache.match(url);
       } catch {
-        /* fall through to plain fetch */
+        /* storage unavailable; fetch normally */
       }
     }
+    if (hit) {
+      onFile?.(url, true);
+      return hit; // Cache.match already returns an independently consumable response.
+    }
+
+    const resp = await fetch(input, init);
+    if (resp.ok && cache) {
+      await cachePutSafe(cache, url, resp.clone());
+    }
     onFile?.(url, false);
-    return fetch(input, init);
+    return resp;
   };
 }
 
@@ -308,6 +309,7 @@ export async function clearAllModelCaches(): Promise<void> {
             (k) =>
               k.startsWith('denovo-run') ||
               k.startsWith('localfold-') ||
+              k.startsWith('genie3-weights-') ||
               k.startsWith('rfd4p-'),
           )
           .map((k) => caches.delete(k)),

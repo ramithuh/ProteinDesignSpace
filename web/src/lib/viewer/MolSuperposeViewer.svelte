@@ -335,6 +335,7 @@
       surfaceOverlay: boolean;
       ligands: boolean;
       preserveCamera: boolean;
+      structureKey: string;
     },
   ) {
     const mySeq = ++loadSeq;
@@ -342,6 +343,7 @@
     if (!dPdb && !rPdb) {
       if (plugin) await plugin.clear();
       trajModelRef = null;
+      lastStructureKey = '';
       return;
     }
 
@@ -469,6 +471,7 @@
       } else {
         ctx.canvas3d?.requestCameraReset();
       }
+      lastStructureKey = styleOpts.structureKey;
     } catch (err) {
       if (!destroyed && mySeq === loadSeq) {
         initError = err instanceof Error ? err.message : String(err);
@@ -546,6 +549,7 @@
       surfaceOverlay: boolean;
       ligands: boolean;
       preserveCamera: boolean;
+      structureKey: string;
     },
   ) {
     const mySeq = ++loadSeq;
@@ -554,6 +558,7 @@
     trajModelRef = null;
     if (specs.length === 0) {
       if (plugin) await plugin.clear();
+      lastStructureKey = '';
       return;
     }
 
@@ -625,6 +630,7 @@
       } else {
         ctx.canvas3d?.requestCameraReset();
       }
+      lastStructureKey = styleOpts.structureKey;
     } catch (err) {
       if (!destroyed && mySeq === loadSeq) {
         initError = err instanceof Error ? err.message : String(err);
@@ -673,10 +679,10 @@
       ligands: showLigands,
     };
     if (multiRenderKey !== null) {
-      const sameStructure = lastStructureKey === `multi:${multiRenderKey}`;
-      lastStructureKey = `multi:${multiRenderKey}`;
+      const mKey = `multi:${multiRenderKey}`;
+      const sameStructure = lastStructureKey === mKey;
       const snapshot = untrack(() => models ?? []);
-      void renderMultiModels(snapshot, { ...styleOpts, preserveCamera: sameStructure });
+      void renderMultiModels(snapshot, { ...styleOpts, preserveCamera: sameStructure, structureKey: mKey });
       return;
     }
     const d = designedPdb;
@@ -685,12 +691,12 @@
     const useT = showTrajectory && Boolean(t);
     const sd = showDesigned;
     const sr = showRefold;
-    const sKey = `single:${sd ? d?.length ?? 0 : -1}:${d?.slice(0, 48) ?? ''}|${sr ? r?.length ?? 0 : -1}:${r?.slice(0, 48) ?? ''}|${useT ? 1 : 0}`;
+    const sKey = `single:${sd ? d?.length ?? 0 : -1}:${d?.slice(0, 48) ?? ''}:${d?.slice(-48) ?? ''}|${sr ? r?.length ?? 0 : -1}:${r?.slice(0, 48) ?? ''}:${r?.slice(-48) ?? ''}|${useT ? `${t?.length ?? 0}:${t?.slice(-48) ?? ''}` : 0}`;
     const sameStructure = lastStructureKey === sKey;
-    lastStructureKey = sKey;
     void renderScene(d, r, t, useT, sd, sr, untrack(() => frameIndex), {
       ...styleOpts,
       preserveCamera: sameStructure,
+      structureKey: sKey,
     });
   });
 
