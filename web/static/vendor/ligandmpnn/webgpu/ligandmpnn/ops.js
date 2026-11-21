@@ -1,4 +1,4 @@
-import { gpuRawFeatures } from "./geometry.js";
+import { gpuRawFeatures } from "./geometry.js?v=2";
 import {
   linearShader,
   elementShader,

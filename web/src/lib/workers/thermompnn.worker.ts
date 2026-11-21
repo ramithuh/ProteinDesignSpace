@@ -172,7 +172,7 @@ async function ensureEngine(id: number, precision: Precision): Promise<ThermoEng
       progress: 0.02,
       detail: 'Loading ThermoMPNN WebGPU modules...',
     });
-    const moduleUrl = new URL('/vendor/thermompnn/webgpu/index.js', self.location.origin).href;
+    const moduleUrl = new URL('/vendor/thermompnn/webgpu/index.js?v=2', self.location.origin).href;
     thermoMod = await import(/* @vite-ignore */ moduleUrl);
   }
 

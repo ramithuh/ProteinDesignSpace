@@ -1,4 +1,4 @@
-import * as S from "./shaders.js";
+import * as S from "./shaders.js?v=2";
 import { checkAbort } from "../shared/loader.js";
 export class GPUOps {
   constructor(engine, input, options) {

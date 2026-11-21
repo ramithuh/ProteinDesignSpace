@@ -1,6 +1,6 @@
 import { fetchWeights } from "../shared/ligandmpnn/weights.js";
 import { makeEngine } from "../shared/ligandmpnn/model.js";
-import { GpuOps } from "./ligandmpnn/ops.js";
+import { GpuOps } from "./ligandmpnn/ops.js?v=2";
 export { GpuOps };
 export { LigandModel } from "../shared/ligandmpnn/model.js";
 export * from "./ligandmpnn/shaders.js";

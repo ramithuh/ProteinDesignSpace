@@ -191,7 +191,7 @@ async function ensureEngine(
       progress: 0.02,
       detail: 'Loading LigandMPNN WebGPU modules...',
     });
-    const moduleUrl = new URL('/vendor/ligandmpnn/webgpu/index.js', self.location.origin).href;
+    const moduleUrl = new URL('/vendor/ligandmpnn/webgpu/index.js?v=2', self.location.origin).href;
     ligandMod = await import(/* @vite-ignore */ moduleUrl);
   }
 
