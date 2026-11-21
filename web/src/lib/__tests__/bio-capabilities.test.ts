@@ -22,12 +22,10 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
       id: 'ppi-test',
       name: 'PD-L1 Binder',
       nodes: [
-        { id: 'cond', adapterId: 'rfd4-conditioner', label: 'Condition', params: { taskPreset: 'ppi_pdl1' } },
-        { id: 'gen', adapterId: 'rfd4-proteina', label: 'RFD4', params: { mode: 'conditioned' } },
+        { id: 'gen', adapterId: 'rfd4-proteina', label: 'RFD4', params: { mode: 'preset', presetId: 'ppi_pdl1' } },
         { id: 'fold', adapterId: 'localfold-af2', label: 'LocalFold (AF2 m1)', params: { model: 'monomer' } },
       ],
       edges: [
-        { fromNode: 'cond', fromPort: 'condition', toNode: 'gen', toPort: 'condition' },
         { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
       ],
     };
@@ -460,5 +458,99 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
     expect(trajRep!.fold.sequenceId).toBe('frame-2');
     expect(trajRep!.selection.criterion).toContain('final-frame-fallback');
     expect(trajRep!.selection.scoreValue).toBeNull();
+  });
+
+  it('Wave-2 P1/P2 & #123 regressions: missing structure edge blocking, duplicate model label fix, Genie 3 / Cα-only -> SolubleMPNN 1-click switch, and clean genie3-mpnn-af2 preset', () => {
+    // 1. Missing required structure edge blocks RFD4 (motif/binder/partial/inverse-folding) and Genie 3 (motif/binder)
+    for (const mode of ['motif', 'binder', 'partial', 'inverse-folding']) {
+      const g: WorkflowGraph = {
+        id: `rfd4-missing-${mode}`,
+        name: 'Missing RFD4 Tpl',
+        nodes: [{ id: 'rfd', adapterId: 'rfd4-proteina', params: { mode, length: 70 } }],
+        edges: [],
+      };
+      const issues = validateBioCapabilities(g);
+      const err = issues.find((i) => i.code === 'rfd4-missing-template');
+      expect(err, mode).toBeDefined();
+      expect(err!.severity).toBe('error');
+    }
+
+    for (const taskMode of ['motif', 'binder']) {
+      const g: WorkflowGraph = {
+        id: `g3-missing-${taskMode}`,
+        name: 'Missing Genie3 Tpl',
+        nodes: [
+          {
+            id: 'g3',
+            adapterId: 'genie3',
+            params: { taskMode, length: 80, ...(taskMode === 'motif' ? { motifSpan: 'A16-35' } : { lockChain: 'A' }) },
+          },
+        ],
+        edges: [],
+      };
+      const issues = validateBioCapabilities(g);
+      const err = issues.find((i) => i.code === 'genie3-missing-template');
+      expect(err, taskMode).toBeDefined();
+      expect(err!.severity).toBe('error');
+    }
+
+    // 2. Duplicate model label fix: "AF2 Model 1" does not repeat as "AF2 Model 1 (AF2 Model 1)"
+    const dupLabelGraph: WorkflowGraph = {
+      id: 'dup-label',
+      name: 'Dup Label',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'MKTAYIAKQR:QISFVKSHFS' } },
+        { id: 'fold', adapterId: 'localfold-af2', label: 'AF2 Model 1', params: { model: 'monomer' } },
+      ],
+      edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+    };
+    const dupIssues = validateBioCapabilities(dupLabelGraph);
+    const multimerWarn = dupIssues.find((i) => i.code === 'multimer-into-af2-monomer')!;
+    expect(multimerWarn.message).not.toContain('(AF2 Model 1)');
+    expect(multimerWarn.message).toContain('AF2 Model 1');
+
+    // 3. Genie 3 -> SolubleMPNN triggers Cα-only warning with 1-click Switch to Cα-ProteinMPNN fix
+    const g3SolubleGraph: WorkflowGraph = {
+      id: 'g3-soluble',
+      name: 'Genie3 Soluble',
+      nodes: [
+        { id: 'g3', adapterId: 'genie3', params: { taskMode: 'unconditional', length: 80 } },
+        { id: 'mpnn', adapterId: 'web-protein-mpnn', label: 'SolubleMPNN', params: { family: 'solublempnn' } },
+      ],
+      edges: [{ fromNode: 'g3', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' }],
+    };
+    const g3SolIssues = validateBioCapabilities(g3SolubleGraph);
+    const caWarn = g3SolIssues.find((i) => i.code === 'mpnn-ca-only-backbone');
+    expect(caWarn).toBeDefined();
+    expect(caWarn!.severity).toBe('warning');
+    expect(caWarn!.fix).toEqual({
+      label: 'Switch to Cα-ProteinMPNN',
+      nodeId: 'mpnn',
+      paramsPatch: { family: 'ca', modelName: 'v_48_020' },
+      nodeLabel: 'Cα-ProteinMPNN',
+    });
+
+    // Applying the fix clears the warning
+    g3SolubleGraph.nodes[1].params.family = 'ca';
+    expect(validateBioCapabilities(g3SolubleGraph).find((i) => i.code === 'mpnn-ca-only-backbone')).toBeUndefined();
+
+    // 4. Cα-only custom PDB -> SolubleMPNN also triggers Switch to Cα-ProteinMPNN warning
+    const caOnlyPdb = [
+      'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      2  CA  GLY A   2       3.800   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      3  CA  VAL A   3       7.600   0.000   0.000  1.00  0.00           C  ',
+      'END',
+    ].join('\n');
+    const caPdbGraph: WorkflowGraph = {
+      id: 'ca-pdb-mpnn',
+      name: 'CA PDB MPNN',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', params: { mode: 'custom', pdbText: caOnlyPdb } },
+        { id: 'mpnn', adapterId: 'web-protein-mpnn', label: 'SolubleMPNN', params: { family: 'solublempnn' } },
+      ],
+      edges: [{ fromNode: 'src', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' }],
+    };
+    const caPdbIssues = validateBioCapabilities(caPdbGraph);
+    expect(caPdbIssues.find((i) => i.code === 'mpnn-ca-only-backbone')?.fix?.label).toBe('Switch to Cα-ProteinMPNN');
   });
 });

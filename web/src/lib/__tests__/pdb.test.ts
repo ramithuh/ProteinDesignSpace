@@ -985,4 +985,68 @@ describe('protein-ops/pdb', () => {
     expect(() => cropRawAllAtomStructure(insPdb, '???')).toThrow(/Invalid segment crop/i);
     expect(() => cropRawAllAtomStructure(insPdb, 'A10,???')).toThrow(/Invalid segment crop/i);
   });
+
+  it('Wave-2 P1/P2 regressions: HETATM MSE in whole-chain crop, fixed-width coord formatting & non-finite guard, AltLoc B-only fallback, and negative resnum crops', () => {
+    // 1. Whole-chain crop ('A') keeps HETATM MSE (selenomethionine)
+    const mseChainPdb = [
+      'HETATM    1  N   MSE A  -2       0.000   0.000   0.000  1.00 50.00           N  ',
+      'HETATM    2  CA  MSE A  -2       1.458   0.000   0.000  1.00 50.00           C  ',
+      'HETATM    3  C   MSE A  -2       2.009   1.420   0.000  1.00 50.00           C  ',
+      'ATOM      4  N   ALA A  -1       3.320   1.500   0.000  1.00 50.00           N  ',
+      'ATOM      5  CA  ALA A  -1       4.000   2.800   0.000  1.00 50.00           C  ',
+      'ATOM      6  C   ALA A  -1       5.500   2.600   0.000  1.00 50.00           C  ',
+      'ATOM      7  CA  GLY A   1       8.000   2.600   0.000  1.00 50.00           C  ',
+      'HETATM    8 ZN    ZN A 201      10.000  10.000  10.000  1.00 20.00          ZN  ',
+      'END',
+    ].join('\n');
+    const wholeA = cropRawAllAtomStructure(mseChainPdb, 'A');
+    expect(wholeA.text).toContain('MSE A  -2');
+    expect(wholeA.text).not.toContain('ZN A 201');
+
+    // 2. Negative residue number range crop ('A-2--1' and 'A-2-1')
+    const negCrop = cropRawAllAtomStructure(mseChainPdb, 'A-2--1');
+    const parsedNeg = parsePdbBackbone(negCrop.text);
+    expect(parsedNeg.sequence).toBe('MA');
+    expect(parsedNeg.resNums).toEqual([-2, -1]);
+
+    // 3. AltLoc B-only fallback keeps B conformer when no primary blank/A/1 conformer exists, while preferring A when both exist
+    const altBPdb = [
+      'ATOM      1  CA BALA A   1       1.000   2.000   3.000  0.50 20.00           C  ',
+      'ATOM      2  CA AGLY A   2       4.000   2.000   3.000  0.60 20.00           C  ',
+      'ATOM      3  CA BGLY A   2      99.000  99.000  99.000  0.40 20.00           C  ',
+      'ATOM      4  CA 2VAL A   3       7.000   2.000   3.000  0.50 20.00           C  ',
+      'END',
+    ].join('\n');
+    const parsedAltB = parsePdbBackbone(altBPdb);
+    expect(parsedAltB.sequence).toBe('AGV');
+    expect(parsedAltB.caCoords[0]).toBeCloseTo(1.0, 3);
+    expect(parsedAltB.caCoords[3]).toBeCloseTo(4.0, 3);
+    expect(parsedAltB.caCoords[6]).toBeCloseTo(7.0, 3);
+
+    // 4. coordsToBackbonePdb & atom37ToPdb clamp/format coordinates strictly to 8 chars and drop non-finite coords
+    const extremeCoords = new Float32Array([
+      // Res 1 (N, CA, C) with extreme coords > 9999 / < -999
+      12345.678, -1234.567, 0.0,
+      12346.0, -1235.0, 1.0,
+      12347.0, -1236.0, 2.0,
+      // Res 2 with NaN atoms (all skipped)
+      Number.NaN, 1.0, 2.0,
+      Number.NaN, 1.0, 2.0,
+      Number.NaN, 1.0, 2.0,
+      // Res 3 (N, CA, C) valid
+      0.0, 0.0, 0.0,
+      1.458, 0.0, 0.0,
+      2.009, 1.42, 0.0,
+    ]);
+    const extremePdb = coordsToBackbonePdb(extremeCoords, 3, { atomsPerRes: 3, sequence: 'AGV' });
+    const atomLines = extremePdb.split('\n').filter((l) => l.startsWith('ATOM  '));
+    expect(atomLines).toHaveLength(6); // Res 2 NaN atoms skipped; Res 1 & 3 emitted (3 atoms each)
+    for (const line of atomLines) {
+      expect(line.slice(30, 38)).toHaveLength(8);
+      expect(line.slice(38, 46)).toHaveLength(8);
+      expect(line.slice(46, 54)).toHaveLength(8);
+      expect(line).not.toContain('NaN');
+      expect(Number.isFinite(parseFloat(line.slice(30, 38)))).toBe(true);
+    }
+  });
 });

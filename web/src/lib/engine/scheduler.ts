@@ -19,9 +19,9 @@ import { normalizeWorkflowGraph } from './share';
 import {
   resolveFoldConfidence,
   splitMultiChainSequence,
+  validateBioCapabilities,
   validateRuntimeNodeInputs,
 } from './bio-capabilities';
-import { buildCanonicalConditionIntent, compileConditionToRfd4 } from './conditioning';
 import {
   clearAllModelCaches,
   type CheckpointStorageAdapter,
@@ -34,7 +34,6 @@ import {
 import type {
   ArtifactRef,
   CanonicalArtifact,
-  ConditionSpecArtifact,
   DesignabilityMetrics,
   DesignabilityRow,
   FoldedStructure,
@@ -57,6 +56,25 @@ function fnv1a(str: string): string {
     h = Math.imul(h, 0x01000193);
   }
   return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/** Deterministic key-sorted JSON serializer so reordered param keys never bust memoization. */
+function canonicalJsonStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => (v === undefined ? 'null' : canonicalJsonStringify(v))).join(',')}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  const parts: string[] = [];
+  for (const k of keys) {
+    const v = obj[k];
+    if (v === undefined) continue;
+    parts.push(`${JSON.stringify(k)}:${canonicalJsonStringify(v)}`);
+  }
+  return `{${parts.join(',')}}`;
 }
 
 /**
@@ -99,7 +117,7 @@ export async function materializePdbInputNode(
     rawText = generateSampleHelixBundlePdb();
     filename = 'demo_3helix_53aa.pdb';
   }
-  const cropSpec = String(node.params.cropSegments ?? '').trim();
+  const cropSpec = mode === 'demo-bundle' ? '' : String(node.params.cropSegments ?? '').trim();
   const isCropped = cropSpec.length > 0;
   let effectiveRawText = rawText;
   if (isCropped) {
@@ -110,7 +128,12 @@ export async function materializePdbInputNode(
   if (parsed.nResidues < 3 && !hasNonProteinContext) {
     throw new Error('Input PDB/mmCIF must contain at least 3 residues with Cα atoms');
   }
-  const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds, parsed.resNums);
+  const geometry = computeGeometryStats(
+    parsed.caCoords,
+    parsed.chainIds,
+    parsed.resNums,
+    parsed.insCodes,
+  );
   const benchmarkId = String(node.params.benchmarkId ?? '').trim() || undefined;
 
   const summaryParts: string[] = [];
@@ -136,6 +159,11 @@ export async function materializePdbInputNode(
     cifText: parsed.format === 'mmcif' ? effectiveRawText : undefined,
     chainIds: parsed.chainIds,
     chainLengths: parsed.diagnostics.chainLengths,
+    insCodes: parsed.insCodes,
+    sourceResidues: parsed.sourceResidues,
+    chainIdMap: parsed.chainIdMap,
+    atomPresence: parsed.atomPresence,
+    observedBackboneMask: parsed.observedBackboneMask,
     diagnostics: parsed.diagnostics,
     ...(benchmarkId ? { benchmarkId } : {}),
     geometry,
@@ -310,6 +338,8 @@ export interface ExecutionSchedulerOptions {
   maxRunHistory?: number;
   /** Optional durable checkpoint storage adapter (e.g. IndexedDB or in-memory store). */
   checkpointStore?: CheckpointStorageAdapter;
+  /** Idle delay (ms) after a run completes before auto-releasing the active GPU worker (default 60_000; 0 disables). */
+  gpuIdleReleaseMs?: number;
 }
 
 export interface RunResult {
@@ -379,6 +409,7 @@ export class RunCancellationError extends Error {
 
 const DEFAULT_MAX_MEMO_BYTES = 64 * 1024 * 1024; // 64 MiB
 const DEFAULT_MAX_RUN_HISTORY = 20;
+const DEFAULT_GPU_IDLE_RELEASE_MS = 60_000; // 60 s idle auto-release for Safari/Metal VRAM hygiene
 
 /**
  * Validate a worker or CPU adapter output map against `ADAPTER_REGISTRY[node.adapterId].outputs`
@@ -599,7 +630,7 @@ export function computeInvalidatedNodeIds(
     const changed =
       !prev ||
       prev.adapterId !== n.adapterId ||
-      JSON.stringify(prev.params ?? {}) !== JSON.stringify(n.params ?? {}) ||
+      canonicalJsonStringify(prev.params ?? {}) !== canonicalJsonStringify(n.params ?? {}) ||
       prevIncoming.get(n.id) !== nextIncoming.get(n.id);
     if (changed) {
       stale.add(n.id);
@@ -753,6 +784,8 @@ interface ActiveGpuSlot {
 export class ExecutionScheduler {
   private activeGpu: ActiveGpuSlot | null = null;
   private gpuDisposalPromise: Promise<void> | null = null;
+  private gpuIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  private gpuIdleReleaseMs: number;
   private memo = new Map<string, Record<string, CanonicalArtifact>>();
   private memoEntryBytes = new Map<string, number>();
   private memoKeysByNode = new Map<string, Set<string>>();
@@ -797,6 +830,40 @@ export class ExecutionScheduler {
         ? Math.floor(opts.maxRunHistory)
         : DEFAULT_MAX_RUN_HISTORY;
     this.checkpointStore = opts.checkpointStore;
+    this.gpuIdleReleaseMs =
+      typeof opts.gpuIdleReleaseMs === 'number' && opts.gpuIdleReleaseMs >= 0
+        ? opts.gpuIdleReleaseMs
+        : DEFAULT_GPU_IDLE_RELEASE_MS;
+  }
+
+  private clearGpuIdleTimer(): void {
+    if (this.gpuIdleTimer !== null) {
+      clearTimeout(this.gpuIdleTimer);
+      this.gpuIdleTimer = null;
+    }
+  }
+
+  private scheduleGpuIdleRelease(): void {
+    this.clearGpuIdleTimer();
+    if (!this.activeGpu || this.running) return;
+    if (!Number.isFinite(this.gpuIdleReleaseMs) || this.gpuIdleReleaseMs <= 0) return;
+    const timer = setTimeout(() => {
+      this.gpuIdleTimer = null;
+      if (!this.running && this.activeGpu) {
+        void this.releaseActiveGpuInternal().catch(() => {});
+      }
+    }, this.gpuIdleReleaseMs);
+    // Avoid pinning Node/Vitest event loops when scheduler sits idle
+    if (typeof timer === 'object' && timer !== null && 'unref' in timer && typeof timer.unref === 'function') {
+      timer.unref();
+    }
+    this.gpuIdleTimer = timer;
+  }
+
+  /** Clean up idle timers and terminate any active GPU worker (e.g. on page unmount). */
+  async destroy(): Promise<void> {
+    this.clearGpuIdleTimer();
+    await this.releaseActiveGpuInternal('Scheduler destroyed');
   }
 
   getActiveGpuAdapter(): string | null {
@@ -1107,6 +1174,7 @@ export class ExecutionScheduler {
   }
 
   private async releaseActiveGpuInternal(abortMessage?: string): Promise<void> {
+    this.clearGpuIdleTimer();
     const slot = this.activeGpu;
     if (!slot) {
       await this.waitForPendingGpuDisposal();
@@ -1319,57 +1387,6 @@ export class ExecutionScheduler {
       return { sequences: seqSet };
     }
 
-    if (node.adapterId === 'rfd4-conditioner') {
-      const p = node.params ?? {};
-      const template = inputs.template as StructureArtifact | undefined;
-      const taskPreset = String(p.taskPreset ?? 'custom');
-      const rawOverride = String(p.rawJsonOverride ?? '').trim();
-
-      if (rawOverride) {
-        const parsed = JSON.parse(rawOverride) as Record<string, unknown>;
-        const art: ConditionSpecArtifact = {
-          kind: 'ConditionSpec',
-          id: `cond-raw-${fnv1a(JSON.stringify({ rawOverride, tpl: template?.id }))}`,
-          label: 'Custom JSON Spec',
-          contig: String(parsed.contig ?? p.contig ?? '70-70'),
-          conditions: (parsed.conditions as Record<string, unknown>) ?? {},
-          inputCif: template?.cifText ?? template?.pdbText,
-          specMode: true,
-          summary: `raw spec (${String(parsed.contig ?? 'custom')})`,
-        };
-        return { condition: art };
-      }
-
-      if (taskPreset !== 'custom') {
-        const art: ConditionSpecArtifact = {
-          kind: 'ConditionSpec',
-          id: `cond-preset-${taskPreset}`,
-          label: `RFD4 Preset: ${taskPreset}`,
-          contig: String(p.contig ?? ''),
-          conditions: {},
-          cifUrl: `preset:${taskPreset}`,
-          summary: `preset:${taskPreset}`,
-        };
-        return { condition: art };
-      }
-
-      const intent = buildCanonicalConditionIntent(p);
-      const { contig, conditions, tags } = compileConditionToRfd4(intent);
-
-      const art: ConditionSpecArtifact = {
-        kind: 'ConditionSpec',
-        id: `cond-${fnv1a(JSON.stringify({ intent, tpl: template?.id }))}`,
-        label: tags.join(' · '),
-        contig,
-        conditions,
-        intent,
-        inputCif: template?.cifText ?? template?.pdbText,
-        specMode: true,
-        summary: tags.join(' · '),
-      };
-      return { condition: art };
-    }
-
     if (node.adapterId === 'designability-scorer') {
       const structure = inputs.structure as StructureArtifact | undefined;
       const folds = inputs.folds as FoldedStructure | undefined;
@@ -1560,25 +1577,51 @@ export class ExecutionScheduler {
         }
         const alignedFoldPdb = applyTransformToPdb(f.pdbText, align.rotation, align.translation);
 
-        let foldResNums: number[] | undefined;
-        let foldChainIds = f.chainIds;
-        if (f.pdbText) {
+        let foldResNums: number[] | undefined =
+          f.resNums && f.resNums.length === foldLen ? f.resNums : undefined;
+        let foldChainIds = f.chainIds && f.chainIds.length === foldLen ? f.chainIds : undefined;
+        let foldInsCodes: string[] | undefined;
+        if ((!foldResNums || !foldChainIds) && f.pdbText) {
           try {
             const parsedFold = parseStructureText(f.pdbText);
             if (parsedFold.nResidues === foldLen) {
-              foldResNums = parsedFold.resNums;
-              if (!foldChainIds || foldChainIds.length !== foldLen) {
-                foldChainIds = parsedFold.chainIds;
-              }
+              if (!foldResNums) foldResNums = parsedFold.resNums;
+              if (!foldChainIds) foldChainIds = parsedFold.chainIds;
+              foldInsCodes = parsedFold.insCodes;
             }
           } catch {
             /* keep f.chainIds without resNums if pdbText is synthetic */
           }
         }
-        const geom = computeGeometryStats(f.caCoords, foldChainIds, foldResNums);
+        const geom = computeGeometryStats(f.caCoords, foldChainIds, foldResNums, foldInsCodes);
 
         // Multi-chain binder & interface evaluation (#8) — only applicable for full 1:1 equal-length complexes
         const isFullOneToOne = !parsedMapping && foldLen === structLen;
+        if (isFullOneToOne) {
+          const hasStructChainInfo =
+            (structure.chainLengths && structure.chainLengths.length > 0) ||
+            (structure.chainIds && structure.chainIds.length === structLen);
+          const hasFoldChainInfo =
+            (f.chainLengths && f.chainLengths.length > 0) ||
+            (foldChainIds && foldChainIds.length === foldLen);
+          if (hasStructChainInfo && hasFoldChainInfo) {
+            const structRanges = resolveScorerChainRanges(
+              structLen,
+              structure.chainLengths,
+              structure.chainIds,
+            );
+            const foldRanges = resolveScorerChainRanges(foldLen, f.chainLengths, foldChainIds);
+            const stoichMatches =
+              structRanges.length === foldRanges.length &&
+              structRanges.every((sr, idx) => sr.length === foldRanges[idx].length);
+            if (!stoichMatches) {
+              throw new Error(
+                `Chain stoichiometry mismatch in designability-scorer: refolded "${f.sequenceId}" has ${foldRanges.length} chain(s) [${foldRanges.map((r) => r.length).join(', ')}], ` +
+                  `but reference structure "${structure.label}" has ${structRanges.length} chain(s) [${structRanges.map((r) => r.length).join(', ')}].`,
+              );
+            }
+          }
+        }
         const chainRanges = isFullOneToOne
           ? resolveScorerChainRanges(
               structLen,
@@ -1600,60 +1643,68 @@ export class ExecutionScheduler {
           );
           const { binderIndices, targetIndices, explicitRoleSplit } = split;
 
-          if (f.pae && f.pae.length === structLen * structLen) {
-            ipae = computeInterfacePae(
-              f.pae,
-              structLen,
-              chainRanges,
-              explicitRoleSplit ? binderIndices : undefined,
-              explicitRoleSplit ? targetIndices : undefined,
-            );
-          }
-
-          if (f.plddt.length === structLen) {
-            if (binderIndices.length > 0) {
-              let sum = 0;
-              for (const idx of binderIndices) sum += f.plddt[idx];
-              const mean = sum / binderIndices.length;
-              if (Number.isFinite(mean)) binderPlddt = mean;
-            }
-            if (targetIndices.length > 0) {
-              let sum = 0;
-              for (const idx of targetIndices) sum += f.plddt[idx];
-              const mean = sum / targetIndices.length;
-              if (Number.isFinite(mean)) targetPlddt = mean;
+          if (f.pae && f.pae.length >= structLen * structLen) {
+            const paeDim = Math.round(Math.sqrt(f.pae.length));
+            if (paeDim >= structLen && paeDim * paeDim === f.pae.length) {
+              ipae = computeInterfacePae(
+                f.pae,
+                paeDim,
+                structLen,
+                chainRanges,
+                explicitRoleSplit ? binderIndices : undefined,
+                explicitRoleSplit ? targetIndices : undefined,
+              );
             }
           }
 
-          if (binderIndices.length >= 3) {
-            const foldBinderCa = gatherCoordsByIndices(f.caCoords, binderIndices);
-            const structBinderCa = gatherCoordsByIndices(structure.caCoords, binderIndices);
-            const bAlign = kabschAlign(foldBinderCa, structBinderCa);
-            if (Number.isFinite(bAlign.rmsd)) {
-              binderScRmsd = bAlign.rmsd;
-            }
-          }
-
-          if (targetIndices.length >= 3 && binderIndices.length >= 1) {
-            const foldTargetCa = gatherCoordsByIndices(f.caCoords, targetIndices);
-            const structTargetCa = gatherCoordsByIndices(structure.caCoords, targetIndices);
-            const tAlign = kabschAlign(foldTargetCa, structTargetCa);
-            if (Number.isFinite(tAlign.rmsd)) {
-              const { rotation: R, translation: t } = tAlign;
-              let sqSum = 0;
-              for (let k = 0; k < binderIndices.length; k++) {
-                const off = binderIndices[k] * 3;
-                const x = f.caCoords[off + 0];
-                const y = f.caCoords[off + 1];
-                const z = f.caCoords[off + 2];
-                const dx = R[0] * x + R[1] * y + R[2] * z + t[0] - structure.caCoords[off + 0];
-                const dy = R[3] * x + R[4] * y + R[5] * z + t[1] - structure.caCoords[off + 1];
-                const dz = R[6] * x + R[7] * y + R[8] * z + t[2] - structure.caCoords[off + 2];
-                sqSum += dx * dx + dy * dy + dz * dz;
+          // Only emit binder/target-specific metrics when explicit chainRoles or lockedChains exist
+          // (never fabricate arbitrary binder/target roles on symmetric homodimers or unannotated complexes).
+          if (explicitRoleSplit) {
+            if (f.plddt.length === structLen) {
+              if (binderIndices.length > 0) {
+                let sum = 0;
+                for (const idx of binderIndices) sum += f.plddt[idx];
+                const mean = sum / binderIndices.length;
+                if (Number.isFinite(mean)) binderPlddt = mean;
               }
-              const tabRmsd = Math.sqrt(sqSum / binderIndices.length);
-              if (Number.isFinite(tabRmsd)) {
-                targetAlignedBinderRmsd = tabRmsd;
+              if (targetIndices.length > 0) {
+                let sum = 0;
+                for (const idx of targetIndices) sum += f.plddt[idx];
+                const mean = sum / targetIndices.length;
+                if (Number.isFinite(mean)) targetPlddt = mean;
+              }
+            }
+
+            if (binderIndices.length >= 3) {
+              const foldBinderCa = gatherCoordsByIndices(f.caCoords, binderIndices);
+              const structBinderCa = gatherCoordsByIndices(structure.caCoords, binderIndices);
+              const bAlign = kabschAlign(foldBinderCa, structBinderCa);
+              if (Number.isFinite(bAlign.rmsd)) {
+                binderScRmsd = bAlign.rmsd;
+              }
+            }
+
+            if (targetIndices.length >= 3 && binderIndices.length >= 1) {
+              const foldTargetCa = gatherCoordsByIndices(f.caCoords, targetIndices);
+              const structTargetCa = gatherCoordsByIndices(structure.caCoords, targetIndices);
+              const tAlign = kabschAlign(foldTargetCa, structTargetCa);
+              if (Number.isFinite(tAlign.rmsd)) {
+                const { rotation: R, translation: t } = tAlign;
+                let sqSum = 0;
+                for (let k = 0; k < binderIndices.length; k++) {
+                  const off = binderIndices[k] * 3;
+                  const x = f.caCoords[off + 0];
+                  const y = f.caCoords[off + 1];
+                  const z = f.caCoords[off + 2];
+                  const dx = R[0] * x + R[1] * y + R[2] * z + t[0] - structure.caCoords[off + 0];
+                  const dy = R[3] * x + R[4] * y + R[5] * z + t[1] - structure.caCoords[off + 1];
+                  const dz = R[6] * x + R[7] * y + R[8] * z + t[2] - structure.caCoords[off + 2];
+                  sqSum += dx * dx + dy * dy + dz * dz;
+                }
+                const tabRmsd = Math.sqrt(sqSum / binderIndices.length);
+                if (Number.isFinite(tabRmsd)) {
+                  targetAlignedBinderRmsd = tabRmsd;
+                }
               }
             }
           }
@@ -1826,9 +1877,21 @@ export class ExecutionScheduler {
         return 0;
       });
       const passed = rows.filter((r) => r.designable).length;
+      const threshHash = fnv1a(
+        canonicalJsonStringify({
+          scThresh,
+          plddtThresh,
+          motifThresh,
+          ipaeThresh,
+          targetAlignedBinderThresh,
+          allowExternalReference,
+          strictLineage,
+          mapping: appliedMappingSpec ?? null,
+        }),
+      );
       const metrics: DesignabilityMetrics = {
         kind: 'DesignabilityMetrics',
-        id: `metrics-${structure.id}-${folds.id}`,
+        id: `metrics-${structure.id}-${folds.id}-${threshHash}`,
         rows,
         best: rows[0] ?? null,
         passRate: rows.length > 0 ? passed / rows.length : 0,
@@ -1878,8 +1941,14 @@ export class ExecutionScheduler {
     // Validate & normalize graph BEFORE acquiring lease or emitting progress (preserves pre-run error contract)
     graph = normalizeWorkflowGraph(graph, graph?.id, graph?.name, false);
     const errors = validateGraph(graph);
+    for (const issue of validateBioCapabilities(graph)) {
+      if (issue.severity === 'error' && !errors.includes(issue.message)) {
+        errors.push(issue.message);
+      }
+    }
     if (errors.length) throw new Error(errors.join('\n'));
     const order = topoSort(graph);
+    this.clearGpuIdleTimer();
 
     if (opts.resumeCheckpoint) {
       this.importCheckpoint(opts.resumeCheckpoint);
@@ -2066,9 +2135,9 @@ export class ExecutionScheduler {
           }
         }
 
-        // Content-addressed memoization key
+        // Content-addressed memoization key (canonicalized key order prevents spurious misses)
         const cacheKey = fnv1a(
-          JSON.stringify({ adapter: node.adapterId, params: node.params, inputIds }),
+          canonicalJsonStringify({ adapter: node.adapterId, params: node.params, inputIds }),
         );
 
         let nodeOutputs: Record<string, CanonicalArtifact>;
@@ -2289,6 +2358,7 @@ export class ExecutionScheduler {
         this.activeRun = { ...this.activeRun, leaseHeld: false, activeNodeId: null };
         this.emitRunState();
       }
+      this.scheduleGpuIdleRelease();
     }
   }
 }
@@ -2506,7 +2576,8 @@ function gatherCoordsByIndices(coords: Float32Array, indices: readonly number[])
 
 function computeInterfacePae(
   pae: Float32Array,
-  L: number,
+  paeDim: number,
+  proteinLen: number,
   ranges: readonly ScorerChainRange[],
   binderIndices?: readonly number[],
   targetIndices?: readonly number[],
@@ -2516,12 +2587,12 @@ function computeInterfacePae(
   if (binderIndices && targetIndices && binderIndices.length > 0 && targetIndices.length > 0) {
     for (const bi of binderIndices) {
       for (const ti of targetIndices) {
-        const v1 = pae[bi * L + ti];
+        const v1 = pae[bi * paeDim + ti];
         if (Number.isFinite(v1)) {
           sum += v1;
           count++;
         }
-        const v2 = pae[ti * L + bi];
+        const v2 = pae[ti * paeDim + bi];
         if (Number.isFinite(v2)) {
           sum += v2;
           count++;
@@ -2529,16 +2600,16 @@ function computeInterfacePae(
       }
     }
   } else {
-    const chainOf = new Int32Array(L);
+    const chainOf = new Int32Array(proteinLen);
     for (let c = 0; c < ranges.length; c++) {
       const r = ranges[c];
       for (let i = r.start; i < r.start + r.length; i++) chainOf[i] = c;
     }
-    for (let i = 0; i < L; i++) {
+    for (let i = 0; i < proteinLen; i++) {
       const ci = chainOf[i];
-      for (let j = 0; j < L; j++) {
+      for (let j = 0; j < proteinLen; j++) {
         if (ci === chainOf[j]) continue;
-        const v = pae[i * L + j];
+        const v = pae[i * paeDim + j];
         if (Number.isFinite(v)) {
           sum += v;
           count++;

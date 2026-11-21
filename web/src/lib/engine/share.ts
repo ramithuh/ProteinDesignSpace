@@ -9,7 +9,6 @@ import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 const ADAPTER_TO_SHORT: Record<string, string> = {
   'pdb-input': 'p',
   'sequence-input': 'q',
-  'rfd4-conditioner': 'c',
   'rfd4-proteina': 'r',
   genie3: 'g',
   'web-protein-mpnn': 'm',
@@ -37,6 +36,10 @@ function fromBase64Url(str: string): Uint8Array {
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+}
+
 function sanitizeParams(obj: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) {
@@ -51,10 +54,14 @@ async function deflateRaw(text: string): Promise<Uint8Array> {
   if (typeof CompressionStream === 'undefined') return input;
   const cs = new CompressionStream('deflate-raw');
   const bufPromise = new Response(cs.readable).arrayBuffer();
+  bufPromise.catch(() => {});
   const writer = cs.writable.getWriter();
-  await writer.write(input);
-  await writer.close();
-  const buf = await bufPromise;
+  const writePromise = (async () => {
+    await writer.write(input);
+    await writer.close();
+  })();
+  writePromise.catch(() => {});
+  const [buf] = await Promise.all([bufPromise, writePromise]);
   return new Uint8Array(buf);
 }
 
@@ -64,10 +71,15 @@ async function inflateRaw(bytes: Uint8Array): Promise<string> {
   }
   const ds = new DecompressionStream('deflate-raw');
   const bufPromise = new Response(ds.readable).arrayBuffer();
+  // Prevent unhandled promise rejection if writer.write/close rejects on invalid deflate bytes
+  bufPromise.catch(() => {});
   const writer = ds.writable.getWriter();
-  await writer.write(bytes.slice());
-  await writer.close();
-  const buf = await bufPromise;
+  const writePromise = (async () => {
+    await writer.write(bytes.slice());
+    await writer.close();
+  })();
+  writePromise.catch(() => {});
+  const [buf] = await Promise.all([bufPromise, writePromise]);
   return new TextDecoder().decode(buf);
 }
 
@@ -107,29 +119,6 @@ function normalizeUnresolvedIssues(raw: unknown): string[] {
     }
   }
   return out;
-}
-
-function parseFixedBareProteinContig(contig: string): number | null {
-  const m = /^(\d+)(?:-(\d+))?$/.exec(contig.trim());
-  if (!m) return null;
-  const lo = Number(m[1]);
-  const hi = m[2] !== undefined ? Number(m[2]) : lo;
-  if (!Number.isInteger(lo) || !Number.isInteger(hi) || lo !== hi) return null;
-  return lo;
-}
-
-function hasRfd4OnlyContigSyntax(contig: string): boolean {
-  for (const rawTok of contig.split(/[,\s;]+/)) {
-    const tok = rawTok.trim();
-    if (!tok) continue;
-    // Secondary-structure labeled contig segment like "h1:16-16P"
-    if (/^[A-Za-z0-9_]+:\d+(?:-\d+)?[PRDN]$/i.test(tok)) return true;
-    // RFD4 polymer-typed contig suffix like "120-120P", "70-70D", "20-20R", "12-12N"
-    if (/^\d+(?:-\d+)?[PRDN]$/i.test(tok)) return true;
-    // Explicit ligand selector like "A:SAM" or "A:ZN"
-    if (/^[A-Za-z]+:[A-Za-z][A-Za-z0-9]{0,4}$/.test(tok)) return true;
-  }
-  return false;
 }
 
 function diffParams(
@@ -234,9 +223,9 @@ function sameTopology(a: WorkflowGraph, b: WorkflowGraph): boolean {
   for (let i = 0; i < a.nodes.length; i++) {
     if (a.nodes[i].id !== b.nodes[i].id || a.nodes[i].adapterId !== b.nodes[i].adapterId) return false;
   }
-  const edgeSet = new Set(a.edges.map((e) => `${e.fromNode}.${e.fromPort}->${e.toNode}.${e.toPort}`));
+  const edgeSet = new Set(a.edges.map((e) => `${e.fromNode}\0${e.fromPort}->${e.toNode}\0${e.toPort}`));
   for (const e of b.edges) {
-    if (!edgeSet.has(`${e.fromNode}.${e.fromPort}->${e.toNode}.${e.toPort}`)) return false;
+    if (!edgeSet.has(`${e.fromNode}\0${e.fromPort}->${e.toNode}\0${e.toPort}`)) return false;
   }
   return true;
 }
@@ -338,7 +327,7 @@ export function normalizeWorkflowGraph(
   fallbackName = 'Custom Recipe',
   fillDefaults = true,
 ): WorkflowGraph {
-  if (!raw || typeof raw !== 'object') {
+  if (!isPlainObject(raw)) {
     throw new Error('Workflow must be a JSON object with nodes[] and edges[]');
   }
   const parsed = raw as Partial<WorkflowGraph>;
@@ -348,7 +337,7 @@ export function normalizeWorkflowGraph(
 
   const seenIds = new Set<string>();
   const validatedNodes: WorkflowNode[] = parsed.nodes.map((n, idx) => {
-    if (!n || typeof n !== 'object') {
+    if (!isPlainObject(n)) {
       throw new Error(`Invalid node at index ${idx}`);
     }
     const id = String(n.id ?? '').trim();
@@ -360,15 +349,15 @@ export function normalizeWorkflowGraph(
     if (!Object.hasOwn(ADAPTER_REGISTRY, adapterId)) {
       throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
     }
-    const rawParams = n.params && typeof n.params === 'object' ? sanitizeParams(n.params) : {};
+    const rawParams = isPlainObject(n.params) ? sanitizeParams(n.params) : {};
+    const posObj = isPlainObject(n.position) ? n.position : null;
     const pos =
-      n.position &&
-      typeof n.position === 'object' &&
-      typeof n.position.x === 'number' &&
-      Number.isFinite(n.position.x) &&
-      typeof n.position.y === 'number' &&
-      Number.isFinite(n.position.y)
-        ? { x: n.position.x, y: n.position.y }
+      posObj &&
+      typeof posObj.x === 'number' &&
+      Number.isFinite(posObj.x) &&
+      typeof posObj.y === 'number' &&
+      Number.isFinite(posObj.y)
+        ? { x: posObj.x, y: posObj.y }
         : undefined;
 
     return {
@@ -381,7 +370,7 @@ export function normalizeWorkflowGraph(
   });
 
   const validatedEdges: WorkflowEdge[] = parsed.edges.map((e, idx) => {
-    if (!e || typeof e !== 'object') {
+    if (!isPlainObject(e)) {
       throw new Error(`Invalid wire at index ${idx}`);
     }
     const fromNode = String(e.fromNode ?? '').trim();
@@ -400,7 +389,7 @@ export function normalizeWorkflowGraph(
     return { fromNode, fromPort, toNode, toPort };
   });
 
-  const normalizedRaw: WorkflowGraph = {
+  const normalized: WorkflowGraph = {
     id: typeof parsed.id === 'string' && parsed.id.trim() ? parsed.id.trim() : fallbackId,
     name: typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : fallbackName,
     ...(typeof parsed.description === 'string' ? { description: parsed.description } : {}),
@@ -408,228 +397,10 @@ export function normalizeWorkflowGraph(
     edges: validatedEdges,
   };
 
-  // Transparently migrate legacy graphs:
-  // 1) Remap legacy `template` input port on genie3/rfd4-proteina -> unified `structure` port.
-  // 2) Fold legacy `rfd4-conditioner` nodes wired into genie3/rfd4-proteina into inline task fields.
-  const normalized = migrateLegacyConditioningGraph(normalizedRaw);
-
   // Recipes may be unfinished, but their existing wires must be valid before layout/rendering.
   const errors = validateGraph(normalized, { requireRunnable: false });
   if (errors.length) throw new Error(errors.join('\n'));
   return normalized.nodes.some((n) => !n.position) ? autoLayoutGraph(normalized) : normalized;
-}
-
-function migrateLegacyConditioningGraph(graph: WorkflowGraph): WorkflowGraph {
-  const nodeById = new Map(graph.nodes.map((n) => [n.id, { ...n, params: { ...n.params } }]));
-  let edges = graph.edges.map((e) => {
-    const dst = nodeById.get(e.toNode);
-    if (
-      dst &&
-      (dst.adapterId === 'genie3' || dst.adapterId === 'rfd4-proteina') &&
-      e.toPort === 'template'
-    ) {
-      return { ...e, toPort: 'structure' };
-    }
-    return { ...e };
-  });
-
-  const condNodesToDrop = new Set<string>();
-  for (const node of [...nodeById.values()]) {
-    if (node.adapterId !== 'rfd4-conditioner') continue;
-    const outCondEdges = edges.filter((e) => e.fromNode === node.id && e.fromPort === 'condition');
-    if (outCondEdges.length === 0) continue;
-
-    const inTplEdge = edges.find((e) => e.toNode === node.id && (e.toPort === 'template' || e.toPort === 'structure'));
-    const cp = node.params ?? {};
-    const tp = String(cp.taskPreset ?? 'custom');
-    let allFolded = true;
-
-    for (const ce of outCondEdges) {
-      const dst = nodeById.get(ce.toNode);
-      if (!dst || (dst.adapterId !== 'rfd4-proteina' && dst.adapterId !== 'genie3')) {
-        allFolded = false;
-        continue;
-      }
-      const lockChain = String(cp.lockChain ?? '').trim();
-      const motifSpan = String(cp.motifSpan ?? '').trim();
-      const hotspots = String(cp.hotspots ?? '').trim();
-      const contig = String(cp.contig ?? '').trim();
-      const cathCode = String(cp.cathCode ?? '').trim();
-      const hbondMode = String(cp.hbondMode ?? 'none').trim() || 'none';
-      const hbondSelection = String(cp.hbondSelection ?? '').trim();
-      const unindexedMotif = Boolean(cp.unindexedMotif);
-      const rawJsonOverride = String(cp.rawJsonOverride ?? '').trim();
-      const customSpecYaml = String(cp.customSpecYaml ?? '').trim();
-      const rawOverride = rawJsonOverride || customSpecYaml;
-      const legacyMode = String(cp.mode ?? '').trim();
-      const hasPartialFraction =
-        cp.partialFraction !== undefined &&
-        cp.partialFraction !== null &&
-        String(cp.partialFraction).trim() !== '';
-      const isPartial =
-        legacyMode === 'partial' || Boolean(cp.partialDiffusion) || hasPartialFraction;
-      const isInverseFolding =
-        legacyMode === 'inverse-folding' || Boolean(cp.inverseFolding);
-      const sourceCondIssues = normalizeUnresolvedIssues(cp.unresolvedImportIssues);
-
-      if (dst.adapterId === 'rfd4-proteina') {
-        const mergedIssues = normalizeUnresolvedIssues(dst.params.unresolvedImportIssues);
-        for (const issue of sourceCondIssues) {
-          if (!mergedIssues.includes(issue)) mergedIssues.push(issue);
-        }
-        const inferredMode =
-          tp !== 'custom'
-            ? 'preset'
-            : isPartial
-              ? 'partial'
-              : isInverseFolding
-                ? 'inverse-folding'
-                : lockChain
-                  ? 'binder'
-                  : motifSpan
-                    ? 'motif'
-                    : hbondMode !== 'none' || cathCode || rawOverride || contig
-                      ? 'conditioned'
-                      : String(dst.params.mode ?? 'unconditional') === 'conditioned'
-                        ? 'conditioned'
-                        : String(dst.params.mode ?? 'unconditional');
-        dst.params = {
-          ...dst.params,
-          mode: inferredMode,
-          ...(tp !== 'custom' ? { presetId: tp } : {}),
-          ...(hasPartialFraction ? { partialFraction: Number(cp.partialFraction) } : {}),
-          ...(contig ? { contig } : {}),
-          ...(lockChain ? { lockChain } : {}),
-          ...(hotspots ? { hotspots } : {}),
-          ...(motifSpan ? { motifSpan } : {}),
-          ...(unindexedMotif ? { unindexedMotif: true } : {}),
-          ...(hbondMode !== 'none' ? { hbondMode, hbondSelection } : {}),
-          ...(cathCode ? { cathCode } : {}),
-          ...(rawOverride ? { customSpecYaml: rawOverride } : {}),
-          ...(mergedIssues.length > 0 ? { unresolvedImportIssues: mergedIssues } : {}),
-        };
-      } else {
-        const inferredTaskMode = lockChain ? 'binder' : motifSpan ? 'motif' : 'unconditional';
-        const importIssues = normalizeUnresolvedIssues(dst.params.unresolvedImportIssues);
-        const addIssue = (msg: string) => {
-          if (!importIssues.includes(msg)) importIssues.push(msg);
-        };
-        for (const issue of sourceCondIssues) {
-          addIssue(issue);
-        }
-
-        if (tp !== 'custom') {
-          addIssue(
-            `Legacy taskPreset "${tp}" is not supported by Genie 3 (switch to RFD4-Proteina or configure a Genie 3 binder/motif task).`,
-          );
-        }
-        if (lockChain && motifSpan) {
-          addIssue(
-            `Legacy combined binder (lockChain="${lockChain}") and motif (motifSpan="${motifSpan}") conditioning cannot be run simultaneously in Genie 3 (choose binder or motif mode, or use RFD4-Proteina).`,
-          );
-        }
-        if (cathCode) {
-          addIssue(`Legacy CATH fold conditioning (cathCode="${cathCode}") is not supported by Genie 3.`);
-        }
-        if (hbondMode !== 'none' || hbondSelection) {
-          const detail = [
-            hbondMode !== 'none' ? `hbondMode="${hbondMode}"` : '',
-            hbondSelection ? `hbondSelection="${hbondSelection}"` : '',
-          ]
-            .filter(Boolean)
-            .join(', ');
-          addIssue(`Legacy H-bond conditioning (${detail}) is not supported by Genie 3.`);
-        }
-        if (isPartial) {
-          const detail = hasPartialFraction
-            ? `partialFraction=${String(cp.partialFraction)}`
-            : 'partial diffusion';
-          addIssue(`Legacy partial diffusion (${detail}) is not supported by Genie 3.`);
-        }
-        if (isInverseFolding) {
-          addIssue('Legacy inverse folding setting is not supported by Genie 3.');
-        }
-        if (unindexedMotif) {
-          addIssue('Legacy unindexed motif placement (unindexedMotif=true) is not supported by Genie 3.');
-        }
-        if (rawOverride) {
-          const fieldName = rawJsonOverride ? 'rawJsonOverride' : 'customSpecYaml';
-          addIssue(`Legacy custom spec override (${fieldName}) is not supported by Genie 3.`);
-        }
-        if (hotspots && inferredTaskMode !== 'binder') {
-          addIssue(
-            `Legacy hotspots "${hotspots}" require binder mode (lockChain) in Genie 3 and cannot be represented in "${inferredTaskMode}" mode.`,
-          );
-        }
-
-        let translatedLength: number | undefined;
-        const hasTemplateContext =
-          Boolean(inTplEdge) || edges.some((e) => e.toNode === dst.id && e.toPort === 'structure');
-        if (contig) {
-          if (hasRfd4OnlyContigSyntax(contig)) {
-            addIssue(
-              `Legacy contig "${contig}" uses RFD4 polymer-suffix, secondary-structure, or ligand syntax not supported by Genie 3.`,
-            );
-          } else if (inferredTaskMode === 'unconditional') {
-            const fixedLen = parseFixedBareProteinContig(contig);
-            if (fixedLen !== null) {
-              if (hasTemplateContext) {
-                // Wiring a template into unconditional Genie 3 triggers automatic binder conditioning in genie3.worker.ts.
-                addIssue(
-                  `Legacy bare contig "${contig}" with a wired template structure would silently switch Genie 3 into automatic binder mode (disconnect the template for unconditional length ${fixedLen}, or set binder lockChain / motifSpan).`,
-                );
-              } else {
-                // Translate fixed bare monomer contigs (e.g. "120-120") into Genie 3's effective length parameter.
-                translatedLength = fixedLen;
-              }
-            } else {
-              addIssue(
-                `Legacy contig "${contig}" cannot be mapped automatically to an unconditional Genie 3 task (set binder lockChain or motifSpan, pick a fixed length, or use RFD4-Proteina).`,
-              );
-            }
-          }
-        }
-
-        dst.params = {
-          ...dst.params,
-          taskMode: inferredTaskMode,
-          ...(translatedLength !== undefined ? { length: translatedLength } : {}),
-          ...(contig ? { contig } : {}),
-          ...(lockChain ? { lockChain } : {}),
-          ...(hotspots ? { hotspots } : {}),
-          ...(motifSpan ? { motifSpan } : {}),
-          ...(importIssues.length > 0 ? { unresolvedImportIssues: importIssues } : {}),
-        };
-      }
-
-      if (inTplEdge) {
-        const alreadyHasStruct = edges.some((e) => e.toNode === dst.id && e.toPort === 'structure');
-        if (!alreadyHasStruct) {
-          edges.push({
-            fromNode: inTplEdge.fromNode,
-            fromPort: inTplEdge.fromPort,
-            toNode: dst.id,
-            toPort: 'structure',
-          });
-        }
-      }
-    }
-
-    if (allFolded) {
-      condNodesToDrop.add(node.id);
-    }
-  }
-
-  if (condNodesToDrop.size > 0) {
-    edges = edges.filter((e) => !condNodesToDrop.has(e.fromNode) && !condNodesToDrop.has(e.toNode));
-    for (const id of condNodesToDrop) nodeById.delete(id);
-  }
-
-  return {
-    ...graph,
-    nodes: [...nodeById.values()],
-    edges,
-  };
 }
 
 /** Serialize a WorkflowGraph cleanly as pretty-printed canonical JSON. */
@@ -651,7 +422,7 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
     const byId = new Map(g.nodes.map((n) => [n.id, n]));
     for (const [k, v] of qs.entries()) {
       if (k === 'p') continue;
-      const dot = k.indexOf('.');
+      const dot = k.lastIndexOf('.');
       if (dot <= 0) continue;
       const nodeId = k.slice(0, dot);
       const paramKey = k.slice(dot + 1);
@@ -676,36 +447,52 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
 
   if (clean.startsWith('g=')) {
     const encoded = clean.slice(2);
-    const rawBytes = fromBase64Url(encoded);
+    let rawBytes: Uint8Array;
+    try {
+      rawBytes = fromBase64Url(encoded);
+    } catch {
+      return null;
+    }
     let jsonText: string;
     try {
       jsonText = await inflateRaw(rawBytes);
     } catch {
       jsonText = new TextDecoder().decode(rawBytes);
     }
-    const obj = JSON.parse(jsonText) as { n: unknown[][]; e: string[][] };
-    if (!Array.isArray(obj.n) || !Array.isArray(obj.e)) return null;
+    let obj: unknown;
+    try {
+      obj = JSON.parse(jsonText);
+    } catch {
+      return null;
+    }
+    if (!isPlainObject(obj) || !Array.isArray(obj.n) || !Array.isArray(obj.e)) return null;
 
-    const nodes: WorkflowNode[] = obj.n.map((tuple) => {
+    const nodes: WorkflowNode[] = [];
+    for (const tuple of obj.n) {
+      if (!Array.isArray(tuple) || tuple.length < 2) return null;
       const id = String(tuple[0]);
       const shortA = String(tuple[1]);
       const adapterId = Object.hasOwn(SHORT_TO_ADAPTER, shortA) ? SHORT_TO_ADAPTER[shortA] : shortA;
-      const rawOverrides = (tuple[2] && typeof tuple[2] === 'object' ? tuple[2] : {}) as Record<string, unknown>;
+      const rawOverrides = isPlainObject(tuple[2]) ? tuple[2] : {};
       const overrides = sanitizeParams(rawOverrides);
       const label = typeof tuple[3] === 'string' ? tuple[3] : ADAPTER_REGISTRY[adapterId]?.shortName ?? adapterId;
-      return {
+      nodes.push({
         id,
         adapterId,
         label,
         params: { ...defaultParamsForAdapter(adapterId), ...overrides },
-      };
-    });
-    const edges: WorkflowEdge[] = obj.e.map((e) => ({
-      fromNode: e[0],
-      fromPort: e[1],
-      toNode: e[2],
-      toPort: e[3],
-    }));
+      });
+    }
+    const edges: WorkflowEdge[] = [];
+    for (const e of obj.e) {
+      if (!Array.isArray(e) || e.length < 4) return null;
+      edges.push({
+        fromNode: String(e[0]),
+        fromPort: String(e[1]),
+        toNode: String(e[2]),
+        toPort: String(e[3]),
+      });
+    }
     try {
       return normalizeWorkflowGraph(
         { id: 'shared-workflow', name: 'Shared Workflow', nodes, edges },
@@ -812,7 +599,11 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
       if (colon <= 0) throw new Error(`Invalid node line: "${line}"`);
       const id = line.slice(0, colon).trim();
       const bodyStr = line.slice(colon + 1).trim();
-      const obj = JSON.parse(bodyStr) as Record<string, unknown>;
+      const parsedBody = JSON.parse(bodyStr) as unknown;
+      if (!isPlainObject(parsedBody)) {
+        throw new Error(`Invalid node body on "${id}": expected a JSON object`);
+      }
+      const obj = parsedBody;
       const adapterId = String(obj.adapterId ?? obj.model ?? '');
       if (!Object.hasOwn(ADAPTER_REGISTRY, adapterId)) {
         throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
@@ -834,7 +625,7 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
       }
       if (adapterId === 'sequence-input') {
         const seqLabel = obj.seqLabel ?? obj.sequenceLabel;
-        if (typeof seqLabel === 'string' && seqLabel) {
+        if (typeof seqLabel === 'string') {
           rest.label = seqLabel;
         }
         delete rest.seqLabel;
@@ -848,9 +639,27 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
       });
     } else if (section === 'wires') {
       const clean = line.replace(/^-\s*/, '').trim();
-      const m = /^([a-zA-Z0-9_.-]+)\.([a-zA-Z0-9_-]+)\s*->\s*([a-zA-Z0-9_.-]+)\.([a-zA-Z0-9_-]+)$/.exec(clean);
-      if (!m) throw new Error(`Invalid wire syntax: "${line}" (expected "a.port -> b.port")`);
-      edges.push({ fromNode: m[1], fromPort: m[2], toNode: m[3], toPort: m[4] });
+      const arrowIdx = clean.indexOf('->');
+      if (arrowIdx <= 0 || clean.indexOf('->', arrowIdx + 2) !== -1) {
+        throw new Error(`Invalid wire syntax: "${line}" (expected "a.port -> b.port")`);
+      }
+      const lhs = clean.slice(0, arrowIdx).trim();
+      const rhs = clean.slice(arrowIdx + 2).trim();
+      const lhsDot = lhs.lastIndexOf('.');
+      const rhsDot = rhs.lastIndexOf('.');
+      const fromNode = lhsDot > 0 ? lhs.slice(0, lhsDot).trim() : '';
+      const fromPort = lhsDot > 0 ? lhs.slice(lhsDot + 1).trim() : '';
+      const toNode = rhsDot > 0 ? rhs.slice(0, rhsDot).trim() : '';
+      const toPort = rhsDot > 0 ? rhs.slice(rhsDot + 1).trim() : '';
+      if (
+        !fromNode ||
+        !toNode ||
+        !/^[a-zA-Z0-9_-]+$/.test(fromPort) ||
+        !/^[a-zA-Z0-9_-]+$/.test(toPort)
+      ) {
+        throw new Error(`Invalid wire syntax: "${line}" (expected "a.port -> b.port")`);
+      }
+      edges.push({ fromNode, fromPort, toNode, toPort });
     }
   }
 

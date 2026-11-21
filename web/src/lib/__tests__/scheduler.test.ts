@@ -294,7 +294,7 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
         },
         () => {},
       ),
-    ).rejects.toThrow(/at least 3 residues/);
+    ).rejects.toThrow(/at least 3 (?:Cα )?residues/);
   });
 
   it('executes sequence-input on plain text, multi-FASTA, and throws on empty / too-short input', async () => {
@@ -373,129 +373,19 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     ).rejects.toThrow(/Invalid residue/);
   });
 
-  it('executes rfd4-conditioner for hotspots, indexed/unindexed motifs, H-bonds, CATH, rawJson, and taskPreset', async () => {
+  it('rejects removed legacy rfd4-conditioner adapter cleanly at preflight', async () => {
     const scheduler = new ExecutionScheduler();
-
-    // 1. Combined custom conditioning (hotspots + unindexed motif + lockChain + H-bond + CATH) with template
-    const combinedGraph: WorkflowGraph = {
-      id: 'cond-full',
-      name: 'Cond Full',
-      nodes: [
-        { id: 'tpl', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+    await expect(
+      scheduler.run(
         {
-          id: 'cond',
-          adapterId: 'rfd4-conditioner',
-          params: {
-            taskPreset: 'custom',
-            contig: 'A1-20,/0,50-50',
-            lockChain: 'a',
-            hotspots: 'A54, A56, B10-12',
-            motifSpan: 'A16-35, A52-71',
-            unindexedMotif: true,
-            hbondMode: 'ACCEPTOR',
-            hbondSelection: 'B/SAM/*/*',
-            cathCode: '3.40.50',
-            rawJsonOverride: '',
-          },
+          id: 'legacy-cond',
+          name: 'Legacy Cond',
+          nodes: [{ id: 'cond', adapterId: 'rfd4-conditioner', params: { taskPreset: 'custom', contig: '70-70' } }],
+          edges: [],
         },
-      ],
-      edges: [{ fromNode: 'tpl', fromPort: 'structure', toNode: 'cond', toPort: 'template' }],
-    };
-    const res1 = await scheduler.run(combinedGraph, () => {});
-    const c1 = res1.outputsByNode.cond.condition as ConditionSpecArtifact;
-    expect(c1.kind).toBe('ConditionSpec');
-    expect(c1.contig).toBe('A1-20,/0,50-50');
-    expect(c1.specMode).toBe(true);
-    expect(c1.inputCif).toBeTruthy();
-    expect(c1.conditions.C_CRD).toEqual({ true: [{ select: "sel('A/*/*/*')" }] });
-    expect(c1.conditions.C_SEQ).toEqual({
-      true: [
-        { select: "sel('A/*/*/*')" },
-        { select: "sel('A/*/[16-35,52-71]/*')" },
-      ],
-    });
-    expect(c1.conditions.C_HOT).toEqual({
-      true: [{ select: "sel('A/*/[54,56]/*') | sel('B/*/[10-12]/*')" }],
-    });
-    expect(c1.conditions.C_CRDGRP).toEqual({
-      1: [{ select: "sel('A/*/[16-35,52-71]/*')" }],
-    });
-    expect(c1.conditions.C_IDX).toEqual({
-      false: [{ select: "sel('A/*/[16-35,52-71]/*')", group: 'motif' }],
-    });
-    expect(c1.conditions.C_HB).toEqual({
-      ACCEPTOR: [{ select: "sel('B/SAM/*/*')" }],
-    });
-    expect(c1.conditions.C_CATH).toEqual({
-      '3.40.50': [{ select: "sel('*/*/*/*')" }],
-    });
-
-    // 2. Indexed motif (unindexedMotif: false => no C_IDX)
-    const resIdx = await scheduler.run(
-      {
-        id: 'cond-idx',
-        name: 'Idx',
-        nodes: [
-          {
-            id: 'cond',
-            adapterId: 'rfd4-conditioner',
-            params: { taskPreset: 'custom', contig: '5-20,A16-35,5-20', motifSpan: 'A16-35', unindexedMotif: false },
-          },
-        ],
-        edges: [],
-      },
-      () => {},
-    );
-    const cIdx = resIdx.outputsByNode.cond.condition as ConditionSpecArtifact;
-    expect(cIdx.conditions.C_CRDGRP).toBeDefined();
-    expect(cIdx.conditions.C_IDX).toBeUndefined();
-
-    // 3. rawJsonOverride takes precedence
-    const resRaw = await scheduler.run(
-      {
-        id: 'cond-raw',
-        name: 'Raw',
-        nodes: [
-          {
-            id: 'cond',
-            adapterId: 'rfd4-conditioner',
-            params: {
-              taskPreset: 'ppi_pdl1',
-              rawJsonOverride: JSON.stringify({
-                contig: '64-64',
-                conditions: { C_CATH: { '1.10.287': [{ select: "sel('*/*/*/*')" }] } },
-              }),
-            },
-          },
-        ],
-        edges: [],
-      },
-      () => {},
-    );
-    const cRaw = resRaw.outputsByNode.cond.condition as ConditionSpecArtifact;
-    expect(cRaw.contig).toBe('64-64');
-    expect(cRaw.conditions.C_CATH).toBeDefined();
-    expect(cRaw.cifUrl).toBeUndefined();
-
-    // 4. taskPreset mode
-    const resPreset = await scheduler.run(
-      {
-        id: 'cond-preset',
-        name: 'Preset',
-        nodes: [
-          {
-            id: 'cond',
-            adapterId: 'rfd4-conditioner',
-            params: { taskPreset: 'ppi_pdl1', contig: 'A18-132,/0,76-76' },
-          },
-        ],
-        edges: [],
-      },
-      () => {},
-    );
-    const cPreset = resPreset.outputsByNode.cond.condition as ConditionSpecArtifact;
-    expect(cPreset.cifUrl).toBe('preset:ppi_pdl1');
-    expect(cPreset.summary).toBe('preset:ppi_pdl1');
+        () => {},
+      ),
+    ).rejects.toThrow(/Unknown model "rfd4-conditioner"/);
   });
 
   it('executes designability-scorer with PASS/FAIL thresholds, scRMSD sorting, and accurate alignedFoldPdb', async () => {
@@ -674,12 +564,12 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
           id: 'cyclic',
           name: 'Cyclic',
           nodes: [
-            { id: 'a', adapterId: 'rfd4-conditioner', params: {} },
-            { id: 'b', adapterId: 'rfd4-conditioner', params: {} },
+            { id: 'a', adapterId: 'rfd4-proteina', params: {} },
+            { id: 'b', adapterId: 'rfd4-proteina', params: {} },
           ],
           edges: [
-            { fromNode: 'a', fromPort: 'condition', toNode: 'b', toPort: 'template' },
-            { fromNode: 'b', fromPort: 'condition', toNode: 'a', toPort: 'template' },
+            { fromNode: 'a', fromPort: 'structure', toNode: 'b', toPort: 'structure' },
+            { fromNode: 'b', fromPort: 'structure', toNode: 'a', toPort: 'structure' },
           ],
         },
         () => {},
@@ -713,7 +603,7 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     const dupSet = dupFastaRes.outputsByNode.s.sequences as SequenceSet;
     expect(dupSet.candidates.map((c) => c.id)).toEqual(['dup', 'dup_2', 'dup_3']);
 
-    // 2. cond-raw artifact id includes upstream template.id (cache busting when template changes)
+    // 2. pdb-input artifact id changes when custom PDB coordinates change (cache busting)
     const pdb1 = [
       'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C  ',
       'ATOM      2  CA  ALA A   2       3.800   0.000   0.000  1.00  0.00           C  ',
@@ -721,27 +611,23 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
       'END',
     ].join('\n');
     const pdb2 = pdb1.replace('7.600', '7.700');
-    const rawJson = JSON.stringify({ contig: '10-10', conditions: {} });
-    const runCondRaw = (pdbText: string) =>
+    const runTpl = (pdbText: string) =>
       scheduler.run(
         {
-          id: 'cond-raw-tpl',
-          name: 'Cond Raw Tpl',
-          nodes: [
-            { id: 't', adapterId: 'pdb-input', params: { mode: 'custom', pdbText } },
-            { id: 'c', adapterId: 'rfd4-conditioner', params: { rawJsonOverride: rawJson } },
-          ],
-          edges: [{ fromNode: 't', fromPort: 'structure', toNode: 'c', toPort: 'template' }],
+          id: 'tpl-bust',
+          name: 'Tpl Bust',
+          nodes: [{ id: 't', adapterId: 'pdb-input', params: { mode: 'custom', pdbText } }],
+          edges: [],
         },
         () => {},
       );
-    const rCond1 = await runCondRaw(pdb1);
-    const rCond2 = await runCondRaw(pdb2);
-    const art1 = rCond1.outputsByNode.c.condition as ConditionSpecArtifact;
-    const art2 = rCond2.outputsByNode.c.condition as ConditionSpecArtifact;
+    const rTpl1 = await runTpl(pdb1);
+    const rTpl2 = await runTpl(pdb2);
+    const art1 = rTpl1.outputsByNode.t.structure as StructureArtifact;
+    const art2 = rTpl2.outputsByNode.t.structure as StructureArtifact;
     expect(art1.id).not.toBe(art2.id);
-    expect(art1.inputCif).toBe(pdb1);
-    expect(art2.inputCif).toBe(pdb2);
+    expect(art1.pdbText).toBe(pdb1);
+    expect(art2.pdbText).toBe(pdb2);
 
     // 3. designability-scorer rejects length mismatch with clear error
     const demoPdb = generateSampleHelixBundlePdb();
@@ -874,10 +760,10 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
       id: 'stream-test',
       name: 'Stream Test',
       nodes: [
-        { id: 'cond', adapterId: 'rfd4-conditioner', params: { taskPreset: 'custom', contig: 'A1-53' } },
-        { id: 'src', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { model: 'monomer' } },
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'MKTAYIAKQRQISFVKSHFS' } },
       ],
-      edges: [{ fromNode: 'src', fromPort: 'structure', toNode: 'cond', toPort: 'template' }],
+      edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
     };
 
     await scheduler.run(graph, () => {}, {
@@ -887,9 +773,10 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     });
 
     expect(streamed).toEqual([
-      { nodeId: 'src', kinds: ['StructureArtifact'] },
-      { nodeId: 'cond', kinds: ['ConditionSpec'] },
+      { nodeId: 'seq', kinds: ['SequenceSet'] },
+      { nodeId: 'fold', kinds: ['FoldedStructure', 'StructureArtifact'] },
     ]);
+    await scheduler.releaseActiveGpu();
   });
 
   it('keeps pdbText empty for pure ligand/DNA mmCIF (#16), preserves resNums for discontinuous motifs (#21), and preserves holo cifText in scorer', async () => {
@@ -2042,14 +1929,15 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
       id: 'zero-memo-resume',
       name: 'Zero Memo Resume',
       nodes: [
-        { id: 'n1', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
-        { id: 'n2', adapterId: 'rfd4-conditioner', params: { taskPreset: 'custom', contig: 'A1-53' } },
+        { id: 'n1', adapterId: 'sequence-input', params: { sequence: 'MKTAYIAKQRQISFVKSHFS' } },
+        { id: 'n2', adapterId: 'localfold-af2', params: { model: 'monomer' } },
       ],
-      edges: [{ fromNode: 'n1', fromPort: 'structure', toNode: 'n2', toPort: 'template' }],
+      edges: [{ fromNode: 'n1', fromPort: 'sequences', toNode: 'n2', toPort: 'sequences' }],
     };
     const producer = new ExecutionScheduler();
     await producer.run(twoNodeGraph, () => {});
     const exported = producer.exportCheckpoint();
+    await producer.releaseActiveGpu();
 
     const zeroMemoResumer = new ExecutionScheduler({ maxMemoBytes: 0 });
     zeroMemoResumer.importCheckpoint(exported);
@@ -2341,7 +2229,7 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
       name: 'Inv Memo',
       nodes: [
         { id: 'src', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
-        { id: 'g3', adapterId: 'genie3', params: { length: 53, taskMode: 'motif' } },
+        { id: 'g3', adapterId: 'genie3', params: { length: 53, taskMode: 'motif', motifSpan: 'A16-35' } },
       ],
       edges: [{ fromNode: 'src', fromPort: 'structure', toNode: 'g3', toPort: 'structure' }],
     };
@@ -2441,5 +2329,151 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     expect(postFailState.leaseHeld).toBe(false);
     expect(sFailStore.getRunHistory()).toHaveLength(1);
     expect(sFailStore.getRunHistory()[0].status).toBe('failed');
+  });
+
+  it('Wave-2 P1/P2 & Safari VRAM regressions: demo-bundle ignores cropSegments, metadata propagation, stoichiometry mismatch, homodimer role gate, AF3 holo PAE slice, thresholds in metrics.id, canonical cacheKey, and idle GPU auto-release', async () => {
+    // 1. demo-bundle ignores stale cropSegments & propagates sourceResidues/insCodes/chainIdMap/observedBackboneMask
+    const demoWithStaleCrop = await materializePdbInputNode({
+      id: 'src',
+      adapterId: 'pdb-input',
+      params: { mode: 'demo-bundle', cropSegments: 'A1-5' },
+    });
+    expect(demoWithStaleCrop.length).toBe(53);
+    expect(demoWithStaleCrop.sourceResidues).toHaveLength(53);
+    expect(demoWithStaleCrop.insCodes).toHaveLength(53);
+    expect(demoWithStaleCrop.chainIdMap).toEqual({ A: 'A' });
+    expect(demoWithStaleCrop.observedBackboneMask).toBeInstanceOf(Uint8Array);
+    expect(demoWithStaleCrop.observedBackboneMask!.length).toBe(53);
+
+    // 2. Canonical cacheKey: reordered param keys hit the exact same memoized entry (no redundant worker call)
+    const sKey = new ExecutionScheduler();
+    const gA: WorkflowGraph = {
+      id: 'canon-a',
+      name: 'Canon A',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'MKTAYIAKQRQISFVKSHFS' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { model: 'monomer', recycles: 1, seed: 7 } },
+      ],
+      edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+    };
+    const gB: WorkflowGraph = {
+      id: 'canon-b',
+      name: 'Canon B',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'MKTAYIAKQRQISFVKSHFS' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { seed: 7, recycles: 1, model: 'monomer' } },
+      ],
+      edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+    };
+    await sKey.run(gA, () => {});
+    expect(mockWorkerRunCalls).toBe(1);
+    await sKey.run(gB, () => {});
+    expect(mockWorkerRunCalls).toBe(1); // memo hit despite different key order
+    await sKey.releaseActiveGpu();
+
+    // 3. Scorer: symmetric homodimer WITHOUT chainRoles/lockedChains omits binderPlddt/targetPlddt;
+    //    AF3 holo/DNA full-complex PAE matrix (paeDim > L) still computes finite iPAE;
+    //    thresholds change metrics.id; chain-stoichiometry mismatch is rejected cleanly.
+    const dimerPdb = [
+      'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 50.00           C  ',
+      'ATOM      2  CA  GLY A   2       3.800   0.000   0.000  1.00 50.00           C  ',
+      'ATOM      3  CA  VAL A   3       7.600   0.000   0.000  1.00 50.00           C  ',
+      'TER',
+      'ATOM      4  CA  ALA B   1       0.000  10.000   0.000  1.00 50.00           C  ',
+      'ATOM      5  CA  GLY B   2       3.800  10.000   0.000  1.00 50.00           C  ',
+      'ATOM      6  CA  VAL B   3       7.600  10.000   0.000  1.00 50.00           C  ',
+      'END',
+    ].join('\n');
+    const dimerParsed = parsePdbBackbone(dimerPdb);
+    const dimerRef = await materializePdbInputNode({
+      id: 'src',
+      adapterId: 'pdb-input',
+      params: { mode: 'custom', pdbText: dimerPdb },
+    });
+
+    // Full-complex 8x8 PAE (6 protein + 2 ligand/DNA tokens) with low inter-chain PAE (2.5 Å)
+    const paeDim = 8;
+    const pae = new Float32Array(paeDim * paeDim).fill(2.5);
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'folds-dimer',
+      parentStructureId: dimerRef.id,
+      folds: [
+        {
+          sequenceId: 'homodimer-1',
+          sequence: dimerParsed.sequence,
+          foldModelId: 'localfold-af3-int5',
+          pdbText: dimerPdb,
+          caCoords: dimerParsed.caCoords,
+          chainIds: ['A', 'A', 'A', 'B', 'B', 'B'],
+          resNums: [1, 2, 3, 1, 2, 3],
+          plddt: new Float32Array(6).fill(90),
+          meanPlddt: 90,
+          ptm: 0.9,
+          pae,
+          paeDim,
+          elapsedMs: 10,
+        },
+      ],
+    });
+    const scoreGraph = (scRmsdThreshold: number): WorkflowGraph => ({
+      id: `score-dimer-${scRmsdThreshold}`,
+      name: 'Score Dimer',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', params: { mode: 'custom', pdbText: dimerPdb } },
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'AGV:AGV' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { model: 'multimer' } },
+        { id: 'score', adapterId: 'designability-scorer', params: { scRmsdThreshold, plddtThreshold: 70 } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'src', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    });
+    const sScore = new ExecutionScheduler();
+    const res1 = await sScore.run(scoreGraph(2.0), () => {}, { bypassCache: true });
+    const m1 = res1.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(m1.rows[0].binderPlddt).toBeUndefined();
+    expect(m1.rows[0].targetPlddt).toBeUndefined();
+    expect(m1.rows[0].ipae).toBeCloseTo(2.5, 3);
+
+    const res2 = await sScore.run(scoreGraph(1.5), () => {}, { bypassCache: true });
+    const m2 = res2.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(m2.id).not.toBe(m1.id);
+
+    // Chain-stoichiometry mismatch (6-aa single-chain fold vs 3+3 dimer reference) rejects cleanly
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'folds-stoich-mismatch',
+      parentStructureId: dimerRef.id,
+      folds: [
+        {
+          sequenceId: 'mono-6',
+          sequence: dimerParsed.sequence,
+          foldModelId: 'localfold-af2-monomer-int5',
+          pdbText: dimerPdb.replace(/ B /g, ' A '),
+          caCoords: dimerParsed.caCoords,
+          chainIds: ['A', 'A', 'A', 'A', 'A', 'A'],
+          resNums: [1, 2, 3, 4, 5, 6],
+          plddt: new Float32Array(6).fill(90),
+          meanPlddt: 90,
+          ptm: 0.9,
+          elapsedMs: 10,
+        },
+      ],
+    });
+    await expect(sScore.run(scoreGraph(2.0), () => {}, { bypassCache: true })).rejects.toThrow(
+      /chain stoichiometry mismatch/i,
+    );
+    await sScore.releaseActiveGpu();
+
+    // 4. Idle GPU auto-release timer releases active GPU worker automatically after idle timeout
+    const sIdle = new ExecutionScheduler({ gpuIdleReleaseMs: 30 });
+    await sIdle.run(gA, () => {}, { bypassCache: true });
+    expect(mockLiveWorkers).toBe(1);
+    await new Promise((r) => setTimeout(r, 90));
+    expect(mockLiveWorkers).toBe(0);
+    sIdle.destroy();
   });
 });

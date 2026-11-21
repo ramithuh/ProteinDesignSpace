@@ -45,5 +45,27 @@ describe('Genie 3 WebGPU integration', () => {
     expect(workerSrc).toContain('lockedChains');
     expect(workerSrc).toContain('chainRoles');
     expect(workerSrc).toContain('nativeMotifCoords');
+    // Wave-2 & #123: honest Cα-only output, directionScale 0.0, fail-fast before ensureLoaded(), drop weightBundle, transferables
+    expect(workerSrc).toContain('caOnly: true');
+    expect(workerSrc).toContain('weightBundle = null');
+    expect(workerSrc).toContain('collectOwnedTransferables');
+    const failFastIdx = workerSrc.indexOf('requires a wired structure input');
+    const ensureLoadedIdx = workerSrc.indexOf('await ensureLoaded(');
+    expect(failFastIdx).toBeGreaterThan(-1);
+    expect(failFastIdx).toBeLessThan(ensureLoadedIdx);
+
+    // Verify RFD4 & LocalFold workers also carry Wave-2 VRAM cleanup & fail-fast / transferables
+    const rfd4WorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/rfd4.worker.ts'), 'utf8');
+    expect(rfd4WorkerSrc).toContain('releaseActivations');
+    expect(rfd4WorkerSrc).toContain('collectOwnedTransferables');
+    const rfdFailFastIdx = rfd4WorkerSrc.indexOf('requires a wired structure input');
+    const rfdEnsureIdx = rfd4WorkerSrc.indexOf('await ensureLoaded(');
+    expect(rfdFailFastIdx).toBeGreaterThan(-1);
+    expect(rfdFailFastIdx).toBeLessThan(rfdEnsureIdx);
+
+    const lfWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/localfold.worker.ts'), 'utf8');
+    expect(lfWorkerSrc).toContain('releaseAllWeights');
+    expect(lfWorkerSrc).toContain('resolveLocalFoldMemoryBudgetBytes');
+    expect(lfWorkerSrc).toContain('collectOwnedTransferables');
   });
 });

@@ -3,6 +3,7 @@
 
 import type { WorkflowNode } from './types';
 import { isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
+import { parseStructureText } from '$lib/protein-ops/pdb';
 import { LOCALFOLD_MODEL_OPTIONS, RFD4_BENCHMARK_OPTIONS } from './registry';
 
 const VALID_PDB_INPUT_MODES = new Set(['demo-bundle', 'pdb-id', 'custom']);
@@ -159,7 +160,7 @@ export const NUMERIC_SPECS: Record<string, Record<string, NumericFieldSpec>> = {
   genie3: {
     length: { min: 30, max: 256, step: 1, integer: true, defaultValue: 80, unit: 'aa' },
     nSampleStep: { min: 10, max: 250, step: 10, integer: true, defaultValue: 100 },
-    directionScale: { min: 0.1, max: 1.5, step: 0.1, integer: false, defaultValue: 0.8 },
+    directionScale: { min: 0.0, max: 1.5, step: 0.1, integer: false, defaultValue: 0.8 },
     noiseScale: { min: 0, max: 1.5, step: 0.1, integer: false, defaultValue: 1.0 },
     seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 42 },
   },
@@ -315,6 +316,7 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
   const illegal = new Set<string>();
   let totalResidues = 0;
   let minLen = Infinity;
+  let maxLen = 0;
   for (const seq of entries) {
     let aaCount = 0;
     for (const ch of seq) {
@@ -327,6 +329,7 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
     }
     totalResidues += aaCount;
     if (aaCount < minLen) minLen = aaCount;
+    if (aaCount > maxLen) maxLen = aaCount;
   }
 
   const chainsInFirst = entries[0].split(/[:/]/).filter(Boolean).length;
@@ -342,6 +345,28 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
     };
   }
 
+  if (totalResidues === 0 || maxLen === 0) {
+    return {
+      status: 'error',
+      numSequences: entries.length,
+      totalResidues,
+      chainsInFirst,
+      illegalChars: [],
+      message: 'Sequence contains no amino acid residues (minimum 5 aa required).',
+    };
+  }
+
+  if (maxLen < 5) {
+    return {
+      status: 'error',
+      numSequences: entries.length,
+      totalResidues,
+      chainsInFirst,
+      illegalChars: [],
+      message: `Sequence too short (${maxLen} aa) — minimum 5 amino acids required.`,
+    };
+  }
+
   if (minLen < 5) {
     return {
       status: 'warn',
@@ -349,7 +374,7 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
       totalResidues,
       chainsInFirst,
       illegalChars: [],
-      message: `Very short sequence (${minLen} aa) — folding models usually need ≥ 10 aa.`,
+      message: `Contains an entry shorter than 5 aa (${minLen} aa) which will be skipped.`,
     };
   }
 
@@ -369,11 +394,52 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
   };
 }
 
-/** Validate a residue selector token like `A54`, `A16-35`, `12`, `10-14`. */
+/**
+ * Validate a residue selector token like `A54`, `A16-35`, `12`, `10-14`,
+ * insertion codes (`A100A`, `A100A-100C`), negative resnums (`A-2`, `A-5--2`, `A-2-5`),
+ * or colon-delimited multi-char chain selectors (`AA:1-5`, `AA:100A`), while rejecting reversed ranges (`A999-1`).
+ */
 export function isValidResidueToken(token: string): boolean {
   const t = token.trim();
   if (!t) return false;
-  return /^[A-Za-z]?\d+(?:-\d+)?$/.test(t);
+  const colonM = /^([A-Za-z0-9_]+):(-?\d+)([A-Z])?(?:-(-?\d+)([A-Z])?)?$/.exec(t);
+  const bareM = !colonM
+    ? /^([A-Za-z_])?(-?\d+)([A-Z])?(?:-([A-Za-z_])?(-?\d+)([A-Z])?)?$/.exec(t)
+    : null;
+  if (!colonM && !bareM) return false;
+
+  let start: number;
+  let startIns: string | undefined;
+  let end: number;
+  let endIns: string | undefined;
+  if (colonM) {
+    start = Number(colonM[2]);
+    startIns = colonM[3];
+    if (colonM[4] !== undefined) {
+      end = Number(colonM[4]);
+      endIns = colonM[5];
+    } else {
+      end = start;
+      endIns = startIns;
+    }
+  } else {
+    const startChain = bareM![1];
+    const endChain = bareM![4];
+    if (startChain && endChain && startChain.toUpperCase() !== endChain.toUpperCase()) return false;
+    start = Number(bareM![2]);
+    startIns = bareM![3];
+    if (bareM![5] !== undefined) {
+      end = Number(bareM![5]);
+      endIns = bareM![6];
+    } else {
+      end = start;
+      endIns = startIns;
+    }
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+  if (end < start) return false;
+  if (end === start && (startIns ?? '') > (endIns ?? '')) return false;
+  return true;
 }
 
 /** Validate RFD4 raw JSON override text (blank is valid). */
@@ -394,6 +460,59 @@ export function validateJsonOverride(raw: string): ValidationFeedback {
   }
 }
 
+/** Validate RFD4 customSpecYaml (JSON object or YAML mapping; blank is valid). */
+export function validateCustomSpecYaml(raw: string): ValidationFeedback {
+  const trimmed = raw.trim();
+  if (!trimmed) return { status: 'ok' };
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    return validateJsonOverride(trimmed);
+  }
+  let braceDepth = 0;
+  let bracketDepth = 0;
+  let hasMappingKey = false;
+  for (const rawLine of trimmed.split(/\r?\n/)) {
+    let inSingle = false;
+    let inDouble = false;
+    let clean = '';
+    for (let i = 0; i < rawLine.length; i++) {
+      const ch = rawLine[i];
+      if (ch === "'" && !inDouble) {
+        inSingle = !inSingle;
+      } else if (ch === '"' && !inSingle && rawLine[i - 1] !== '\\') {
+        inDouble = !inDouble;
+      } else if (!inSingle && !inDouble) {
+        if (ch === '#') break;
+        if (ch === '{') braceDepth++;
+        else if (ch === '}') braceDepth--;
+        else if (ch === '[') bracketDepth++;
+        else if (ch === ']') bracketDepth--;
+        if (braceDepth < 0 || bracketDepth < 0) {
+          return { status: 'error', message: 'Invalid customSpecYaml: unmatched closing bracket or brace.' };
+        }
+      }
+      clean += ch;
+    }
+    if (inSingle || inDouble) {
+      return { status: 'error', message: 'Invalid customSpecYaml: unclosed quote string.' };
+    }
+    const stripped = clean.trim();
+    if (!stripped) continue;
+    if (/^[A-Za-z_][A-Za-z0-9_-]*\s*:/.test(stripped)) {
+      hasMappingKey = true;
+    }
+  }
+  if (braceDepth !== 0 || bracketDepth !== 0) {
+    return { status: 'error', message: 'Invalid customSpecYaml: unclosed "{" or "[".' };
+  }
+  if (!hasMappingKey) {
+    return {
+      status: 'error',
+      message: 'Invalid customSpecYaml: expected a YAML mapping (e.g. "contig: 70-70") or JSON object.',
+    };
+  }
+  return { status: 'ok', message: 'Valid YAML spec' };
+}
+
 /** Validate a 4-character RCSB PDB ID (e.g. 1PRW, 5O45) or extended 12-char ID. */
 export function validatePdbId(raw: string): ValidationFeedback {
   const norm = normalizePdbId(raw);
@@ -409,7 +528,7 @@ export function validatePdbId(raw: string): ValidationFeedback {
   return { status: 'ok', message: `RCSB PDB: ${norm}` };
 }
 
-/** Lightweight structure text check for custom PDB / mmCIF paste. */
+/** Structure text check for custom PDB / mmCIF paste (enforces >=3 Cα residues unless non-protein context). */
 export function validateStructureText(raw: string): ValidationFeedback {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -423,7 +542,28 @@ export function validateStructureText(raw: string): ValidationFeedback {
       message: 'No PDB ATOM lines or mmCIF _atom_site records found.',
     };
   }
-  return { status: 'ok', message: isCif ? 'mmCIF detected' : 'PDB ATOM records detected' };
+  try {
+    const parsed = parseStructureText(trimmed);
+    const hasNonProtein = parsed.diagnostics.hasLigands || parsed.diagnostics.hasNucleicAcids;
+    if (parsed.nResidues < 3 && !hasNonProtein) {
+      return {
+        status: 'error',
+        message: `Structure contains only ${parsed.nResidues} Cα residue${parsed.nResidues === 1 ? '' : 's'} (at least 3 Cα residues required).`,
+      };
+    }
+    return {
+      status: 'ok',
+      message:
+        parsed.nResidues >= 3
+          ? `${isCif ? 'mmCIF' : 'PDB'} detected (${parsed.nResidues} aa)`
+          : `${isCif ? 'mmCIF' : 'PDB'} non-protein context detected`,
+    };
+  } catch (err) {
+    return {
+      status: 'error',
+      message: `Failed to parse structure: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 /**
@@ -442,7 +582,11 @@ export function validateNodeParams(node: WorkflowNode): string[] {
       // Skip mode-irrelevant params
       if (node.adapterId === 'rfd4-proteina') {
         const mode = String(p.mode ?? 'unconditional');
-        if (key === 'length' && mode !== 'unconditional' && mode !== 'binder') continue;
+        const usesFallbackLength =
+          (mode === 'motif' || mode === 'conditioned') &&
+          !String(p.contig ?? '').trim() &&
+          !String(p.customSpecYaml ?? '').trim();
+        if (key === 'length' && mode !== 'unconditional' && mode !== 'binder' && !usesFallbackLength) continue;
         if (key === 'partialFraction' && mode !== 'partial') continue;
       }
       const val = Number(p[key]);
@@ -455,7 +599,7 @@ export function validateNodeParams(node: WorkflowNode): string[] {
     }
   }
 
-  // Enum parameter validation (prevents invalid recipes from crashing mid-run)
+  // Enum & syntax parameter validation (prevents invalid recipes from crashing mid-run)
   if (node.adapterId === 'rfd4-proteina') {
     const mode = p.mode !== undefined ? String(p.mode) : 'unconditional';
     if (!VALID_RFD4_MODES.has(mode)) {
@@ -470,12 +614,22 @@ export function validateNodeParams(node: WorkflowNode): string[] {
     if (p.recycleSchedule !== undefined && !VALID_RFD4_RECYCLE_SCHEDULES.has(String(p.recycleSchedule))) {
       errs.push(`"${label}": Invalid recycleSchedule "${String(p.recycleSchedule)}" (expected none, low, or medium).`);
     }
+    const customYaml = String(p.customSpecYaml ?? '').trim();
+    if (customYaml) {
+      const yamlCheck = validateCustomSpecYaml(customYaml);
+      if (yamlCheck.status === 'error') {
+        errs.push(`"${label}": ${yamlCheck.message}`);
+      }
+    }
   }
 
-  if (node.adapterId === 'genie3' && p.taskMode !== undefined) {
-    const taskMode = String(p.taskMode);
-    if (!VALID_GENIE3_TASK_MODES.has(taskMode)) {
+  if (node.adapterId === 'genie3') {
+    const taskMode = p.taskMode !== undefined ? String(p.taskMode) : 'unconditional';
+    if (p.taskMode !== undefined && !VALID_GENIE3_TASK_MODES.has(taskMode)) {
       errs.push(`"${label}": Unknown Genie 3 taskMode "${taskMode}" (expected unconditional, binder, or motif).`);
+    }
+    if (taskMode === 'motif' && !String(p.motifSpan ?? '').trim() && !String(p.contig ?? '').trim()) {
+      errs.push(`"${label}": Genie 3 motif mode requires a motifSpan (e.g. A16-35) or contig specifying motif residues.`);
     }
   }
 
@@ -490,6 +644,38 @@ export function validateNodeParams(node: WorkflowNode): string[] {
         errs.push(
           `"${label}": Unknown ${family} modelName "${modelName}" (expected ${[...allowedModels].join(', ')}).`,
         );
+      }
+    }
+    const fixedSpec = String(p.fixedPositions ?? '').trim();
+    if (fixedSpec) {
+      for (const tok of fixedSpec.split(/[,\s]+/).filter(Boolean)) {
+        if (!/^[A-Za-z_]$/.test(tok) && !isValidResidueToken(tok)) {
+          errs.push(
+            `"${label}": Invalid fixedPositions token "${tok}" (expected e.g. "A", "A10", "A10-15", "A-2", or "A100A").`,
+          );
+        }
+      }
+    }
+    if (typeof p.tiedPositions === 'string' && p.tiedPositions.trim()) {
+      const text = p.tiedPositions.trim();
+      const rawGroups = text.includes(';') ? text.split(';') : text.split(',');
+      for (const rawGroup of rawGroups) {
+        const groupText = rawGroup.trim();
+        if (!groupText) continue;
+        const tokens = groupText.split(/[=\s]+/).filter(Boolean);
+        if (tokens.length < 2) {
+          errs.push(
+            `"${label}": Invalid tiedPositions group "${groupText}" (expected at least 2 residues, e.g. "A10=B10").`,
+          );
+          continue;
+        }
+        for (const tok of tokens) {
+          if (!/^([A-Za-z_])?:?(-?\d+)([A-Z])?$/.test(tok)) {
+            errs.push(
+              `"${label}": Invalid tiedPositions token "${tok}" in "${groupText}" (expected e.g. "A10=B10" or "A100A=B100A").`,
+            );
+          }
+        }
       }
     }
   }
@@ -583,18 +769,6 @@ export function validateNodeParams(node: WorkflowNode): string[] {
     const check = validateSequenceText(String(p.sequence ?? ''));
     if (check.status === 'error') {
       errs.push(`"${label}": ${check.message}`);
-    }
-  }
-
-  if (node.adapterId === 'rfd4-conditioner' && String(p.taskPreset ?? 'custom') === 'custom') {
-    const rawJson = String(p.rawJsonOverride ?? '').trim();
-    if (rawJson) {
-      const check = validateJsonOverride(rawJson);
-      if (check.status === 'error') {
-        errs.push(`"${label}": ${check.message}`);
-      }
-    } else if (!String(p.contig ?? '').trim()) {
-      errs.push(`"${label}": Contig cannot be empty in custom mode.`);
     }
   }
 

@@ -1,6 +1,7 @@
 // Core denovo.run orchestration types (aligned with RFC-0001 + CampaignState hooks).
 
 import type { GeometryStats } from '$lib/protein-ops/kabsch';
+import type { BackboneAtomPresence, SourceResidueId } from '$lib/protein-ops/pdb';
 
 export type RuntimeKind = 'ort-webgpu' | 'wgsl-custom' | 'cpu-ts';
 
@@ -93,6 +94,16 @@ export interface StructureArtifact {
   cifText?: string;
   chainIds?: string[];
   chainLengths?: number[];
+  /** Per-residue insertion codes (`''` when absent, e.g. `'A'`, `'B'`). */
+  insCodes?: string[];
+  /** Per-residue source identity mapping each residue back to its original chain/resNum/insCode/resName. */
+  sourceResidues?: SourceResidueId[];
+  /** Bijective map from projected 1-char PDB chain ID -> original source `authChainId`. */
+  chainIdMap?: Record<string, string>;
+  /** Per-residue observed backbone atom presence flags (`hasN`, `hasCA`, `hasC`, `hasO`, `oReconstructed`). */
+  atomPresence?: BackboneAtomPresence[];
+  /** Compact per-residue observed backbone atom bitmask (`BACKBONE_MASK_N/CA/C/O`). */
+  observedBackboneMask?: Uint8Array;
   diagnostics?: StructureParseDiagnostics;
   /** Optional curated benchmark ID when loaded from a benchmark target preset. */
   benchmarkId?: string;
@@ -197,6 +208,7 @@ export interface FoldedCandidate {
   iptmIsMonomerApprox?: boolean;
   chainLengths?: number[];
   chainIds?: string[];
+  resNums?: number[];
   pae?: Float32Array;
   elapsedMs: number;
 }

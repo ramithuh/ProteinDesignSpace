@@ -486,7 +486,9 @@ function getAncestorNodeIds(graph: WorkflowGraph, nodeId: string): Set<string> {
 function computeIpaeFromMatrix(pae: Float32Array, chainLengths: readonly number[]): number | null {
   if (chainLengths.length < 2) return null;
   const L = chainLengths.reduce((a, b) => a + b, 0);
-  if (L <= 0 || pae.length !== L * L) return null;
+  if (L <= 0 || pae.length < L * L) return null;
+  const paeDim = Math.round(Math.sqrt(pae.length));
+  if (paeDim < L || paeDim * paeDim !== pae.length) return null;
   const chainOf = new Int32Array(L);
   let off = 0;
   for (let c = 0; c < chainLengths.length; c++) {
@@ -498,7 +500,7 @@ function computeIpaeFromMatrix(pae: Float32Array, chainLengths: readonly number[
     const ci = chainOf[i];
     for (let j = 0; j < L; j++) {
       if (ci === chainOf[j]) continue;
-      const v = pae[i * L + j];
+      const v = pae[i * paeDim + j];
       if (Number.isFinite(v)) {
         sum += v;
         count++;
@@ -1354,8 +1356,19 @@ function sequenceIdentity(a: string, b: string): number {
   return valid > 0 ? matches / valid : 0;
 }
 
-function scoreChainPair(anchorSeg: ChainSegment, mobileSeg: ChainSegment, sameIndex: boolean): number {
-  let score = sameIndex ? 1 : 0;
+function isValidKabschResult(res: KabschResult): boolean {
+  if (!Number.isFinite(res.rmsd) || !Number.isFinite(res.tmScore)) return false;
+  for (let i = 0; i < 9; i++) {
+    if (!Number.isFinite(res.rotation[i])) return false;
+  }
+  for (let i = 0; i < 3; i++) {
+    if (!Number.isFinite(res.translation[i])) return false;
+  }
+  return true;
+}
+
+function scoreChainPairCore(anchorSeg: ChainSegment, mobileSeg: ChainSegment): number {
+  let score = 0;
   if (anchorSeg.role && mobileSeg.role) {
     score += anchorSeg.role === mobileSeg.role ? 1000 : -1000;
   }
@@ -1369,18 +1382,33 @@ function scoreChainPair(anchorSeg: ChainSegment, mobileSeg: ChainSegment, sameIn
   return score;
 }
 
-function bestChainPermutation(anchorSegs: ChainSegment[], mobileSegs: ChainSegment[]): number[] {
+function scoreChainPair(anchorSeg: ChainSegment, mobileSeg: ChainSegment, sameIndex: boolean): number {
+  return scoreChainPairCore(anchorSeg, mobileSeg) + (sameIndex ? 1 : 0);
+}
+
+/**
+ * Return all chain permutations achieving the maximum intrinsic (role + length + sequence) score
+ * so symmetric homodimers / homomers can break ties by lowest 3D Kabsch RMSD rather than
+ * arbitrarily locking chain indices.
+ */
+function topChainPermutations(
+  anchorSegs: ChainSegment[],
+  mobileSegs: ChainSegment[],
+  maxTied = 24,
+): number[][] {
   const C = anchorSegs.length;
   if (C <= 6) {
     let bestScore = -Infinity;
-    let bestPerm = Array.from({ length: C }, (_, i) => i);
+    let bestPerms: Array<{ perm: number[]; sameCount: number }> = [];
     const used = new Uint8Array(C);
     const cur = new Array<number>(C);
-    const dfs = (aIdx: number, acc: number) => {
+    const dfs = (aIdx: number, acc: number, sameCount: number) => {
       if (aIdx === C) {
-        if (acc > bestScore) {
+        if (acc > bestScore + 1e-6) {
           bestScore = acc;
-          bestPerm = cur.slice();
+          bestPerms = [{ perm: cur.slice(), sameCount }];
+        } else if (Math.abs(acc - bestScore) <= 1e-6 && bestPerms.length < maxTied) {
+          bestPerms.push({ perm: cur.slice(), sameCount });
         }
         return;
       }
@@ -1388,12 +1416,17 @@ function bestChainPermutation(anchorSegs: ChainSegment[], mobileSegs: ChainSegme
         if (used[mIdx]) continue;
         used[mIdx] = 1;
         cur[aIdx] = mIdx;
-        dfs(aIdx + 1, acc + scoreChainPair(anchorSegs[aIdx], mobileSegs[mIdx], aIdx === mIdx));
+        dfs(
+          aIdx + 1,
+          acc + scoreChainPairCore(anchorSegs[aIdx], mobileSegs[mIdx]),
+          sameCount + (aIdx === mIdx ? 1 : 0),
+        );
         used[mIdx] = 0;
       }
     };
-    dfs(0, 0);
-    return bestPerm;
+    dfs(0, 0, 0);
+    bestPerms.sort((a, b) => b.sameCount - a.sameCount);
+    return bestPerms.map((p) => p.perm);
   }
 
   // Greedy fallback for very large complexes (>6 chains)
@@ -1413,7 +1446,7 @@ function bestChainPermutation(anchorSegs: ChainSegment[], mobileSegs: ChainSegme
     used[bestM] = 1;
     perm[aIdx] = bestM;
   }
-  return perm;
+  return [perm];
 }
 
 interface BranchAlignOutcome {
@@ -1424,8 +1457,8 @@ interface BranchAlignOutcome {
 
 /**
  * Align `mobile` onto `anchor`, matching multi-chain complexes by `chainRoles` / sequence
- * similarity / chain length (#9) so opposite chain ordering (e.g. Genie 3 [Binder=A, Target=B]
- * vs RFD4 [Target=A, Binder=B]) superimposes binder-to-binder and target-to-target.
+ * similarity / chain length (#9) with a Kabsch RMSD tie-breaker for symmetric equal-sequence
+ * homodimers/homomers so opposite chain ordering superimposes cleanly.
  */
 function alignBranchPair(
   mobile: CompareBranchSummary,
@@ -1442,24 +1475,44 @@ function alignBranchPair(
 
   // Case 1: Both are multi-chain with matching chain count and equal per-matched-chain lengths
   if (mobileSegs.length > 1 && mobileSegs.length === anchorSegs.length) {
-    const perm = bestChainPermutation(anchorSegs, mobileSegs);
-    const allLengthsMatch = anchorSegs.every((aSeg, aIdx) => mobileSegs[perm[aIdx]].length === aSeg.length);
-    if (allLengthsMatch && mLen === aLen) {
+    const candidatePerms = topChainPermutations(anchorSegs, mobileSegs);
+    const matchingLenPerms =
+      mLen === aLen
+        ? candidatePerms.filter((perm) =>
+            anchorSegs.every((aSeg, aIdx) => mobileSegs[perm[aIdx]].length === aSeg.length),
+          )
+        : [];
+
+    if (matchingLenPerms.length > 0) {
+      let bestResult: KabschResult | null = null;
       const reorderedMobile = new Float32Array(aLen * 3);
-      for (let aIdx = 0; aIdx < anchorSegs.length; aIdx++) {
-        const aSeg = anchorSegs[aIdx];
-        const mSeg = mobileSegs[perm[aIdx]];
-        reorderedMobile.set(
-          mobileCoords.subarray(mSeg.start * 3, (mSeg.start + mSeg.length) * 3),
-          aSeg.start * 3,
-        );
+      for (const perm of matchingLenPerms) {
+        for (let aIdx = 0; aIdx < anchorSegs.length; aIdx++) {
+          const aSeg = anchorSegs[aIdx];
+          const mSeg = mobileSegs[perm[aIdx]];
+          reorderedMobile.set(
+            mobileCoords.subarray(mSeg.start * 3, (mSeg.start + mSeg.length) * 3),
+            aSeg.start * 3,
+          );
+        }
+        const cand = kabschAlign(reorderedMobile, anchorCoords);
+        if (!bestResult) {
+          bestResult = cand;
+        } else if (
+          Number.isFinite(cand.rmsd) &&
+          (!Number.isFinite(bestResult.rmsd) || cand.rmsd < bestResult.rmsd - 1e-6)
+        ) {
+          bestResult = cand;
+        }
       }
       return {
-        result: kabschAlign(reorderedMobile, anchorCoords),
+        result: bestResult!,
         alignedResidues: aLen,
         isSubstructure: false,
       };
     }
+
+    const perm = candidatePerms[0];
 
     // Different binder lengths on a shared multi-chain target: align on matched equal-length target chain(s)
     const matchedPairs: Array<{ aSeg: ChainSegment; mSeg: ChainSegment }> = [];
@@ -1709,14 +1762,28 @@ export function buildComparisonState(
   }
 
   // Compute pairwise agreements across all alignable pairs (A↔B primary, plus A↔C, B↔C, etc. for 3–4 blocks)
+  // Cache alignments targeting `anchorBranch` so the overlay loop reuses them without duplicating Kabsch work.
   const allPairwise: PairwiseAgreement[] = [];
+  const cachedAlignToAnchor = new Map<string, BranchAlignOutcome>();
   for (let i = 0; i < alignable.length; i++) {
     for (let j = i + 1; j < alignable.length; j++) {
       const a = alignable[i];
       const b = alignable[j];
       const sharedTpl = branchesShareUpstreamTemplate(a, b, ancestorsByNode);
       try {
-        const outcome = alignBranchPair(b, a, sharedTpl);
+        // Align directly onto `anchorBranch` whenever either endpoint is the anchor so the
+        // exact (rotation, translation) transform is ready for reuse in the overlay loop.
+        const bIsAnchor = anchorBranch !== null && b.nodeId === anchorBranch.nodeId;
+        const aIsAnchor = anchorBranch !== null && a.nodeId === anchorBranch.nodeId;
+        const outcome = bIsAnchor
+          ? alignBranchPair(a, b, sharedTpl)
+          : alignBranchPair(b, a, sharedTpl);
+        if (!isValidKabschResult(outcome.result)) continue;
+        if (aIsAnchor) {
+          cachedAlignToAnchor.set(b.nodeId, outcome);
+        } else if (bIsAnchor) {
+          cachedAlignToAnchor.set(a.nodeId, outcome);
+        }
         allPairwise.push({
           labelA: a.label,
           labelB: b.label,
@@ -1788,14 +1855,21 @@ export function buildComparisonState(
         b.nodeId !== anchorBranch.nodeId
       ) {
         try {
-          const sharedTpl = branchesShareUpstreamTemplate(b, anchorBranch, ancestorsByNode);
-          const outcome = alignBranchPair(b, anchorBranch, sharedTpl);
-          structText = applyTransformToStructureText(
-            structText,
-            outcome.result.rotation,
-            outcome.result.translation,
-          );
-          kabschAligned = true;
+          const outcome =
+            cachedAlignToAnchor.get(b.nodeId) ??
+            alignBranchPair(
+              b,
+              anchorBranch,
+              branchesShareUpstreamTemplate(b, anchorBranch, ancestorsByNode),
+            );
+          if (isValidKabschResult(outcome.result)) {
+            structText = applyTransformToStructureText(
+              structText,
+              outcome.result.rotation,
+              outcome.result.translation,
+            );
+            kabschAligned = true;
+          }
         } catch {
           /* keep original coordinates on degenerate alignment */
         }

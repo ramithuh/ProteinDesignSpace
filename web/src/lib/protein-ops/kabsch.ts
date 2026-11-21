@@ -889,6 +889,7 @@ export function computeGeometryStats(
   caCoords: Float32Array,
   chainIds?: readonly string[],
   resNums?: readonly number[],
+  insCodes?: readonly string[],
 ): GeometryStats {
   const L = Math.floor(caCoords.length / 3);
   if (L === 0) {
@@ -896,9 +897,22 @@ export function computeGeometryStats(
   }
   const hasChains = Boolean(chainIds && chainIds.length === L);
   const hasResNums = Boolean(resNums && resNums.length === L);
+  const hasInsCodes = Boolean(insCodes && insCodes.length === L);
   const sameChain = (i: number, j: number): boolean => !hasChains || chainIds![i] === chainIds![j];
-  const isBonded = (i: number): boolean =>
-    sameChain(i, i + 1) && (!hasResNums || resNums![i + 1] === resNums![i] + 1);
+  const isBonded = (i: number): boolean => {
+    if (!sameChain(i, i + 1)) return false;
+    if (!hasResNums) return true;
+    const dr = resNums![i + 1] - resNums![i];
+    if (dr === 1) return true;
+    // Insertion-code neighbors (e.g. 100 -> 100A -> 100B): treat as bonded when
+    // insCodes differ or Cα-Cα distance is within peptide bond range (<= 4.5 Å).
+    if (dr === 0) {
+      if (hasInsCodes && insCodes![i + 1] !== insCodes![i]) return true;
+      const d = dist(caCoords, i, i + 1);
+      if (Number.isFinite(d) && d <= 4.5) return true;
+    }
+    return false;
+  };
 
   let cx = 0, cy = 0, cz = 0;
   for (let i = 0; i < L; i++) {

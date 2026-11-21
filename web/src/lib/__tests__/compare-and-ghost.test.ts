@@ -879,4 +879,87 @@ describe('multi-select 3D comparison state', () => {
     expect(dupJoined.rows).toHaveLength(4);
     expect(dupJoined.keys).toEqual(['x', 'x#2', 'x#4', 'x#3']);
   });
+
+  it('Wave-2 P1/P2 regressions: symmetric equal-sequence homodimer Kabsch tie-breaker and non-finite Kabsch guard', () => {
+    // 1. Symmetric equal-sequence homodimer: chain A & B have identical sequence ('ACDEF') but distinct 3D positions.
+    // Model 2 swaps chain A and B in coordinate order; Kabsch tie-breaker must recover ~0 Å RMSD instead of mis-pairing.
+    const chainACoords = [
+      [0, 0, 0],
+      [3.8, 0, 0],
+      [7.6, 1.2, 0],
+      [11.4, 0, 1.0],
+      [15.2, 1.5, 2.0],
+    ];
+    const chainBCoords = [
+      [0, 20, 5],
+      [2.5, 22.8, 5],
+      [5.5, 20.5, 6.2],
+      [8.5, 23.0, 5.0],
+      [11.8, 21.0, 7.5],
+    ];
+    const makeDimer = (id: string, first: number[][], second: number[][]): StructureArtifact => {
+      const ca = new Float32Array(10 * 3);
+      for (let i = 0; i < 5; i++) {
+        ca[i * 3 + 0] = first[i][0];
+        ca[i * 3 + 1] = first[i][1];
+        ca[i * 3 + 2] = first[i][2];
+        ca[(5 + i) * 3 + 0] = second[i][0];
+        ca[(5 + i) * 3 + 1] = second[i][1];
+        ca[(5 + i) * 3 + 2] = second[i][2];
+      }
+      const chainIds = ['A', 'A', 'A', 'A', 'A', 'B', 'B', 'B', 'B', 'B'];
+      return {
+        kind: 'StructureArtifact',
+        id,
+        label: id,
+        sourceModelId: 'mock',
+        length: 10,
+        sequence: 'ACDEFACDEF',
+        chainIds,
+        caCoords: ca,
+        backbone4Coords: new Float32Array(10 * 4 * 3),
+        pdbText: 'END\n',
+        geometry: {
+          length: 10,
+          rg: 10,
+          meanCaDist: 3.8,
+          chainBreaks: 0,
+          clashes: 0,
+          helixPct: 0,
+          sheetPct: 0,
+          coilPct: 100,
+        },
+      };
+    };
+
+    const s1 = makeDimer('dimer-1', chainACoords, chainBCoords);
+    const s2 = makeDimer('dimer-2', chainBCoords, chainACoords); // chains swapped!
+    const g: WorkflowGraph = {
+      id: 'homodimer-cmp',
+      name: 'Homodimer',
+      nodes: [
+        { id: 'n1', adapterId: 'pdb-input', label: 'Dimer 1', params: {} },
+        { id: 'n2', adapterId: 'pdb-input', label: 'Dimer 2', params: {} },
+      ],
+      edges: [],
+    };
+    const cmp = buildComparisonState(g, ['n1', 'n2'], { n1: { structure: s1 }, n2: { structure: s2 } }, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+    });
+    expect(cmp.allPairwise).toHaveLength(1);
+    expect(cmp.allPairwise[0].rmsd).toBeLessThan(1e-3);
+    expect(cmp.kabschAligned).toBe(true);
+
+    // 2. Non-finite coordinates in a branch must NOT emit NaN pairwise rows or apply NaN transforms
+    const badCa = new Float32Array(s1.caCoords);
+    badCa[0] = Number.NaN;
+    const sBad: StructureArtifact = { ...s2, id: 'dimer-nan', caCoords: badCa };
+    const cmpBad = buildComparisonState(g, ['n1', 'n2'], { n1: { structure: s1 }, n2: { structure: sBad } }, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+    });
+    expect(cmpBad.allPairwise).toEqual([]);
+    expect(cmpBad.kabschAligned).toBe(false);
+  });
 });

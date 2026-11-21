@@ -69,13 +69,23 @@ describe('parameter validation & numeric sanitization', () => {
     expect(bad.illegalChars).toEqual(['5', 'X']);
 
     const short = validateSequenceText('MKTA');
-    expect(short.status).toBe('warn');
+    expect(short.status).toBe('error');
+
+    const colonsOnly = validateSequenceText('::::');
+    expect(colonsOnly.status).toBe('error');
   });
 
   it('validates residue tokens, JSON overrides, and PDB/mmCIF structure text', () => {
     expect(isValidResidueToken('A54')).toBe(true);
     expect(isValidResidueToken('A16-35')).toBe(true);
     expect(isValidResidueToken('10-14')).toBe(true);
+    expect(isValidResidueToken('A100A')).toBe(true);
+    expect(isValidResidueToken('A100A-100C')).toBe(true);
+    expect(isValidResidueToken('A-2')).toBe(true);
+    expect(isValidResidueToken('A-5--2')).toBe(true);
+    expect(isValidResidueToken('A-2-5')).toBe(true);
+    expect(isValidResidueToken('A999-1')).toBe(false);
+    expect(isValidResidueToken('A10B-10A')).toBe(false);
     expect(isValidResidueToken('A5r')).toBe(false);
     expect(isValidResidueToken('bad!')).toBe(false);
 
@@ -86,8 +96,15 @@ describe('parameter validation & numeric sanitization', () => {
 
     expect(validateStructureText('').status).toBe('error');
     expect(validateStructureText('hello world').status).toBe('error');
-    expect(validateStructureText('ATOM      1  CA  ALA A   1       0.000   0.000   0.000').status).toBe('ok');
-    expect(validateStructureText('loop_\n_atom_site.group_PDB').status).toBe('ok');
+    expect(validateStructureText('ATOM      1  CA  ALA A   1       0.000   0.000   0.000').status).toBe('error');
+    expect(validateStructureText('loop_\n_atom_site.group_PDB').status).toBe('error');
+    const threeCaPdb = [
+      'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      2  CA  GLY A   2       3.800   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      3  CA  VAL A   3       7.600   0.000   0.000  1.00  0.00           C  ',
+      'END',
+    ].join('\n');
+    expect(validateStructureText(threeCaPdb).status).toBe('ok');
   });
 
   it('reports blocking parameter errors from validateNodeParams', () => {
@@ -112,9 +129,9 @@ describe('parameter validation & numeric sanitization', () => {
     expect(
       validateNodeParams({
         id: 'n3',
-        adapterId: 'rfd4-conditioner',
-        label: 'Cond',
-        params: { taskPreset: 'custom', contig: '70-70', rawJsonOverride: '{bad' },
+        adapterId: 'rfd4-proteina',
+        label: 'RFD4',
+        params: { mode: 'motif', customSpecYaml: '{bad' },
       }),
     ).toHaveLength(1);
   });
@@ -361,5 +378,73 @@ describe('parameter validation & numeric sanitization', () => {
         },
       }),
     ).toEqual([]);
+  });
+
+  it('Wave-2 P1/P2 regressions: Genie 3 empty motif & directionScale 0.0, MPNN fixedPositions/tiedPositions, RFD4 motif fallback length & customSpecYaml', () => {
+    // 1. Genie 3 directionScale allows 0.0 (unconditional guidance)
+    expect(NUMERIC_SPECS.genie3.directionScale.min).toBe(0);
+    expect(
+      validateNodeParams({
+        id: 'g3',
+        adapterId: 'genie3',
+        params: { taskMode: 'unconditional', length: 80, directionScale: 0 },
+      }),
+    ).toEqual([]);
+
+    // 2. Genie 3 motif mode with BOTH motifSpan and contig empty is blocked
+    expect(
+      validateNodeParams({
+        id: 'g3-empty-motif',
+        adapterId: 'genie3',
+        label: 'Genie 3',
+        params: { taskMode: 'motif', length: 80, motifSpan: '', contig: '' },
+      }).join(' '),
+    ).toMatch(/motifSpan.*contig/i);
+
+    // 3. ProteinMPNN fixedPositions & tiedPositions validation (accepts insCodes & negative resnums, rejects reversed/malformed)
+    expect(
+      validateNodeParams({
+        id: 'mpnn-ok',
+        adapterId: 'web-protein-mpnn',
+        params: { fixedPositions: 'A100A, A-2, A10-20', tiedPositions: 'A1=B1; A2=B2' },
+      }),
+    ).toEqual([]);
+    expect(
+      validateNodeParams({
+        id: 'mpnn-bad-fixed',
+        adapterId: 'web-protein-mpnn',
+        params: { fixedPositions: 'A999-1' },
+      }).join(' '),
+    ).toMatch(/fixedPositions/i);
+    expect(
+      validateNodeParams({
+        id: 'mpnn-bad-tied',
+        adapterId: 'web-protein-mpnn',
+        params: { tiedPositions: 'A1, ???' },
+      }).join(' '),
+    ).toMatch(/tiedPositions/i);
+
+    // 4. RFD4 motif mode validates fallback length when contig & customSpecYaml are empty, and validates customSpecYaml
+    expect(
+      validateNodeParams({
+        id: 'rfd-motif-badlen',
+        adapterId: 'rfd4-proteina',
+        params: { mode: 'motif', length: 5, contig: '', customSpecYaml: '' },
+      }).join(' '),
+    ).toMatch(/length/i);
+    expect(
+      validateNodeParams({
+        id: 'rfd-yaml-ok',
+        adapterId: 'rfd4-proteina',
+        params: { mode: 'motif', customSpecYaml: 'contig: 70-70\nconditions: {}' },
+      }),
+    ).toEqual([]);
+    expect(
+      validateNodeParams({
+        id: 'rfd-yaml-bad',
+        adapterId: 'rfd4-proteina',
+        params: { mode: 'motif', customSpecYaml: 'not a valid yaml mapping' },
+      }).join(' '),
+    ).toMatch(/customSpecYaml/i);
   });
 });

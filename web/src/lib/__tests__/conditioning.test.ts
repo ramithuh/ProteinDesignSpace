@@ -222,7 +222,7 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
         { id: 'lf', adapterId: 'localfold-af2', params: { model: 'monomer' } },
       ],
       edges: [
-        { fromNode: 'pdb', fromPort: 'structure', toNode: 'g3', toPort: 'template' },
+        { fromNode: 'pdb', fromPort: 'structure', toNode: 'g3', toPort: 'structure' },
         { fromNode: 'g3', fromPort: 'sequences', toNode: 'lf', toPort: 'sequences' },
       ],
     };
@@ -236,7 +236,7 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
         { id: 'pdb', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
         { id: 'rfd4', adapterId: 'rfd4-proteina', params: { mode: 'unconditional', length: 70 } },
       ],
-      edges: [{ fromNode: 'pdb', fromPort: 'structure', toNode: 'rfd4', toPort: 'template' }],
+      edges: [{ fromNode: 'pdb', fromPort: 'structure', toNode: 'rfd4', toPort: 'structure' }],
     };
     const rfd4Issues = validateBioCapabilities(rfd4UnusedTpl);
     expect(rfd4Issues.some((i) => i.code === 'rfd4-unused-template' && i.fix?.paramsPatch?.mode === 'partial')).toBe(true);

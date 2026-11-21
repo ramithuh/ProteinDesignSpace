@@ -202,7 +202,7 @@ describe('engine/registry & engine/graph-utils', () => {
       name: 'Types',
       nodes: [
         { id: 'src', adapterId: 'pdb-input', params: {} },
-        { id: 'cond', adapterId: 'rfd4-conditioner', params: {} },
+        { id: 'seq', adapterId: 'sequence-input', params: {} },
         { id: 'rfd4', adapterId: 'rfd4-proteina', params: {} },
         { id: 'mpnn', adapterId: 'web-protein-mpnn', params: {} },
         { id: 'fold', adapterId: 'localfold-af2', params: {} },
@@ -222,7 +222,7 @@ describe('engine/registry & engine/graph-utils', () => {
     expect(mismatch1.valid).toBe(false);
     expect(mismatch1.reason).toContain('Type mismatch');
 
-    const mismatch2 = validateConnection(graph, 'cond', 'condition', 'mpnn', 'structure');
+    const mismatch2 = validateConnection(graph, 'seq', 'sequences', 'mpnn', 'structure');
     expect(mismatch2.valid).toBe(false);
     expect(mismatch2.reason).toContain('Type mismatch');
 
@@ -341,7 +341,7 @@ describe('engine/registry & engine/graph-utils', () => {
     expect(n2.position).toEqual({ x: 340, y: 60 });
 
     // Insert another node with r1 still selected -> same x=340 is occupied by n2, so y must nudge vertically
-    const r3 = insertBlockSmart(r2.graph, 'rfd4-conditioner', r1.nodeId);
+    const r3 = insertBlockSmart(r2.graph, 'rfd4-proteina', r1.nodeId);
     const n3 = r3.graph.nodes.find((n) => n.id === r3.nodeId)!;
     expect(n3.position!.x).toBe(340);
     expect(n3.position!.y).toBeGreaterThan(60);

@@ -54,10 +54,12 @@ describe('engine/catalog & biologist terminology', () => {
     }
   });
 
-  it('organizes all 8 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, and RFD4 Conditioning', () => {
+  it('organizes all 7 blocks into workflow groups with structured sub-items for LocalFold and ProteinMPNN', () => {
     const groupedIds = CATALOG_STAGE_GROUPS.flatMap((g) => g.ids);
     expect(new Set(groupedIds)).toEqual(new Set(Object.keys(ADAPTER_REGISTRY)));
     expect(CATALOG_ITEMS).toHaveLength(Object.keys(ADAPTER_REGISTRY).length);
+    expect(CATALOG_ITEMS).toHaveLength(7);
+    expect(ADAPTER_REGISTRY['rfd4-conditioner']).toBeUndefined();
 
     const lf = CATALOG_ITEMS.find((i) => i.id === 'localfold-af2')!;
     expect(lf.subGroups.map((g) => g.title)).toEqual([
@@ -80,11 +82,11 @@ describe('engine/catalog & biologist terminology', () => {
       'ca',
     ]);
 
-    const cond = CATALOG_ITEMS.find((i) => i.id === 'rfd4-conditioner')!;
-    expect(cond.subGroups).toHaveLength(2);
-    expect(cond.subGroups[0].items).toHaveLength(1);
-    expect(cond.subGroups[0].items[0].insert.params?.taskPreset).toBe('custom');
-    expect(cond.subGroups[1].items).toHaveLength(9);
+    // Genie 3 preset defaults to Cα-ProteinMPNN (family: 'ca') for honest Cα-only backbones
+    const g3Preset = WORKFLOW_PRESETS.find((p) => p.id === 'genie3-mpnn-af2')!;
+    const g3Mpnn = g3Preset.graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn')!;
+    expect(g3Mpnn.params.family).toBe('ca');
+    expect(g3Mpnn.label).toBe('Cα-ProteinMPNN');
   });
 
   it('filterCatalog matches parent fields and narrows multi-variant sub-items for boltz, soluble, motif, and af3', () => {
@@ -101,10 +103,8 @@ describe('engine/catalog & biologist terminology', () => {
     expect(mpnnMatch.matchingSubItems.map((s) => s.key)).toEqual(['solublempnn']);
 
     const motifRes = filterCatalog('motif');
-    const condMatch = motifRes.find((r) => r.item.id === 'rfd4-conditioner')!;
-    expect(condMatch).toBeDefined();
-    expect(condMatch.hasNarrowedSubMatch).toBe(true);
-    expect(condMatch.matchingSubItems.map((s) => s.key)).toEqual(['motif_idx_1prw', 'motif_unidx_1prw']);
+    expect(motifRes.some((r) => r.item.id === 'rfd4-proteina')).toBe(true);
+    expect(motifRes.some((r) => r.item.id === 'genie3')).toBe(true);
 
     const af3Res = filterCatalog('af3');
     const lfAf3 = af3Res.find((r) => r.item.id === 'localfold-af2')!;
@@ -123,22 +123,10 @@ describe('engine/catalog & biologist terminology', () => {
     expect(mpnnSol.hasNarrowedSubMatch).toBe(true);
     expect(mpnnSol.matchingSubItems.map((s) => s.key)).toEqual(['solublempnn']);
 
-    const rfd4Motif = filterCatalog('rfd4 motif').find((r) => r.item.id === 'rfd4-conditioner')!;
-    expect(rfd4Motif.hasNarrowedSubMatch).toBe(true);
-    expect(rfd4Motif.matchingSubItems.map((s) => s.key)).toEqual(['motif_idx_1prw', 'motif_unidx_1prw']);
-
-    const rfd4Hotspot = filterCatalog('rfd4 hotspot').find((r) => r.item.id === 'rfd4-conditioner')!;
-    expect(rfd4Hotspot.hasNarrowedSubMatch).toBe(true);
-    expect(rfd4Hotspot.matchingSubItems.map((s) => s.key)).toEqual(['custom', 'ppi_pdl1']);
-
-    const rfd4Inv = filterCatalog('rfd4 inverse').find((r) => r.item.id === 'rfd4-conditioner')!;
-    expect(rfd4Inv.hasNarrowedSubMatch).toBe(true);
-    expect(rfd4Inv.matchingSubItems.map((s) => s.key)).toEqual(['inverse_folding_1prw']);
-
     // Pure parent identity queries ("rfd4", "proteinmpnn", "localfold") must NOT mis-narrow
-    const rfd4Bare = filterCatalog('rfd4').find((r) => r.item.id === 'rfd4-conditioner')!;
+    const rfd4Bare = filterCatalog('rfd4').find((r) => r.item.id === 'rfd4-proteina')!;
+    expect(rfd4Bare).toBeDefined();
     expect(rfd4Bare.hasNarrowedSubMatch).toBe(false);
-    expect(rfd4Bare.matchingSubItems).toHaveLength(10);
 
     const mpnnBare = filterCatalog('proteinmpnn').find((r) => r.item.id === 'web-protein-mpnn')!;
     expect(mpnnBare.hasNarrowedSubMatch).toBe(false);
@@ -248,15 +236,16 @@ describe('engine/catalog & biologist terminology', () => {
     expect(caNode.params.family).toBe('ca');
     expect(caNode.label).toBe('ProteinMPNN (Cα-only)');
 
-    // 4. Insert RFD4 Conditioning with taskPreset: 'ppi_pdl1'
-    const rCond = insertBlockSmart(base, 'rfd4-conditioner', undefined, { x: 60, y: 240 }, {
+    // 4. Insert RFD4-Proteina with inline preset mode
+    const rRfd = insertBlockSmart(base, 'rfd4-proteina', undefined, { x: 60, y: 240 }, {
       autoCommit: false,
-      params: { taskPreset: 'ppi_pdl1' },
-      label: 'Condition: Binder',
+      params: { mode: 'preset', presetId: 'ppi_pdl1' },
+      label: 'RFD4 Binder',
     });
-    const condNode = rCond.graph.nodes.find((n) => n.id === rCond.nodeId)!;
-    expect(condNode.params.taskPreset).toBe('ppi_pdl1');
-    expect(condNode.params.contig).toBe('70-70');
+    const rfdNode = rRfd.graph.nodes.find((n) => n.id === rRfd.nodeId)!;
+    expect(rfdNode.params.mode).toBe('preset');
+    expect(rfdNode.params.presetId).toBe('ppi_pdl1');
+    expect(rfdNode.params.length).toBe(70);
   });
 
   it('contains zero forbidden internal or ML implementation tokens in user-facing registry, catalog, port, and preset strings', () => {

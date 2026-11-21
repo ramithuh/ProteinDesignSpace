@@ -5,7 +5,6 @@ import {
   ADAPTER_REGISTRY,
   LOCALFOLD_MODEL_OPTIONS,
   MPNN_VARIANT_OPTIONS,
-  RFD4_BENCHMARK_OPTIONS,
 } from './registry';
 import { BENCHMARK_TARGETS } from './benchmarks';
 import { PORT_COLORS } from './graph-utils';
@@ -58,7 +57,6 @@ export interface FilteredCatalogEntry {
 
 export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
   { title: 'Inputs', ids: ['pdb-input', 'sequence-input'] },
-  { title: 'Conditioning', ids: ['rfd4-conditioner'] },
   { title: 'Structure Generation', ids: ['rfd4-proteina', 'genie3'] },
   { title: 'Sequence Design', ids: ['web-protein-mpnn'] },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
@@ -68,7 +66,6 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
 export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   'pdb-input': 'Fetch by PDB ID, upload/paste PDB & mmCIF, or 3-helix demo',
   'sequence-input': 'Paste amino acid sequences (plain text or FASTA)',
-  'rfd4-conditioner': 'Binding hotspots, fixed motifs, H-bonds & CATH folds',
   'rfd4-proteina': 'All-atom backbone and sequence co-design',
   genie3: 'Fast de novo backbone diffusion (23.3M parameters)',
   'web-protein-mpnn': 'Inverse folding (SolubleMPNN, ProteinMPNN, Cα-only)',
@@ -200,49 +197,6 @@ function buildSubGroupsForAdapter(adapterId: string): {
     };
   }
 
-  if (adapterId === 'rfd4-conditioner') {
-    const customItem: CatalogSubItem = {
-      key: 'custom',
-      label: 'Custom Conditioning Builder',
-      subtitle: 'Define binding hotspots, fixed motifs & fold topology (RFD4 & Genie 3)',
-      insert: {
-        adapterId: 'rfd4-conditioner',
-        params: { taskPreset: 'custom' },
-        label: 'Conditioning',
-      },
-      searchBlob: 'custom conditioning builder hotspots cath hbond h-bond',
-    };
-
-    const presetItems: CatalogSubItem[] = RFD4_BENCHMARK_OPTIONS.map((opt) => ({
-      key: opt.id,
-      label: opt.label,
-      badge: opt.category,
-      meta: opt.needsEncoder ? 'Requires structure encoder (~138 MB)' : undefined,
-      insert: {
-        adapterId: 'rfd4-conditioner',
-        params: { taskPreset: opt.id },
-        label: `Condition: ${opt.category}`,
-      },
-      searchBlob: [
-        opt.id,
-        opt.label,
-        opt.category,
-        opt.needsEncoder ? 'encoder' : '',
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase(),
-    }));
-
-    return {
-      subCountLabel: `${RFD4_BENCHMARK_OPTIONS.length} presets`,
-      subGroups: [
-        { title: 'Custom', items: [customItem] },
-        { title: 'Task Presets', items: presetItems },
-      ],
-    };
-  }
-
   return { subGroups: [] };
 }
 
@@ -268,7 +222,6 @@ export const CATALOG_ITEMS: CatalogItem[] = CATALOG_STAGE_GROUPS.flatMap((grp) =
         m.displayName.replace(/\s*\([^)]*\)/g, ''),
         m.stage,
         grp.title,
-        id === 'rfd4-conditioner' ? 'rfd4' : '',
       ]
         .filter(Boolean)
         .join(' ')

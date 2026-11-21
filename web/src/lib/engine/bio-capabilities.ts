@@ -5,14 +5,20 @@
 
 import { LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { getBenchmarkById } from './benchmarks';
-import { cropRawAllAtomStructure, parseStructureText } from '$lib/protein-ops/pdb';
-import { checkGenie3ConditionCompatibility } from './conditioning';
+import {
+  BACKBONE_MASK_CA,
+  BACKBONE_MASK_C,
+  BACKBONE_MASK_N,
+  cropRawAllAtomStructure,
+  getMissingBackboneResidues,
+  parseStructureText,
+  type StructureParseDiagnostics,
+} from '$lib/protein-ops/pdb';
 import type {
   BioCompatibilityIssue,
   BioEntityKind,
   CanonicalArtifact,
   CollectionKind,
-  ConditionSpecArtifact,
   ExcludedCandidateRecord,
   FoldedCandidate,
   RepresentativeSelection,
@@ -22,6 +28,120 @@ import type {
   WorkflowGraph,
   WorkflowNode,
 } from './types';
+
+interface CachedStructureBioSummary {
+  nResidues: number;
+  diagnostics: StructureParseDiagnostics;
+  missingBackboneCount: number;
+  isCaOnly: boolean;
+}
+
+const STRUCTURE_DIAG_CACHE_LIMIT = 32;
+const structureDiagCache = new Map<string, CachedStructureBioSummary>();
+
+function fastTextHash(text: string): string {
+  const len = text.length;
+  let h = 0x811c9dc5;
+  if (len <= 262_144) {
+    for (let i = 0; i < len; i++) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+  } else {
+    // Sample head, tail, and uniform stride for multi-MB structures to keep main-thread O(1)
+    const edge = 4096;
+    for (let i = 0; i < edge; i++) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    const step = Math.max(1, Math.floor((len - edge * 2) / 32_768));
+    for (let i = edge; i < len - edge; i += step) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    for (let i = len - edge; i < len; i++) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function getCachedStructureBioSummary(rawText: string, cropSpec = ''): CachedStructureBioSummary {
+  const key = `${rawText.length}:${fastTextHash(rawText)}:${cropSpec}`;
+  const hit = structureDiagCache.get(key);
+  if (hit) {
+    // Refresh LRU order
+    structureDiagCache.delete(key);
+    structureDiagCache.set(key, hit);
+    return hit;
+  }
+  const effectiveText = cropSpec ? cropRawAllAtomStructure(rawText, cropSpec).text : rawText;
+  const parsed = parseStructureText(effectiveText);
+  const missing = getMissingBackboneResidues(parsed, ['N', 'CA', 'C', 'O'], {
+    allowReconstructedO: true,
+  });
+  const isCaOnly =
+    parsed.nResidues > 0 &&
+    parsed.atomPresence.every((p) => p.hasCA && !p.hasN && !p.hasC);
+  const summary: CachedStructureBioSummary = {
+    nResidues: parsed.nResidues,
+    diagnostics: parsed.diagnostics,
+    missingBackboneCount: missing.length,
+    isCaOnly,
+  };
+  if (structureDiagCache.size >= STRUCTURE_DIAG_CACHE_LIMIT) {
+    const oldest = structureDiagCache.keys().next().value as string | undefined;
+    if (oldest !== undefined) structureDiagCache.delete(oldest);
+  }
+  structureDiagCache.set(key, summary);
+  return summary;
+}
+
+function inspectArtifactBackboneCoverage(struct: StructureArtifact): {
+  missingBackboneCount: number;
+  isCaOnly: boolean;
+} {
+  if (struct.atomPresence && struct.atomPresence.length === struct.length) {
+    let missingCount = 0;
+    let allCaOnly = struct.length > 0;
+    for (let i = 0; i < struct.length; i++) {
+      const p = struct.atomPresence[i];
+      if (!p.hasN || !p.hasCA || !p.hasC || (!p.hasO && !p.oReconstructed)) {
+        missingCount++;
+      }
+      if (!p.hasCA || p.hasN || p.hasC) {
+        allCaOnly = false;
+      }
+    }
+    return { missingBackboneCount: missingCount, isCaOnly: allCaOnly };
+  }
+  if (struct.observedBackboneMask && struct.observedBackboneMask.length === struct.length) {
+    const required = BACKBONE_MASK_N | BACKBONE_MASK_CA | BACKBONE_MASK_C;
+    let missingCount = 0;
+    let allCaOnly = struct.length > 0;
+    for (let i = 0; i < struct.length; i++) {
+      const m = struct.observedBackboneMask[i];
+      if ((m & required) !== required) missingCount++;
+      if ((m & required) !== BACKBONE_MASK_CA) allCaOnly = false;
+    }
+    return { missingBackboneCount: missingCount, isCaOnly: allCaOnly };
+  }
+  if (struct.pdbText && struct.length > 0) {
+    try {
+      const summary = getCachedStructureBioSummary(struct.pdbText);
+      if (summary.nResidues === struct.length) {
+        return {
+          missingBackboneCount: summary.missingBackboneCount,
+          isCaOnly: summary.isCaOnly,
+        };
+      }
+    } catch {
+      /* ignore synthetic pdbText */
+    }
+  }
+  return { missingBackboneCount: 0, isCaOnly: false };
+}
 
 export interface FoldWorkItemSelection {
   maxSequences: number;
@@ -137,6 +257,12 @@ export interface NodeBioProfile {
   looksLikeDnaSequence?: boolean;
   /** Upstream non-protein entities stripped by an intermediate protein-only stage (e.g. ProteinMPNN). */
   strippedNonProtein?: BioEntityKind[];
+  /** Number of protein residues missing required N/CA/C backbone atoms. */
+  missingBackboneCount?: number;
+  /** True when the upstream structure is Cα-only (e.g. Genie 3 or a Cα-trace PDB). */
+  isCaOnly?: boolean;
+  /** True when the upstream generator is Genie 3 (for tailored Cα-only guidance). */
+  fromGenie3?: boolean;
 }
 
 const MULTICHAIN_RFD4_PRESETS = new Set(['ppi_pdl1', 'yaml_5o45_binder']);
@@ -165,36 +291,6 @@ function looksLikePureDna(seq: string): boolean {
   if (seq.length < 12) return false;
   const acgt = (seq.match(/[ACGT]/g) ?? []).length;
   return acgt === seq.length;
-}
-
-function inferConditionProfile(node: WorkflowNode): NodeBioProfile {
-  const preset = String(node.params.taskPreset ?? 'custom');
-  const contig = String(node.params.contig ?? '');
-  const entities = new Set<BioEntityKind>(['protein']);
-  let chainCount = 1;
-  let estimatedTokens = 80;
-
-  if (MULTICHAIN_RFD4_PRESETS.has(preset)) {
-    chainCount = 2;
-    estimatedTokens = 208;
-  } else if (LIGAND_RFD4_PRESETS.has(preset)) {
-    entities.add('ligand');
-    estimatedTokens = 143;
-  } else if (DNA_RFD4_PRESETS.has(preset)) {
-    entities.add('dna');
-    chainCount = 3;
-    estimatedTokens = 128;
-  } else if (contig.includes('/0')) {
-    chainCount = contig.split('/0').filter((s) => s.trim().length > 0).length;
-    estimatedTokens = 160;
-  }
-
-  return {
-    entities,
-    stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
-    chainCount,
-    estimatedTokens,
-  };
 }
 
 function inferNodeOutputProfile(
@@ -248,36 +344,40 @@ function inferNodeOutputProfile(
         1,
         diag.chainCount + (diag.hasNucleicAcids ? diag.nucleicAcidChains.length : 0),
       );
+      const coverage = inspectArtifactBackboneCoverage(liveStruct);
       profile = {
         entities,
         stoichiometry: totalChains > 1 ? 'multimer' : 'monomer',
         chainCount: totalChains,
         estimatedTokens: liveStruct.length > 0 ? liveStruct.length : (bench?.approxTokens ?? 80),
+        missingBackboneCount: coverage.missingBackboneCount,
+        isCaOnly: coverage.isCaOnly,
       };
     } else if ((mode === 'custom' || mode === 'pdb-id') && pdbText.length > 0) {
       try {
         const cropSpec = String(node.params.cropSegments ?? '').trim();
-        const rawText = cropSpec ? cropRawAllAtomStructure(pdbText, cropSpec).text : pdbText;
-        const parsed = parseStructureText(rawText);
+        const summary = getCachedStructureBioSummary(pdbText, cropSpec);
         const entities = new Set<BioEntityKind>();
-        if (parsed.nResidues > 0 || (!parsed.diagnostics.hasLigands && !parsed.diagnostics.hasNucleicAcids)) {
+        if (summary.nResidues > 0 || (!summary.diagnostics.hasLigands && !summary.diagnostics.hasNucleicAcids)) {
           entities.add('protein');
         }
-        if (parsed.diagnostics.hasLigands) entities.add('ligand');
-        if (parsed.diagnostics.hasNucleicAcids) entities.add('dna');
+        if (summary.diagnostics.hasLigands) entities.add('ligand');
+        if (summary.diagnostics.hasNucleicAcids) entities.add('dna');
         if (bench) {
           for (const e of bench.entities) entities.add(e);
         }
         const totalChains = Math.max(
           1,
-          parsed.diagnostics.chainCount +
-            (parsed.diagnostics.hasNucleicAcids ? parsed.diagnostics.nucleicAcidChains.length : 0),
+          summary.diagnostics.chainCount +
+            (summary.diagnostics.hasNucleicAcids ? summary.diagnostics.nucleicAcidChains.length : 0),
         );
         profile = {
           entities,
           stoichiometry: totalChains > 1 ? 'multimer' : 'monomer',
           chainCount: totalChains,
-          estimatedTokens: parsed.nResidues > 0 ? parsed.nResidues : (bench?.approxTokens ?? 80),
+          estimatedTokens: summary.nResidues > 0 ? summary.nResidues : (bench?.approxTokens ?? 80),
+          missingBackboneCount: summary.missingBackboneCount,
+          isCaOnly: summary.isCaOnly,
         };
       } catch {
         profile.estimatedTokens = bench?.approxTokens ?? 80;
@@ -328,18 +428,9 @@ function inferNodeOutputProfile(
       estimatedTokens: maxLen,
       looksLikeDnaSequence: dnaFlag,
     };
-  } else if (node.adapterId === 'rfd4-conditioner') {
-    profile = inferConditionProfile(node);
-    const tpl = upstreamProfileForPort('template');
-    if (tpl) {
-      for (const e of tpl.entities) profile.entities.add(e);
-      profile.chainCount = Math.max(profile.chainCount, tpl.chainCount);
-      profile.stoichiometry = profile.chainCount > 1 ? 'multimer' : 'monomer';
-    }
   } else if (node.adapterId === 'rfd4-proteina') {
     const mode = String(node.params.mode ?? 'unconditional');
-    const cond = upstreamProfileForPort('condition');
-    const tpl = upstreamProfileForPort('structure') ?? upstreamProfileForPort('template');
+    const tpl = upstreamProfileForPort('structure');
     const entities = new Set<BioEntityKind>(['protein']);
     let chainCount = 1;
     let estimatedTokens = Number(node.params.length ?? 70);
@@ -364,11 +455,6 @@ function inferNodeOutputProfile(
       chainCount = Math.max(chainCount, 2);
       estimatedTokens = Math.max(estimatedTokens, (tpl?.estimatedTokens ?? 100) + Number(node.params.length ?? 70));
     }
-    if (cond) {
-      for (const e of cond.entities) entities.add(e);
-      chainCount = Math.max(chainCount, cond.chainCount);
-      estimatedTokens = Math.max(estimatedTokens, cond.estimatedTokens);
-    }
     if (tpl && (mode === 'partial' || mode === 'inverse-folding' || mode === 'motif' || mode === 'binder' || mode === 'conditioned')) {
       for (const e of tpl.entities) entities.add(e);
       chainCount = Math.max(chainCount, tpl.chainCount);
@@ -388,11 +474,8 @@ function inferNodeOutputProfile(
       estimatedTokens,
     };
   } else if (node.adapterId === 'genie3') {
-    const cond = upstreamProfileForPort('condition');
-    const tpl = upstreamProfileForPort('structure') ?? upstreamProfileForPort('template');
-    const tplEdge = graph.edges.find(
-      (e) => e.toNode === node.id && (e.toPort === 'structure' || e.toPort === 'template'),
-    );
+    const tpl = upstreamProfileForPort('structure');
+    const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
     const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
     const tplBenchId =
       tplNode?.adapterId === 'pdb-input' ? String(tplNode.params.benchmarkId ?? '').trim() : '';
@@ -404,20 +487,22 @@ function inferNodeOutputProfile(
       taskMode === 'binder' ||
       Boolean(inlineLock) ||
       inlineContig.includes('/0') ||
-      (Boolean(tpl) && !cond && taskMode !== 'motif' && tplBench?.category !== 'motif');
-    const chainCount = Math.max(1, cond?.chainCount ?? 1, isBinderTask ? 2 : 1);
+      (Boolean(tpl) && taskMode !== 'motif' && tplBench?.category !== 'motif');
+    const chainCount = Math.max(1, isBinderTask ? 2 : 1);
     const binderLen = Number(node.params.length ?? 80);
-    const estimatedTokens =
-      tpl && !cond
-        ? tplBench
-          ? tplBench.approxTokens
-          : binderLen + tpl.estimatedTokens
-        : Math.max(binderLen, cond?.estimatedTokens ?? 0, tpl?.estimatedTokens ?? 0);
+    const estimatedTokens = tpl
+      ? tplBench
+        ? tplBench.approxTokens
+        : binderLen + tpl.estimatedTokens
+      : binderLen;
     profile = {
       entities: new Set<BioEntityKind>(['protein']),
       stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
       chainCount,
       estimatedTokens,
+      isCaOnly: true,
+      missingBackboneCount: estimatedTokens,
+      fromGenie3: true,
     };
   } else if (node.adapterId === 'web-protein-mpnn') {
     const st = upstreamProfileForPort('structure');
@@ -478,14 +563,31 @@ export function validateBioCapabilities(
     }
 
     if (node.adapterId === 'genie3') {
-      const condEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'condition');
-      const condNode = condEdge ? graph.nodes.find((n) => n.id === condEdge.fromNode) : null;
-      const tplEdge = graph.edges.find(
-        (e) => e.toNode === node.id && (e.toPort === 'structure' || e.toPort === 'template'),
-      );
+      const taskMode = String(node.params.taskMode ?? 'unconditional');
+      const inlineLock = String(node.params.lockChain ?? '').trim();
+      const inlineMotif = String(node.params.motifSpan ?? '').trim();
+      const inlineContig = String(node.params.contig ?? '').trim();
+      const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
       const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
 
-      if (!condNode && tplNode) {
+      if ((taskMode === 'motif' || taskMode === 'binder' || Boolean(inlineLock) || Boolean(inlineMotif)) && !tplNode) {
+        issues.push({
+          severity: 'error',
+          code: 'genie3-missing-template',
+          nodeId: node.id,
+          message: `${node.label ?? 'Genie 3'} (${taskMode} mode) requires a wired input structure (e.g. from PDB Input) on its "structure" port.`,
+        });
+      }
+      if (taskMode === 'motif' && !inlineMotif && !inlineContig) {
+        issues.push({
+          severity: 'error',
+          code: 'genie3-empty-motif',
+          nodeId: node.id,
+          message: `${node.label ?? 'Genie 3'} is set to motif mode, but both motifSpan and contig are empty. Specify a motif span (e.g. A16-35) or contig.`,
+        });
+      }
+
+      if (tplNode) {
         const benchId =
           tplNode.adapterId === 'pdb-input' ? String(tplNode.params.benchmarkId ?? '').trim() : '';
         const bench = benchId ? getBenchmarkById(benchId) : undefined;
@@ -507,38 +609,23 @@ export function validateBioCapabilities(
           });
         }
       }
-
-      if (condNode && condNode.adapterId === 'rfd4-conditioner') {
-        const tp = String(condNode.params.taskPreset ?? 'custom');
-        const hbond = String(condNode.params.hbondMode ?? 'none');
-        const cath = String(condNode.params.cathCode ?? '').trim();
-        const unidx = Boolean(condNode.params.unindexedMotif);
-        const upCond = inferNodeOutputProfile(condNode, graph, cache, visiting, outputsByNode);
-        const reasons: string[] = [];
-        if (tp !== 'custom') reasons.push(`RFD4 preset "${tp}"`);
-        if (upCond.entities.has('ligand') || upCond.entities.has('dna')) reasons.push('ligand/DNA targets');
-        if (hbond !== 'none') reasons.push('H-bond atom constraints');
-        if (cath) reasons.push(`CATH fold "${cath}"`);
-        if (unidx) reasons.push('unindexed motif placement');
-        if (reasons.length > 0) {
-          issues.push({
-            severity: 'warning',
-            code: 'genie3-unsupported-condition',
-            nodeId: node.id,
-            message: `${node.label ?? 'Genie 3'} supports protein motif scaffolding and PPI binder design, not ${reasons.join(', ')}. Use RFD4-Proteina for those constraints.`,
-          });
-        }
-      }
     }
 
     if (node.adapterId === 'rfd4-proteina') {
       const mode = String(node.params.mode ?? 'unconditional');
-      const hasTpl = graph.edges.some(
-        (e) => e.toNode === node.id && (e.toPort === 'structure' || e.toPort === 'template'),
-      );
-      const hasCond = graph.edges.some((e) => e.toNode === node.id && e.toPort === 'condition');
+      const hasTpl = graph.edges.some((e) => e.toNode === node.id && e.toPort === 'structure');
       const hasYaml = String(node.params.customSpecYaml ?? '').trim().length > 0;
-      if (hasTpl && !hasCond && mode === 'unconditional' && !hasYaml) {
+      if (
+        (mode === 'motif' || mode === 'binder' || mode === 'partial' || mode === 'inverse-folding') &&
+        !hasTpl
+      ) {
+        issues.push({
+          severity: 'error',
+          code: 'rfd4-missing-template',
+          nodeId: node.id,
+          message: `${node.label ?? 'RFD4-Proteina'} (${mode} mode) requires a wired input structure (e.g. from PDB Input) on its "structure" port.`,
+        });
+      } else if (hasTpl && mode === 'unconditional' && !hasYaml) {
         issues.push({
           severity: 'warning',
           code: 'rfd4-unused-template',
@@ -570,6 +657,27 @@ export function validateBioCapabilities(
       const src = edge ? graph.nodes.find((n) => n.id === edge.fromNode) : null;
       if (src) {
         const up = inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
+        const family = String(node.params.family ?? 'solublempnn');
+        if (family !== 'ca' && (up.isCaOnly || (up.missingBackboneCount ?? 0) > 0)) {
+          const mpnnName = node.label ?? 'ProteinMPNN';
+          const msg = up.fromGenie3
+            ? `Genie 3 outputs Cα-only coordinates (no N/C/O backbone atoms), which ${mpnnName} requires. Switch to Cα-ProteinMPNN for faithful sequence design.`
+            : up.isCaOnly
+              ? `Upstream structure is Cα-only (missing N/C/O backbone atoms), which ${mpnnName} requires. Switch to Cα-ProteinMPNN.`
+              : `Upstream structure has ${up.missingBackboneCount} residue(s) missing N/C backbone atoms — ${mpnnName} requires complete backbone atoms. Switch to Cα-ProteinMPNN.`;
+          issues.push({
+            severity: 'warning',
+            code: 'mpnn-ca-only-backbone',
+            nodeId: node.id,
+            message: msg,
+            fix: {
+              label: 'Switch to Cα-ProteinMPNN',
+              nodeId: node.id,
+              paramsPatch: { family: 'ca', modelName: 'v_48_020' },
+              nodeLabel: 'Cα-ProteinMPNN',
+            },
+          });
+        }
         if (up.entities.has('ligand') || up.entities.has('dna')) {
           const nonProt = [...up.entities].filter((e) => e !== 'protein').join('/');
           issues.push({
@@ -590,6 +698,9 @@ export function validateBioCapabilities(
       const modelId = String(node.params.model ?? 'monomer');
       const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
       const nodeName = node.label ?? 'LocalFold';
+      const modelDisplay = nodeName.toLowerCase().includes(meta.shortLabel.toLowerCase())
+        ? nodeName
+        : `${nodeName} (${meta.shortLabel})`;
       const hasExplicitAf3NonProt =
         meta.family === 'af3' &&
         (String(node.params.ligandCcdCodes ?? '').trim().length > 0 ||
@@ -607,7 +718,7 @@ export function validateBioCapabilities(
             severity: 'warning',
             code: 'af2-non-protein-entity',
             nodeId: node.id,
-            message: `${nodeName} (${meta.shortLabel}) is protein-only, while upstream involves ${nonProt.toUpperCase()}. Switch to RoseTTAFold3 or Boltz-2 (note: current browser refolding folds the protein chain apo unless ligand/DNA context is configured).`,
+            message: `${modelDisplay} is protein-only, while upstream involves ${nonProt.toUpperCase()}. Switch to RoseTTAFold3 or Boltz-2 (note: current browser refolding folds the protein chain apo unless ligand/DNA context is configured).`,
             fix: {
               label: 'Switch to RoseTTAFold3',
               nodeId: node.id,
@@ -620,15 +731,18 @@ export function validateBioCapabilities(
             severity: 'warning',
             code: 'af3-apo-refold-note',
             nodeId: node.id,
-            message: `${nodeName} (${meta.shortLabel}) currently receives protein sequences only — upstream ${nonProt.toUpperCase()} coordinates were not forwarded into structure prediction (apo protein refold).`,
+            message: `${modelDisplay} currently receives protein sequences only — upstream ${nonProt.toUpperCase()} coordinates were not forwarded into structure prediction (apo protein refold).`,
           });
         }
       } else if (up.stoichiometry === 'multimer' && meta.family === 'af2') {
+        const monoDesc = nodeName.toLowerCase().includes(meta.shortLabel.toLowerCase())
+          ? `${nodeName} (monomer)`
+          : `${nodeName} is set to ${meta.shortLabel} (monomer)`;
         issues.push({
           severity: 'warning',
           code: 'multimer-into-af2-monomer',
           nodeId: node.id,
-          message: `Upstream produces a ${up.chainCount}-chain complex, but ${nodeName} is set to ${meta.shortLabel} (monomer). Switch to AlphaFold2-Multimer v3 or Boltz-2 for proper complex folding & ipTM.`,
+          message: `Upstream produces a ${up.chainCount}-chain complex, but ${monoDesc}. Switch to AlphaFold2-Multimer v3 or Boltz-2 for proper complex folding & ipTM.`,
           fix: {
             label: 'Switch to AF2-Multimer v3',
             nodeId: node.id,
@@ -706,15 +820,22 @@ export function validateRuntimeNodeInputs(
     }
   }
 
-  if (node.adapterId === 'genie3') {
-    const cond = inputs.condition as ConditionSpecArtifact | undefined;
-    if (cond) {
-      const compat = checkGenie3ConditionCompatibility(cond);
-      if (!compat.supported) {
-        throw new Error(compat.reason ?? 'Conditioning spec is not supported by Genie 3.');
-      }
+  if (node.adapterId === 'rfd4-proteina') {
+    const mode = String(node.params.mode ?? 'unconditional');
+    const tpl = inputs.structure as StructureArtifact | undefined;
+    if (
+      (mode === 'motif' || mode === 'binder' || mode === 'partial' || mode === 'inverse-folding') &&
+      !tpl?.cifText &&
+      !tpl?.pdbText
+    ) {
+      throw new Error(
+        `RFD4-Proteina (${mode} mode) requires a wired structure input (e.g. from PDB Input).`,
+      );
     }
-    const tpl = (inputs.structure ?? inputs.template) as StructureArtifact | undefined;
+  }
+
+  if (node.adapterId === 'genie3') {
+    const tpl = inputs.structure as StructureArtifact | undefined;
     if (tpl) {
       if (tpl.benchmarkId) {
         const bench = getBenchmarkById(tpl.benchmarkId);
@@ -734,6 +855,24 @@ export function validateRuntimeNodeInputs(
         );
       }
     }
+    const taskMode = String(node.params.taskMode ?? 'unconditional');
+    const inlineLock = String(node.params.lockChain ?? '').trim();
+    const inlineMotif = String(node.params.motifSpan ?? '').trim();
+    const inlineContig = String(node.params.contig ?? '').trim();
+    if (taskMode === 'motif' && !inlineMotif && !inlineContig) {
+      throw new Error(
+        'Genie 3 motif mode requires a motifSpan (e.g. A16-35) or contig specifying motif residues.',
+      );
+    }
+    if (
+      (taskMode === 'motif' || taskMode === 'binder' || Boolean(inlineLock) || Boolean(inlineMotif)) &&
+      !tpl?.cifText &&
+      !tpl?.pdbText
+    ) {
+      throw new Error(
+        `Genie 3 (${taskMode} mode) requires a wired structure input (e.g. from PDB Input).`,
+      );
+    }
   }
 
   if (node.adapterId === 'web-protein-mpnn') {
@@ -745,6 +884,17 @@ export function validateRuntimeNodeInputs(
       throw new Error(
         `ProteinMPNN requires at least 3 protein residues (received ${struct.length}). Upstream non-protein ligand/DNA-only structures cannot be inverse-folded directly.`,
       );
+    }
+    const family = String(node.params.family ?? 'solublempnn');
+    if (family !== 'ca') {
+      const cov = inspectArtifactBackboneCoverage(struct);
+      if (cov.isCaOnly || cov.missingBackboneCount > 0) {
+        warnings.push(
+          cov.isCaOnly
+            ? `Upstream structure is Cα-only; switch ProteinMPNN to Cα-ProteinMPNN (family: "ca") for faithful sequence design.`
+            : `Upstream structure has ${cov.missingBackboneCount} residue(s) missing N/C backbone atoms; consider switching to Cα-ProteinMPNN.`,
+        );
+      }
     }
     if (struct.diagnostics?.hasLigands || struct.diagnostics?.hasNucleicAcids) {
       const extras = [

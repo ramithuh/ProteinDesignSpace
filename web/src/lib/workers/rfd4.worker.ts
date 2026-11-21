@@ -45,6 +45,21 @@ function computeChainLengths(chainIds: readonly string[]): number[] {
   return lengths;
 }
 
+function collectOwnedTransferables(views: Array<ArrayBufferView | undefined>): Transferable[] {
+  const seen = new Set<ArrayBuffer>();
+  const out: Transferable[] = [];
+  for (const v of views) {
+    if (!v) continue;
+    const buf = v.buffer;
+    if (!(buf instanceof ArrayBuffer)) continue;
+    if (v.byteOffset !== 0 || v.byteLength !== buf.byteLength) continue;
+    if (seen.has(buf)) continue;
+    seen.add(buf);
+    out.push(buf);
+  }
+  return out;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let rfd4Mod: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -293,6 +308,19 @@ self.onmessage = async (ev: MessageEvent) => {
         mode !== 'inverse-folding'
       ) {
         throw new Error(`Unknown RFD4 mode "${mode}"`);
+      }
+
+      // Fail fast BEFORE downloading 330–468 MB weights if a required template structure is missing
+      const hasTemplateStructure = Boolean(
+        template?.cifText || template?.pdbText || condArtifact?.inputCif || condArtifact?.cifUrl,
+      );
+      if (
+        (mode === 'motif' || mode === 'binder' || mode === 'partial' || mode === 'inverse-folding') &&
+        !hasTemplateStructure
+      ) {
+        throw new Error(
+          `RFD4 "${mode}" mode requires a wired structure input (e.g. from PDB Input).`,
+        );
       }
 
       const activePresetId =
@@ -593,12 +621,24 @@ self.onmessage = async (ev: MessageEvent) => {
       if (pushedScope) {
         scopeDevice!.pushErrorScope('validation');
       }
+      const releaseGeneratorActivations = () => {
+        try {
+          generator?.releaseActivations?.();
+          generator?.trunk?.engine?.releaseActivations?.();
+          generator?.decoder?.engine?.releaseActivations?.();
+          generator?.encoder?.engine?.releaseActivations?.();
+        } catch {
+          /* ignore */
+        }
+      };
+
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let res: any;
       let gpuValErr: GPUError | null = null;
       try {
         res = await generator.generate(built.batch, genOpts);
       } finally {
+        releaseGeneratorActivations();
         if (pushedScope && typeof scopeDevice?.popErrorScope === 'function') {
           gpuValErr = await scopeDevice.popErrorScope().catch(() => null);
         }
@@ -692,6 +732,8 @@ self.onmessage = async (ev: MessageEvent) => {
           }
         } catch (recErr) {
           console.warn('[rfd4] Decoder-head sequence recovery failed:', recErr);
+        } finally {
+          releaseGeneratorActivations();
         }
       }
 
@@ -720,7 +762,12 @@ self.onmessage = async (ev: MessageEvent) => {
         );
       }
 
-      const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
+      const geometry = computeGeometryStats(
+        parsed.caCoords,
+        parsed.chainIds,
+        parsed.resNums,
+        parsed.insCodes,
+      );
       const chainLengths = computeChainLengths(parsed.chainIds);
       const candChainLengths =
         chainLengths.length > 0 && chainLengths.reduce((a, b) => a + b, 0) === finalSeq.length
@@ -766,6 +813,11 @@ self.onmessage = async (ev: MessageEvent) => {
         cifText,
         chainIds: parsed.chainIds,
         chainLengths: parsed.diagnostics.chainLengths,
+        insCodes: parsed.insCodes,
+        sourceResidues: parsed.sourceResidues,
+        chainIdMap: parsed.chainIdMap,
+        atomPresence: parsed.atomPresence,
+        observedBackboneMask: parsed.observedBackboneMask,
         diagnostics: parsed.diagnostics,
         ...designMeta,
         geometry,
@@ -789,12 +841,20 @@ self.onmessage = async (ev: MessageEvent) => {
         ],
       };
 
-      self.postMessage({
-        id: msg.id,
-        type: 'result',
-        outputs: { structure: structArtifact, sequences: seqSet },
-        elapsedMs: performance.now() - t0,
-      });
+      const transferables = collectOwnedTransferables([
+        structArtifact.caCoords,
+        structArtifact.backbone4Coords,
+        structArtifact.observedBackboneMask,
+      ]);
+      self.postMessage(
+        {
+          id: msg.id,
+          type: 'result',
+          outputs: { structure: structArtifact, sequences: seqSet },
+          elapsedMs: performance.now() - t0,
+        },
+        transferables,
+      );
     }
   } catch (err) {
     self.postMessage({

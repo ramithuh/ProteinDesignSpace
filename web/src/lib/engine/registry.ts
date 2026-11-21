@@ -35,24 +35,6 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       sequences: { type: 'SequenceSet' },
     },
   },
-  'rfd4-conditioner': {
-    id: 'rfd4-conditioner',
-    displayName: 'Design Conditioning (Hotspots / Motif / Fold)',
-    shortName: 'Conditioning',
-    stage: 'condition',
-    runtime: 'cpu-ts',
-    estimatedVramMB: 0,
-    approxWeightsMB: 0,
-    licenseNote: 'Model-agnostic constraint builder (RFD4-Proteina & Genie 3)',
-    description:
-      'Define target binding hotspots, fixed structural motifs (indexed or unindexed), hydrogen-bond contacts, CATH fold topology, or curated benchmark tasks for RFD4-Proteina and Genie 3.',
-    inputs: {
-      template: { type: 'StructureArtifact', required: false },
-    },
-    outputs: {
-      condition: { type: 'ConditionSpec' },
-    },
-  },
   'rfd4-proteina': {
     id: 'rfd4-proteina',
     displayName: 'RFD4-Proteina',
@@ -82,7 +64,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 45,
     licenseNote: 'Apache-2.0 (aqlaboratory/genie3 · WebGPU port ramithuh/genie3-webgpu)',
     description:
-      'Fast de novo protein backbone diffusion (AlQuraishi Lab · 23.3M parameters). Supports unconditional generation, motif scaffolding, and PPI binder design with ideal N/Cα/C/O backbones and optional single-step sequence prediction.',
+      'Fast de novo protein Cα backbone diffusion (AlQuraishi Lab · 23.3M parameters). Supports unconditional generation, motif scaffolding, and PPI binder design with Cα backbones and optional single-step sequence prediction.',
     inputs: {
       structure: { type: 'StructureArtifact', required: false },
     },
@@ -297,13 +279,13 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
   },
   {
     id: 'genie3-mpnn-af2',
-    name: 'Genie 3 → ProteinMPNN → LocalFold',
+    name: 'Genie 3 → Cα-ProteinMPNN → LocalFold',
     badge: 'Fast Backbone Diffusion',
     summary:
-      'Generate a de novo protein backbone with Genie 3 (23.3M parameters), design sequences with SolubleMPNN, fold with LocalFold, and score scRMSD and scTM.',
+      'Generate a de novo Cα protein backbone with Genie 3 (23.3M parameters), design sequences with Cα-ProteinMPNN, fold with LocalFold, and score scRMSD and scTM.',
     graph: {
       id: 'genie3-mpnn-af2',
-      name: 'Genie 3 → ProteinMPNN → LocalFold',
+      name: 'Genie 3 → Cα-ProteinMPNN → LocalFold',
       nodes: [
         {
           id: 'gen',
@@ -321,8 +303,8 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'mpnn',
           adapterId: 'web-protein-mpnn',
-          label: 'SolubleMPNN',
-          params: { family: 'solublempnn', modelName: 'v_48_020', numSequences: 2, temperature: 0.1, seed: 42 },
+          label: 'Cα-ProteinMPNN',
+          params: { family: 'ca', modelName: 'v_48_020', numSequences: 2, temperature: 0.1, seed: 42 },
         },
         {
           id: 'fold',

@@ -46,6 +46,8 @@ export function clearRcsbCache(): void {
   pending.clear();
 }
 
+const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
+
 /**
  * Fetch an mmCIF (preferred) or PDB structure from RCSB PDB with automatic fallback
  * to RCSB `.pdb` and PDBe `_updated.cif`.
@@ -53,6 +55,7 @@ export function clearRcsbCache(): void {
 export async function fetchStructureByPdbId(
   rawId: string,
   fetchImpl: typeof fetch = fetch,
+  timeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
 ): Promise<FetchedPdbStructure> {
   const pdbId = normalizePdbId(rawId);
   if (!isValidPdbId(pdbId)) {
@@ -65,7 +68,7 @@ export async function fetchStructureByPdbId(
   const inFlight = pending.get(pdbId);
   if (inFlight) return inFlight;
 
-  const request = fetchStructure(pdbId, fetchImpl);
+  const request = fetchStructure(pdbId, fetchImpl, timeoutMs);
   pending.set(pdbId, request);
   try {
     const result = await request;
@@ -77,7 +80,11 @@ export async function fetchStructureByPdbId(
   }
 }
 
-async function fetchStructure(pdbId: string, fetchImpl: typeof fetch): Promise<FetchedPdbStructure> {
+async function fetchStructure(
+  pdbId: string,
+  fetchImpl: typeof fetch,
+  timeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
+): Promise<FetchedPdbStructure> {
   const candidates: Array<{ url: string; format: 'mmcif' | 'pdb'; filename: string }> = [
     {
       url: `https://files.rcsb.org/download/${encodeURIComponent(pdbId)}.cif`,
@@ -96,10 +103,26 @@ async function fetchStructure(pdbId: string, fetchImpl: typeof fetch): Promise<F
     },
   ];
 
+  const effectiveTimeoutMs =
+    typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : DEFAULT_FETCH_TIMEOUT_MS;
+
   let lastStatus = '';
   for (const cand of candidates) {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    let timedOut = false;
+    const timer = controller
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, effectiveTimeoutMs)
+      : null;
     try {
-      const resp = await fetchImpl(cand.url, { mode: 'cors' });
+      const resp = await fetchImpl(cand.url, {
+        mode: 'cors',
+        ...(controller ? { signal: controller.signal } : {}),
+      });
       if (!resp.ok) {
         lastStatus = `HTTP ${resp.status}`;
         continue;
@@ -130,7 +153,13 @@ async function fetchStructure(pdbId: string, fetchImpl: typeof fetch): Promise<F
         nucleicAcidChains: parsed.diagnostics.nucleicAcidChains,
       };
     } catch (err) {
-      lastStatus = err instanceof Error ? err.message : String(err);
+      lastStatus = timedOut
+        ? `timed out after ${(effectiveTimeoutMs / 1000).toFixed(0)}s`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
     }
   }
 

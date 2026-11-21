@@ -27,6 +27,21 @@ function fnv1a(str: string): string {
   return (h >>> 0).toString(16).padStart(8, '0');
 }
 
+function collectOwnedTransferables(views: Array<ArrayBufferView | undefined>): Transferable[] {
+  const seen = new Set<ArrayBuffer>();
+  const out: Transferable[] = [];
+  for (const v of views) {
+    if (!v) continue;
+    const buf = v.buffer;
+    if (!(buf instanceof ArrayBuffer)) continue;
+    if (v.byteOffset !== 0 || v.byteLength !== buf.byteLength) continue;
+    if (seen.has(buf)) continue;
+    seen.add(buf);
+    out.push(buf);
+  }
+  return out;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let genie3Mod: any = null;
 let gpuDevice: GPUDevice | null = null;
@@ -63,37 +78,37 @@ async function ensureLoaded(id: number) {
     });
   }
 
-  if (!weightBundle) {
-    self.postMessage({
-      id,
-      type: 'progress',
-      phase: 'weights',
-      progress: 0.05,
-      detail: 'Fetching Genie 3 weights (~45 MB, cached after first run)...',
-    });
-    const envWeightsUrl = (import.meta.env.VITE_GENIE3_WEIGHTS_URL as string | undefined)?.trim();
-    const weightsUrl =
-      envWeightsUrl || 'https://huggingface.co/ramithuh/genie3-webgpu/resolve/main/fp16';
-    weightBundle = await genie3Mod.fetchGenie3Weights(weightsUrl, {
-      cache: true,
-      onProgress: (p: { loaded?: number; total?: number; shardIndex?: number; totalShards?: number; shard?: string }) => {
-        const loaded = p.loaded ?? 0;
-        const total = p.total ?? 45 * 1024 * 1024;
-        const frac = total > 0 ? loaded / total : 0.2;
-        const mb = (loaded / 1024 / 1024).toFixed(1);
-        const totMb = (total / 1024 / 1024).toFixed(1);
-        self.postMessage({
-          id,
-          type: 'progress',
-          phase: 'weights',
-          progress: Math.min(0.92, frac),
-          detail: `Genie 3 weights: ${mb} / ${totMb} MB`,
-        });
-      },
-    });
-  }
-
   if (!generator) {
+    if (!weightBundle) {
+      self.postMessage({
+        id,
+        type: 'progress',
+        phase: 'weights',
+        progress: 0.05,
+        detail: 'Fetching Genie 3 weights (~45 MB, cached after first run)...',
+      });
+      const envWeightsUrl = (import.meta.env.VITE_GENIE3_WEIGHTS_URL as string | undefined)?.trim();
+      const weightsUrl =
+        envWeightsUrl || 'https://huggingface.co/ramithuh/genie3-webgpu/resolve/main/fp16';
+      weightBundle = await genie3Mod.fetchGenie3Weights(weightsUrl, {
+        cache: true,
+        onProgress: (p: { loaded?: number; total?: number; shardIndex?: number; totalShards?: number; shard?: string }) => {
+          const loaded = p.loaded ?? 0;
+          const total = p.total ?? 45 * 1024 * 1024;
+          const frac = total > 0 ? loaded / total : 0.2;
+          const mb = (loaded / 1024 / 1024).toFixed(1);
+          const totMb = (total / 1024 / 1024).toFixed(1);
+          self.postMessage({
+            id,
+            type: 'progress',
+            phase: 'weights',
+            progress: Math.min(0.92, frac),
+            detail: `Genie 3 weights: ${mb} / ${totMb} MB`,
+          });
+        },
+      });
+    }
+
     self.postMessage({
       id,
       type: 'progress',
@@ -107,6 +122,8 @@ async function ensureLoaded(id: number) {
       weightBundle.config ?? null,
       { half: true },
     );
+    // Drop CPU-side weight buffers immediately after GPU upload to reclaim ~45–90 MB JS heap
+    weightBundle = null;
   }
 }
 
@@ -132,7 +149,7 @@ self.onmessage = async (ev: MessageEvent) => {
       const p = msg.params ?? {};
       const length = Math.max(30, Math.min(256, Math.round(Number(p.length ?? 80))));
       const nSampleStep = Math.max(10, Math.min(250, Math.round(Number(p.nSampleStep ?? 100))));
-      const directionScale = Math.max(0.1, Math.min(1.5, Number(p.directionScale ?? 0.8)));
+      const directionScale = Math.max(0.0, Math.min(1.5, Number(p.directionScale ?? 0.8)));
       const noiseScale = Math.max(0, Math.min(1.5, Number(p.noiseScale ?? 1.0)));
       const predictSequence = p.predictSequence !== false;
       const seed = Math.max(0, Math.round(Number(p.seed ?? 42)));
@@ -143,6 +160,23 @@ self.onmessage = async (ev: MessageEvent) => {
       const inlineLock = String(p.lockChain ?? '').trim().toUpperCase();
       const inlineHotspots = String(p.hotspots ?? '').trim();
       const inlineMotif = String(p.motifSpan ?? '').trim();
+
+      // Fail fast BEFORE downloading 45 MB weights if required motif/binder inputs are missing
+      if (!condArtifact && taskMode === 'motif' && !inlineMotif && !inlineContig) {
+        throw new Error(
+          'Genie 3 motif mode requires a motifSpan (e.g. A16-35) or contig specifying motif residues.',
+        );
+      }
+      if (
+        (taskMode === 'motif' || taskMode === 'binder' || Boolean(inlineLock) || Boolean(inlineMotif)) &&
+        !template?.cifText &&
+        !template?.pdbText &&
+        !condArtifact?.inputCif
+      ) {
+        throw new Error(
+          `Genie 3 "${taskMode}" mode requires a wired structure input (e.g. from PDB Input).`,
+        );
+      }
 
       // Guard against non-protein/enzyme/DNA templates across ALL Genie 3 modes (including inline motif/binder)
       if (template && (taskMode !== 'unconditional' || !condArtifact)) {
@@ -233,6 +267,8 @@ self.onmessage = async (ev: MessageEvent) => {
         predictSequence,
         sequenceTemperature: 0.1,
         seed,
+        // Emit honest Cα-only PDB/mmCIF (Genie 3 diffuses Cα coordinates only; never fabricate N/C/O)
+        caOnly: true,
         yieldBetweenSteps: true,
         onStep: (info: { stepIndex: number; totalSteps: number; timestep: number }) => {
           self.postMessage({
@@ -252,7 +288,7 @@ self.onmessage = async (ev: MessageEvent) => {
       if (!predictSequence) {
         // Upstream generate.js falls back to unmasked ddimRes.seqLogits when predictSequence=false,
         // corrupting locked target/motif residues. Emit 'A' for unconditioned residues and preserve
-        // gtRestype wherever condSeqMask > 0.5, then re-serialize PDB/mmCIF cleanly.
+        // gtRestype wherever condSeqMask > 0.5, then re-serialize honest Cα-only PDB/mmCIF cleanly.
         const outLen = Number(res.length ?? compiledSpec?.length ?? length);
         finalSeq = resolveGenie3PolyAlaSequence(outLen, compiledSpec);
         if (res.backbone4 && typeof genie3Mod.backboneToPdb === 'function') {
@@ -261,6 +297,7 @@ self.onmessage = async (ev: MessageEvent) => {
             chainId: 'A',
             chainIds: (batch as { asym_id?: ArrayLike<number> } | undefined)?.asym_id ?? null,
             residueIndices: (batch as { residue_index?: ArrayLike<number> } | undefined)?.residue_index ?? null,
+            caOnly: true,
           };
           pdbText = genie3Mod.backboneToPdb(res.backbone4, outLen, serializeOpts);
           if (typeof genie3Mod.backboneToMmcif === 'function') {
@@ -279,7 +316,12 @@ self.onmessage = async (ev: MessageEvent) => {
       }
 
       const parsed = parsePdbBackbone(pdbText);
-      const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
+      const geometry = computeGeometryStats(
+        parsed.caCoords,
+        parsed.chainIds,
+        parsed.resNums,
+        parsed.insCodes,
+      );
       const candChainLengths =
         expectedChainLengths && expectedChainLengths.length > 1 &&
         expectedChainLengths.reduce((a, b) => a + b, 0) === finalSeq.length
@@ -359,6 +401,11 @@ self.onmessage = async (ev: MessageEvent) => {
         cifText,
         chainIds: parsed.chainIds,
         chainLengths: candChainLengths ?? parsed.diagnostics.chainLengths,
+        insCodes: parsed.insCodes,
+        sourceResidues: parsed.sourceResidues,
+        chainIdMap: parsed.chainIdMap,
+        atomPresence: parsed.atomPresence,
+        observedBackboneMask: parsed.observedBackboneMask,
         diagnostics: parsed.diagnostics,
         ...(lockedChains ? { lockedChains } : {}),
         ...(fixedResidueIndices ? { fixedResidueIndices } : {}),
@@ -385,12 +432,20 @@ self.onmessage = async (ev: MessageEvent) => {
         ],
       };
 
-      self.postMessage({
-        id: msg.id,
-        type: 'result',
-        outputs: { structure: structArtifact, sequences: seqSet },
-        elapsedMs: performance.now() - t0,
-      });
+      const transferables = collectOwnedTransferables([
+        structArtifact.caCoords,
+        structArtifact.backbone4Coords,
+        structArtifact.observedBackboneMask,
+      ]);
+      self.postMessage(
+        {
+          id: msg.id,
+          type: 'result',
+          outputs: { structure: structArtifact, sequences: seqSet },
+          elapsedMs: performance.now() - t0,
+        },
+        transferables,
+      );
     }
   } catch (err) {
     self.postMessage({

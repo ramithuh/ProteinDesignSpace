@@ -766,7 +766,7 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
           const inner = resPart.startsWith('[') && resPart.endsWith(']') ? resPart.slice(1, -1) : resPart;
           const remappedNums: string[] = [];
           for (const item of inner.split(',').map((s) => s.trim()).filter(Boolean)) {
-            const m = /^(\d+)([A-Za-z])?(?:-(\d+)([A-Za-z])?)?$/.exec(item);
+            const m = /^(-?\d+)([A-Za-z])?(?:-(-?\d+)([A-Za-z])?)?$/.exec(item);
             if (!m) {
               remappedNums.push(item);
               continue;
@@ -850,8 +850,8 @@ function contigHasPreservedResidues(contig: string): boolean {
     .map((s) => s.trim())
     .some(
       (tok) =>
-        /^[A-Za-z]+\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?$/.test(tok) ||
-        (/^[A-Za-z0-9_]+:\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?$/.test(tok) &&
+        /^[A-Za-z]+-?\d+[A-Za-z]?(?:--?\d+[A-Za-z]?)?$/.test(tok) ||
+        (/^[A-Za-z0-9_]+:-?\d+[A-Za-z]?(?:--?\d+[A-Za-z]?)?$/.test(tok) &&
           !/^[A-Za-z0-9_]+:\d+-\d+[PRDN]$/i.test(tok)),
     );
 }
@@ -860,7 +860,7 @@ function preservedChainsInContig(contig: string): Set<string> {
   const chains = new Set<string>();
   for (const raw of contig.split(',')) {
     const t = raw.trim();
-    const m = /^([A-Za-z]+)\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?$/.exec(t);
+    const m = /^([A-Za-z]+)-?\d+[A-Za-z]?(?:--?\d+[A-Za-z]?)?$/.exec(t);
     if (m) chains.add(m[1].toUpperCase());
   }
   return chains;
@@ -915,7 +915,7 @@ export function parseResidueRangeTokens(raw: string): ResidueRangeToken[] {
     const colonMatch =
       /^([A-Za-z0-9_]+):(-?\d+)([A-Za-z])?(?:-(-?\d+)([A-Za-z])?)?$/.exec(trimmed);
     const bareMatch = !colonMatch
-      ? /^([A-Za-z]+)?(\d+)([A-Za-z])?(?:-(\d+)([A-Za-z])?)?$/.exec(trimmed)
+      ? /^([A-Za-z]+)?(-?\d+)([A-Za-z])?(?:-(-?\d+)([A-Za-z])?)?$/.exec(trimmed)
       : null;
     const m = colonMatch ?? bareMatch;
     if (!m) continue;

@@ -167,6 +167,37 @@ function padR(s: string, n: number): string {
 }
 
 /**
+ * Format a coordinate strictly within PDB's 8-character fixed column width so
+ * columns 55+ (occupancy/B-factor/element) never shift even on large coordinates.
+ */
+function formatPdbCoord8(v: number): string {
+  if (!Number.isFinite(v)) return '   0.000';
+  const s3 = v.toFixed(3);
+  if (s3.length <= 8) return pad(s3, 8);
+  const s2 = v.toFixed(2);
+  if (s2.length <= 8) return pad(s2, 8);
+  const s1 = v.toFixed(1);
+  if (s1.length <= 8) return pad(s1, 8);
+  const s0 = Math.round(v).toString();
+  if (s0.length <= 8) return pad(s0, 8);
+  const clamped = Math.max(-9999999, Math.min(99999999, Math.round(v)));
+  return pad(String(clamped), 8);
+}
+
+function formatPdbBFactor6(v: number): string {
+  if (!Number.isFinite(v)) return '  0.00';
+  const clamped = Math.max(-99.99, Math.min(999.99, v));
+  return pad(clamped.toFixed(2), 6);
+}
+
+/** AltLoc conformer priority: 0 = primary ('', ' ', 'A', '1'), 1 = fallback ('B', '2'), 2 = ignore. */
+function altLocPriority(alt: string): number {
+  if (alt === '' || alt === ' ' || alt === 'A' || alt === '1') return 0;
+  if (alt === 'B' || alt === '2') return 1;
+  return 2;
+}
+
+/**
  * Reconstruct planar peptide carbonyl oxygen O from 3-atom [L * 3 * 3] (N, CA, C)
  * coordinates into 4-atom [L * 4 * 3] (N, CA, C, O).
  * Uses the ideal peptide plane defined by (CA_i, C_i, N_{i+1}) with C=O = 1.231 Å
@@ -390,8 +421,8 @@ export function coordsToBackbonePdb(
       const element = name[0];
       emittedForRes.push(
         `  ${padR(name, 3)} ${resName} ${chain}${resSeqField}` +
-          `${pad(x.toFixed(3), 8)}${pad(y.toFixed(3), 8)}${pad(z.toFixed(3), 8)}` +
-          `  1.00${pad(bVal.toFixed(2), 6)}           ${element}  `,
+          `${formatPdbCoord8(x)}${formatPdbCoord8(y)}${formatPdbCoord8(z)}` +
+          `  1.00${formatPdbBFactor6(bVal)}           ${element}  `,
       );
     }
 
@@ -527,8 +558,8 @@ export function atom37ToPdb(
       const element = name[0];
       lines.push(
         `ATOM  ${pad(String(atomIdx), 5)} ${atomCol} ${resName} ${chain}${pad(String(chainResNum), 4)}    ` +
-          `${pad(x.toFixed(3), 8)}${pad(y.toFixed(3), 8)}${pad(z.toFixed(3), 8)}` +
-          `  1.00${pad(bVal.toFixed(2), 6)}           ${element}  `,
+          `${formatPdbCoord8(x)}${formatPdbCoord8(y)}${formatPdbCoord8(z)}` +
+          `  1.00${formatPdbBFactor6(bVal)}           ${element}  `,
       );
       atomIdx++;
     }
@@ -712,6 +743,7 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
     resNumStr: string;
     insCode: string;
     atoms: Record<string, [number, number, number]>;
+    atomAltPrio: Record<string, number>;
   }
   const residues: ResAccum[] = [];
   const byKey = new Map<string, ResAccum>();
@@ -742,7 +774,7 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
     if (isHet && line.length >= 22) {
       const hetRes = line.slice(17, 20).trim().toUpperCase();
       if (hetRes !== 'MSE') {
-        if (hetRes && !WATER_RESNAMES.has(hetRes) && !AA3_TO_AA1[hetRes]) {
+        if (altLocPriority(line[16]) === 0 && hetRes && !WATER_RESNAMES.has(hetRes) && !AA3_TO_AA1[hetRes]) {
           if (NUCLEIC_RESNAMES.has(hetRes)) {
             nucleicChains.add(line[21]?.trim() || 'A');
           } else {
@@ -760,7 +792,8 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
       continue;
     }
     const altLoc = line[16];
-    if (altLoc !== ' ' && altLoc !== 'A' && altLoc !== '1') continue;
+    const prio = altLocPriority(altLoc);
+    if (prio > 1) continue;
     const atomName = line.slice(12, 16).trim();
     if (atomName !== 'N' && atomName !== 'CA' && atomName !== 'C' && atomName !== 'O') continue;
 
@@ -784,12 +817,14 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
         resNumStr,
         insCode,
         atoms: {},
+        atomAltPrio: {},
       };
       byKey.set(key, entry);
       residues.push(entry);
     }
-    if (!entry.atoms[atomName]) {
+    if (!entry.atoms[atomName] || prio < entry.atomAltPrio[atomName]) {
       entry.atoms[atomName] = [x, y, z];
+      entry.atomAltPrio[atomName] = prio;
     }
   }
 
@@ -837,6 +872,7 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
   // Reconstruct O with chain-break guard (only when N/CA/C are all observed), then restore real parsed O
   const backbone4Coords = reconstructBackboneOxygen(ncac, L, chainIds);
   const missingOByKey = new Map<string, [number, number, number]>();
+  const cAltPrioByKey = new Map<string, number>();
 
   for (let i = 0; i < L; i++) {
     const r = valid[i];
@@ -851,6 +887,7 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
       if (Number.isFinite(ox) && Number.isFinite(oy) && Number.isFinite(oz)) {
         // Only patch O into PDB when N & C are genuinely observed (never synthesize for CA-only inputs)
         missingOByKey.set(r.resKey, [ox, oy, oz]);
+        cAltPrioByKey.set(r.resKey, r.atomAltPrio.C ?? 0);
       } else {
         atomPresence[i].oReconstructed = false;
       }
@@ -879,7 +916,8 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
       if (!inModel1 || !isAtomOrMse || line.length < 54) continue;
       seenAtoms = true;
       const altLoc = line[16];
-      if (altLoc !== ' ' && altLoc !== 'A' && altLoc !== '1') continue;
+      const prio = altLocPriority(altLoc);
+      if (prio > 1) continue;
       const atomName = line.slice(12, 16).trim();
       if (atomName !== 'C') continue;
       const chain = line[21]?.trim() || 'A';
@@ -887,7 +925,7 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
       const insCode = (line[26] ?? ' ').trim();
       const key = `${chain}:${resNumStr}:${insCode}`;
       const oCoord = missingOByKey.get(key);
-      if (oCoord) {
+      if (oCoord && prio === (cAltPrioByKey.get(key) ?? 0)) {
         missingOByKey.delete(key);
         patchedKeys.push(key);
         nextSerial = Math.min(99999, nextSerial + 1);
@@ -896,7 +934,7 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
         const bFactorTail = line.length >= 66 ? line.slice(54, 66) : '  1.00  0.00';
         patchedLines.push(
           `${recType}${pad(String(nextSerial), 5)}  ${padR('O', 3)} ${resMeta}   ` +
-            `${pad(oCoord[0].toFixed(3), 8)}${pad(oCoord[1].toFixed(3), 8)}${pad(oCoord[2].toFixed(3), 8)}` +
+            `${formatPdbCoord8(oCoord[0])}${formatPdbCoord8(oCoord[1])}${formatPdbCoord8(oCoord[2])}` +
             `${bFactorTail}           O  `,
         );
       }
@@ -963,6 +1001,7 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     aa1: string;
     resName: string;
     atoms: Record<string, [number, number, number]>;
+    atomAltPrio: Record<string, number>;
   }
   const lines = cifText.split('\n');
   const cols: string[] = [];
@@ -1041,9 +1080,10 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
       else if (modelNum !== firstModelNum) continue;
     }
 
-    // Filter to primary altLoc only
+    // Filter to primary altLoc with B/2 fallback when primary is absent
     const altId = cifVal(iAlt);
-    if (altId && altId !== 'A' && altId !== '1') continue;
+    const prio = altLocPriority(altId);
+    if (prio > 1) continue;
 
     const group = (cifVal(iGroup) || 'ATOM').toUpperCase();
     const rawComp = cifVal(iLabelComp) || cifVal(iAuthComp) || 'UNK';
@@ -1051,16 +1091,16 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     const labelChain = cifVal(iLabelAsym) || undefined;
     const chain = cifVal(iAuthAsym) || labelChain || 'A';
 
-    // Detect nucleic acid chains (ATOM or HETATM) via resolved column indices
+    // Detect nucleic acid chains (ATOM or HETATM) via resolved column indices (primary altLoc only)
     if (NUCLEIC_RESNAMES.has(comp)) {
-      nucleicChains.add(chain);
+      if (prio === 0) nucleicChains.add(chain);
       continue;
     }
 
-    // Detect HETATM ligands, while allowing HETATM MSE (selenomethionine) as protein residue M
+    // Detect HETATM ligands (primary altLoc only), while allowing HETATM MSE (selenomethionine) as protein residue M
     if (group === 'HETATM') {
       if (comp !== 'MSE') {
-        if (comp && !WATER_RESNAMES.has(comp) && !AA3_TO_AA1[comp]) {
+        if (prio === 0 && comp && !WATER_RESNAMES.has(comp) && !AA3_TO_AA1[comp]) {
           ligandSet.add(comp);
         }
         continue;
@@ -1092,12 +1132,14 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
         aa1: AA3_TO_AA1[comp] ?? 'X',
         resName: comp,
         atoms: {},
+        atomAltPrio: {},
       };
       byKey.set(key, entry);
       residues.push(entry);
     }
-    if (!entry.atoms[atomName]) {
+    if (!entry.atoms[atomName] || prio < entry.atomAltPrio[atomName]) {
       entry.atoms[atomName] = [x, y, z];
+      entry.atomAltPrio[atomName] = prio;
     }
   }
 
@@ -1226,7 +1268,7 @@ function parseCropRangeSpec(tok: string): {
 } | null {
   const colonMatch = /^([A-Za-z0-9_]+):(-?\d+)([A-Za-z])?(?:-(-?\d+)([A-Za-z])?)?$/.exec(tok);
   const bareMatch = !colonMatch
-    ? /^([A-Za-z]+)?(\d+)([A-Za-z])?(?:-(\d+)([A-Za-z])?)?$/.exec(tok)
+    ? /^([A-Za-z]+)?(-?\d+)([A-Za-z])?(?:-(-?\d+)([A-Za-z])?)?$/.exec(tok)
     : null;
   const m = colonMatch ?? bareMatch;
   if (!m) return null;
@@ -1340,8 +1382,8 @@ function matchesRawCropRule(
   if (WATER_RESNAMES.has(comp)) return false;
   for (const r of rules) {
     if (r.kind === 'chain') {
-      // Whole-chain crop keeps polymer ATOM records (protein + nucleic acids) on that chain (case-sensitive!)
-      if (group === 'ATOM' && chain === r.chain) return true;
+      // Whole-chain crop keeps polymer ATOM records (protein + nucleic acids) and HETATM MSE (selenomethionine) on that chain
+      if ((group === 'ATOM' || comp === 'MSE') && chain === r.chain) return true;
     } else if (r.kind === 'range') {
       if (
         (group === 'ATOM' || comp === 'MSE') &&
@@ -1398,8 +1440,12 @@ export function cropRawAllAtomStructure(
     let iIns = -1;
     let iLabelComp = -1;
     let iAuthComp = -1;
+    let iLabelAtom = -1;
+    let iAuthAtom = -1;
     let firstModelNum: string | null = null;
     let kept = 0;
+    const cifPending: Array<{ outIdx: number; prio: number; atomKey: string }> = [];
+    const cifPrimaryAtomKeys = new Set<string>();
 
     for (let i = 0; i < lines.length; i++) {
       const raw = lines[i];
@@ -1437,6 +1483,8 @@ export function cropRawAllAtomStructure(
           iIns = cols.indexOf('pdbx_PDB_ins_code');
           iLabelComp = cols.indexOf('label_comp_id');
           iAuthComp = cols.indexOf('auth_comp_id');
+          iLabelAtom = cols.indexOf('label_atom_id');
+          iAuthAtom = cols.indexOf('auth_atom_id');
           colMapReady = true;
         }
         const cifVal = (idx: number): string => {
@@ -1449,7 +1497,8 @@ export function cropRawAllAtomStructure(
           else if (modelNum !== firstModelNum) continue;
         }
         const altId = cifVal(iAlt);
-        if (altId && altId !== 'A' && altId !== '1') continue;
+        const prio = altLocPriority(altId);
+        if (prio > 1) continue;
 
         const grp = (cifVal(iGroup) || 'ATOM').toUpperCase();
         const ch = cifVal(iAuthAsym) || cifVal(iLabelAsym) || 'A';
@@ -1457,9 +1506,17 @@ export function cropRawAllAtomStructure(
         const rn = parseInt(seqStr, 10);
         const insCode = cifVal(iIns);
         const comp = cifVal(iLabelComp) || cifVal(iAuthComp) || '';
+        const atomName = cifVal(iLabelAtom) || cifVal(iAuthAtom) || '';
         if (matchesRawCropRule(rules, grp, ch, Number.isFinite(rn) ? rn : null, insCode, comp)) {
-          out.push(raw);
-          kept++;
+          const atomKey = `${ch}:${seqStr}:${insCode}:${atomName}`;
+          if (prio === 0) {
+            cifPrimaryAtomKeys.add(atomKey);
+            out.push(raw);
+            kept++;
+          } else {
+            cifPending.push({ outIdx: out.length, prio, atomKey });
+            out.push(raw);
+          }
         }
         continue;
       }
@@ -1532,6 +1589,25 @@ export function cropRawAllAtomStructure(
       out.push(raw);
     }
 
+    // Resolve AltLoc B/2 fallback entries: keep only when no primary conformer existed for that atom
+    if (cifPending.length > 0) {
+      const seenFallback = new Set<string>();
+      const dropIndices = new Set<number>();
+      for (const item of cifPending) {
+        if (cifPrimaryAtomKeys.has(item.atomKey) || seenFallback.has(item.atomKey)) {
+          dropIndices.add(item.outIdx);
+        } else {
+          seenFallback.add(item.atomKey);
+          kept++;
+        }
+      }
+      if (dropIndices.size > 0) {
+        const filtered = out.filter((_, idx) => !dropIndices.has(idx));
+        out.length = 0;
+        out.push(...filtered);
+      }
+    }
+
     if (kept === 0) {
       throw new Error(
         `Segment crop "${segmentSpec}" matched 0 atoms in mmCIF structure. Clear the crop or check chain/residue/ligand codes.`,
@@ -1547,6 +1623,8 @@ export function cropRawAllAtomStructure(
   const seenKeptReconO = new Set<string>();
   const headerOut: string[] = [];
   const bodyOut: string[] = [];
+  const pdbPrimaryAtomKeys = new Set<string>();
+  const pdbPending: Array<{ outIdx: number; atomKey: string; rKey: string }> = [];
   let kept = 0;
   let seenAtom = false;
   for (const line of lines) {
@@ -1559,20 +1637,29 @@ export function cropRawAllAtomStructure(
     if (line.startsWith('ATOM  ') || line.startsWith('HETATM')) {
       seenAtom = true;
       const altLoc = line[16] ?? ' ';
-      if (altLoc !== ' ' && altLoc !== 'A' && altLoc !== '1') continue;
+      const prio = altLocPriority(altLoc);
+      if (prio > 1) continue;
       const grp = line.startsWith('HETATM') ? 'HETATM' : 'ATOM';
       const comp = line.slice(17, 20).trim();
       const ch = (line[21] ?? 'A').trim() || 'A';
       const rnStr = line.slice(22, 26).trim();
       const rn = parseInt(rnStr, 10);
       const insCode = (line[26] ?? ' ').trim();
+      const atomName = line.slice(12, 16).trim();
       if (matchesRawCropRule(rules, grp, ch, Number.isFinite(rn) ? rn : null, insCode, comp)) {
-        bodyOut.push(line);
-        kept++;
         const rKey = `${ch}:${rnStr}:${insCode}`;
-        if (inputReconOKeys.has(rKey) && !seenKeptReconO.has(rKey)) {
-          seenKeptReconO.add(rKey);
-          keptReconOKeys.push(rKey);
+        const atomKey = `${rKey}:${atomName}`;
+        if (prio === 0) {
+          pdbPrimaryAtomKeys.add(atomKey);
+          bodyOut.push(line);
+          kept++;
+          if (inputReconOKeys.has(rKey) && !seenKeptReconO.has(rKey)) {
+            seenKeptReconO.add(rKey);
+            keptReconOKeys.push(rKey);
+          }
+        } else {
+          pdbPending.push({ outIdx: bodyOut.length, atomKey, rKey });
+          bodyOut.push(line);
         }
       }
     } else if (
@@ -1581,6 +1668,27 @@ export function cropRawAllAtomStructure(
       line.startsWith('CRYST1')
     ) {
       headerOut.push(line);
+    }
+  }
+  if (pdbPending.length > 0) {
+    const seenFallback = new Set<string>();
+    const dropIndices = new Set<number>();
+    for (const item of pdbPending) {
+      if (pdbPrimaryAtomKeys.has(item.atomKey) || seenFallback.has(item.atomKey)) {
+        dropIndices.add(item.outIdx);
+      } else {
+        seenFallback.add(item.atomKey);
+        kept++;
+        if (inputReconOKeys.has(item.rKey) && !seenKeptReconO.has(item.rKey)) {
+          seenKeptReconO.add(item.rKey);
+          keptReconOKeys.push(item.rKey);
+        }
+      }
+    }
+    if (dropIndices.size > 0) {
+      const filtered = bodyOut.filter((_, idx) => !dropIndices.has(idx));
+      bodyOut.length = 0;
+      bodyOut.push(...filtered);
     }
   }
   if (kept === 0) {

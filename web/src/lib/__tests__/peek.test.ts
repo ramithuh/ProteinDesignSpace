@@ -180,12 +180,23 @@ describe('peek helpers', () => {
     expect(healthy.recoveryPct).toBeCloseTo(60, 5);
   });
 
-  it('previewTextLines bounds long PDB outputs cleanly', () => {
+  it('previewTextLines bounds long PDB outputs cleanly (including CRLF and maxLines=0)', () => {
     const text = Array.from({ length: 60 }, (_, i) => `LINE ${i + 1}`).join('\n');
     const res = previewTextLines(text, 10);
     expect(res.totalLines).toBe(60);
     expect(res.truncated).toBe(true);
     expect(res.preview.split('\n')).toHaveLength(10);
+
+    const crlf = 'LINE 1\r\nLINE 2\r\nLINE 3';
+    const crlfRes = previewTextLines(crlf, 2);
+    expect(crlfRes.totalLines).toBe(3);
+    expect(crlfRes.truncated).toBe(true);
+    expect(crlfRes.preview).toBe('LINE 1\nLINE 2');
+
+    const zeroRes = previewTextLines(crlf, 0);
+    expect(zeroRes.preview).toBe('');
+    expect(zeroRes.totalLines).toBe(3);
+    expect(zeroRes.truncated).toBe(true);
   });
 
   it('foldModelSlug and formatFoldModelName format all 18 worker foldModelId values and bare localfold-af2', () => {

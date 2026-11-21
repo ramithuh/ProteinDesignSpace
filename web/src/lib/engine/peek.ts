@@ -271,15 +271,33 @@ export function analyzeSequence(rawSeq: string, referenceSeq?: string): Sequence
   };
 }
 
-/** Return a bounded preview of PDB/mmCIF text for raw-text inspection. */
+/** Return a bounded preview of PDB/mmCIF text for raw-text inspection without splitting the full file. */
 export function previewTextLines(text: string, maxLines = 40): { preview: string; totalLines: number; truncated: boolean } {
-  const lines = text.split(/\r?\n/);
-  const totalLines = lines.length;
-  if (totalLines <= maxLines) {
+  const limit = Math.max(0, Math.floor(maxLines));
+  let nlCount = 0;
+  let previewEnd = -1;
+  let idx = text.indexOf('\n');
+  while (idx !== -1) {
+    nlCount++;
+    if (nlCount === limit && previewEnd === -1) {
+      previewEnd = idx;
+    }
+    idx = text.indexOf('\n', idx + 1);
+  }
+  const totalLines = nlCount + 1;
+  if (totalLines <= limit) {
     return { preview: text, totalLines, truncated: false };
   }
+  if (limit === 0) {
+    return { preview: '', totalLines, truncated: true };
+  }
+  let rawPreview = previewEnd >= 0 ? text.slice(0, previewEnd) : text;
+  if (rawPreview.endsWith('\r')) {
+    rawPreview = rawPreview.slice(0, -1);
+  }
+  const preview = rawPreview.includes('\r') ? rawPreview.replace(/\r\n/g, '\n') : rawPreview;
   return {
-    preview: lines.slice(0, maxLines).join('\n'),
+    preview,
     totalLines,
     truncated: true,
   };

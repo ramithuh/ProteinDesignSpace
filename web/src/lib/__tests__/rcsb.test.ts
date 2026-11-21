@@ -212,4 +212,30 @@ describe('RCSB PDB ID input', () => {
     const waterFetch = vi.fn(async () => new Response(waterOnlyPdb, { status: 200 })) as unknown as typeof fetch;
     await expect(fetchStructureByPdbId('9WAT', waterFetch)).rejects.toThrow(/Could not fetch PDB entry "9WAT"/);
   });
+
+  it('aborts hung RCSB/PDBe endpoints via per-endpoint AbortController timeout and falls back cleanly', async () => {
+    const validPdb = [
+      'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      2  CA  GLY A   2       3.800   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      3  CA  VAL A   3       7.600   0.000   0.000  1.00  0.00           C  ',
+      'END',
+    ].join('\n');
+    let calls = 0;
+    const hungFirstFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls++;
+      if (calls === 1) {
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'));
+          });
+        });
+      }
+      return new Response(validPdb, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const res = await fetchStructureByPdbId('7TIM', hungFirstFetch, 25);
+    expect(res.pdbId).toBe('7TIM');
+    expect(res.nResidues).toBe(3);
+    expect(calls).toBe(2);
+  });
 });

@@ -225,34 +225,19 @@ describe('RFD4-Proteina upstream integration regressions', () => {
     expect(builtYaml.n).toBe(12);
   });
 
-  it('regression: rfd4-conditioner multi-hotspot, lockChain+motif C_SEQ merge, and unindexed C_IDX integrate cleanly with upstream buildBatch', async () => {
+  it('regression: multi-hotspot, lockChain+motif C_SEQ merge, and unindexed C_IDX integrate cleanly with upstream buildBatch', async () => {
     const tplCif = buildMinimalTemplateCif(6);
-    const scheduler = new ExecutionScheduler();
-    const res = await scheduler.run(
-      {
-        id: 'hot-e2e',
-        name: 'Hotspot E2E',
-        nodes: [
-          {
-            id: 'c',
-            adapterId: 'rfd4-conditioner',
-            params: {
-              taskPreset: 'custom',
-              contig: 'A1-6,/0,10-10',
-              lockChain: 'A',
-              hotspots: 'A2, A4',
-              motifSpan: 'A1-2, A5-6',
-              unindexedMotif: true,
-            },
-          },
-        ],
-        edges: [],
-      },
-      () => {},
-    );
-    const cond = res.outputsByNode.c.condition as ConditionSpecArtifact;
+    const { buildCanonicalConditionIntent, compileConditionToRfd4 } = await import('$lib/engine/conditioning');
+    const intent = buildCanonicalConditionIntent({
+      contig: 'A1-6,/0,10-10',
+      lockChain: 'A',
+      hotspots: 'A2, A4',
+      motifSpan: 'A1-2, A5-6',
+      unindexedMotif: true,
+    });
+    const compiled = compileConditionToRfd4(intent);
     const built = rfd4.buildBatch(
-      { contig: cond.contig, conditions: cond.conditions },
+      { contig: compiled.contig, conditions: compiled.conditions },
       { inputCif: tplCif, seed: 11 },
     );
     // Both A2 and A4 must be marked in condition_hotspot_1_atom

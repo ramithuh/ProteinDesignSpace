@@ -31,12 +31,12 @@ describe('engine/share', () => {
     graph.nodes[0].id = 'a';
     graph.edges = [{ fromNode: 'a', fromPort: 'toString', toNode: 'b', toPort: 'toString' }];
     expect(() => normalizeWorkflowGraph(graph)).toThrow(/unknown.*port/i);
-    graph.edges = [{ fromNode: 'a', fromPort: 'sequences', toNode: 'b', toPort: 'template' }];
+    graph.edges = [{ fromNode: 'a', fromPort: 'sequences', toNode: 'b', toPort: 'structure' }];
     expect(() => normalizeWorkflowGraph(graph)).toThrow(/type mismatch/i);
-    graph.edges = [{ fromNode: 'a', fromPort: 'structure', toNode: 'b', toPort: 'template' }];
+    graph.edges = [{ fromNode: 'a', fromPort: 'structure', toNode: 'b', toPort: 'structure' }];
     graph.edges.push({ ...graph.edges[0] });
     expect(() => normalizeWorkflowGraph(graph)).toThrow(/multiple incoming/i);
-    graph.edges[1] = { fromNode: 'b', fromPort: 'structure', toNode: 'a', toPort: 'template' };
+    graph.edges[1] = { fromNode: 'b', fromPort: 'structure', toNode: 'a', toPort: 'structure' };
     expect(() => normalizeWorkflowGraph(graph)).toThrow(/cycle/i);
   });
 
@@ -240,7 +240,13 @@ describe('engine/share', () => {
     expect(validateGraph(malformedYamlParsed).join(' ')).toMatch(/Invalid expectedPdbSha256/i);
 
     // 3. Small PDB (<= 1500 chars) is preserved directly without missingUpload markers
-    const smallPdb = 'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C  \nEND\n';
+    const smallPdb = [
+      'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      2  CA  GLY A   2       3.800   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      3  CA  VAL A   3       7.600   0.000   0.000  1.00  0.00           C  ',
+      'END',
+      '',
+    ].join('\n');
     customGraph.nodes[0].params.pdbText = smallPdb;
     const encSmall = await encodeGraphToHash(customGraph);
     expect(encSmall.strippedPdb).toBe(false);
@@ -272,7 +278,7 @@ describe('engine/share', () => {
     expect(parsedYaml.edges).toEqual(src.edges);
     expect(parsedYaml.nodes[0].params.cathCode).toBe('3.40.50');
 
-    // Legacy YAML containing an rfd4-conditioner + template wire auto-migrates into inline generator fields + structure port
+    // Removed legacy rfd4-conditioner adapter is cleanly rejected as an unknown model
     const legacyYaml = [
       'denovo: v1',
       'name: "Legacy Conditioned"',
@@ -284,13 +290,7 @@ describe('engine/share', () => {
       '  - pdb.structure -> cond.template',
       '  - cond.condition -> g3.condition',
     ].join('\n');
-    const migrated = parseRecipeToGraph(legacyYaml);
-    expect(migrated.nodes.map((n) => n.adapterId)).toEqual(['pdb-input', 'genie3']);
-    expect(migrated.edges).toEqual([
-      { fromNode: 'pdb', fromPort: 'structure', toNode: 'g3', toPort: 'structure' },
-    ]);
-    expect(migrated.nodes[1].params.taskMode).toBe('binder');
-    expect(migrated.nodes[1].params.hotspots).toBe('A54, A56');
+    expect(() => parseRecipeToGraph(legacyYaml)).toThrow(/Unknown model "rfd4-conditioner"/);
 
     // JSON input support
     const parsedJson = parseRecipeToGraph(JSON.stringify(src));
@@ -573,199 +573,54 @@ describe('engine/share', () => {
     expect(yamlPdbId).toContain('"mode":"pdb-id"');
     expect(yamlPdbId).toContain('"pdbId":"1PRW"');
 
-    // 4. Legacy rfd4-conditioner with contig-only migrates into RFD4 mode: 'conditioned' (not 'unconditional')
-    const legacyContigOnly = [
+    // 4. Inline RFD4 conditioned recipe round-trips cleanly while legacy rfd4-conditioner is rejected
+    const inlineContigYaml = [
       'denovo: v1',
-      'name: "Legacy Contig Only"',
+      'name: "Inline Contig"',
       'nodes:',
       '  pdb: {"model":"pdb-input","mode":"pdb-id","pdbId":"1PRW"}',
-      '  cond: {"model":"rfd4-conditioner","contig":"10-20,A16-35,10-20"}',
-      '  gen: {"model":"rfd4-proteina"}',
+      '  gen: {"model":"rfd4-proteina","mode":"motif","contig":"10-20,A16-35,10-20"}',
       'wires:',
-      '  - pdb.structure -> cond.template',
-      '  - cond.condition -> gen.condition',
+      '  - pdb.structure -> gen.structure',
     ].join('\n');
-    const migratedContig = parseRecipeToGraph(legacyContigOnly);
-    expect(migratedContig.nodes.map((n) => n.adapterId)).toEqual(['pdb-input', 'rfd4-proteina']);
-    expect(migratedContig.nodes[1].params.mode).toBe('conditioned');
-    expect(migratedContig.nodes[1].params.contig).toBe('10-20,A16-35,10-20');
+    const parsedInline = parseRecipeToGraph(inlineContigYaml);
+    expect(parsedInline.nodes.map((n) => n.adapterId)).toEqual(['pdb-input', 'rfd4-proteina']);
+    expect(parsedInline.nodes[1].params.mode).toBe('motif');
+    expect(parsedInline.nodes[1].params.contig).toBe('10-20,A16-35,10-20');
   });
 
-  it('records unresolvedImportIssues and blocks execution when legacy conditioner settings are unsupported by Genie 3 (Issue #1)', async () => {
-    const unsupportedCases: Array<{
-      name: string;
-      condParams: Record<string, unknown>;
-      expectedPattern: RegExp;
-    }> = [
-      {
-        name: 'CATH fold code',
-        condParams: { cathCode: '3.40.50' },
-        expectedPattern: /CATH.*3\.40\.50/i,
-      },
-      {
-        name: 'H-bond constraints',
-        condParams: { hbondMode: 'ACCEPTOR', hbondSelection: 'A/SAM/*/O2' },
-        expectedPattern: /H-bond.*ACCEPTOR/i,
-      },
-      {
-        name: 'partial diffusion',
-        condParams: { mode: 'partial', partialFraction: 0.5 },
-        expectedPattern: /partial diffusion.*0\.5/i,
-      },
-      {
-        name: 'custom JSON/YAML override',
-        condParams: { rawJsonOverride: '{"contig":"70-70"}' },
-        expectedPattern: /custom spec override.*rawJsonOverride/i,
-      },
-      {
-        name: 'customSpecYaml override',
-        condParams: { customSpecYaml: 'contig: 70-70' },
-        expectedPattern: /custom spec override.*customSpecYaml/i,
-      },
-      {
-        name: 'RFD4 taskPreset',
-        condParams: { taskPreset: 'ppi_pdl1' },
-        expectedPattern: /taskPreset.*ppi_pdl1/i,
-      },
-      {
-        name: 'unindexed motif',
-        condParams: { motifSpan: 'A16-35', unindexedMotif: true },
-        expectedPattern: /unindexed motif/i,
-      },
-      {
-        name: 'non-bare contig without lockChain or motifSpan',
-        condParams: { contig: '10-20,A16-35,10-20' },
-        expectedPattern: /contig.*10-20,A16-35,10-20/i,
-      },
-      {
-        name: 'binder with unsupported H-bond setting',
-        condParams: { lockChain: 'A', hotspots: 'A54', hbondMode: 'BOTH' },
-        expectedPattern: /H-bond.*BOTH/i,
-      },
-      {
-        name: 'combined lockChain + motifSpan into Genie 3',
-        condParams: { lockChain: 'A', motifSpan: 'A16-35' },
-        expectedPattern: /combined binder.*motif/i,
-      },
-      {
-        name: 'whitespace-separated RFD4 secondary-structure contig with lockChain',
-        condParams: { lockChain: 'A', contig: 'h1:16-16P l1:4-4P' },
-        expectedPattern: /secondary-structure.*not supported/i,
-      },
-      {
-        name: 'variable-length bare contig range into unconditional Genie 3',
-        condParams: { contig: '50-90' },
-        expectedPattern: /contig.*50-90/i,
-      },
-      {
-        name: 'nucleic-acid bare contig into Genie 3',
-        condParams: { contig: '70-70D' },
-        expectedPattern: /polymer-suffix.*not supported/i,
-      },
-      {
-        name: 'P-suffixed binder contig into Genie 3',
-        condParams: { lockChain: 'A', contig: 'A1-53,/0,120-120P' },
-        expectedPattern: /polymer-suffix.*not supported/i,
-      },
-      {
-        name: 'P-suffixed motif contig into Genie 3',
-        condParams: { motifSpan: 'A16-35', contig: '10-10P,A16-35,10-10P' },
-        expectedPattern: /polymer-suffix.*not supported/i,
-      },
-      {
-        name: 'bare contig with wired template into Genie 3',
-        condParams: { contig: '120-120' },
-        expectedPattern: /wired template.*automatic binder mode/i,
-      },
-    ];
-
+  it('preserves unresolvedImportIssues across #p=, #g=, YAML, and blocks execution until cleared (Issue #1)', async () => {
     const scheduler = new ExecutionScheduler();
 
-    for (const tc of unsupportedCases) {
-      const legacyYaml = [
-        'denovo: v1',
-        `name: ${JSON.stringify(`Legacy Genie3 ${tc.name}`)}`,
-        'nodes:',
-        '  pdb: {"model":"pdb-input","mode":"pdb-id","pdbId":"1PRW"}',
-        `  cond: ${JSON.stringify({ model: 'rfd4-conditioner', ...tc.condParams })}`,
-        '  g3: {"model":"genie3"}',
-        'wires:',
-        '  - pdb.structure -> cond.template',
-        '  - cond.condition -> g3.condition',
-      ].join('\n');
+    // 1. Direct unresolvedImportIssues survive #g= and YAML re-encoding and block validateGraph + scheduler.run
+    const blockedGraph: WorkflowGraph = {
+      id: 'blocked-import',
+      name: 'Blocked Import',
+      nodes: [
+        {
+          id: 'g3',
+          adapterId: 'genie3',
+          params: {
+            ...defaultParamsForAdapter('genie3'),
+            unresolvedImportIssues: ['Unsupported CATH code 3.40.50 in Genie 3'],
+          },
+        },
+      ],
+      edges: [],
+    };
+    expect(validateGraph(blockedGraph).join(' ')).toMatch(/CATH.*3\.40\.50/i);
+    await expect(scheduler.run(blockedGraph, () => {})).rejects.toThrow(/CATH.*3\.40\.50/i);
 
-      const migrated = parseRecipeToGraph(legacyYaml);
-      const genieNode = migrated.nodes.find((n) => n.id === 'g3')!;
-      expect(genieNode, tc.name).toBeDefined();
-      const issues = genieNode.params.unresolvedImportIssues as string[];
-      expect(Array.isArray(issues), tc.name).toBe(true);
-      expect(issues.length, tc.name).toBeGreaterThan(0);
-      expect(issues.join(' '), tc.name).toMatch(tc.expectedPattern);
-
-      // Must block validateGraph and ExecutionScheduler.run until explicitly resolved
-      const errs = validateGraph(migrated);
-      expect(errs.length, tc.name).toBeGreaterThan(0);
-      expect(errs.join(' '), tc.name).toMatch(tc.expectedPattern);
-      await expect(scheduler.run(migrated, () => {})).rejects.toThrow(tc.expectedPattern);
-    }
-
-    // unresolvedImportIssues survive compact #g= and YAML re-encoding until cleared
-    const cathMigrated = parseRecipeToGraph(
-      [
-        'denovo: v1',
-        'name: "Legacy CATH to Genie3"',
-        'nodes:',
-        '  cond: {"model":"rfd4-conditioner","cathCode":"3.40.50"}',
-        '  g3: {"model":"genie3"}',
-        'wires:',
-        '  - cond.condition -> g3.condition',
-      ].join('\n'),
-    );
-    const enc = await encodeGraphToHash(cathMigrated);
+    const enc = await encodeGraphToHash(blockedGraph);
     const dec = await decodeHashToGraph(enc.hash);
     expect(validateGraph(dec!).join(' ')).toMatch(/CATH.*3\.40\.50/i);
 
-    const yamlRoundTrip = parseRecipeToGraph(graphToYamlRecipe(cathMigrated));
+    const yamlRoundTrip = parseRecipeToGraph(graphToYamlRecipe(blockedGraph));
     expect(validateGraph(yamlRoundTrip).join(' ')).toMatch(/CATH.*3\.40\.50/i);
 
     // Clearing unresolvedImportIssues unblocks execution
     yamlRoundTrip.nodes[0].params.unresolvedImportIssues = [];
     expect(validateGraph(yamlRoundTrip)).toEqual([]);
-
-    // Supported Genie 3 binder migration remains completely clean with 0 issues
-    const supportedBinder = parseRecipeToGraph(
-      [
-        'denovo: v1',
-        'name: "Supported Genie3 Binder"',
-        'nodes:',
-        '  pdb: {"model":"pdb-input","mode":"pdb-id","pdbId":"5O45"}',
-        '  cond: {"model":"rfd4-conditioner","contig":"A17-132,/0,70-70","lockChain":"A","hotspots":"A54, A56"}',
-        '  g3: {"model":"genie3"}',
-        'wires:',
-        '  - pdb.structure -> cond.template',
-        '  - cond.condition -> g3.condition',
-      ].join('\n'),
-    );
-    expect(supportedBinder.nodes[1].params.unresolvedImportIssues).toBeUndefined();
-    expect(validateGraph(supportedBinder)).toEqual([]);
-
-    // Fixed bare legacy contig ("120-120") translates to Genie 3's effective length parameter (120, not default 80)
-    const bareFixedContig = parseRecipeToGraph(
-      [
-        'denovo: v1',
-        'name: "Legacy Bare Length Contig"',
-        'nodes:',
-        '  cond: {"model":"rfd4-conditioner","contig":"120-120"}',
-        '  g3: {"model":"genie3"}',
-        'wires:',
-        '  - cond.condition -> g3.condition',
-      ].join('\n'),
-    );
-    expect(bareFixedContig.nodes[0].adapterId).toBe('genie3');
-    expect(bareFixedContig.nodes[0].params.taskMode).toBe('unconditional');
-    expect(bareFixedContig.nodes[0].params.length).toBe(120);
-    expect(bareFixedContig.nodes[0].params.unresolvedImportIssues).toBeUndefined();
-    expect(validateGraph(bareFixedContig)).toEqual([]);
 
     // YAML schema version validation and dotted node IDs in wires
     expect(() =>
@@ -814,40 +669,57 @@ describe('engine/share', () => {
 
     const decMalformedYaml = parseRecipeToGraph(graphToYamlRecipe(malformedDag));
     expect(validateGraph(decMalformedYaml).join(' ')).toMatch(/cathCode/);
+  });
 
-    // Existing unresolvedImportIssues on a legacy rfd4-conditioner must propagate to surviving RFD4 and Genie 3 nodes
-    const legacyCondWithIssueRfd4 = parseRecipeToGraph(
-      [
-        'denovo: v1',
-        'name: "Legacy Conditioner Issues RFD4"',
-        'nodes:',
-        '  cond: {"model":"rfd4-conditioner","contig":"70-70","unresolvedImportIssues":["Prior unsupported constraint X"]}',
-        '  gen: {"model":"rfd4-proteina"}',
-        'wires:',
-        '  - cond.condition -> gen.condition',
-      ].join('\n'),
-    );
-    expect(legacyCondWithIssueRfd4.nodes[0].adapterId).toBe('rfd4-proteina');
-    expect(legacyCondWithIssueRfd4.nodes[0].params.unresolvedImportIssues).toEqual([
-      'Prior unsupported constraint X',
-    ]);
-    expect(validateGraph(legacyCondWithIssueRfd4).join(' ')).toMatch(/Prior unsupported constraint X/);
+  it('Wave-2 P1/P2 regressions: invalid #g= inflateRaw without unhandled rejection, null/array params guard, dotted IDs in #p=/YAML, and empty sequence-input label round-trip', async () => {
+    // 1. Corrupt compressed #g= returns null cleanly (no unhandled rejection from inflateRaw)
+    expect(await decodeHashToGraph('#g=!!!not-valid-deflate!!!')).toBeNull();
+    expect(await decodeHashToGraph('#g=AAAA')).toBeNull();
 
-    const legacyCondWithIssueGenie = parseRecipeToGraph(
-      [
-        'denovo: v1',
-        'name: "Legacy Conditioner Issues Genie3"',
-        'nodes:',
-        '  pdb: {"model":"pdb-input","mode":"pdb-id","pdbId":"5O45"}',
-        '  cond: {"model":"rfd4-conditioner","contig":"A17-132,/0,70-70","lockChain":"A","unresolvedImportIssues":["Prior unsupported constraint Y"]}',
-        '  g3: {"model":"genie3"}',
-        'wires:',
-        '  - pdb.structure -> cond.template',
-        '  - cond.condition -> g3.condition',
-      ].join('\n'),
-    );
-    const genieSurviving = legacyCondWithIssueGenie.nodes.find((n) => n.id === 'g3')!;
-    expect(genieSurviving.params.unresolvedImportIssues).toEqual(['Prior unsupported constraint Y']);
-    expect(validateGraph(legacyCondWithIssueGenie).join(' ')).toMatch(/Prior unsupported constraint Y/);
+    // 2. Null or array params in JSON/YAML/normalizeWorkflowGraph are sanitized instead of crashing
+    expect(() =>
+      normalizeWorkflowGraph({
+        nodes: [
+          { id: 's1', adapterId: 'sequence-input', params: null as unknown as Record<string, unknown> },
+          { id: 'g1', adapterId: 'genie3', params: ['bad'] as unknown as Record<string, unknown> },
+        ],
+        edges: [],
+      }),
+    ).not.toThrow();
+    const normNull = normalizeWorkflowGraph({
+      nodes: [{ id: 'g1', adapterId: 'genie3', params: null as unknown as Record<string, unknown> }],
+      edges: [],
+    });
+    expect(normNull.nodes[0].params.length).toBe(80);
+
+    // 3. Dotted node IDs round-trip across YAML wires and #p= diff overrides
+    const dottedGraph: WorkflowGraph = {
+      id: 'dotted-roundtrip',
+      name: 'Dotted',
+      nodes: [
+        { id: 'v1.src', adapterId: 'pdb-input', params: defaultParamsForAdapter('pdb-input') },
+        { id: 'v1.mpnn', adapterId: 'web-protein-mpnn', params: defaultParamsForAdapter('web-protein-mpnn') },
+      ],
+      edges: [{ fromNode: 'v1.src', fromPort: 'structure', toNode: 'v1.mpnn', toPort: 'structure' }],
+    };
+    const yamlBack = parseRecipeToGraph(graphToYamlRecipe(dottedGraph));
+    expect(yamlBack.edges).toEqual(dottedGraph.edges);
+
+    // 4. Empty sequence-input params.label ('') survives YAML round-trip without being overwritten by node display label
+    const seqEmptyLabel: WorkflowGraph = {
+      id: 'empty-seq-label',
+      name: 'Empty Seq Label',
+      nodes: [
+        {
+          id: 'seq',
+          adapterId: 'sequence-input',
+          label: 'My Sequence Node',
+          params: { label: '', sequence: 'MKTAYIAKQRQISFVK' },
+        },
+      ],
+      edges: [],
+    };
+    const seqYamlBack = parseRecipeToGraph(graphToYamlRecipe(seqEmptyLabel));
+    expect(seqYamlBack.nodes[0].params.label).toBe('');
   });
 });

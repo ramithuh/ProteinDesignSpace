@@ -486,4 +486,28 @@ describe('protein-ops/kabsch', () => {
     expect(multiChainRes.alignedResidues).toBe(6);
     expect(multiChainRes.rmsd).toBeLessThan(1e-3);
   });
+
+  it('Wave-2 P1 regression: computeGeometryStats treats antibody insertion codes (100 -> 100A -> 100B -> 101) as bonded without false breaks or clashes', () => {
+    // 6-residue chain with consecutive ~3.8 Å Cα spacing across insertion codes 100, 100A, 100B, 101
+    const L = 6;
+    const ca = new Float32Array(L * 3);
+    for (let i = 0; i < L; i++) {
+      ca[i * 3 + 0] = i * 3.8;
+      ca[i * 3 + 1] = (i % 2) * 0.6;
+      ca[i * 3 + 2] = 0;
+    }
+    const chainIds = ['H', 'H', 'H', 'H', 'H', 'H'];
+    const resNums = [99, 100, 100, 100, 101, 102];
+    const insCodes = ['', '', 'A', 'B', '', ''];
+
+    const statsWithIns = computeGeometryStats(ca, chainIds, resNums, insCodes);
+    expect(statsWithIns.chainBreaks).toBe(0);
+    expect(statsWithIns.clashes).toBe(0);
+    expect(statsWithIns.meanCaDist).toBeCloseTo(Math.hypot(3.8, 0.6), 2);
+
+    // Even when insCodes are omitted, dr === 0 with Cα distance <= 4.5 Å is treated as bonded (antibody CDR fallback)
+    const statsNoIns = computeGeometryStats(ca, chainIds, resNums);
+    expect(statsNoIns.chainBreaks).toBe(0);
+    expect(statsNoIns.clashes).toBe(0);
+  });
 });

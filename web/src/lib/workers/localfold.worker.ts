@@ -47,6 +47,58 @@ function fnv1a(str: string): string {
   return (h >>> 0).toString(16).padStart(8, '0');
 }
 
+function collectOwnedTransferables(views: Array<ArrayBufferView | undefined>): Transferable[] {
+  const seen = new Set<ArrayBuffer>();
+  const out: Transferable[] = [];
+  for (const v of views) {
+    if (!v) continue;
+    const buf = v.buffer;
+    if (!(buf instanceof ArrayBuffer)) continue;
+    if (v.byteOffset !== 0 || v.byteLength !== buf.byteLength) continue;
+    if (seen.has(buf)) continue;
+    seen.add(buf);
+    out.push(buf);
+  }
+  return out;
+}
+
+function sequentialResNumsFromChainLengths(chainLengths: readonly number[]): number[] {
+  const out: number[] = [];
+  for (const len of chainLengths) {
+    for (let k = 1; k <= len; k++) out.push(k);
+  }
+  return out;
+}
+
+/**
+ * Safari omits `navigator.deviceMemory`, which would cause LocalFold's default `budgetForDevice()`
+ * to assume a 4 GiB mobile phone (~1.33 GiB ceiling) on Apple Silicon / macOS desktops.
+ * Provide a sensible desktop macOS fallback while preserving Chromium `deviceMemory` and mobile caps.
+ */
+function resolveLocalFoldMemoryBudgetBytes(): number | null {
+  const nav =
+    typeof navigator === 'object' && navigator !== null
+      ? (navigator as Navigator & { deviceMemory?: number })
+      : null;
+  if (
+    nav &&
+    typeof nav.deviceMemory === 'number' &&
+    Number.isFinite(nav.deviceMemory) &&
+    nav.deviceMemory > 0
+  ) {
+    return null;
+  }
+  const ua = nav?.userAgent ?? '';
+  const isMobile = /iPhone|iPad|iPod|Android|Mobile/i.test(ua);
+  const isMacDesktop = !isMobile && /Macintosh|Mac OS X/i.test(ua);
+  if (isMacDesktop) {
+    const cores = typeof nav?.hardwareConcurrency === 'number' ? nav.hardwareConcurrency : 8;
+    const estGiB = cores >= 10 ? 16 : 8;
+    return Math.round((estGiB * 1024 * 1024 * 1024) / 3);
+  }
+  return null;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let lfCore: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -81,6 +133,7 @@ async function ensureCoreModules(id: number) {
     deltaStoreMod,
     manifestsMod,
     deviceMod,
+    residentMod,
   ] = await Promise.all([
     importVendor('webgpu/af2/model/monomer.js'),
     importVendor('webgpu/af2/multimer/model.js'),
@@ -90,6 +143,7 @@ async function ensureCoreModules(id: number) {
     importVendor('shared/bundles/delta-tensor-store.js'),
     importVendor('shared/bundles/manifests/index.js'),
     importVendor('webgpu/runtime/device.js'),
+    importVendor('webgpu/runtime/resident.js'),
   ]);
   lfCore = {
     AlphaFoldMonomerGpu: monomerMod.AlphaFoldMonomerGpu,
@@ -103,6 +157,8 @@ async function ensureCoreModules(id: number) {
     bundleBaseUrl: manifestsMod.bundleBaseUrl,
     loadManifest: manifestsMod.loadManifest,
     requestAlphaFoldDevice: deviceMod.requestAlphaFoldDevice,
+    releaseAllWeights: residentMod.releaseAllWeights,
+    releaseResidentWeights: residentMod.releaseResidentWeights,
   };
 }
 
@@ -149,7 +205,14 @@ function releaseCurrentModel() {
       lfAf3.releaseWeights(loadedAf3.weights);
     }
     loadedAf3?.store?.releaseDecoded?.();
-    if (gpuDevice && lfAf3?.releaseResidentWeights) {
+  } catch {
+    /* ignore */
+  }
+  try {
+    // Release resident & streamed GPU weight buffers for BOTH AF2 and AF3 models
+    if (gpuDevice && lfCore?.releaseAllWeights) {
+      lfCore.releaseAllWeights(gpuDevice);
+    } else if (gpuDevice && lfAf3?.releaseResidentWeights) {
       lfAf3.releaseResidentWeights(gpuDevice);
     }
   } catch {
@@ -167,7 +230,9 @@ async function ensureDevice() {
   }
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('No compatible WebGPU adapter found for LocalFold');
-  const dev: GPUDevice = await lfCore.requestAlphaFoldDevice(adapter, { memoryBudgetBytes: null });
+  const dev: GPUDevice = await lfCore.requestAlphaFoldDevice(adapter, {
+    memoryBudgetBytes: resolveLocalFoldMemoryBudgetBytes(),
+  });
   gpuDevice = dev;
   void dev.lost.then(() => {
     if (gpuDevice === dev) {
@@ -530,6 +595,7 @@ self.onmessage = async (ev: MessageEvent) => {
             ...(iptmIsMonomerApprox ? { iptmIsMonomerApprox: true } : {}),
             chainLengths,
             chainIds,
+            resNums: sequentialResNumsFromChainLengths(chainLengths),
             pae: paeRaw ? new Float32Array(paeRaw) : undefined,
             elapsedMs: performance.now() - foldStart,
           });
@@ -706,6 +772,10 @@ self.onmessage = async (ev: MessageEvent) => {
             ...chainScores,
             chainLengths,
             chainIds,
+            resNums:
+              parsed.resNums.length === cleanSeq.length
+                ? parsed.resNums
+                : sequentialResNumsFromChainLengths(chainLengths),
             pae: paeRaw ? new Float32Array(paeRaw) : undefined,
             elapsedMs: performance.now() - foldStart,
           });
@@ -782,17 +852,42 @@ self.onmessage = async (ev: MessageEvent) => {
           pdbText: bestFold.pdbText,
           chainIds: bestChainIds,
           chainLengths: bestFold.chainLengths ?? bestParsed.diagnostics.chainLengths,
+          insCodes: bestParsed.insCodes,
+          sourceResidues: bestParsed.sourceResidues,
+          chainIdMap: bestParsed.chainIdMap,
+          atomPresence: bestParsed.atomPresence,
+          observedBackboneMask: bestParsed.observedBackboneMask,
           diagnostics: bestParsed.diagnostics,
-          geometry: computeGeometryStats(bestParsed.caCoords, bestChainIds),
+          geometry: computeGeometryStats(
+            bestParsed.caCoords,
+            bestChainIds,
+            bestParsed.resNums,
+            bestParsed.insCodes,
+          ),
         };
       }
 
-      self.postMessage({
-        id: msg.id,
-        type: 'result',
-        outputs: bestStructure ? { folds: out, structure: bestStructure } : { folds: out },
-        elapsedMs: performance.now() - t0,
-      });
+      const transferViews: Array<ArrayBufferView | undefined> = [];
+      for (const f of folds) {
+        transferViews.push(f.caCoords, f.plddt, f.pae);
+      }
+      if (bestStructure) {
+        transferViews.push(
+          bestStructure.caCoords,
+          bestStructure.backbone4Coords,
+          bestStructure.observedBackboneMask,
+        );
+      }
+      const transferables = collectOwnedTransferables(transferViews);
+      self.postMessage(
+        {
+          id: msg.id,
+          type: 'result',
+          outputs: bestStructure ? { folds: out, structure: bestStructure } : { folds: out },
+          elapsedMs: performance.now() - t0,
+        },
+        transferables,
+      );
     }
   } catch (err) {
     self.postMessage({
