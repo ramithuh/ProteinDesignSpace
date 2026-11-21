@@ -10,9 +10,15 @@
     NUMERIC_SPECS,
     isValidResidueToken,
     validateJsonOverride,
+    validatePdbId,
     validateSequenceText,
     validateStructureText,
   } from '$lib/engine/param-validation';
+  import {
+    QUICK_PDB_EXAMPLES,
+    fetchStructureByPdbId,
+    normalizePdbId,
+  } from '$lib/protein-ops/rcsb';
   import NumericInput from './NumericInput.svelte';
   import type { WorkflowNode } from '$lib/engine/types';
 
@@ -95,6 +101,53 @@
     setParam(key, tokens.join(', '));
   }
 
+  let pdbFetchBusy = $state(false);
+  let pdbFetchError = $state<string | null>(null);
+  let pdbFetchSummary = $state<string | null>(null);
+
+  $effect(() => {
+    void node.id;
+    pdbFetchError = null;
+    pdbFetchSummary = null;
+  });
+
+  async function handleFetchPdbId(overrideId?: string) {
+    const rawId = overrideId ?? String(node.params.pdbId ?? '');
+    const normId = normalizePdbId(rawId);
+    const check = validatePdbId(normId);
+    if (check.status === 'error') {
+      pdbFetchError = check.message ?? 'Invalid PDB ID';
+      return;
+    }
+    const targetNodeId = node.id;
+    const baseParams = { ...node.params };
+    pdbFetchBusy = true;
+    pdbFetchError = null;
+    pdbFetchSummary = null;
+    try {
+      const res = await fetchStructureByPdbId(normId);
+      onUpdate(targetNodeId, {
+        ...baseParams,
+        mode: 'pdb-id',
+        pdbId: res.pdbId,
+        fetchedPdbId: res.pdbId,
+        filename: res.filename,
+        pdbText: res.text,
+      });
+      const extras = [
+        res.ligandNames.length > 0 ? `ligands: ${res.ligandNames.join(', ')}` : '',
+        res.nucleicAcidChains.length > 0 ? `NA chains: ${res.nucleicAcidChains.join(', ')}` : '',
+      ].filter(Boolean);
+      pdbFetchSummary =
+        `Loaded ${res.filename} · ${res.nResidues} aa · ${res.chainCount} chain${res.chainCount === 1 ? '' : 's'}` +
+        (extras.length > 0 ? ` · ${extras.join(' · ')}` : '');
+    } catch (err) {
+      pdbFetchError = err instanceof Error ? err.message : String(err);
+    } finally {
+      pdbFetchBusy = false;
+    }
+  }
+
   async function handleFileUpload(ev: Event) {
     const input = ev.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
@@ -143,14 +196,83 @@
         <select
           {disabled}
           value={String(node.params.mode ?? 'demo-bundle')}
-          onchange={(e) => setParam('mode', e.currentTarget.value)}
+          onchange={(e) => {
+            pdbFetchError = null;
+            pdbFetchSummary = null;
+            setParam('mode', e.currentTarget.value);
+          }}
         >
           <option value="demo-bundle">Built-in 53 aa 3-helix bundle demo</option>
+          <option value="pdb-id">Fetch from RCSB PDB ID (e.g. 1PRW, 5O45)</option>
           <option value="custom">Upload or paste PDB / mmCIF</option>
         </select>
       </label>
 
-      {#if node.params.mode === 'custom'}
+      {#if node.params.mode === 'pdb-id'}
+        {@const pdbIdVal = String(node.params.pdbId ?? '')}
+        {@const pdbIdCheck = validatePdbId(pdbIdVal)}
+        {@const isAlreadyLoaded =
+          pdbIdCheck.status === 'ok' &&
+          normalizePdbId(String(node.params.fetchedPdbId ?? '')) === normalizePdbId(pdbIdVal) &&
+          String(node.params.pdbText ?? '').trim().length > 0}
+        <div class="full pdb-fetch-wrap">
+          <span class="field-lbl">RCSB PDB ID</span>
+          <div class="pdb-fetch-row">
+            <input
+              type="text"
+              class:input-error={pdbIdVal.trim().length > 0 && pdbIdCheck.status === 'error'}
+              disabled={disabled || pdbFetchBusy}
+              placeholder="e.g. 1PRW, 5O45, 4JHW"
+              maxlength="12"
+              value={pdbIdVal}
+              oninput={(e) => {
+                pdbFetchError = null;
+                pdbFetchSummary = null;
+                setParam('pdbId', e.currentTarget.value.toUpperCase());
+              }}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' && pdbIdCheck.status === 'ok' && !disabled && !pdbFetchBusy) {
+                  e.preventDefault();
+                  void handleFetchPdbId();
+                }
+              }}
+            />
+            <button
+              type="button"
+              class="fetch-btn"
+              disabled={disabled || pdbFetchBusy || pdbIdCheck.status === 'error'}
+              onclick={() => void handleFetchPdbId()}
+            >
+              {pdbFetchBusy ? 'Fetching…' : isAlreadyLoaded ? '↻ Refetch' : '↓ Fetch'}
+            </button>
+          </div>
+          <div class="quick-chips">
+            <span class="quick-lbl">Examples:</span>
+            {#each QUICK_PDB_EXAMPLES as ex (ex.id)}
+              <button
+                type="button"
+                class="quick-chip"
+                disabled={disabled || pdbFetchBusy}
+                onclick={() => void handleFetchPdbId(ex.id)}
+                title={`Fetch ${ex.id} (${ex.name}) from RCSB PDB`}
+              >
+                {ex.id} · {ex.name}
+              </button>
+            {/each}
+          </div>
+          {#if pdbFetchError}
+            <span class="field-hint err">{pdbFetchError}</span>
+          {:else if pdbFetchSummary}
+            <span class="field-hint ok">✓ {pdbFetchSummary}</span>
+          {:else if isAlreadyLoaded}
+            <span class="field-hint ok">✓ Ready ({String(node.params.filename || `${normalizePdbId(pdbIdVal)}.cif`)} loaded)</span>
+          {:else if pdbIdCheck.status === 'error'}
+            <span class="field-hint" class:err={pdbIdVal.trim().length > 0}>{pdbIdCheck.message}</span>
+          {:else}
+            <span class="field-hint">Click Fetch to preview now, or click Run to auto-fetch from RCSB PDB.</span>
+          {/if}
+        </div>
+      {:else if node.params.mode === 'custom'}
         {@const pdbCheck = validateStructureText(String(node.params.pdbText ?? ''))}
         <label class="file-row full">
           Upload .pdb / .cif
@@ -994,6 +1116,76 @@
     border-color: var(--err-strong);
     color: var(--err-strong);
     background: color-mix(in srgb, var(--err-strong) 10%, transparent);
+  }
+  .pdb-fetch-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .field-lbl {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .pdb-fetch-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .pdb-fetch-row input {
+    flex: 1;
+    min-width: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .fetch-btn {
+    flex-shrink: 0;
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: 5px;
+    padding: 6px 11px;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+  .fetch-btn:hover:not(:disabled) {
+    background: var(--accent);
+    color: #fff;
+  }
+  .fetch-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .quick-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+  }
+  .quick-lbl {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-right: 2px;
+  }
+  .quick-chip {
+    background: var(--bg-surface-2);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 7px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .quick-chip:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+  .quick-chip:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   textarea {
     width: 100%;

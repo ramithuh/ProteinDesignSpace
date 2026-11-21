@@ -2,6 +2,7 @@
 // for NodeInspector (live feedback) and validateGraph (pre-run checks).
 
 import type { WorkflowNode } from './types';
+import { isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
 
 export interface NumericFieldSpec {
   min: number;
@@ -277,6 +278,21 @@ export function validateJsonOverride(raw: string): ValidationFeedback {
   }
 }
 
+/** Validate a 4-character RCSB PDB ID (e.g. 1PRW, 5O45) or extended 12-char ID. */
+export function validatePdbId(raw: string): ValidationFeedback {
+  const norm = normalizePdbId(raw);
+  if (!norm) {
+    return { status: 'error', message: 'Enter a 4-character RCSB PDB ID (e.g. 1PRW, 5O45).' };
+  }
+  if (!isValidPdbId(norm)) {
+    return {
+      status: 'error',
+      message: `"${norm}" is not a valid PDB ID (expected 4 characters starting with a digit, e.g. 1PRW).`,
+    };
+  }
+  return { status: 'ok', message: `RCSB PDB: ${norm}` };
+}
+
 /** Lightweight structure text check for custom PDB / mmCIF paste. */
 export function validateStructureText(raw: string): ValidationFeedback {
   const trimmed = raw.trim();
@@ -323,6 +339,13 @@ export function validateNodeParams(node: WorkflowNode): string[] {
 
   if (node.adapterId === 'pdb-input' && p.mode === 'custom') {
     const check = validateStructureText(String(p.pdbText ?? ''));
+    if (check.status === 'error') {
+      errs.push(`"${label}": ${check.message}`);
+    }
+  }
+
+  if (node.adapterId === 'pdb-input' && p.mode === 'pdb-id') {
+    const check = validatePdbId(String(p.pdbId ?? ''));
     if (check.status === 'error') {
       errs.push(`"${label}": ${check.message}`);
     }

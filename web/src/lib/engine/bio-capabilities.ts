@@ -112,7 +112,7 @@ function inferNodeOutputProfile(
   if (node.adapterId === 'pdb-input') {
     const mode = String(node.params.mode ?? 'demo-bundle');
     const pdbText = String(node.params.pdbText ?? '').trim();
-    if (mode === 'custom' && pdbText.length > 0) {
+    if ((mode === 'custom' || mode === 'pdb-id') && pdbText.length > 0) {
       try {
         const parsed = parseStructureText(pdbText);
         const entities = new Set<BioEntityKind>(['protein']);

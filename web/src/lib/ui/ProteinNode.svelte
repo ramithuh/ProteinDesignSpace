@@ -57,6 +57,10 @@
     const p = data.params ?? {};
     switch (data.adapterId) {
       case 'pdb-input': {
+        if (p.mode === 'pdb-id') {
+          const id = String(p.pdbId ?? '').trim().toUpperCase();
+          return id ? `RCSB ${id}` : 'Fetch by PDB ID';
+        }
         if (p.mode === 'custom') {
           const fname = String(p.filename ?? '').trim();
           return fname || 'custom PDB';

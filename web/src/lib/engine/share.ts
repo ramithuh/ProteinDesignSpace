@@ -85,11 +85,14 @@ function diffParams(
       strippedPdb = true;
       continue;
     }
+    if (adapterId === 'pdb-input' && k === 'fetchedPdbId') {
+      continue;
+    }
     if (JSON.stringify(v) !== JSON.stringify(defaults[k])) {
       diff[k] = v;
     }
   }
-  if (strippedPdb && resetModeOnStrip && adapterId === 'pdb-input') {
+  if (strippedPdb && resetModeOnStrip && adapterId === 'pdb-input' && params.mode !== 'pdb-id') {
     // Do not leave a broken mode:'custom' with an empty pdbText in shared links
     if (defaults.mode === 'demo-bundle') {
       delete diff.mode;

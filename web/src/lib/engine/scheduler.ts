@@ -7,6 +7,7 @@ import LocalFoldWorker from '$lib/workers/localfold.worker?worker';
 import Rfd4Worker from '$lib/workers/rfd4.worker?worker';
 import Genie3Worker from '$lib/workers/genie3.worker?worker';
 import { generateSampleHelixBundlePdb, parseStructureText } from '$lib/protein-ops/pdb';
+import { fetchStructureByPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
 import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/protein-ops/kabsch';
 import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
 import { splitMultiChainSequence, validateRuntimeNodeInputs } from './bio-capabilities';
@@ -242,19 +243,44 @@ export class ExecutionScheduler {
     });
   }
 
-  private runCpuNode(
+  private async runCpuNode(
     node: WorkflowNode,
     inputs: Record<string, CanonicalArtifact>,
-  ): Record<string, CanonicalArtifact> {
+    onProgress?: (ev: NodeProgressEvent) => void,
+  ): Promise<Record<string, CanonicalArtifact>> {
     if (node.adapterId === 'pdb-input') {
       const mode = String(node.params.mode ?? 'demo-bundle');
-      const rawText =
-        mode === 'custom' && String(node.params.pdbText ?? '').trim().length > 0
-          ? String(node.params.pdbText)
-          : generateSampleHelixBundlePdb();
-      const filename = String(
-        mode === 'custom' ? node.params.filename || 'uploaded.pdb' : 'demo_3helix_53aa.pdb',
-      );
+      let rawText: string;
+      let filename: string;
+      if (mode === 'pdb-id') {
+        const normId = normalizePdbId(String(node.params.pdbId ?? ''));
+        if (!normId) {
+          throw new Error('PDB Input is in PDB ID mode, but no PDB ID was entered.');
+        }
+        const cachedText = String(node.params.pdbText ?? '').trim();
+        const fetchedFor = normalizePdbId(String(node.params.fetchedPdbId ?? ''));
+        if (cachedText.length > 0 && fetchedFor === normId) {
+          rawText = cachedText;
+          filename = String(node.params.filename || `${normId}.cif`);
+        } else {
+          onProgress?.({
+            nodeId: node.id,
+            status: 'loading',
+            phase: 'fetch',
+            progress: 0.2,
+            detail: `Fetching ${normId} from RCSB PDB...`,
+          });
+          const fetched = await fetchStructureByPdbId(normId);
+          rawText = fetched.text;
+          filename = fetched.filename;
+        }
+      } else if (mode === 'custom' && String(node.params.pdbText ?? '').trim().length > 0) {
+        rawText = String(node.params.pdbText);
+        filename = String(node.params.filename || 'uploaded.pdb');
+      } else {
+        rawText = generateSampleHelixBundlePdb();
+        filename = 'demo_3helix_53aa.pdb';
+      }
       const parsed = parseStructureText(rawText);
       if (parsed.nResidues < 3) {
         throw new Error('Input PDB/mmCIF must contain at least 3 residues with Cα atoms');
@@ -568,7 +594,7 @@ export class ExecutionScheduler {
           onProgress({ nodeId: node.id, status: 'running', progress: 0, detail: 'Starting...' });
           try {
             if (manifest.runtime === 'cpu-ts') {
-              nodeOutputs = this.runCpuNode(node, inputs);
+              nodeOutputs = await this.runCpuNode(node, inputs, onProgress);
               elapsedMs = performance.now() - nStart;
             } else {
               // Layer 2 biological capability guard before launching GPU worker / downloading weights

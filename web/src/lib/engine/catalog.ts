@@ -63,7 +63,7 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
 ];
 
 export const CONCISE_BLOCK_ROLES: Record<string, string> = {
-  'pdb-input': 'Built-in 3-helix bundle or upload/paste PDB & mmCIF',
+  'pdb-input': 'Fetch by PDB ID, upload/paste PDB & mmCIF, or 3-helix demo',
   'sequence-input': 'Paste amino acid sequences (plain text or FASTA)',
   'rfd4-conditioner': 'Binding hotspots, fixed motifs, H-bonds & CATH folds',
   'rfd4-proteina': 'All-atom backbone and sequence co-design',
