@@ -414,15 +414,15 @@
       <div class="onb-highlights">
         <div class="hl-item">
           <span class="hl-dot" style="background: #3b82f6"></span>
-          <span><b>Design &amp; Conditioning:</b> RFD4-Proteina, Genie 3, RCSB PDB IDs &amp; 16 curated benchmark targets.</span>
+          <span><b>Backbone Design &amp; Conditioning:</b> De novo monomers, motif scaffolding, protein binders, enzymes, ligands &amp; DNA.</span>
         </div>
         <div class="hl-item">
           <span class="hl-dot" style="background: #a855f7"></span>
-          <span><b>Sequence Design:</b> SolubleMPNN, ProteinMPNN &amp; Cα-only with residue-level locking.</span>
+          <span><b>Sequence Design:</b> Inverse folding with fixed-residue constraints and solubility optimization.</span>
         </div>
         <div class="hl-item">
           <span class="hl-dot" style="background: #10b981"></span>
-          <span><b>Structure Prediction:</b> 18 LocalFold models (AF2 Monomer &amp; Multimer v3, RF3, Boltz-2, AF3 &amp; more) cached locally in your browser.</span>
+          <span><b>Prediction &amp; Scoring:</b> Monomer &amp; complex folding, 3D comparison, scRMSD, scTM &amp; pLDDT evaluation.</span>
         </div>
       </div>
 
