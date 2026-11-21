@@ -3,7 +3,13 @@
 // sharing a designed backbone, or clean +X side-by-side offset when lengths differ
 // or Side-by-Side layout is toggled) + pairwise inter-model Cα RMSD/TM-score.
 
-import { applyTransformToPdb, computeGeometryStats, kabschAlign, type GeometryStats } from '$lib/protein-ops/kabsch';
+import {
+  applyTransformToPdb,
+  computeGeometryStats,
+  kabschAlign,
+  kabschAlignSubstructure,
+  type GeometryStats,
+} from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import { ADAPTER_REGISTRY } from './registry';
 import type {
@@ -61,6 +67,7 @@ export interface CompareBranchSummary {
   designedPdb: string | null;
   pdbText: string | null;
   caCoords: Float32Array | null;
+  resNums: number[] | null;
   length: number | null;
   sequenceId: string | null;
   candidateCount: number;
@@ -82,6 +89,8 @@ export interface PairwiseAgreement {
   badgeB: string;
   rmsd: number;
   tmScore: number;
+  alignedResidues?: number;
+  isSubstructure?: boolean;
 }
 
 export interface ComparisonState {
@@ -89,6 +98,7 @@ export interface ComparisonState {
   models: ViewerModelSpec[];
   effectiveLayout: 'overlay' | 'side-by-side';
   forcedSideBySide: boolean;
+  kabschAligned: boolean;
   sharedReferenceLabel: string | null;
   pairwise: PairwiseAgreement | null;
 }
@@ -138,6 +148,7 @@ function extractBranch(
     designedPdb: null,
     pdbText: null,
     caCoords: null,
+    resNums: null,
     length: null,
     sequenceId: null,
     candidateCount: 0,
@@ -171,6 +182,7 @@ function extractBranch(
       designedPdb: row.designedPdb,
       pdbText: row.alignedFoldPdb,
       caCoords: parsed.caCoords,
+      resNums: parsed.resNums,
       length: parsed.nResidues,
       sequenceId: row.sequenceId,
       candidateCount: metrics.rows.length,
@@ -201,6 +213,7 @@ function extractBranch(
       designedPdb: null,
       pdbText: f.pdbText,
       caCoords: parsed.caCoords,
+      resNums: parsed.resNums,
       length: parsed.nResidues,
       sequenceId: f.sequenceId,
       candidateCount: folds.folds.length,
@@ -215,6 +228,12 @@ function extractBranch(
 
   const struct = values.find((a): a is StructureArtifact => a.kind === 'StructureArtifact');
   if (struct && struct.pdbText) {
+    let resNums: number[] | null = null;
+    try {
+      resNums = parseStructureText(struct.pdbText).resNums;
+    } catch {
+      resNums = null;
+    }
     return {
       ...empty,
       hasOutputs: true,
@@ -224,6 +243,7 @@ function extractBranch(
       designedPdb: null,
       pdbText: struct.pdbText,
       caCoords: struct.caCoords,
+      resNums,
       length: struct.length,
       sequenceId: struct.label,
       candidateCount: 1,
@@ -242,6 +262,7 @@ export function buildComparisonState(
   opts: {
     layout: 'overlay' | 'side-by-side';
     colorMode: 'by-model' | 'plddt';
+    alignKabsch?: boolean;
     branchCandidateIdx?: Record<string, number>;
     hiddenModelIds?: ReadonlySet<string>;
   },
@@ -249,6 +270,7 @@ export function buildComparisonState(
   const capped = selectedNodeIds.slice(0, COMPARE_PALETTE.length);
   const candIdx = opts.branchCandidateIdx ?? {};
   const hidden = opts.hiddenModelIds ?? new Set<string>();
+  const wantKabsch = opts.alignKabsch !== false;
 
   const branches = capped.map((id, idx) =>
     extractBranch(graph, id, idx, outputsByNode, candIdx),
@@ -267,25 +289,57 @@ export function buildComparisonState(
   // Check if all 3D models share the same residue count
   const lengths = new Set(with3d.map((b) => b.length));
   const sameLength = with3d.length >= 2 && lengths.size === 1;
-  const forcedSideBySide = with3d.length >= 2 && !sameLength;
+  // Substructure Kabsch alignment now supports overlaying different-length models (e.g. motif vs scaffold)!
+  const forcedSideBySide = false;
   const effectiveLayout: 'overlay' | 'side-by-side' =
-    forcedSideBySide || opts.layout === 'side-by-side' ? 'side-by-side' : 'overlay';
+    opts.layout === 'side-by-side' ? 'side-by-side' : 'overlay';
 
-  // Compute pairwise agreement between first 2 same-length models
+  // Pick anchor frame: for same-length use model 0; for different-length use the longest model
+  // so shorter motifs/targets snap onto the larger scaffold/complex cleanly.
+  let anchorIdx = 0;
+  if (!sameLength && with3d.length >= 2) {
+    let maxLen = with3d[0].length ?? 0;
+    for (let i = 1; i < with3d.length; i++) {
+      if ((with3d[i].length ?? 0) > maxLen) {
+        maxLen = with3d[i].length ?? 0;
+        anchorIdx = i;
+      }
+    }
+  }
+
+  // Compute pairwise agreement between first 2 3D models (full Kabsch if same length, substructure if different)
   let pairwise: PairwiseAgreement | null = null;
-  if (sameLength && with3d.length >= 2) {
+  if (with3d.length >= 2) {
     const a = with3d[0];
     const b = with3d[1];
     try {
-      const align = kabschAlign(b.caCoords!, a.caCoords!);
-      pairwise = {
-        labelA: a.label,
-        labelB: b.label,
-        badgeA: a.badge,
-        badgeB: b.badge,
-        rmsd: align.rmsd,
-        tmScore: align.tmScore,
-      };
+      if (sameLength) {
+        const align = kabschAlign(b.caCoords!, a.caCoords!);
+        pairwise = {
+          labelA: a.label,
+          labelB: b.label,
+          badgeA: a.badge,
+          badgeB: b.badge,
+          rmsd: align.rmsd,
+          tmScore: align.tmScore,
+          alignedResidues: a.length ?? undefined,
+          isSubstructure: false,
+        };
+      } else {
+        const shorter = (a.length ?? 0) <= (b.length ?? 0) ? a : b;
+        const longer = shorter === a ? b : a;
+        const align = kabschAlignSubstructure(shorter.caCoords!, longer.caCoords!, shorter.resNums);
+        pairwise = {
+          labelA: a.label,
+          labelB: b.label,
+          badgeA: a.badge,
+          badgeB: b.badge,
+          rmsd: align.rmsd,
+          tmScore: align.tmScore,
+          alignedResidues: align.alignedResidues,
+          isSubstructure: true,
+        };
+      }
     } catch {
       pairwise = null;
     }
@@ -293,11 +347,13 @@ export function buildComparisonState(
 
   const models: ViewerModelSpec[] = [];
   let sharedReferenceLabel: string | null = null;
+  let kabschAligned = false;
 
   if (effectiveLayout === 'overlay') {
     // 1. Optional ghosted shared designed backbone
     if (hasSharedDesigned && metricBranches[0].designedPdb) {
       sharedReferenceLabel = 'Designed Backbone';
+      kabschAligned = true;
       models.push({
         id: 'ref-designed',
         nodeId: null,
@@ -311,15 +367,19 @@ export function buildComparisonState(
       });
     }
 
-    const anchor = with3d[0];
+    const anchor = with3d[anchorIdx];
     for (let i = 0; i < with3d.length; i++) {
       const b = with3d[i];
       let pdb = b.pdbText!;
-      // If NOT already in a shared pre-aligned frame, Kabsch-align models 2..N onto model 1
-      if (!hasSharedDesigned && i > 0 && sameLength && anchor?.caCoords && b.caCoords) {
+      // If Kabsch align is enabled and NOT already in a shared pre-aligned frame, align non-anchor models onto anchor
+      if (wantKabsch && !hasSharedDesigned && i !== anchorIdx && anchor?.caCoords && b.caCoords) {
         try {
-          const res = kabschAlign(b.caCoords, anchor.caCoords);
+          const res =
+            (b.length ?? 0) === (anchor.length ?? 0)
+              ? kabschAlign(b.caCoords, anchor.caCoords)
+              : kabschAlignSubstructure(b.caCoords, anchor.caCoords, b.resNums);
           pdb = applyTransformToPdb(pdb, res.rotation, res.translation);
+          kabschAligned = true;
         } catch {
           /* keep original coordinates on degenerate alignment */
         }
@@ -381,6 +441,7 @@ export function buildComparisonState(
     models,
     effectiveLayout,
     forcedSideBySide,
+    kabschAligned,
     sharedReferenceLabel,
     pairwise,
   };

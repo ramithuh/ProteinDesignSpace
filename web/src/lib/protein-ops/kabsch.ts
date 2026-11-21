@@ -324,6 +324,115 @@ export function kabschAlign(mobile: Float32Array, target: Float32Array): KabschR
   return { rmsd, tmScore: bestTm, rotation: R, translation: t, transform4x4, aligned };
 }
 
+export interface SubstructureKabschResult extends KabschResult {
+  alignedResidues: number;
+  isSubstructure: true;
+}
+
+/**
+ * Align a shorter structure (`shortCoords`, length m) onto the best-matching segment(s) of a
+ * longer structure (`longCoords`, length n >= m) via sliding-window / multi-island Kabsch alignment.
+ * Enables overlaying a cropped motif (e.g. 19-aa 5TPN or twin 1PRW EF-hands) onto a 74-aa scaffold!
+ */
+export function kabschAlignSubstructure(
+  shortCoords: Float32Array,
+  longCoords: Float32Array,
+  shortResNums?: readonly number[] | null,
+): SubstructureKabschResult {
+  const m = Math.floor(shortCoords.length / 3);
+  const n = Math.floor(longCoords.length / 3);
+  if (m < 3 || n < m) {
+    return { ...kabschAlign(shortCoords, longCoords), alignedResidues: Math.min(m, n), isSubstructure: true };
+  }
+  if (m === n) {
+    return { ...kabschAlign(shortCoords, longCoords), alignedResidues: m, isSubstructure: true };
+  }
+
+  // Partition shortCoords into contiguous islands (splitting on resNum gap > 1 or Cα distance > 6.5 Å)
+  const islands: Array<{ start: number; len: number }> = [];
+  let islStart = 0;
+  for (let i = 1; i < m; i++) {
+    const resGap =
+      shortResNums && shortResNums.length === m ? shortResNums[i] !== shortResNums[i - 1] + 1 : false;
+    const dx = shortCoords[i * 3] - shortCoords[(i - 1) * 3];
+    const dy = shortCoords[i * 3 + 1] - shortCoords[(i - 1) * 3 + 1];
+    const dz = shortCoords[i * 3 + 2] - shortCoords[(i - 1) * 3 + 2];
+    const distBreak = dx * dx + dy * dy + dz * dz > 6.5 * 6.5;
+    if (resGap || distBreak) {
+      islands.push({ start: islStart, len: i - islStart });
+      islStart = i;
+    }
+  }
+  islands.push({ start: islStart, len: m - islStart });
+
+  const sliceCoords = (coords: Float32Array, start: number, len: number): Float32Array =>
+    coords.subarray(start * 3, (start + len) * 3);
+
+  const validIslands = islands.filter((isl) => isl.len >= 3);
+  const useIslands = validIslands.length > 1 ? validIslands : [{ start: 0, len: m }];
+
+  // Match each island in order to its minimum-RMSD non-overlapping window in longCoords
+  const matchedShortIdx: number[] = [];
+  const matchedLongIdx: number[] = [];
+  let searchCursor = 0;
+
+  for (let k = 0; k < useIslands.length; k++) {
+    const isl = useIslands[k];
+    const remainingAfter = useIslands.slice(k + 1).reduce((s, x) => s + x.len, 0);
+    const maxStart = n - isl.len - remainingAfter;
+    if (maxStart < searchCursor) break;
+
+    const islMob = sliceCoords(shortCoords, isl.start, isl.len);
+    let bestOffset = searchCursor;
+    let bestRmsd = Infinity;
+
+    for (let off = searchCursor; off <= maxStart; off++) {
+      const winTgt = sliceCoords(longCoords, off, isl.len);
+      const { R, t } = weightedKabsch(islMob, winTgt);
+      let sq = 0;
+      for (let i = 0; i < isl.len; i++) {
+        const x = islMob[i * 3], y = islMob[i * 3 + 1], z = islMob[i * 3 + 2];
+        const ax = R[0] * x + R[1] * y + R[2] * z + t[0] - winTgt[i * 3];
+        const ay = R[3] * x + R[4] * y + R[5] * z + t[1] - winTgt[i * 3 + 1];
+        const az = R[6] * x + R[7] * y + R[8] * z + t[2] - winTgt[i * 3 + 2];
+        sq += ax * ax + ay * ay + az * az;
+      }
+      const rmsd = Math.sqrt(sq / isl.len);
+      if (rmsd < bestRmsd) {
+        bestRmsd = rmsd;
+        bestOffset = off;
+      }
+    }
+
+    for (let i = 0; i < isl.len; i++) {
+      matchedShortIdx.push(isl.start + i);
+      matchedLongIdx.push(bestOffset + i);
+    }
+    searchCursor = bestOffset + isl.len;
+  }
+
+  const pairCount = matchedShortIdx.length;
+  if (pairCount < 3) {
+    return { ...kabschAlign(shortCoords, longCoords.subarray(0, m * 3)), alignedResidues: m, isSubstructure: true };
+  }
+
+  const subMob = new Float32Array(pairCount * 3);
+  const subTgt = new Float32Array(pairCount * 3);
+  for (let i = 0; i < pairCount; i++) {
+    const si = matchedShortIdx[i] * 3;
+    const li = matchedLongIdx[i] * 3;
+    subMob[i * 3] = shortCoords[si];
+    subMob[i * 3 + 1] = shortCoords[si + 1];
+    subMob[i * 3 + 2] = shortCoords[si + 2];
+    subTgt[i * 3] = longCoords[li];
+    subTgt[i * 3 + 1] = longCoords[li + 1];
+    subTgt[i * 3 + 2] = longCoords[li + 2];
+  }
+
+  const joint = kabschAlign(subMob, subTgt);
+  return { ...joint, alignedResidues: pairCount, isSubstructure: true };
+}
+
 function padLeft(s: string, width: number): string {
   return s.length >= width ? s : ' '.repeat(width - s.length) + s;
 }

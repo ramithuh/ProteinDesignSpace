@@ -90,6 +90,7 @@
   let isCompareMode = $derived(selectedNodeIds.length >= 2);
   let compareLayout = $state<'overlay' | 'side-by-side'>('overlay');
   let compareColorMode = $state<'by-model' | 'plddt'>('by-model');
+  let compareAlignKabsch = $state(true);
   let hiddenCompareModelIds = $state<string[]>([]);
   let branchCandidateIdx = $state<Record<string, number>>({});
   let isRunning = $state(false);
@@ -1385,6 +1386,7 @@
     return buildComparisonState(graph, selectedNodeIds, outputsByNode, {
       layout: compareLayout,
       colorMode: compareColorMode,
+      alignKabsch: compareAlignKabsch,
       branchCandidateIdx,
       hiddenModelIds: new Set(hiddenCompareModelIds),
     });
@@ -1405,10 +1407,17 @@
 
   let compareViewerLabel = $derived.by((): string => {
     if (!comparisonState) return viewerLabel;
+    const alignTag = comparisonState.kabschAligned
+      ? comparisonState.pairwise?.isSubstructure
+        ? `✓ Motif Kabsch (${comparisonState.pairwise.alignedResidues} aa)`
+        : '✓ Kabsch'
+      : comparisonState.effectiveLayout === 'side-by-side'
+        ? 'Side-by-side'
+        : 'Overlay (raw)';
     if (comparisonState.pairwise) {
-      return `Compare ${comparisonState.branches.length} blocks · ${comparisonState.pairwise.badgeA}↔${comparisonState.pairwise.badgeB} RMSD ${comparisonState.pairwise.rmsd.toFixed(2)} Å`;
+      return `Compare ${comparisonState.branches.length} blocks · ${alignTag} · ${comparisonState.pairwise.badgeA}↔${comparisonState.pairwise.badgeB} RMSD ${comparisonState.pairwise.rmsd.toFixed(2)} Å`;
     }
-    return `Compare ${comparisonState.branches.length} blocks · ${comparisonState.effectiveLayout === 'side-by-side' ? 'Side-by-side' : 'Overlay'}`;
+    return `Compare ${comparisonState.branches.length} blocks · ${alignTag}`;
   });
 
   // Reset row index when switching between different scorer branches
@@ -1787,6 +1796,20 @@
                 pLDDT
               </button>
             </div>
+            <label title="Superpose models with Kabsch alignment (supports motif/substructure alignment for different lengths)">
+              <input
+                type="checkbox"
+                checked={compareAlignKabsch && comparisonState.effectiveLayout === 'overlay'}
+                onchange={(e) => {
+                  const checked = e.currentTarget.checked;
+                  compareAlignKabsch = checked;
+                  if (checked && compareLayout === 'side-by-side') {
+                    compareLayout = 'overlay';
+                  }
+                }}
+              />
+              Kabsch align
+            </label>
             <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
             <button
               type="button"

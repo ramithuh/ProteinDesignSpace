@@ -139,11 +139,11 @@ describe('multi-select 3D comparison state', () => {
     expect(cmp.pairwise!.rmsd).toBeCloseTo(0, 4);
   });
 
-  it('automatically uses side-by-side layout when comparing structures of different lengths', () => {
+  it('supports substructure Kabsch overlay when comparing different-length structures (motif vs scaffold) and respects alignKabsch toggle', () => {
     const pdb = generateSampleHelixBundlePdb();
     const lines = pdb.split('\n');
     const shortPdb = lines
-      .filter((l) => !l.startsWith('ATOM  ') || Number(l.slice(22, 26)) <= 25)
+      .filter((l) => !l.startsWith('ATOM  ') || (Number(l.slice(22, 26)) >= 11 && Number(l.slice(22, 26)) <= 35))
       .join('\n');
     const pLong = parsePdbBackbone(pdb);
     const pShort = parsePdbBackbone(shortPdb);
@@ -191,10 +191,24 @@ describe('multi-select 3D comparison state', () => {
     const cmp = buildComparisonState(graph, ['n1', 'n2'], outputsByNode, {
       layout: 'overlay',
       colorMode: 'by-model',
+      alignKabsch: true,
     });
-    expect(cmp.forcedSideBySide).toBe(true);
-    expect(cmp.effectiveLayout).toBe('side-by-side');
-    expect(cmp.pairwise).toBeNull();
+    expect(cmp.forcedSideBySide).toBe(false);
+    expect(cmp.effectiveLayout).toBe('overlay');
+    expect(cmp.kabschAligned).toBe(true);
+    expect(cmp.pairwise).not.toBeNull();
+    expect(cmp.pairwise!.isSubstructure).toBe(true);
+    expect(cmp.pairwise!.alignedResidues).toBe(25);
+    expect(cmp.pairwise!.rmsd).toBeCloseTo(0, 3);
     expect(cmp.models).toHaveLength(2);
+
+    // Turning off Kabsch align keeps raw coordinates unaligned
+    const rawOverlay = buildComparisonState(graph, ['n1', 'n2'], outputsByNode, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      alignKabsch: false,
+    });
+    expect(rawOverlay.effectiveLayout).toBe('overlay');
+    expect(rawOverlay.kabschAligned).toBe(false);
   });
 });

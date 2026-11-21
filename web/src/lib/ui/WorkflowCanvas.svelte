@@ -823,6 +823,7 @@
         clearProposals();
         catalogOpen = false;
         wireLegendOpen = false;
+        onSelectNode('');
       }}
       onnodeclick={({ node, event }) => {
         catalogOpen = false;

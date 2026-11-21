@@ -443,9 +443,11 @@
     filter: saturate(0.75);
   }
   .p-node.comparing {
+    --node-border-w: 2.5px;
     --node-border-color: var(--compare-color);
     box-shadow:
-      0 0 0 2.5px color-mix(in srgb, var(--compare-color) 42%, transparent),
+      0 0 0 4px color-mix(in srgb, var(--compare-color) 36%, transparent),
+      0 10px 22px color-mix(in srgb, var(--compare-color) 20%, transparent),
       var(--node-shadow);
   }
   .compare-badge {
@@ -473,31 +475,47 @@
     --node-border-color: #ef4444;
     box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.22), var(--node-shadow);
   }
-  /* Selected / peeking focus ring stays visible alongside state border & overrides dimming */
+  /* Selected / peeking focus ring stays bold & unmistakable in both light and dark themes */
   .p-node.selected {
     opacity: 1;
     filter: none;
+    --node-border-w: 2.5px;
     --node-border-color: var(--accent);
-    box-shadow: 0 0 0 2.5px rgba(59, 130, 246, 0.35), var(--node-shadow);
+    box-shadow:
+      0 0 0 4px rgba(37, 99, 235, 0.28),
+      0 10px 24px rgba(37, 99, 235, 0.2),
+      var(--node-shadow);
   }
   .p-node.selected.running {
-    --node-border-w: 1.5px;
+    --node-border-w: 2.5px;
     --node-border-color: #f59e0b;
     box-shadow:
-      0 0 0 2.5px var(--accent),
-      0 0 0 5px rgba(245, 158, 11, 0.24),
+      0 0 0 3px var(--accent),
+      0 0 0 6px rgba(245, 158, 11, 0.28),
       var(--node-shadow);
   }
   .p-node.selected.done {
-    --node-border-color: #22c55e;
-    box-shadow: 0 0 0 2.5px rgba(59, 130, 246, 0.4), var(--node-shadow);
+    --node-border-w: 2.5px;
+    --node-border-color: var(--accent);
+    box-shadow:
+      0 0 0 4px rgba(37, 99, 235, 0.28),
+      0 10px 24px rgba(37, 99, 235, 0.2),
+      var(--node-shadow);
+  }
+  .p-node.selected.comparing {
+    --node-border-w: 2.5px;
+    --node-border-color: var(--compare-color);
+    box-shadow:
+      0 0 0 4px color-mix(in srgb, var(--compare-color) 40%, transparent),
+      0 10px 24px color-mix(in srgb, var(--compare-color) 24%, transparent),
+      var(--node-shadow);
   }
   .p-node.selected.err {
-    --node-border-w: 1.5px;
+    --node-border-w: 2.5px;
     --node-border-color: #ef4444;
     box-shadow:
-      0 0 0 2.5px var(--accent),
-      0 0 0 5px rgba(239, 68, 68, 0.22),
+      0 0 0 3px var(--accent),
+      0 0 0 6px rgba(239, 68, 68, 0.26),
       var(--node-shadow);
   }
   .stripe-clip {

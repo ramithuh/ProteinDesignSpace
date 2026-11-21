@@ -67,8 +67,13 @@
   {#if comparison.pairwise}
     <div class="agreement-banner">
       <span>
-        Inter-model Cα RMSD (<b>{comparison.pairwise.badgeA} ↔ {comparison.pairwise.badgeB}</b>):
-        <b>{comparison.pairwise.rmsd.toFixed(2)} Å</b> · TM <b>{comparison.pairwise.tmScore.toFixed(3)}</b>
+        {#if comparison.pairwise.isSubstructure}
+          Motif / Substructure Kabsch Cα RMSD (<b>{comparison.pairwise.badgeA} ↔ {comparison.pairwise.badgeB}</b> · {comparison.pairwise.alignedResidues} aa):
+          <b>{comparison.pairwise.rmsd.toFixed(2)} Å</b>
+        {:else}
+          Inter-model Kabsch Cα RMSD (<b>{comparison.pairwise.badgeA} ↔ {comparison.pairwise.badgeB}</b>):
+          <b>{comparison.pairwise.rmsd.toFixed(2)} Å</b> · TM <b>{comparison.pairwise.tmScore.toFixed(3)}</b>
+        {/if}
       </span>
     </div>
   {/if}
