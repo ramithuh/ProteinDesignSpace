@@ -11,7 +11,7 @@
     "prebuild": "node ../tools/sync-upstream.mjs",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "svelte-kit sync && vitest run",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:deploy": "node ../tools/check-deploy.mjs",
     "sync:upstream": "node ../tools/sync-upstream.mjs"
