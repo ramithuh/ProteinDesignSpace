@@ -38,9 +38,17 @@ dist/
 *.ckpt
 
 # Synced upstream WebGPU ES modules (recreated by `node tools/sync-upstream.mjs`)
-# Genie 3 JS/WGSL runtime (~220 KB, no weights) is tracked so Cloudflare Pages builds
-# work without cross-repo private auth; its FP16 weights are fetched from HuggingFace.
+# Compact JS/WGSL runtimes (no weights) are tracked so Cloudflare Pages builds
+# work cleanly without private cross-repo auth; sharded weights are fetched from HuggingFace.
 web/static/vendor/*
 !web/static/vendor/genie3/
 web/static/vendor/genie3/weights/
+!web/static/vendor/thermompnn/
+web/static/vendor/thermompnn/weights/
+!web/static/vendor/ligandmpnn/
+web/static/vendor/ligandmpnn/weights/
+!web/static/vendor/lasermpnn/
+web/static/vendor/lasermpnn/weights/
+!web/static/vendor/antifold-esmif1/
+web/static/vendor/antifold-esmif1/weights/
 .upstream-tmp/
