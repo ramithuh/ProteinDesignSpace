@@ -522,7 +522,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
       },
     ];
     const subGroups: CatalogSubGroup[] = [{ title: 'Stability, Filtering & Designability Metrics', items }];
-    const identityBlob = 'evaluation score scoring metrics designability scrmsd sctm filter ranker top-k stability';
+    const identityBlob = 'evaluation score scoring metrics';
     const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
     return {
       id: 'evaluation',

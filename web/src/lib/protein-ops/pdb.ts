@@ -1251,6 +1251,7 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
 
 interface RawCropRule {
   kind: 'chain' | 'range' | 'ligand';
+  tokenIdx: number;
   chain?: string;
   start?: number;
   end?: number;
@@ -1303,25 +1304,30 @@ function matchesResNumAndIns(
   return aboveLo && belowHi;
 }
 
-function parseRawCropRules(segmentSpec: string): { rules: RawCropRule[]; invalidTokens: string[] } {
+function parseRawCropRules(segmentSpec: string): {
+  rules: RawCropRule[];
+  tokens: string[];
+  invalidTokens: string[];
+} {
   const tokens = segmentSpec
     .split(/[,\s]+/)
     .map((s) => s.trim())
     .filter(Boolean);
   const rules: RawCropRule[] = [];
   const invalidTokens: string[] = [];
-  for (const tok of tokens) {
+  for (let tokenIdx = 0; tokenIdx < tokens.length; tokenIdx++) {
+    const tok = tokens[tokenIdx];
     // Chain + residue/range with colon e.g. "AA:1", "AA:1-5", "A:10A-10B"
     if (tok.includes(':')) {
       const range = parseCropRangeSpec(tok);
       if (range) {
-        rules.push({ kind: 'range', ...range });
+        rules.push({ kind: 'range', tokenIdx, ...range });
         continue;
       }
       // Chain + ligand comp_id e.g. "A:ZN", "AA:DHZ", "A:SAM", "A:FE2", "A:CIT", "A:K"
       const chainLig = /^([A-Za-z0-9_]+):([A-Za-z0-9]{1,5})$/.exec(tok);
       if (chainLig && !/^-?\d+$/.test(chainLig[2])) {
-        rules.push({ kind: 'ligand', chain: chainLig[1], compId: chainLig[2].toUpperCase() });
+        rules.push({ kind: 'ligand', tokenIdx, chain: chainLig[1], compId: chainLig[2].toUpperCase() });
         continue;
       }
       invalidTokens.push(tok);
@@ -1330,30 +1336,30 @@ function parseRawCropRules(segmentSpec: string): { rules: RawCropRule[]; invalid
     // Single chain character e.g. "A", "a", "B", "C" (case-sensitive!)
     const chainOnly = /^([A-Za-z])$/.exec(tok);
     if (chainOnly) {
-      rules.push({ kind: 'chain', chain: chainOnly[1] });
+      rules.push({ kind: 'chain', tokenIdx, chain: chainOnly[1] });
       continue;
     }
     // Residue or range e.g. "A102", "A10A", "A10A-10B", "A163-181", "AA1-5", "B19-27"
     // Also allow bare ligand comp_ids ending in digits like "FE2", "PO4", "SO4", "PG4", "P6G"
     const range = parseCropRangeSpec(tok);
     if (range) {
-      rules.push({ kind: 'range', ...range });
+      rules.push({ kind: 'range', tokenIdx, ...range });
       if (!tok.includes('-') && /^[A-Za-z][A-Za-z0-9]{1,4}$/.test(tok)) {
-        rules.push({ kind: 'ligand', compId: tok.toUpperCase() });
+        rules.push({ kind: 'ligand', tokenIdx, compId: tok.toUpperCase() });
       }
       continue;
     }
     // Bare ligand comp_id or multi-char chain token e.g. "SAM", "DHZ", "ZN", "1PE", "AA"
     if (/^[A-Za-z0-9]{2,5}$/.test(tok) && /[A-Za-z]/.test(tok)) {
-      rules.push({ kind: 'ligand', compId: tok.toUpperCase() });
+      rules.push({ kind: 'ligand', tokenIdx, compId: tok.toUpperCase() });
       if (/^[A-Za-z]/.test(tok)) {
-        rules.push({ kind: 'chain', chain: tok });
+        rules.push({ kind: 'chain', tokenIdx, chain: tok });
       }
       continue;
     }
     invalidTokens.push(tok);
   }
-  return { rules, invalidTokens };
+  return { rules, tokens, invalidTokens };
 }
 
 function matchesRawCropRule(
@@ -1363,8 +1369,10 @@ function matchesRawCropRule(
   resNum: number | null,
   insCode: string,
   compId: string,
+  matchedTokens?: Set<number>,
 ): boolean {
   const comp = compId.toUpperCase();
+  let matched = false;
   // Check explicit ligand rules BEFORE WATER_RESNAMES filter so explicitly requested
   // ions/buffers like CIT, PO4, NA, K, CL, FE2 (e.g. "A:CIT", "PO4", "FE2") are retained.
   // Guard against matching standard polymer amino-acid ATOM records as ligands.
@@ -1375,15 +1383,20 @@ function matchesRawCropRule(
         (group === 'HETATM' || !AA3_TO_AA1[comp]) &&
         (!r.chain || r.chain === chain)
       ) {
-        return true;
+        matched = true;
+        matchedTokens?.add(r.tokenIdx);
       }
     }
   }
+  if (matched) return true;
   if (WATER_RESNAMES.has(comp)) return false;
   for (const r of rules) {
     if (r.kind === 'chain') {
       // Whole-chain crop keeps polymer ATOM records (protein + nucleic acids) and HETATM MSE (selenomethionine) on that chain
-      if ((group === 'ATOM' || comp === 'MSE') && chain === r.chain) return true;
+      if ((group === 'ATOM' || comp === 'MSE') && chain === r.chain) {
+        matched = true;
+        matchedTokens?.add(r.tokenIdx);
+      }
     } else if (r.kind === 'range') {
       if (
         (group === 'ATOM' || comp === 'MSE') &&
@@ -1391,11 +1404,12 @@ function matchesRawCropRule(
         resNum !== null &&
         matchesResNumAndIns(resNum, insCode, r.start ?? 0, r.end ?? 0, r.startIns, r.endIns)
       ) {
-        return true;
+        matched = true;
+        matchedTokens?.add(r.tokenIdx);
       }
     }
   }
-  return false;
+  return matched;
 }
 
 /** Match mmCIF biological assembly / symmetry operator categories to strip from cropped mmCIFs. */
@@ -1417,12 +1431,13 @@ export function cropRawAllAtomStructure(
   if (!trimmedSpec) {
     return { text: rawText, format: isCif ? 'mmcif' : 'pdb', keptAtomLines: 1 };
   }
-  const { rules, invalidTokens } = parseRawCropRules(trimmedSpec);
+  const { rules, tokens, invalidTokens } = parseRawCropRules(trimmedSpec);
   if (invalidTokens.length > 0 || rules.length === 0) {
     throw new Error(
       `Invalid segment crop "${segmentSpec}": unrecognized token(s) ${invalidTokens.length > 0 ? invalidTokens.join(', ') : trimmedSpec}.`,
     );
   }
+  const matchedTokens = new Set<number>();
 
   if (isCif) {
     const lines = rawText.split('\n');
@@ -1507,7 +1522,17 @@ export function cropRawAllAtomStructure(
         const insCode = cifVal(iIns);
         const comp = cifVal(iLabelComp) || cifVal(iAuthComp) || '';
         const atomName = cifVal(iLabelAtom) || cifVal(iAuthAtom) || '';
-        if (matchesRawCropRule(rules, grp, ch, Number.isFinite(rn) ? rn : null, insCode, comp)) {
+        if (
+          matchesRawCropRule(
+            rules,
+            grp,
+            ch,
+            Number.isFinite(rn) ? rn : null,
+            insCode,
+            comp,
+            matchedTokens,
+          )
+        ) {
           const atomKey = `${ch}:${seqStr}:${insCode}:${atomName}`;
           if (prio === 0) {
             cifPrimaryAtomKeys.add(atomKey);
@@ -1613,6 +1638,12 @@ export function cropRawAllAtomStructure(
         `Segment crop "${segmentSpec}" matched 0 atoms in mmCIF structure. Clear the crop or check chain/residue/ligand codes.`,
       );
     }
+    const unmatchedCif = tokens.filter((_, idx) => !matchedTokens.has(idx));
+    if (unmatchedCif.length > 0) {
+      throw new Error(
+        `Segment crop "${segmentSpec}" had unmatched span/token(s): ${unmatchedCif.join(', ')} (matched 0 atoms). Check chain IDs, residue numbers, or ligand codes.`,
+      );
+    }
     return { text: out.join('\n'), format: 'mmcif', keptAtomLines: kept };
   }
 
@@ -1646,7 +1677,17 @@ export function cropRawAllAtomStructure(
       const rn = parseInt(rnStr, 10);
       const insCode = (line[26] ?? ' ').trim();
       const atomName = line.slice(12, 16).trim();
-      if (matchesRawCropRule(rules, grp, ch, Number.isFinite(rn) ? rn : null, insCode, comp)) {
+      if (
+        matchesRawCropRule(
+          rules,
+          grp,
+          ch,
+          Number.isFinite(rn) ? rn : null,
+          insCode,
+          comp,
+          matchedTokens,
+        )
+      ) {
         const rKey = `${ch}:${rnStr}:${insCode}`;
         const atomKey = `${rKey}:${atomName}`;
         if (prio === 0) {
@@ -1694,6 +1735,12 @@ export function cropRawAllAtomStructure(
   if (kept === 0) {
     throw new Error(
       `Segment crop "${segmentSpec}" matched 0 atoms in PDB structure. Clear the crop or check chain/residue/ligand codes.`,
+    );
+  }
+  const unmatchedPdb = tokens.filter((_, idx) => !matchedTokens.has(idx));
+  if (unmatchedPdb.length > 0) {
+    throw new Error(
+      `Segment crop "${segmentSpec}" had unmatched span/token(s): ${unmatchedPdb.join(', ')} (matched 0 atoms). Check chain IDs, residue numbers, or ligand codes.`,
     );
   }
   const reconRemarks: string[] = [];

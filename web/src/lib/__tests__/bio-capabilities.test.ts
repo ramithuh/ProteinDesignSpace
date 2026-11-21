@@ -604,10 +604,11 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
     seqGraph.nodes[1].params.msaMode = 'mmseqs2';
     expect(validateBioCapabilities(seqGraph).find((i) => i.code === 'natural-single-seq-msa')).toBeUndefined();
 
-    // 3. Natural/RCSB protein via pdb-input (pdb-id) -> MPNN -> LocalFold under single-seq -> Enable MMseqs2 MSA
+    // 3. Inverse-folded sequences from pdb-input -> SolubleMPNN -> LocalFold are designed sequences,
+    //    NOT natural sequences, so single-sequence folding should NOT emit a natural-single-seq-msa warning.
     const pdbNaturalGraph: WorkflowGraph = {
       id: 'msa-natural-pdb',
-      name: 'Natural PDB MSA',
+      name: 'Redesigned PDB Backbone',
       nodes: [
         { id: 'pdb', adapterId: 'pdb-input', params: { mode: 'pdb-id', pdbId: '1PRW' } },
         { id: 'mpnn', adapterId: 'web-protein-mpnn', params: { family: 'solublempnn' } },
@@ -618,11 +619,7 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
         { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
       ],
     };
-    expect(validateBioCapabilities(pdbNaturalGraph).find((i) => i.code === 'natural-single-seq-msa')?.fix).toEqual({
-      label: 'Enable MMseqs2 MSA',
-      nodeId: 'fold',
-      paramsPatch: { msaMode: 'mmseqs2' },
-    });
+    expect(validateBioCapabilities(pdbNaturalGraph).find((i) => i.code === 'natural-single-seq-msa')).toBeUndefined();
 
     // 4. De novo single-chain monomers (RFD4 -> AF2 and Genie 3 -> Cα-MPNN -> AF2) are warning-free under 'single'
     const rfd4MonomerGraph: WorkflowGraph = {

@@ -11,7 +11,8 @@ import {
 } from '$lib/engine/bio-capabilities';
 import { compileNodeInputPreview } from '$lib/engine/input-preview';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
-import { generateSampleHelixBundlePdb } from '$lib/protein-ops/pdb';
+import { cropRawAllAtomStructure, generateSampleHelixBundlePdb } from '$lib/protein-ops/pdb';
+import { filterCatalogCategories } from '$lib/engine/catalog';
 import type { SequenceSet, StructureArtifact, WorkflowGraph } from '$lib/engine/types';
 
 describe('Codex computer-use regression suite', () => {
@@ -271,5 +272,21 @@ describe('Codex computer-use regression suite', () => {
     const schemaFieldsSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/SchemaParamFields.svelte'), 'utf8');
     expect(schemaFieldsSrc).toContain('name={field.key}');
     expect(schemaFieldsSrc).toContain('id={`param-${field.key}`}');
+
+    const pageSrc = readFileSync(resolve(process.cwd(), 'src/routes/+page.svelte'), 'utf8');
+    expect(pageSrc).toContain('inputPreviewErrors');
+  });
+
+  it('fails loud on partial unmatched crop spans and narrows catalog search "top-k" strictly to Top-K Filter', () => {
+    const samplePdb = generateSampleHelixBundlePdb();
+    expect(() => cropRawAllAtomStructure(samplePdb, 'A1-5, Z999-1000')).toThrow(
+      /unmatched span\/token\(s\): Z999-1000/i,
+    );
+    expect(cropRawAllAtomStructure(samplePdb, 'A1-5').keptAtomLines).toBeGreaterThan(0);
+
+    const hits = filterCatalogCategories('top-k');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].matchingSubItems.map((i) => i.key)).toEqual(['top-k-filter']);
+    expect(hits[0].hasNarrowedSubMatch).toBe(true);
   });
 });

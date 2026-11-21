@@ -956,7 +956,19 @@
     };
   }
 
-  let validationErrors = $derived(validateGraph(graph));
+  let inputPreviewErrors = $derived.by((): string[] => {
+    const errs: string[] = [];
+    for (const node of graph.nodes) {
+      if (node.adapterId !== 'pdb-input' && node.adapterId !== 'sequence-input') continue;
+      const st = nodeStates[node.id];
+      if (st?.status === 'error' && st.error) {
+        const label = node.label || node.adapterId;
+        errs.push(`${label}: ${st.error}`);
+      }
+    }
+    return errs;
+  });
+  let validationErrors = $derived([...validateGraph(graph), ...inputPreviewErrors]);
   let bioIssues = $derived(validateBioCapabilities(graph, outputsByNode));
 
   // Instant CPU/fetch preview for starting inputs (PDB Input & Sequence Input) so users can

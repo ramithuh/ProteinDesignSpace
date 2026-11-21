@@ -621,7 +621,12 @@ function inferNodeOutputProfile(
       fromGenie3: true,
       ...(isBinderTask ? { hasLockedTarget: true } : {}),
     };
-  } else if (node.adapterId === 'web-protein-mpnn') {
+  } else if (
+    node.adapterId === 'web-protein-mpnn' ||
+    node.adapterId === 'ligandmpnn' ||
+    node.adapterId === 'lasermpnn' ||
+    node.adapterId === 'antifold-esmif1'
+  ) {
     const st = upstreamProfileForPort('structure');
     const strippedSet = new Set<BioEntityKind>(st?.strippedNonProtein ?? []);
     if (st) {
@@ -634,14 +639,26 @@ function inferNodeOutputProfile(
       Boolean(st?.hasLockedTarget) ||
       (st?.stoichiometry === 'multimer' && Boolean(String(node.params.fixedPositions ?? '').trim()));
     profile = {
-      // ProteinMPNN emits protein sequences only (strips ligands/DNA), but records stripped context for downstream apo warnings
+      // Inverse folding emits designed protein sequences (not natural sequences — do not
+      // propagate fromNaturalProtein, since designed sequences should fold single-seq unless
+      // paired with a locked natural target chain).
       entities: new Set<BioEntityKind>(['protein']),
       stoichiometry: st?.stoichiometry ?? 'monomer',
       chainCount: st?.chainCount ?? 1,
       estimatedTokens: st?.estimatedTokens ?? 80,
       ...(strippedNonProtein ? { strippedNonProtein } : {}),
       ...(hasLockedTarget ? { hasLockedTarget: true } : {}),
-      ...(st?.fromNaturalProtein ? { fromNaturalProtein: true } : {}),
+    };
+  } else if (node.adapterId === 'top-k-filter') {
+    const seq = upstreamProfileForPort('sequences');
+    profile = {
+      entities: new Set<BioEntityKind>(seq ? [...seq.entities] : ['protein']),
+      stoichiometry: seq?.stoichiometry ?? 'monomer',
+      chainCount: seq?.chainCount ?? 1,
+      estimatedTokens: seq?.estimatedTokens ?? 80,
+      ...(seq?.strippedNonProtein ? { strippedNonProtein: seq.strippedNonProtein } : {}),
+      ...(seq?.hasLockedTarget ? { hasLockedTarget: true } : {}),
+      ...(seq?.fromNaturalProtein ? { fromNaturalProtein: true } : {}),
     };
   } else if (node.adapterId === 'localfold-af2') {
     const seq = upstreamProfileForPort('sequences');
