@@ -63,7 +63,8 @@ async function ensureLoaded(id: number) {
       detail: 'Fetching Genie 3 V1 FP16 shards (~45 MB, cached after first run)...',
     });
     const envWeightsUrl = (import.meta.env.VITE_GENIE3_WEIGHTS_URL as string | undefined)?.trim();
-    const weightsUrl = envWeightsUrl || `${self.location.origin}/vendor/genie3/weights/fp16`;
+    const weightsUrl =
+      envWeightsUrl || 'https://huggingface.co/ramithuh/genie3-webgpu/resolve/main/fp16';
     weightBundle = await genie3Mod.fetchGenie3Weights(weightsUrl, {
       cache: true,
       onProgress: (p: { loaded?: number; total?: number; shardIndex?: number; totalShards?: number; shard?: string }) => {
