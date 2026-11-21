@@ -2681,18 +2681,18 @@
     {/if}
 
     <!-- Output & Inspector Pane (Right in Horizontal Split, Bottom in Vertical Split) -->
+    {#if expandedPane !== 'none'}
+      <div
+        class="expand-backdrop"
+        role="presentation"
+        onclick={() => (expandedPane = 'none')}
+      ></div>
+    {/if}
     <section
       class="results-grid"
       class:stacked-pane={splitMode === 'horizontal'}
       class:is-studio-open={studioOpen}
     >
-      {#if expandedPane !== 'none'}
-        <div
-          class="expand-backdrop"
-          role="presentation"
-          onclick={() => (expandedPane = 'none')}
-        ></div>
-      {/if}
       <div class="viewer-col" class:is-expanded={expandedPane === 'viewer'}>
         <div class="viewer-bar">
           {#if isCompareMode && comparisonState}
@@ -2893,16 +2893,18 @@
               </button>
             {/if}
           {/if}
-          <button
-            type="button"
-            class="pane-expand-btn"
-            class:active={expandedPane === 'viewer'}
-            onclick={() => (expandedPane = expandedPane === 'viewer' ? 'none' : 'viewer')}
-            title={expandedPane === 'viewer' ? 'Collapse 3D viewer (Esc)' : 'Expand 3D viewer to full view'}
-            aria-label={expandedPane === 'viewer' ? 'Collapse 3D viewer' : 'Expand 3D viewer'}
-          >
-            {expandedPane === 'viewer' ? '⤡ Collapse' : '⤢ Expand'}
-          </button>
+          {#if !studioOpen}
+            <button
+              type="button"
+              class="pane-expand-btn"
+              class:active={expandedPane === 'viewer'}
+              onclick={() => (expandedPane = expandedPane === 'viewer' ? 'none' : 'viewer')}
+              title={expandedPane === 'viewer' ? 'Collapse 3D viewer (Esc)' : 'Expand 3D viewer to full view'}
+              aria-label={expandedPane === 'viewer' ? 'Collapse 3D viewer' : 'Expand 3D viewer'}
+            >
+              {expandedPane === 'viewer' ? '⤡ Collapse' : '⤢ Expand'}
+            </button>
+          {/if}
         </div>
 
         <div class="viewer-stage">
@@ -3893,29 +3895,35 @@
   .results-grid.is-studio-open {
     position: fixed;
     inset: 16px;
+    width: auto !important;
+    height: auto !important;
     z-index: 160;
     display: grid !important;
     grid-template-columns: minmax(340px, 46%) minmax(420px, 1fr);
     grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
     gap: 12px;
     padding: 12px;
+    box-sizing: border-box;
     background: var(--bg-canvas);
     border: 1px solid var(--border-strong);
     border-radius: 14px;
     box-shadow: 0 28px 72px rgba(0, 0, 0, 0.58);
-    overflow: hidden;
-  }
-  .results-grid.is-studio-open > .expand-backdrop {
-    z-index: -1;
+    overflow: hidden !important;
   }
   .results-grid.is-studio-open > .viewer-col {
     display: flex;
     flex-direction: column;
+    width: auto;
+    height: 100%;
+    min-width: 0;
     min-height: 0;
+    box-sizing: border-box;
     background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border);
     border-radius: 10px;
     padding: 10px;
+    overflow: hidden;
   }
   .results-grid.is-studio-open > .viewer-col .viewer-stage {
     flex: 1;
@@ -3930,7 +3938,11 @@
   .results-grid.is-studio-open > .right-panel {
     display: flex;
     flex-direction: column;
+    width: auto;
+    height: 100%;
+    min-width: 0;
     min-height: 0;
+    box-sizing: border-box;
     overflow: hidden;
     border-radius: 10px;
   }
