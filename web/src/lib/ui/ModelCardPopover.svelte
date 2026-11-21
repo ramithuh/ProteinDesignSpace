@@ -194,14 +194,18 @@
             </div>
           </section>
 
-          <section class="mc-sec">
-            <div class="mc-sec-title">Limitations &amp; Scientific Caveats</div>
-            <ul class="mc-limits">
-              {#each card.limitations as lim (lim)}
-                <li>{lim}</li>
-              {/each}
-            </ul>
-          </section>
+          {#if card.limitations.length > 0}
+            <details class="mc-notes">
+              <summary class="mc-notes-summary">
+                Port &amp; scope notes ({card.limitations.length})
+              </summary>
+              <ul class="mc-limits">
+                {#each card.limitations as lim (lim)}
+                  <li>{lim}</li>
+                {/each}
+              </ul>
+            </details>
+          {/if}
 
           <footer class="mc-prov">
             <div class="mc-sec-title">Provenance &amp; Licensing</div>
@@ -294,9 +298,12 @@
   }
 
   .mc-pill-compact {
-    padding: 1px 6px;
+    height: 20px;
+    padding: 0 7px;
     font-size: 9.5px;
+    line-height: 1;
     gap: 4px;
+    box-sizing: border-box;
   }
 
   .mc-pill-dot {
@@ -312,13 +319,37 @@
   }
 
   .mc-pill-text {
+    line-height: 1;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
   .mc-pill-icon {
+    display: block;
     opacity: 0.72;
     flex-shrink: 0;
+  }
+
+  .mc-notes {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-surface-2);
+    padding: 7px 10px;
+  }
+
+  .mc-notes-summary {
+    cursor: pointer;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-muted);
+    user-select: none;
+  }
+
+  .mc-notes[open] .mc-notes-summary {
+    margin-bottom: 6px;
   }
 
   .mc-backdrop {

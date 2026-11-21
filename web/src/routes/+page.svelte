@@ -4152,14 +4152,19 @@
   }
   .tab-node-ctx {
     margin-left: auto;
+    margin-bottom: 4px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10.5px;
+    line-height: 1;
     color: var(--text-dim);
-    padding-bottom: 4px;
     max-width: 180px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .right-tabs > :global(.mc-pill) {
+    margin-bottom: 4px;
+    flex-shrink: 0;
   }
   .right-body {
     max-height: 520px;
