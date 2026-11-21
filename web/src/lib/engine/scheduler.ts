@@ -91,7 +91,7 @@ export async function materializePdbInputNode(
   if (parsed.nResidues < 3 && !hasNonProteinContext) {
     throw new Error('Input PDB/mmCIF must contain at least 3 residues with Cα atoms');
   }
-  const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
+  const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds, parsed.resNums);
   const benchmarkId = String(node.params.benchmarkId ?? '').trim() || undefined;
 
   const summaryParts: string[] = [];
@@ -113,7 +113,7 @@ export async function materializePdbInputNode(
     sequence: parsed.sequence,
     caCoords: parsed.caCoords,
     backbone4Coords: parsed.backbone4Coords,
-    pdbText: parsed.nResidues > 0 ? parsed.pdbText : effectiveRawText,
+    pdbText: parsed.nResidues > 0 ? parsed.pdbText : parsed.format === 'mmcif' ? '' : effectiveRawText,
     cifText: parsed.format === 'mmcif' ? effectiveRawText : undefined,
     chainIds: parsed.chainIds,
     chainLengths: parsed.diagnostics.chainLengths,
@@ -480,11 +480,73 @@ export class ExecutionScheduler {
       }
       const scThresh = Number(node.params.scRmsdThreshold ?? 2.0);
       const plddtThresh = Number(node.params.plddtThreshold ?? 70);
+      const motifThresh = Number(node.params.motifRmsdThreshold ?? 1.0);
+      const ipaeThresh = Number(node.params.ipaeThreshold ?? 10.0);
+      const targetAlignedBinderThresh = Number(
+        node.params.targetAlignedBinderRmsdThreshold ?? Math.max(scThresh * 2, 4.0),
+      );
+
+      const structLen = Math.floor(structure.caCoords.length / 3);
+
+      // Pre-extract valid native motif correspondence if present on the designed StructureArtifact
+      const motifPairs: Array<{ idx: number; coord: [number, number, number] }> = [];
+      if (
+        Array.isArray(structure.motifIndices) &&
+        Array.isArray(structure.nativeMotifCoords) &&
+        structure.motifIndices.length > 0 &&
+        structure.nativeMotifCoords.length > 0
+      ) {
+        const limit = Math.min(structure.motifIndices.length, structure.nativeMotifCoords.length);
+        for (let k = 0; k < limit; k++) {
+          const idx = structure.motifIndices[k];
+          const nc = structure.nativeMotifCoords[k];
+          if (
+            Number.isInteger(idx) &&
+            idx >= 0 &&
+            idx < structLen &&
+            Array.isArray(nc) &&
+            nc.length >= 3 &&
+            Number.isFinite(nc[0]) &&
+            Number.isFinite(nc[1]) &&
+            Number.isFinite(nc[2])
+          ) {
+            motifPairs.push({ idx, coord: [nc[0], nc[1], nc[2]] });
+          }
+        }
+      }
+
+      let nativeMotifCa: Float32Array | null = null;
+      let genMotifRmsd: number | undefined;
+      if (motifPairs.length >= 3) {
+        nativeMotifCa = new Float32Array(motifPairs.length * 3);
+        const genMotifCa = new Float32Array(motifPairs.length * 3);
+        for (let k = 0; k < motifPairs.length; k++) {
+          const { idx, coord } = motifPairs[k];
+          nativeMotifCa[k * 3 + 0] = coord[0];
+          nativeMotifCa[k * 3 + 1] = coord[1];
+          nativeMotifCa[k * 3 + 2] = coord[2];
+          genMotifCa[k * 3 + 0] = structure.caCoords[idx * 3 + 0];
+          genMotifCa[k * 3 + 1] = structure.caCoords[idx * 3 + 1];
+          genMotifCa[k * 3 + 2] = structure.caCoords[idx * 3 + 2];
+        }
+        const genAlign = kabschAlign(genMotifCa, nativeMotifCa);
+        if (Number.isFinite(genAlign.rmsd)) {
+          genMotifRmsd = genAlign.rmsd;
+        }
+      }
+
+      // Preserve cifText through Scorer for holo/DNA structures so 3D overlays & Compare mode retain ligands/ions/DNA
+      const hasNonProtein = Boolean(
+        structure.diagnostics?.hasLigands || structure.diagnostics?.hasNucleicAcids,
+      );
+      const designedStructureText =
+        structure.cifText && (hasNonProtein || !structure.pdbText)
+          ? structure.cifText
+          : structure.pdbText;
 
       const rows: DesignabilityRow[] = folds.folds.map((f) => {
         if (f.caCoords.length !== structure.caCoords.length) {
           const foldLen = Math.floor(f.caCoords.length / 3);
-          const structLen = Math.floor(structure.caCoords.length / 3);
           throw new Error(
             `Length mismatch in designability-scorer: refolded "${f.sequenceId}" has ${foldLen} residues, ` +
               `but designed structure "${structure.label}" has ${structLen} residues.`,
@@ -492,8 +554,137 @@ export class ExecutionScheduler {
         }
         const align = kabschAlign(f.caCoords, structure.caCoords);
         const alignedFoldPdb = applyTransformToPdb(f.pdbText, align.rotation, align.translation);
-        const geom = computeGeometryStats(f.caCoords, f.chainIds);
-        const designable = Number.isFinite(align.rmsd) && align.rmsd < scThresh && f.meanPlddt >= plddtThresh;
+
+        let foldResNums: number[] | undefined;
+        let foldChainIds = f.chainIds;
+        if (f.pdbText) {
+          try {
+            const parsedFold = parseStructureText(f.pdbText);
+            if (parsedFold.nResidues === structLen) {
+              foldResNums = parsedFold.resNums;
+              if (!foldChainIds || foldChainIds.length !== structLen) {
+                foldChainIds = parsedFold.chainIds;
+              }
+            }
+          } catch {
+            /* keep f.chainIds without resNums if pdbText is synthetic */
+          }
+        }
+        const geom = computeGeometryStats(f.caCoords, foldChainIds, foldResNums);
+
+        // Multi-chain binder & interface evaluation (#8)
+        const chainRanges = resolveScorerChainRanges(
+          structLen,
+          structure.chainLengths ?? f.chainLengths,
+          structure.chainIds ?? foldChainIds,
+        );
+        let ipae: number | undefined;
+        let binderPlddt: number | undefined;
+        let targetPlddt: number | undefined;
+        let binderScRmsd: number | undefined;
+        let targetAlignedBinderRmsd: number | undefined;
+
+        if (chainRanges.length > 1) {
+          const split = splitBinderAndTargetIndices(
+            chainRanges,
+            structure.chainRoles,
+            structure.lockedChains,
+          );
+          const { binderIndices, targetIndices, explicitRoleSplit } = split;
+
+          if (f.pae && f.pae.length === structLen * structLen) {
+            ipae = computeInterfacePae(
+              f.pae,
+              structLen,
+              chainRanges,
+              explicitRoleSplit ? binderIndices : undefined,
+              explicitRoleSplit ? targetIndices : undefined,
+            );
+          }
+
+          if (f.plddt.length === structLen) {
+            if (binderIndices.length > 0) {
+              let sum = 0;
+              for (const idx of binderIndices) sum += f.plddt[idx];
+              const mean = sum / binderIndices.length;
+              if (Number.isFinite(mean)) binderPlddt = mean;
+            }
+            if (targetIndices.length > 0) {
+              let sum = 0;
+              for (const idx of targetIndices) sum += f.plddt[idx];
+              const mean = sum / targetIndices.length;
+              if (Number.isFinite(mean)) targetPlddt = mean;
+            }
+          }
+
+          if (binderIndices.length >= 3) {
+            const foldBinderCa = gatherCoordsByIndices(f.caCoords, binderIndices);
+            const structBinderCa = gatherCoordsByIndices(structure.caCoords, binderIndices);
+            const bAlign = kabschAlign(foldBinderCa, structBinderCa);
+            if (Number.isFinite(bAlign.rmsd)) {
+              binderScRmsd = bAlign.rmsd;
+            }
+          }
+
+          if (targetIndices.length >= 3 && binderIndices.length >= 1) {
+            const foldTargetCa = gatherCoordsByIndices(f.caCoords, targetIndices);
+            const structTargetCa = gatherCoordsByIndices(structure.caCoords, targetIndices);
+            const tAlign = kabschAlign(foldTargetCa, structTargetCa);
+            if (Number.isFinite(tAlign.rmsd)) {
+              const { rotation: R, translation: t } = tAlign;
+              let sqSum = 0;
+              for (let k = 0; k < binderIndices.length; k++) {
+                const off = binderIndices[k] * 3;
+                const x = f.caCoords[off + 0];
+                const y = f.caCoords[off + 1];
+                const z = f.caCoords[off + 2];
+                const dx = R[0] * x + R[1] * y + R[2] * z + t[0] - structure.caCoords[off + 0];
+                const dy = R[3] * x + R[4] * y + R[5] * z + t[1] - structure.caCoords[off + 1];
+                const dz = R[6] * x + R[7] * y + R[8] * z + t[2] - structure.caCoords[off + 2];
+                sqSum += dx * dx + dy * dy + dz * dz;
+              }
+              const tabRmsd = Math.sqrt(sqSum / binderIndices.length);
+              if (Number.isFinite(tabRmsd)) {
+                targetAlignedBinderRmsd = tabRmsd;
+              }
+            }
+          }
+        }
+
+        // Motif scaffolding RMSD evaluation (#10)
+        let refoldMotifRmsd: number | undefined;
+        if (nativeMotifCa && motifPairs.length >= 3) {
+          const refoldMotifCa = new Float32Array(motifPairs.length * 3);
+          for (let k = 0; k < motifPairs.length; k++) {
+            const off = motifPairs[k].idx * 3;
+            refoldMotifCa[k * 3 + 0] = f.caCoords[off + 0];
+            refoldMotifCa[k * 3 + 1] = f.caCoords[off + 1];
+            refoldMotifCa[k * 3 + 2] = f.caCoords[off + 2];
+          }
+          const refoldAlign = kabschAlign(refoldMotifCa, nativeMotifCa);
+          if (Number.isFinite(refoldAlign.rmsd)) {
+            refoldMotifRmsd = refoldAlign.rmsd;
+          }
+        }
+
+        let designable =
+          Number.isFinite(align.rmsd) && align.rmsd < scThresh && f.meanPlddt >= plddtThresh;
+        if (binderScRmsd !== undefined) {
+          designable = designable && binderScRmsd < scThresh;
+        }
+        if (binderPlddt !== undefined) {
+          designable = designable && binderPlddt >= plddtThresh;
+        }
+        if (targetAlignedBinderRmsd !== undefined) {
+          designable = designable && targetAlignedBinderRmsd < targetAlignedBinderThresh;
+        }
+        if (ipae !== undefined) {
+          designable = designable && ipae < ipaeThresh;
+        }
+        if (refoldMotifRmsd !== undefined) {
+          designable = designable && refoldMotifRmsd < motifThresh;
+        }
+
         return {
           structureId: structure.id,
           sequenceId: f.sequenceId,
@@ -503,9 +694,16 @@ export class ExecutionScheduler {
           meanPlddt: f.meanPlddt,
           ptm: f.ptm,
           iptm: f.iptm ?? null,
+          ...(ipae !== undefined ? { ipae } : {}),
+          ...(binderPlddt !== undefined ? { binderPlddt } : {}),
+          ...(targetPlddt !== undefined ? { targetPlddt } : {}),
+          ...(binderScRmsd !== undefined ? { binderScRmsd } : {}),
+          ...(targetAlignedBinderRmsd !== undefined ? { targetAlignedBinderRmsd } : {}),
+          ...(genMotifRmsd !== undefined ? { genMotifRmsd } : {}),
+          ...(refoldMotifRmsd !== undefined ? { refoldMotifRmsd } : {}),
           designable,
           alignedFoldPdb,
-          designedPdb: structure.pdbText,
+          designedPdb: designedStructureText,
           pae: f.pae,
           plddt: f.plddt,
           geometry: geom,
@@ -666,12 +864,16 @@ function summarizeArtifact(art: CanonicalArtifact): ArtifactRef {
     };
   }
   if (art.kind === 'FoldedStructure') {
+    const iptmVals = art.folds
+      .map((f) => f.iptm)
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
     return {
       id: art.id,
       kind: art.kind,
       summary: {
         count: art.folds.length,
         bestPlddt: Number(Math.max(...art.folds.map((f) => f.meanPlddt), 0).toFixed(1)),
+        ...(iptmVals.length > 0 ? { bestIptm: Number(Math.max(...iptmVals).toFixed(3)) } : {}),
       },
     };
   }
@@ -685,16 +887,183 @@ function summarizeArtifact(art: CanonicalArtifact): ArtifactRef {
       },
     };
   }
+  const best = art.best;
   return {
     id: art.id,
     kind: art.kind,
     summary: {
       passRate: art.passRate,
-      bestScRmsd: art.best ? Number(art.best.scRmsd.toFixed(3)) : null,
-      bestScTm: art.best ? Number(art.best.scTm.toFixed(3)) : null,
-      bestPlddt: art.best ? Number(art.best.meanPlddt.toFixed(1)) : null,
+      bestScRmsd: best && Number.isFinite(best.scRmsd) ? Number(best.scRmsd.toFixed(3)) : null,
+      bestScTm: best && Number.isFinite(best.scTm) ? Number(best.scTm.toFixed(3)) : null,
+      bestPlddt: best && Number.isFinite(best.meanPlddt) ? Number(best.meanPlddt.toFixed(1)) : null,
+      ...(best && typeof best.iptm === 'number' && Number.isFinite(best.iptm)
+        ? { bestIptm: Number(best.iptm.toFixed(3)) }
+        : {}),
+      ...(best && typeof best.ipae === 'number' && Number.isFinite(best.ipae)
+        ? { bestIpae: Number(best.ipae.toFixed(2)) }
+        : {}),
+      ...(best && typeof best.binderScRmsd === 'number' && Number.isFinite(best.binderScRmsd)
+        ? { bestBinderScRmsd: Number(best.binderScRmsd.toFixed(3)) }
+        : {}),
+      ...(best &&
+      typeof best.targetAlignedBinderRmsd === 'number' &&
+      Number.isFinite(best.targetAlignedBinderRmsd)
+        ? { bestTargetAlignedBinderRmsd: Number(best.targetAlignedBinderRmsd.toFixed(3)) }
+        : {}),
+      ...(best && typeof best.genMotifRmsd === 'number' && Number.isFinite(best.genMotifRmsd)
+        ? { bestGenMotifRmsd: Number(best.genMotifRmsd.toFixed(3)) }
+        : {}),
+      ...(best && typeof best.refoldMotifRmsd === 'number' && Number.isFinite(best.refoldMotifRmsd)
+        ? { bestRefoldMotifRmsd: Number(best.refoldMotifRmsd.toFixed(3)) }
+        : {}),
     },
   };
+}
+
+interface ScorerChainRange {
+  chainId: string;
+  start: number;
+  length: number;
+}
+
+function resolveScorerChainRanges(
+  L: number,
+  chainLengths?: readonly number[],
+  chainIds?: readonly string[],
+): ScorerChainRange[] {
+  if (L <= 0) return [];
+  if (chainIds && chainIds.length === L) {
+    const ranges: ScorerChainRange[] = [];
+    let start = 0;
+    for (let i = 1; i <= L; i++) {
+      if (i === L || chainIds[i] !== chainIds[start]) {
+        ranges.push({ chainId: chainIds[start], start, length: i - start });
+        start = i;
+      }
+    }
+    if (ranges.length > 0) return ranges;
+  }
+  if (chainLengths && chainLengths.length > 0 && chainLengths.reduce((a, b) => a + b, 0) === L) {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let start = 0;
+    return chainLengths.map((len, idx) => {
+      const r = { chainId: alphabet[idx % alphabet.length], start, length: len };
+      start += len;
+      return r;
+    });
+  }
+  return [{ chainId: 'A', start: 0, length: L }];
+}
+
+function splitBinderAndTargetIndices(
+  ranges: readonly ScorerChainRange[],
+  chainRoles?: Record<string, 'target' | 'binder' | 'scaffold'>,
+  lockedChains?: readonly string[],
+): { binderIndices: number[]; targetIndices: number[]; explicitRoleSplit: boolean } {
+  let binderRanges: ScorerChainRange[] = [];
+  let targetRanges: ScorerChainRange[] = [];
+  let explicitRoleSplit = false;
+
+  if (chainRoles) {
+    binderRanges = ranges.filter((r) => chainRoles[r.chainId] === 'binder');
+    targetRanges = ranges.filter((r) => chainRoles[r.chainId] === 'target');
+    if (binderRanges.length > 0 && targetRanges.length > 0) {
+      explicitRoleSplit = true;
+    }
+  }
+
+  if (!explicitRoleSplit && lockedChains && lockedChains.length > 0) {
+    const locked = new Set(lockedChains.map((c) => c.trim().toUpperCase()));
+    targetRanges = ranges.filter((r) => locked.has(r.chainId.toUpperCase()));
+    binderRanges = ranges.filter((r) => !locked.has(r.chainId.toUpperCase()));
+    if (binderRanges.length > 0 && targetRanges.length > 0) {
+      explicitRoleSplit = true;
+    }
+  }
+
+  if (binderRanges.length === 0 || targetRanges.length === 0) {
+    // Fallback heuristic: shorter chain is the designed binder (tie-breaker: later chain, matching Target=A, Binder=B)
+    let binderIdx = ranges.length - 1;
+    let minLen = ranges[binderIdx].length;
+    for (let i = ranges.length - 2; i >= 0; i--) {
+      if (ranges[i].length < minLen) {
+        minLen = ranges[i].length;
+        binderIdx = i;
+      }
+    }
+    binderRanges = [ranges[binderIdx]];
+    targetRanges = ranges.filter((_, idx) => idx !== binderIdx);
+  }
+
+  const expand = (rs: readonly ScorerChainRange[]): number[] => {
+    const out: number[] = [];
+    for (const r of rs) {
+      for (let i = r.start; i < r.start + r.length; i++) out.push(i);
+    }
+    return out;
+  };
+
+  return {
+    binderIndices: expand(binderRanges),
+    targetIndices: expand(targetRanges),
+    explicitRoleSplit,
+  };
+}
+
+function gatherCoordsByIndices(coords: Float32Array, indices: readonly number[]): Float32Array {
+  const out = new Float32Array(indices.length * 3);
+  for (let i = 0; i < indices.length; i++) {
+    const src = indices[i] * 3;
+    out[i * 3 + 0] = coords[src + 0];
+    out[i * 3 + 1] = coords[src + 1];
+    out[i * 3 + 2] = coords[src + 2];
+  }
+  return out;
+}
+
+function computeInterfacePae(
+  pae: Float32Array,
+  L: number,
+  ranges: readonly ScorerChainRange[],
+  binderIndices?: readonly number[],
+  targetIndices?: readonly number[],
+): number | undefined {
+  let sum = 0;
+  let count = 0;
+  if (binderIndices && targetIndices && binderIndices.length > 0 && targetIndices.length > 0) {
+    for (const bi of binderIndices) {
+      for (const ti of targetIndices) {
+        const v1 = pae[bi * L + ti];
+        if (Number.isFinite(v1)) {
+          sum += v1;
+          count++;
+        }
+        const v2 = pae[ti * L + bi];
+        if (Number.isFinite(v2)) {
+          sum += v2;
+          count++;
+        }
+      }
+    }
+  } else {
+    const chainOf = new Int32Array(L);
+    for (let c = 0; c < ranges.length; c++) {
+      const r = ranges[c];
+      for (let i = r.start; i < r.start + r.length; i++) chainOf[i] = c;
+    }
+    for (let i = 0; i < L; i++) {
+      const ci = chainOf[i];
+      for (let j = 0; j < L; j++) {
+        if (ci === chainOf[j]) continue;
+        const v = pae[i * L + j];
+        if (Number.isFinite(v)) {
+          sum += v;
+          count++;
+        }
+      }
+    }
+  }
+  return count > 0 ? sum / count : undefined;
 }
 
 /**

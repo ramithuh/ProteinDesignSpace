@@ -14,6 +14,7 @@ import type {
 
 // Controllable Worker stub so designability-scorer, memoization & releaseActiveGpu can be tested end-to-end
 let mockFoldFactory: (() => FoldedStructure) | null = null;
+let mockGenStructureFactory: (() => StructureArtifact) | null = null;
 let mockWorkerRunCalls = 0;
 let mockHangWorker = false;
 
@@ -26,7 +27,7 @@ class MockWorker {
   removeEventListener(type: string, cb: (ev: MessageEvent) => void) {
     this.listeners.get(type)?.delete(cb);
   }
-  postMessage(msg: { id: number; type: string }) {
+  postMessage(msg: { id: number; type: string; inputs?: Record<string, unknown> }) {
     if (msg.type === 'dispose') {
       this.emit('message', { data: { id: msg.id, type: 'disposed' } } as MessageEvent);
       return;
@@ -34,6 +35,16 @@ class MockWorker {
     if (msg.type === 'run') {
       mockWorkerRunCalls++;
       if (mockHangWorker) return; // intentionally stays in-flight to test mid-run releaseActiveGpu()
+      const hasSeqInput = Boolean(msg.inputs && 'sequences' in msg.inputs);
+      if (!hasSeqInput && mockGenStructureFactory) {
+        const structure = mockGenStructureFactory();
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: { id: msg.id, type: 'result', outputs: { structure }, elapsedMs: 5 },
+          } as MessageEvent);
+        });
+        return;
+      }
       const folds = mockFoldFactory ? mockFoldFactory() : {
         kind: 'FoldedStructure' as const,
         id: 'mock-folds',
@@ -56,6 +67,7 @@ class MockWorker {
 describe('engine/scheduler (CPU nodes & memoization)', () => {
   beforeEach(() => {
     mockFoldFactory = null;
+    mockGenStructureFactory = null;
     mockWorkerRunCalls = 0;
     mockHangWorker = false;
     vi.stubGlobal('Worker', MockWorker);
@@ -776,5 +788,424 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
       { nodeId: 'src', kinds: ['StructureArtifact'] },
       { nodeId: 'cond', kinds: ['ConditionSpec'] },
     ]);
+  });
+
+  it('keeps pdbText empty for pure ligand/DNA mmCIF (#16), preserves resNums for discontinuous motifs (#21), and preserves holo cifText in scorer', async () => {
+    const scheduler = new ExecutionScheduler();
+
+    // 1. Pure DNA mmCIF (nResidues === 0) must NOT shove raw mmCIF into pdbText
+    const pureDnaCif = [
+      'data_7M5W',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      'ATOM 1 P DC A 1 1.000 2.000 3.000',
+      'ATOM 2 P DG A 2 4.000 5.000 6.000',
+      'ATOM 3 P DC B 1 7.000 8.000 9.000',
+      '#',
+    ].join('\n');
+    const dnaRes = await scheduler.run(
+      {
+        id: 'pure-dna',
+        name: 'Pure DNA',
+        nodes: [{ id: 'p', adapterId: 'pdb-input', params: { mode: 'custom', pdbText: pureDnaCif, filename: '7M5W.cif' } }],
+        edges: [],
+      },
+      () => {},
+    );
+    const dnaStruct = dnaRes.outputsByNode.p.structure as StructureArtifact;
+    expect(dnaStruct.length).toBe(0);
+    expect(dnaStruct.pdbText).toBe('');
+    expect(dnaStruct.cifText).toBe(pureDnaCif);
+    expect(dnaStruct.diagnostics?.hasNucleicAcids).toBe(true);
+
+    // 2. Discontinuous motif PDB (gap A10..12 -> A50..52 separated by 25 Å) reports 0 false chain breaks (#21)
+    const gappedPdb = [
+      'ATOM      1  CA  ALA A  10       0.000   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      2  CA  GLY A  11       3.800   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      3  CA  VAL A  12       7.600   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      4  CA  LEU A  50      35.000   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      5  CA  ILE A  51      38.800   0.000   0.000  1.00  0.00           C  ',
+      'ATOM      6  CA  SER A  52      42.600   0.000   0.000  1.00  0.00           C  ',
+      'END',
+    ].join('\n');
+    const gapRes = await scheduler.run(
+      {
+        id: 'gapped-motif',
+        name: 'Gapped Motif',
+        nodes: [{ id: 'p', adapterId: 'pdb-input', params: { mode: 'custom', pdbText: gappedPdb } }],
+        edges: [],
+      },
+      () => {},
+    );
+    const gapStruct = gapRes.outputsByNode.p.structure as StructureArtifact;
+    expect(gapStruct.geometry.chainBreaks).toBe(0);
+
+    // 3. Holo mmCIF (protein + ligand SAM) preserves cifText through designability-scorer
+    const holoCif = [
+      'data_holo',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      'ATOM 1 CA ALA A 1 0.000 0.000 0.000',
+      'ATOM 2 CA GLY A 2 3.800 0.000 0.000',
+      'ATOM 3 CA VAL A 3 7.600 1.200 0.000',
+      'ATOM 4 CA LEU A 4 11.400 0.000 1.000',
+      'ATOM 5 CA ILE A 5 15.200 1.500 0.500',
+      'HETATM 6 C1 SAM B 101 5.000 6.000 2.000',
+      '#',
+    ].join('\n');
+    const holoCa = new Float32Array([0, 0, 0, 3.8, 0, 0, 7.6, 1.2, 0, 11.4, 0, 1, 15.2, 1.5, 0.5]);
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'holo-folds',
+      parentStructureId: 'holo',
+      folds: [
+        {
+          sequenceId: 'holo-1',
+          sequence: 'AGVLI',
+          foldModelId: 'localfold-af2',
+          pdbText: gappedPdb,
+          caCoords: holoCa,
+          plddt: new Float32Array(5).fill(90),
+          meanPlddt: 90,
+          ptm: 0.85,
+          elapsedMs: 10,
+        },
+      ],
+    });
+    const holoRes = await scheduler.run(
+      {
+        id: 'holo-score',
+        name: 'Holo Score',
+        nodes: [
+          { id: 'p', adapterId: 'pdb-input', params: { mode: 'custom', pdbText: holoCif, filename: 'holo.cif' } },
+          { id: 's', adapterId: 'sequence-input', params: { sequence: 'AGVLI' } },
+          { id: 'f', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 1, seed: 0 } },
+          { id: 'sc', adapterId: 'designability-scorer', params: { scRmsdThreshold: 2.0, plddtThreshold: 70 } },
+        ],
+        edges: [
+          { fromNode: 's', fromPort: 'sequences', toNode: 'f', toPort: 'sequences' },
+          { fromNode: 'p', fromPort: 'structure', toNode: 'sc', toPort: 'structure' },
+          { fromNode: 'f', fromPort: 'folds', toNode: 'sc', toPort: 'folds' },
+        ],
+      },
+      () => {},
+    );
+    const holoMetrics = holoRes.outputsByNode.sc.metrics as DesignabilityMetrics;
+    expect(holoMetrics.rows[0].designedPdb).toContain('data_holo');
+    expect(holoMetrics.rows[0].designedPdb).toContain('SAM');
+    await scheduler.releaseActiveGpu();
+  });
+
+  it('computes multi-chain binder metrics (iPAE, binder/target pLDDT, binderScRmsd, targetAlignedBinderRmsd) and gates designability (#8, #36)', async () => {
+    const scheduler = new ExecutionScheduler();
+
+    // Build a realistic 2-chain complex: Target A (16 aa helix) + Binder B (8 aa helix)
+    const makeHelix = (n: number, ox: number, oy: number, oz: number): Float32Array => {
+      const c = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const theta = i * 1.745;
+        c[i * 3 + 0] = ox + 2.3 * Math.cos(theta);
+        c[i * 3 + 1] = oy + 2.3 * Math.sin(theta);
+        c[i * 3 + 2] = oz + i * 1.5;
+      }
+      return c;
+    };
+    const nTarget = 16;
+    const nBinder = 8;
+    const L = nTarget + nBinder;
+    const targetCa = makeHelix(nTarget, 0, 0, 0);
+    const binderCa = makeHelix(nBinder, 10, 0, 4);
+    const complexCa = new Float32Array(L * 3);
+    complexCa.set(targetCa, 0);
+    complexCa.set(binderCa, nTarget * 3);
+    const chainIds = [...Array(nTarget).fill('A'), ...Array(nBinder).fill('B')];
+
+    const toPdb = (ca: Float32Array, chains: string[]): string => {
+      const lines: string[] = [];
+      let serial = 1;
+      for (let i = 0; i < chains.length; i++) {
+        const ch = chains[i];
+        const res = i < nTarget ? i + 1 : i - nTarget + 1;
+        const x = ca[i * 3].toFixed(3).padStart(8);
+        const y = ca[i * 3 + 1].toFixed(3).padStart(8);
+        const z = ca[i * 3 + 2].toFixed(3).padStart(8);
+        lines.push(
+          `ATOM  ${String(serial++).padStart(5)}  CA  ALA ${ch}${String(res).padStart(4)}    ${x}${y}${z}  1.00 85.00           C  `,
+        );
+      }
+      lines.push('END');
+      return lines.join('\n');
+    };
+    const complexPdb = toPdb(complexCa, chainIds);
+
+    // Candidate 1 (PASS): docked binder (rigidly rotated complex), low iPAE = 4.0, high binder pLDDT = 86
+    const R90 = new Float64Array([0, -1, 0, 1, 0, 0, 0, 0, 1]);
+    const tShift = new Float64Array([12, -5, 3]);
+    const dockedPdb = applyTransformToPdb(complexPdb, R90, tShift);
+    const dockedCa = parsePdbBackbone(dockedPdb).caCoords;
+
+    // Candidate 2 (FAIL: dissociated binder): target identical, binder keeps internal fold (binderScRmsd ~ 0)
+    // but floats +18 Å away in X (targetAlignedBinderRmsd = 18 Å, iPAE = 20 Å)
+    const dissocCa = new Float32Array(complexCa);
+    for (let i = nTarget; i < L; i++) dissocCa[i * 3 + 0] += 18.0;
+    const dissocPdb = toPdb(dissocCa, chainIds);
+
+    // Candidate 3 (FAIL: low binder pLDDT even though large target keeps overall meanPlddt >= 70)
+    const lowBinderPlddt = new Float32Array(L);
+    for (let i = 0; i < nTarget; i++) lowBinderPlddt[i] = 95;
+    for (let i = nTarget; i < L; i++) lowBinderPlddt[i] = 55;
+    // Overall mean = (16*95 + 8*55) / 24 = 81.67 >= 70!
+
+    const makePae = (intra: number, inter: number): Float32Array => {
+      const m = new Float32Array(L * L);
+      for (let i = 0; i < L; i++) {
+        for (let j = 0; j < L; j++) {
+          const same = (i < nTarget) === (j < nTarget);
+          m[i * L + j] = same ? intra : inter;
+        }
+      }
+      return m;
+    };
+
+    mockGenStructureFactory = () => ({
+      kind: 'StructureArtifact',
+      id: 'binder-gen-1',
+      label: 'Binder Complex',
+      sourceModelId: 'rfd4-proteina',
+      length: L,
+      sequence: 'A'.repeat(L),
+      caCoords: complexCa,
+      backbone4Coords: new Float32Array(L * 4 * 3),
+      pdbText: complexPdb,
+      chainIds,
+      chainLengths: [nTarget, nBinder],
+      chainRoles: { A: 'target', B: 'binder' },
+      lockedChains: ['A'],
+      geometry: { length: L, rg: 12, meanCaDist: 3.8, chainBreaks: 0, clashes: 0, helixPct: 80, sheetPct: 0, coilPct: 20 },
+    });
+
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'binder-folds-1',
+      parentStructureId: 'binder-gen-1',
+      folds: [
+        {
+          sequenceId: 'docked-pass',
+          sequence: 'A'.repeat(L),
+          foldModelId: 'localfold-multimer',
+          pdbText: dockedPdb,
+          caCoords: dockedCa,
+          plddt: new Float32Array([...Array(nTarget).fill(92), ...Array(nBinder).fill(86)]),
+          meanPlddt: 90,
+          ptm: 0.88,
+          iptm: 0.84,
+          pae: makePae(2.0, 4.0),
+          chainLengths: [nTarget, nBinder],
+          chainIds,
+          elapsedMs: 50,
+        },
+        {
+          sequenceId: 'dissociated-fail',
+          sequence: 'G'.repeat(L),
+          foldModelId: 'localfold-multimer',
+          pdbText: dissocPdb,
+          caCoords: dissocCa,
+          plddt: new Float32Array([...Array(nTarget).fill(92), ...Array(nBinder).fill(86)]),
+          meanPlddt: 90,
+          ptm: 0.72,
+          iptm: 0.25,
+          pae: makePae(2.0, 20.0),
+          chainLengths: [nTarget, nBinder],
+          chainIds,
+          elapsedMs: 55,
+        },
+        {
+          sequenceId: 'low-binder-plddt-fail',
+          sequence: 'L'.repeat(L),
+          foldModelId: 'localfold-multimer',
+          pdbText: dockedPdb,
+          caCoords: dockedCa,
+          plddt: lowBinderPlddt,
+          meanPlddt: 81.67,
+          ptm: 0.78,
+          iptm: 0.65,
+          pae: makePae(2.0, 5.0),
+          chainLengths: [nTarget, nBinder],
+          chainIds,
+          elapsedMs: 60,
+        },
+      ],
+    });
+
+    const graph: WorkflowGraph = {
+      id: 'binder-score-test',
+      name: 'Binder Score Test',
+      nodes: [
+        { id: 'gen', adapterId: 'rfd4-proteina', params: { mode: 'unconditional', length: 70 } },
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: `${'A'.repeat(nTarget)}:${'A'.repeat(nBinder)}` } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { model: 'multimer', recycles: 1, maxSequences: 3, seed: 0 } },
+        { id: 'score', adapterId: 'designability-scorer', params: { scRmsdThreshold: 2.0, plddtThreshold: 70 } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    };
+
+    const res = await scheduler.run(graph, () => {});
+    const metrics = res.outputsByNode.score.metrics as DesignabilityMetrics;
+    const byId = new Map(metrics.rows.map((r) => [r.sequenceId, r]));
+
+    const docked = byId.get('docked-pass')!;
+    expect(docked.designable).toBe(true);
+    expect(docked.ipae).toBeCloseTo(4.0, 4);
+    expect(docked.binderPlddt).toBeCloseTo(86, 4);
+    expect(docked.targetPlddt).toBeCloseTo(92, 4);
+    expect(docked.binderScRmsd!).toBeLessThan(1e-2);
+    expect(docked.targetAlignedBinderRmsd!).toBeLessThan(1e-2);
+
+    const dissoc = byId.get('dissociated-fail')!;
+    expect(dissoc.binderScRmsd!).toBeLessThan(1e-2);
+    expect(dissoc.targetAlignedBinderRmsd!).toBeCloseTo(18.0, 1);
+    expect(dissoc.ipae).toBeCloseTo(20.0, 4);
+    expect(dissoc.designable).toBe(false);
+
+    const lowBinder = byId.get('low-binder-plddt-fail')!;
+    expect(lowBinder.meanPlddt).toBeGreaterThan(70);
+    expect(lowBinder.binderPlddt).toBeCloseTo(55, 4);
+    expect(lowBinder.designable).toBe(false);
+
+    // summarizeArtifact surfaces ipTM, iPAE, binderScRmsd, targetAlignedBinderRmsd (#36)
+    const refSummary = res.refsByNode.score.metrics.summary;
+    expect(refSummary.bestIptm).toBeCloseTo(0.84, 2);
+    expect(refSummary.bestIpae).toBeCloseTo(4.0, 1);
+    expect(typeof refSummary.bestBinderScRmsd).toBe('number');
+    expect(typeof refSummary.bestTargetAlignedBinderRmsd).toBe('number');
+    expect(res.refsByNode.fold.folds.summary.bestIptm).toBeCloseTo(0.84, 2);
+
+    await scheduler.releaseActiveGpu();
+  });
+
+  it('computes genMotifRmsd & refoldMotifRmsd and gates motif pass status at < 1.0 Å (#10)', async () => {
+    const scheduler = new ExecutionScheduler();
+    const basePdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(basePdb);
+    const L = parsed.nResidues;
+    const motifIndices = [5, 6, 7, 8, 9, 10];
+    const nativeMotifCoords = motifIndices.map((idx) => [
+      parsed.caCoords[idx * 3 + 0],
+      parsed.caCoords[idx * 3 + 1],
+      parsed.caCoords[idx * 3 + 2],
+    ]);
+
+    // Refold 1 (PASS): exact scaffold + motif => refoldMotifRmsd ~ 0
+    const goodCa = new Float32Array(parsed.caCoords);
+    // Refold 2 (FAIL motif): scaffold mostly intact (full scRMSD < 2.0 Å),
+    // but motif residues distorted by ~2.5 Å => refoldMotifRmsd > 1.0 Å -> designable = false!
+    const badMotifCa = new Float32Array(parsed.caCoords);
+    for (let k = 0; k < motifIndices.length; k++) {
+      const idx = motifIndices[k];
+      badMotifCa[idx * 3 + 0] += k % 2 === 0 ? 2.5 : -2.5;
+      badMotifCa[idx * 3 + 1] += k % 3 === 0 ? 1.8 : -1.8;
+    }
+
+    mockGenStructureFactory = () => ({
+      kind: 'StructureArtifact',
+      id: 'motif-gen-1',
+      label: 'Motif Scaffold',
+      sourceModelId: 'genie3',
+      length: L,
+      sequence: parsed.sequence,
+      caCoords: parsed.caCoords,
+      backbone4Coords: parsed.backbone4Coords,
+      pdbText: basePdb,
+      chainIds: parsed.chainIds,
+      chainLengths: [L],
+      motifIndices,
+      nativeMotifCoords,
+      geometry: { length: L, rg: 12, meanCaDist: 3.8, chainBreaks: 0, clashes: 0, helixPct: 80, sheetPct: 0, coilPct: 20 },
+    });
+
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'motif-folds-1',
+      parentStructureId: 'motif-gen-1',
+      folds: [
+        {
+          sequenceId: 'motif-pass',
+          sequence: parsed.sequence,
+          foldModelId: 'localfold-af2',
+          pdbText: basePdb,
+          caCoords: goodCa,
+          plddt: new Float32Array(L).fill(92),
+          meanPlddt: 92,
+          ptm: 0.89,
+          elapsedMs: 40,
+        },
+        {
+          sequenceId: 'motif-distorted',
+          sequence: parsed.sequence,
+          foldModelId: 'localfold-af2',
+          pdbText: basePdb,
+          caCoords: badMotifCa,
+          plddt: new Float32Array(L).fill(92),
+          meanPlddt: 92,
+          ptm: 0.85,
+          elapsedMs: 45,
+        },
+      ],
+    });
+
+    const graph: WorkflowGraph = {
+      id: 'motif-score-test',
+      name: 'Motif Score Test',
+      nodes: [
+        { id: 'gen', adapterId: 'genie3', params: { length: L } },
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: parsed.sequence } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 2, seed: 0 } },
+        { id: 'score', adapterId: 'designability-scorer', params: { scRmsdThreshold: 2.0, plddtThreshold: 70 } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    };
+
+    const res = await scheduler.run(graph, () => {});
+    const metrics = res.outputsByNode.score.metrics as DesignabilityMetrics;
+    const byId = new Map(metrics.rows.map((r) => [r.sequenceId, r]));
+
+    const passRow = byId.get('motif-pass')!;
+    expect(passRow.genMotifRmsd!).toBeLessThan(1e-3);
+    expect(passRow.refoldMotifRmsd!).toBeLessThan(1e-3);
+    expect(passRow.designable).toBe(true);
+
+    const badRow = byId.get('motif-distorted')!;
+    expect(badRow.scRmsd).toBeLessThan(2.0);
+    expect(badRow.genMotifRmsd!).toBeLessThan(1e-3);
+    expect(badRow.refoldMotifRmsd!).toBeGreaterThan(1.0);
+    expect(badRow.designable).toBe(false);
+
+    expect(typeof res.refsByNode.score.metrics.summary.bestGenMotifRmsd).toBe('number');
+    expect(typeof res.refsByNode.score.metrics.summary.bestRefoldMotifRmsd).toBe('number');
+    await scheduler.releaseActiveGpu();
   });
 });

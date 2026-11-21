@@ -129,7 +129,7 @@ describe('RCSB PDB ID input', () => {
     };
 
     const encoded = await encodeGraphToHash(graph);
-    expect(encoded.strippedPdb).toBe(true);
+    expect(encoded.strippedPdb).toBe(false);
     const decoded = await decodeHashToGraph(encoded.hash);
     expect(decoded).not.toBeNull();
     expect(decoded!.nodes[0].params.mode).toBe('pdb-id');

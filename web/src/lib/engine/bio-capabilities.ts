@@ -501,7 +501,7 @@ export function validateBioCapabilities(
               label: 'Switch to RoseTTAFold3',
               nodeId: node.id,
               paramsPatch: { model: 'rosettafold3' },
-              nodeLabel: 'LocalFold (RF3)',
+              nodeLabel: 'RoseTTAFold 3',
             },
           });
         } else {
@@ -522,7 +522,7 @@ export function validateBioCapabilities(
             label: 'Switch to AF2-Multimer v3',
             nodeId: node.id,
             paramsPatch: { model: 'multimer' },
-            nodeLabel: 'LocalFold (AF2-Multimer 1)',
+            nodeLabel: 'AF2-Multimer 1',
           },
         });
       }

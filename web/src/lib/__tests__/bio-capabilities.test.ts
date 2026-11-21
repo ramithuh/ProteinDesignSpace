@@ -33,7 +33,7 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
       label: 'Switch to AF2-Multimer v3',
       nodeId: 'fold',
       paramsPatch: { model: 'multimer' },
-      nodeLabel: 'LocalFold (AF2-Multimer 1)',
+      nodeLabel: 'AF2-Multimer 1',
     });
 
     // Applying the 1-click quick fix resolves the warning
@@ -68,6 +68,7 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
     const af2Issue = issues.find((i) => i.code === 'af2-non-protein-entity' && i.nodeId === 'fold');
     expect(af2Issue).toBeDefined();
     expect(af2Issue!.fix?.paramsPatch).toEqual({ model: 'rosettafold3' });
+    expect(af2Issue!.fix?.nodeLabel).toBe('RoseTTAFold 3');
   });
 
   it('Layer 1 flags pure A/C/G/T DNA strings pasted into Sequence Input', () => {
