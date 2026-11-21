@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  CRYSTALLIZATION_BUFFERS,
   buildCanonicalConditionIntent,
   buildDefaultGenie3ConditionFromTemplate,
   checkGenie3ConditionCompatibility,
@@ -10,6 +11,7 @@ import {
   effectiveGenie3DdimSteps,
   extractRfd4TemplateContext,
   isBareLengthContig,
+  isCrystallizationBuffer,
   pdbTextToSplitCifText,
   resolveGenie3PolyAlaSequence,
   resolveMotifSourceResidues,
@@ -777,5 +779,82 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
     const caseCtx = extractRfd4TemplateContext(caseCif);
     expect(caseCtx.remapHbondSelection("sel('a/*/1/*')")).toBe("sel('Y/*/1/*')");
     expect(caseCtx.remapHbondSelection("sel('A/*/1/*')")).toBe("sel('X/*/1/*')");
+  });
+
+  it('excludes crystallization buffers (SO4, GOL, EDO, PEG, etc.) from RFD4 auto-injection while retaining real metals (ZN, MG, FE2), cofactors (SAM), and explicitly named buffers', () => {
+    for (const buf of ['SO4', 'PO4', 'GOL', 'EDO', 'PEG', 'CL', 'NA', 'DMS', 'MPD', 'HOH']) {
+      expect(CRYSTALLIZATION_BUFFERS.has(buf), buf).toBe(true);
+      expect(isCrystallizationBuffer(buf), buf).toBe(true);
+    }
+    for (const real of ['ZN', 'MG', 'MN', 'CA', 'FE', 'FE2', 'CU', 'CO', 'NI', 'SAM', 'DHZ']) {
+      expect(isCrystallizationBuffer(real), real).toBe(false);
+    }
+
+    const mixedCif = [
+      'data_crystal_buffers',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.type_symbol',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_alt_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.label_asym_id',
+      '_atom_site.label_entity_id',
+      '_atom_site.label_seq_id',
+      '_atom_site.pdbx_PDB_ins_code',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      '_atom_site.occupancy',
+      '_atom_site.B_iso_or_equiv',
+      '_atom_site.auth_seq_id',
+      '_atom_site.auth_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_atom_id',
+      '_atom_site.pdbx_PDB_model_num',
+      'ATOM 1 C CA . ALA A 1 1 ? 0.0 0.0 0.0 1.0 10.0 1 ALA A CA 1',
+      'ATOM 2 C CA . GLY A 1 2 ? 3.8 0.0 0.0 1.0 10.0 2 GLY A CA 1',
+      'ATOM 3 C CA . VAL A 1 3 ? 7.6 0.0 0.0 1.0 10.0 3 VAL A CA 1',
+      'HETATM 4 S S . SO4 B 2 . ? 10.0 0.0 0.0 1.0 20.0 401 SO4 A S 1',
+      'HETATM 5 C C1 . GOL C 3 . ? 12.0 0.0 0.0 1.0 20.0 402 GOL A C1 1',
+      'HETATM 6 ZN ZN . ZN D 4 . ? 14.0 0.0 0.0 1.0 10.0 403 ZN A ZN 1',
+      'HETATM 7 C C1 . SAM E 5 . ? 16.0 0.0 0.0 1.0 10.0 404 SAM A C1 1',
+      '#',
+    ].join('\n');
+
+    const ctx = extractRfd4TemplateContext(mixedCif);
+
+    // 1. Default binder design: SO4 & GOL excluded; ZN & SAM retained!
+    const binderCompiled = compileConditionToRfd4(
+      buildCanonicalConditionIntent({ contig: 'A1-3,/0,50-50', lockChain: 'A' }),
+      ctx,
+    );
+    expect(binderCompiled.contig).toBe('A1-3,/0,50-50,/0,D403,/0,E404');
+    expect(binderCompiled.contig).not.toContain('B401');
+    expect(binderCompiled.contig).not.toContain('C402');
+    const crdStr = JSON.stringify(binderCompiled.conditions.C_CRD);
+    expect(crdStr).toContain("sel('D/*/*/*')");
+    expect(crdStr).toContain("sel('E/*/*/*')");
+    expect(crdStr).not.toContain("sel('B/*/*/*')");
+    expect(crdStr).not.toContain("sel('C/*/*/*')");
+
+    // 2. Explicitly naming SO4 in contig retains SO4 while still excluding GOL
+    const explicitContigCompiled = compileConditionToRfd4(
+      buildCanonicalConditionIntent({ contig: 'A1-3,/0,50-50,/0,A:SO4', lockChain: 'A' }),
+      ctx,
+    );
+    expect(explicitContigCompiled.contig).toContain('B401');
+    expect(explicitContigCompiled.contig).not.toContain('C402');
+    expect(JSON.stringify(explicitContigCompiled.conditions.C_CRD)).toContain("sel('B/*/*/*')");
+
+    // 3. Explicitly naming GOL in cropSegments retains GOL while still excluding SO4
+    const explicitCropCompiled = compileConditionToRfd4(
+      buildCanonicalConditionIntent({ contig: 'A1-3,/0,50-50', lockChain: 'A' }),
+      ctx,
+      { cropSegments: 'A1-3, A:GOL' },
+    );
+    expect(explicitCropCompiled.contig).toContain('C402');
+    expect(explicitCropCompiled.contig).not.toContain('B401');
   });
 });

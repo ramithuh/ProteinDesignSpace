@@ -47,7 +47,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         length: 70,
         nsteps: 60,
         recycleSchedule: 'low',
-        earlyStop: true,
+        earlyStop: false,
         seed: 42,
         presetId: 'custom_cath_monomer',
         partialFraction: 0.5,

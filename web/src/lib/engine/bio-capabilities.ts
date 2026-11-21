@@ -263,6 +263,10 @@ export interface NodeBioProfile {
   isCaOnly?: boolean;
   /** True when the upstream generator is Genie 3 (for tailored Cα-only guidance). */
   fromGenie3?: boolean;
+  /** True when the complex contains a locked target chain (e.g. de novo binder design). */
+  hasLockedTarget?: boolean;
+  /** True when the upstream sequence/structure originates from a natural/uploaded protein rather than a de novo generator. */
+  fromNaturalProtein?: boolean;
 }
 
 const MULTICHAIN_RFD4_PRESETS = new Set(['ppi_pdl1', 'yaml_5o45_binder']);
@@ -324,6 +328,7 @@ function inferNodeOutputProfile(
 
   if (node.adapterId === 'pdb-input') {
     const mode = String(node.params.mode ?? 'demo-bundle');
+    const isNaturalPdb = mode === 'custom' || mode === 'pdb-id';
     const pdbText = String(node.params.pdbText ?? '').trim();
     const benchId = String(node.params.benchmarkId ?? '').trim();
     const bench = benchId ? getBenchmarkById(benchId) : undefined;
@@ -352,6 +357,7 @@ function inferNodeOutputProfile(
         estimatedTokens: liveStruct.length > 0 ? liveStruct.length : (bench?.approxTokens ?? 80),
         missingBackboneCount: coverage.missingBackboneCount,
         isCaOnly: coverage.isCaOnly,
+        ...(isNaturalPdb ? { fromNaturalProtein: true } : {}),
       };
     } else if ((mode === 'custom' || mode === 'pdb-id') && pdbText.length > 0) {
       try {
@@ -378,9 +384,11 @@ function inferNodeOutputProfile(
           estimatedTokens: summary.nResidues > 0 ? summary.nResidues : (bench?.approxTokens ?? 80),
           missingBackboneCount: summary.missingBackboneCount,
           isCaOnly: summary.isCaOnly,
+          fromNaturalProtein: true,
         };
       } catch {
         profile.estimatedTokens = bench?.approxTokens ?? 80;
+        profile.fromNaturalProtein = true;
         if (bench) {
           profile.entities = new Set<BioEntityKind>(bench.entities);
         }
@@ -403,9 +411,11 @@ function inferNodeOutputProfile(
         stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
         chainCount,
         estimatedTokens: bench.approxTokens,
+        ...(isNaturalPdb ? { fromNaturalProtein: true } : {}),
       };
     } else {
       profile.estimatedTokens = 53;
+      if (isNaturalPdb) profile.fromNaturalProtein = true;
     }
   } else if (node.adapterId === 'sequence-input') {
     const raw = String(node.params.sequence ?? '').trim();
@@ -427,6 +437,7 @@ function inferNodeOutputProfile(
       chainCount: maxChains,
       estimatedTokens: maxLen,
       looksLikeDnaSequence: dnaFlag,
+      fromNaturalProtein: true,
     };
   } else if (node.adapterId === 'rfd4-proteina') {
     const mode = String(node.params.mode ?? 'unconditional');
@@ -436,12 +447,14 @@ function inferNodeOutputProfile(
     let estimatedTokens = Number(node.params.length ?? 70);
     const contig = String(node.params.contig ?? '');
     const lockChain = String(node.params.lockChain ?? '').trim();
+    let hasLockedTarget = false;
 
     if (mode === 'preset') {
       const presetId = String(node.params.presetId ?? '');
       if (MULTICHAIN_RFD4_PRESETS.has(presetId)) {
         chainCount = 2;
         estimatedTokens = 208;
+        hasLockedTarget = true;
       } else if (LIGAND_RFD4_PRESETS.has(presetId)) {
         entities.add('ligand');
         estimatedTokens = 143;
@@ -454,6 +467,9 @@ function inferNodeOutputProfile(
     if (mode === 'binder' || Boolean(lockChain) || contig.includes('/0')) {
       chainCount = Math.max(chainCount, 2);
       estimatedTokens = Math.max(estimatedTokens, (tpl?.estimatedTokens ?? 100) + Number(node.params.length ?? 70));
+      if (mode === 'binder' || Boolean(lockChain)) {
+        hasLockedTarget = true;
+      }
     }
     if (tpl && (mode === 'partial' || mode === 'inverse-folding' || mode === 'motif' || mode === 'binder' || mode === 'conditioned')) {
       for (const e of tpl.entities) entities.add(e);
@@ -461,17 +477,26 @@ function inferNodeOutputProfile(
       estimatedTokens = Math.max(estimatedTokens, tpl.estimatedTokens);
     }
     const liveStruct = outputsByNode?.[node.id]?.structure as StructureArtifact | undefined;
-    if (liveStruct && liveStruct.kind === 'StructureArtifact' && liveStruct.diagnostics) {
-      if (liveStruct.diagnostics.hasLigands) entities.add('ligand');
-      if (liveStruct.diagnostics.hasNucleicAcids) entities.add('dna');
-      chainCount = Math.max(chainCount, liveStruct.diagnostics.chainCount);
+    if (liveStruct && liveStruct.kind === 'StructureArtifact') {
+      if (liveStruct.diagnostics) {
+        if (liveStruct.diagnostics.hasLigands) entities.add('ligand');
+        if (liveStruct.diagnostics.hasNucleicAcids) entities.add('dna');
+        chainCount = Math.max(chainCount, liveStruct.diagnostics.chainCount);
+      }
       if (liveStruct.length > 0) estimatedTokens = liveStruct.length;
+      if (
+        (liveStruct.lockedChains && liveStruct.lockedChains.length > 0) ||
+        Object.values(liveStruct.chainRoles ?? {}).includes('target')
+      ) {
+        hasLockedTarget = true;
+      }
     }
     profile = {
       entities,
       stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
       chainCount,
       estimatedTokens,
+      ...(hasLockedTarget ? { hasLockedTarget: true } : {}),
     };
   } else if (node.adapterId === 'genie3') {
     const tpl = upstreamProfileForPort('structure');
@@ -503,6 +528,7 @@ function inferNodeOutputProfile(
       isCaOnly: true,
       missingBackboneCount: estimatedTokens,
       fromGenie3: true,
+      ...(isBinderTask ? { hasLockedTarget: true } : {}),
     };
   } else if (node.adapterId === 'web-protein-mpnn') {
     const st = upstreamProfileForPort('structure');
@@ -513,6 +539,9 @@ function inferNodeOutputProfile(
       }
     }
     const strippedNonProtein = strippedSet.size > 0 ? [...strippedSet] : undefined;
+    const hasLockedTarget =
+      Boolean(st?.hasLockedTarget) ||
+      (st?.stoichiometry === 'multimer' && Boolean(String(node.params.fixedPositions ?? '').trim()));
     profile = {
       // ProteinMPNN emits protein sequences only (strips ligands/DNA), but records stripped context for downstream apo warnings
       entities: new Set<BioEntityKind>(['protein']),
@@ -520,6 +549,8 @@ function inferNodeOutputProfile(
       chainCount: st?.chainCount ?? 1,
       estimatedTokens: st?.estimatedTokens ?? 80,
       ...(strippedNonProtein ? { strippedNonProtein } : {}),
+      ...(hasLockedTarget ? { hasLockedTarget: true } : {}),
+      ...(st?.fromNaturalProtein ? { fromNaturalProtein: true } : {}),
     };
   } else if (node.adapterId === 'localfold-af2') {
     const seq = upstreamProfileForPort('sequences');
@@ -529,6 +560,8 @@ function inferNodeOutputProfile(
       chainCount: seq?.chainCount ?? 1,
       estimatedTokens: seq?.estimatedTokens ?? 80,
       ...(seq?.strippedNonProtein ? { strippedNonProtein: seq.strippedNonProtein } : {}),
+      ...(seq?.hasLockedTarget ? { hasLockedTarget: true } : {}),
+      ...(seq?.fromNaturalProtein ? { fromNaturalProtein: true } : {}),
     };
   }
 
@@ -750,6 +783,35 @@ export function validateBioCapabilities(
             nodeLabel: 'AF2-Multimer 1',
           },
         });
+      }
+
+      const msaMode = String(node.params.msaMode ?? 'single');
+      if (msaMode === 'single') {
+        if (up.stoichiometry === 'multimer' && up.hasLockedTarget) {
+          issues.push({
+            severity: 'warning',
+            code: 'binder-single-seq-msa',
+            nodeId: node.id,
+            message: `${modelDisplay} is folding a multi-chain binder complex in single-sequence mode. Enable Target-Only MSA so the locked target chain uses evolutionary alignments while the de novo binder stays query-only.`,
+            fix: {
+              label: 'Enable Target-Only MSA',
+              nodeId: node.id,
+              paramsPatch: { msaMode: 'target-only' },
+            },
+          });
+        } else if (up.fromNaturalProtein) {
+          issues.push({
+            severity: 'warning',
+            code: 'natural-single-seq-msa',
+            nodeId: node.id,
+            message: `${modelDisplay} is folding an uploaded/natural protein in single-sequence mode. Enable MMseqs2 MSA (ColabFold API) for accurate structure prediction.`,
+            fix: {
+              label: 'Enable MMseqs2 MSA',
+              nodeId: node.id,
+              paramsPatch: { msaMode: 'mmseqs2' },
+            },
+          });
+        }
       }
 
       const tokenLimit = meta.family === 'af3' ? 384 : 512;

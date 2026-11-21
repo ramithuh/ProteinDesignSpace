@@ -13,6 +13,7 @@ import {
 } from '$lib/protein-ops/pdb';
 import { fetchStructureByPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
 import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/protein-ops/kabsch';
+import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
 import { validateGraph } from './graph-utils';
 import { normalizeWorkflowGraph } from './share';
@@ -1397,6 +1398,7 @@ export class ExecutionScheduler {
       const plddtThresh = Number(node.params.plddtThreshold ?? 70);
       const motifThresh = Number(node.params.motifRmsdThreshold ?? 1.0);
       const ipaeThresh = Number(node.params.ipaeThreshold ?? 10.0);
+      const ipsaeThresh = Number(node.params.ipsaeThreshold ?? 0);
       const targetAlignedBinderThresh = Number(
         node.params.targetAlignedBinderRmsdThreshold ?? Math.max(scThresh * 2, 4.0),
       );
@@ -1630,6 +1632,8 @@ export class ExecutionScheduler {
             )
           : [];
         let ipae: number | undefined;
+        let ipsae: number | undefined;
+        let ipsaeMin: number | undefined;
         let binderPlddt: number | undefined;
         let targetPlddt: number | undefined;
         let binderScRmsd: number | undefined;
@@ -1710,6 +1714,30 @@ export class ExecutionScheduler {
           }
         }
 
+        // Dunbrack-lab ipSAE interface scoring for every multi-chain fold with valid protein PAE
+        // (reusing protein-sliced PAE for AF3-class holo matrices that append non-protein tokens).
+        const ipsaeChainRanges =
+          chainRanges.length > 1
+            ? chainRanges
+            : resolveScorerChainRanges(foldLen, f.chainLengths, foldChainIds);
+        if (ipsaeChainRanges.length > 1 && f.pae && f.pae.length >= foldLen * foldLen) {
+          const proteinPae = sliceProteinPae(f.pae, foldLen);
+          if (proteinPae) {
+            const perResChains = expandChainRangesToIds(ipsaeChainRanges);
+            const ipsaeRes = computeIpsae(proteinPae, perResChains, 10);
+            if (ipsaeRes) {
+              ipsae = ipsaeRes.ipsae;
+              ipsaeMin = ipsaeRes.ipsaeMin;
+            }
+          }
+        }
+        if (ipsae === undefined && typeof f.ipsae === 'number' && Number.isFinite(f.ipsae)) {
+          ipsae = f.ipsae;
+          if (typeof f.ipsaeMin === 'number' && Number.isFinite(f.ipsaeMin)) {
+            ipsaeMin = f.ipsaeMin;
+          }
+        }
+
         // Motif scaffolding RMSD evaluation (#10)
         let refoldMotifRmsd: number | undefined;
         if (isFullOneToOne && nativeMotifCa && motifPairs.length >= 3) {
@@ -1731,30 +1759,47 @@ export class ExecutionScheduler {
         const effectiveMeanPlddt = confVal !== null ? confVal : Number.NaN;
 
         // Strictly per #81: ONLY true self-consistency (`selfConsistencyValid === true`) may claim
-        // `designable: true` (PASS). External-mismatch, external-unlinked, and external-mapped runs
-        // compute full RMSD/scTM metrics without claiming a self-consistency PASS.
-        let designable =
-          rowSelfConsistencyValid &&
-          !rowLineageMismatch &&
-          confidenceAvailable &&
-          Number.isFinite(align.rmsd) &&
-          align.rmsd < scThresh &&
-          effectiveMeanPlddt >= plddtThresh;
-        if (binderScRmsd !== undefined) {
-          designable = designable && binderScRmsd < scThresh;
+        // `designable: true` (PASS). Record every failing gate explicitly in `failedGates`.
+        const failedGates: string[] = [];
+        if (!rowSelfConsistencyValid || rowLineageMismatch) {
+          failedGates.push('External reference (not self-consistency)');
         }
-        if (binderPlddt !== undefined) {
-          designable = designable && binderPlddt >= plddtThresh;
+        if (!confidenceAvailable) {
+          failedGates.push('Confidence unavailable (no pLDDT)');
+        } else if (effectiveMeanPlddt < plddtThresh) {
+          failedGates.push(`pLDDT ${effectiveMeanPlddt.toFixed(1)} < ${plddtThresh}`);
         }
-        if (targetAlignedBinderRmsd !== undefined) {
-          designable = designable && targetAlignedBinderRmsd < targetAlignedBinderThresh;
+        if (!Number.isFinite(align.rmsd)) {
+          failedGates.push('scRMSD unavailable');
+        } else if (align.rmsd >= scThresh) {
+          failedGates.push(`scRMSD ${align.rmsd.toFixed(2)} Å ≥ ${scThresh.toFixed(1)} Å`);
         }
-        if (ipae !== undefined) {
-          designable = designable && ipae < ipaeThresh;
+        if (binderScRmsd !== undefined && binderScRmsd >= scThresh) {
+          failedGates.push(`Binder scRMSD ${binderScRmsd.toFixed(2)} Å ≥ ${scThresh.toFixed(1)} Å`);
         }
-        if (refoldMotifRmsd !== undefined) {
-          designable = designable && refoldMotifRmsd < motifThresh;
+        if (binderPlddt !== undefined && binderPlddt < plddtThresh) {
+          failedGates.push(`Binder pLDDT ${binderPlddt.toFixed(1)} < ${plddtThresh}`);
         }
+        if (targetAlignedBinderRmsd !== undefined && targetAlignedBinderRmsd >= targetAlignedBinderThresh) {
+          failedGates.push(
+            `Binder RMSD (target-aligned) ${targetAlignedBinderRmsd.toFixed(2)} Å ≥ ${targetAlignedBinderThresh.toFixed(1)} Å`,
+          );
+        }
+        if (ipae !== undefined && ipae >= ipaeThresh) {
+          failedGates.push(`iPAE ${ipae.toFixed(1)} Å ≥ ${ipaeThresh.toFixed(1)} Å`);
+        }
+        if (
+          Number.isFinite(ipsaeThresh) &&
+          ipsaeThresh > 0 &&
+          ipsae !== undefined &&
+          ipsae < ipsaeThresh
+        ) {
+          failedGates.push(`ipSAE ${ipsae.toFixed(2)} < ${ipsaeThresh.toFixed(2)}`);
+        }
+        if (refoldMotifRmsd !== undefined && refoldMotifRmsd >= motifThresh) {
+          failedGates.push(`Motif RMSD ${refoldMotifRmsd.toFixed(2)} Å ≥ ${motifThresh.toFixed(1)} Å`);
+        }
+        const designable = failedGates.length === 0;
 
         return {
           structureId: structure.id,
@@ -1769,6 +1814,8 @@ export class ExecutionScheduler {
           ptm: f.ptm,
           iptm: f.iptm ?? null,
           ...(ipae !== undefined ? { ipae } : {}),
+          ...(ipsae !== undefined ? { ipsae } : {}),
+          ...(ipsaeMin !== undefined ? { ipsaeMin } : {}),
           ...(binderPlddt !== undefined ? { binderPlddt } : {}),
           ...(targetPlddt !== undefined ? { targetPlddt } : {}),
           ...(binderScRmsd !== undefined ? { binderScRmsd } : {}),
@@ -1783,6 +1830,9 @@ export class ExecutionScheduler {
           ...(parsedMapping ? { referenceMappingApplied: true } : {}),
           alignedResidueCount,
           designable,
+          failedGates,
+          ...(f.msaMode ? { msaMode: f.msaMode } : {}),
+          ...(typeof f.msaDepth === 'number' && Number.isFinite(f.msaDepth) ? { msaDepth: f.msaDepth } : {}),
           alignedFoldPdb,
           designedPdb: designedStructureText,
           pae: f.pae,
@@ -1883,6 +1933,7 @@ export class ExecutionScheduler {
           plddtThresh,
           motifThresh,
           ipaeThresh,
+          ipsaeThresh,
           targetAlignedBinderThresh,
           allowExternalReference,
           strictLineage,
@@ -2409,6 +2460,9 @@ function summarizeArtifact(art: CanonicalArtifact): ArtifactRef {
     const iptmVals = art.folds
       .map((f) => f.iptm)
       .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+    const ipsaeVals = art.folds
+      .map((f) => f.ipsae)
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
     return {
       id: art.id,
       kind: art.kind,
@@ -2417,6 +2471,7 @@ function summarizeArtifact(art: CanonicalArtifact): ArtifactRef {
         bestPlddt: confVals.length > 0 ? Number(Math.max(...confVals).toFixed(1)) : null,
         confidenceAvailable: confVals.length > 0,
         ...(iptmVals.length > 0 ? { bestIptm: Number(Math.max(...iptmVals).toFixed(3)) } : {}),
+        ...(ipsaeVals.length > 0 ? { bestIpsae: Number(Math.max(...ipsaeVals).toFixed(3)) } : {}),
         ...(art.collectionKind ? { collectionKind: art.collectionKind } : {}),
         ...(art.representativeSelection ? { representativeSelection: art.representativeSelection } : {}),
       },
@@ -2454,6 +2509,9 @@ function summarizeArtifact(art: CanonicalArtifact): ArtifactRef {
         : {}),
       ...(best && typeof best.ipae === 'number' && Number.isFinite(best.ipae)
         ? { bestIpae: Number(best.ipae.toFixed(2)) }
+        : {}),
+      ...(best && typeof best.ipsae === 'number' && Number.isFinite(best.ipsae)
+        ? { bestIpsae: Number(best.ipsae.toFixed(3)) }
         : {}),
       ...(best && typeof best.binderScRmsd === 'number' && Number.isFinite(best.binderScRmsd)
         ? { bestBinderScRmsd: Number(best.binderScRmsd.toFixed(3)) }
@@ -2506,6 +2564,14 @@ function resolveScorerChainRanges(
     });
   }
   return [{ chainId: 'A', start: 0, length: L }];
+}
+
+function expandChainRangesToIds(ranges: readonly ScorerChainRange[]): string[] {
+  const out: string[] = [];
+  for (const r of ranges) {
+    for (let i = 0; i < r.length; i++) out.push(r.chainId);
+  }
+  return out;
 }
 
 function splitBinderAndTargetIndices(

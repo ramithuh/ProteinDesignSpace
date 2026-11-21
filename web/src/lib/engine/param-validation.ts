@@ -112,9 +112,10 @@ const VALID_RFD4_PRESET_IDS = new Set([
   ...RFD4_BENCHMARK_OPTIONS.map((b) => b.id),
   'yaml_5o45_binder',
 ]);
-const VALID_RFD4_RECYCLE_SCHEDULES = new Set(['none', 'low', 'medium']);
+const VALID_RFD4_RECYCLE_SCHEDULES = new Set(['none', 'low', 'medium', 'high']);
 const VALID_GENIE3_TASK_MODES = new Set(['unconditional', 'binder', 'motif']);
 const VALID_LOCALFOLD_MODELS = new Set(LOCALFOLD_MODEL_OPTIONS.map((m) => m.id));
+const VALID_MSA_MODES = new Set(['single', 'mmseqs2', 'target-only', 'a3m']);
 const VALID_MPNN_CATALOG: Record<string, ReadonlySet<string>> = {
   proteinmpnn: new Set(['v_48_002', 'v_48_010', 'v_48_020', 'v_48_030']),
   solublempnn: new Set(['v_48_010', 'v_48_020']),
@@ -170,7 +171,8 @@ export const NUMERIC_SPECS: Record<string, Record<string, NumericFieldSpec>> = {
     seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 42 },
   },
   'localfold-af2': {
-    recycles: { min: 0, max: 4, step: 1, integer: true, defaultValue: 1 },
+    recycles: { min: 0, max: 20, step: 1, integer: true, defaultValue: 1 },
+    tolerance: { min: 0, max: 5, step: 0.1, integer: false, defaultValue: 0, unit: 'Å' },
     diffusionSteps: { min: 10, max: 200, step: 5, integer: true, defaultValue: 25 },
     maxSequences: { min: 1, max: 8, step: 1, integer: true, defaultValue: 2 },
     seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 0 },
@@ -178,6 +180,10 @@ export const NUMERIC_SPECS: Record<string, Record<string, NumericFieldSpec>> = {
   'designability-scorer': {
     scRmsdThreshold: { min: 0.5, max: 10, step: 0.1, integer: false, defaultValue: 2.0, unit: 'Å' },
     plddtThreshold: { min: 10, max: 99, step: 5, integer: true, defaultValue: 70 },
+    motifRmsdThreshold: { min: 0.1, max: 10, step: 0.1, integer: false, defaultValue: 1.0, unit: 'Å' },
+    ipaeThreshold: { min: 1, max: 31.75, step: 0.5, integer: false, defaultValue: 10.0, unit: 'Å' },
+    ipsaeThreshold: { min: 0, max: 1, step: 0.05, integer: false, defaultValue: 0 },
+    targetAlignedBinderRmsdThreshold: { min: 0.5, max: 20, step: 0.5, integer: false, defaultValue: 4.0, unit: 'Å' },
   },
 };
 
@@ -612,7 +618,7 @@ export function validateNodeParams(node: WorkflowNode): string[] {
       }
     }
     if (p.recycleSchedule !== undefined && !VALID_RFD4_RECYCLE_SCHEDULES.has(String(p.recycleSchedule))) {
-      errs.push(`"${label}": Invalid recycleSchedule "${String(p.recycleSchedule)}" (expected none, low, or medium).`);
+      errs.push(`"${label}": Invalid recycleSchedule "${String(p.recycleSchedule)}" (expected none, low, medium, or high).`);
     }
     const customYaml = String(p.customSpecYaml ?? '').trim();
     if (customYaml) {
@@ -680,10 +686,31 @@ export function validateNodeParams(node: WorkflowNode): string[] {
     }
   }
 
-  if (node.adapterId === 'localfold-af2' && p.model !== undefined) {
-    const modelId = String(p.model);
-    if (!VALID_LOCALFOLD_MODELS.has(modelId)) {
+  if (node.adapterId === 'localfold-af2') {
+    const modelId = p.model !== undefined ? String(p.model) : 'monomer';
+    if (p.model !== undefined && !VALID_LOCALFOLD_MODELS.has(modelId)) {
       errs.push(`"${label}": Unknown LocalFold model "${modelId}".`);
+    }
+    const maxRecycles = modelId === 'mol1' || modelId.startsWith('multimer') ? 20 : 10;
+    if (p.recycles !== undefined) {
+      const rec = Number(p.recycles);
+      if (Number.isFinite(rec) && Number.isInteger(rec) && rec > maxRecycles && rec <= 20) {
+        errs.push(
+          `"${label}": recycles must be <= ${maxRecycles} for "${modelId}" (up to 20 allowed for mol1 and AF2-Multimer).`,
+        );
+      }
+    }
+    if (p.msaMode !== undefined) {
+      const msaMode = String(p.msaMode);
+      if (!VALID_MSA_MODES.has(msaMode)) {
+        errs.push(
+          `"${label}": Invalid msaMode "${msaMode}" (expected single, mmseqs2, target-only, or a3m).`,
+        );
+      } else if (msaMode === 'a3m' && !String(p.msaA3mText ?? '').trim()) {
+        errs.push(
+          `"${label}": Custom .a3m MSA mode requires non-empty msaA3mText alignment data.`,
+        );
+      }
     }
   }
 

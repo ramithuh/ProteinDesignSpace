@@ -16,6 +16,7 @@ import {
   validateStructureText,
 } from '../engine/param-validation';
 import { generateSampleHelixBundlePdb } from '../protein-ops/pdb';
+import { defaultParamsForAdapter } from '../engine/graph-utils';
 
 describe('parameter validation & numeric sanitization', () => {
   it('rejects fractional count parameters but preserves continuous parameters', () => {
@@ -446,5 +447,102 @@ describe('parameter validation & numeric sanitization', () => {
         params: { mode: 'motif', customSpecYaml: 'not a valid yaml mapping' },
       }).join(' '),
     ).toMatch(/customSpecYaml/i);
+  });
+
+  it('Wave-3 validation: RFD4 high recycle & earlyStop default, LocalFold recycles 10/20 & MSA modes, scorer gate specs, and worker provenance contracts', () => {
+    // 1. RFD4 recycleSchedule accepts 'high' and defaults earlyStop: false in graph-utils
+    expect(defaultParamsForAdapter('rfd4-proteina').earlyStop).toBe(false);
+    expect(
+      validateNodeParams({
+        id: 'rfd-hi',
+        adapterId: 'rfd4-proteina',
+        params: { recycleSchedule: 'high', nsteps: 60 },
+      }),
+    ).toEqual([]);
+    expect(
+      validateNodeParams({
+        id: 'rfd-bad-rec',
+        adapterId: 'rfd4-proteina',
+        params: { recycleSchedule: 'ultra' },
+      }).join(' '),
+    ).toMatch(/recycleSchedule/);
+
+    // 2. LocalFold recycles cap: <= 10 for standard models, <= 20 for mol1 & multimer*
+    expect(NUMERIC_SPECS['localfold-af2'].recycles.max).toBe(20);
+    expect(
+      validateNodeParams({ id: 'lf1', adapterId: 'localfold-af2', params: { model: 'monomer', recycles: 10, tolerance: 0 } }),
+    ).toEqual([]);
+    expect(
+      validateNodeParams({ id: 'lf2', adapterId: 'localfold-af2', params: { model: 'monomer', recycles: 11 } }).join(' '),
+    ).toMatch(/recycles must be <= 10/);
+    expect(
+      validateNodeParams({ id: 'lf3', adapterId: 'localfold-af2', params: { model: 'mol1', recycles: 20 } }),
+    ).toEqual([]);
+    expect(
+      validateNodeParams({ id: 'lf4', adapterId: 'localfold-af2', params: { model: 'multimer-2', recycles: 20 } }),
+    ).toEqual([]);
+    expect(
+      validateNodeParams({ id: 'lf5', adapterId: 'localfold-af2', params: { model: 'mol1', recycles: 21 } }).join(' '),
+    ).toMatch(/recycles must be between 0 and 20/);
+
+    // 3. LocalFold msaMode enum & required msaA3mText when msaMode === 'a3m'
+    for (const m of ['single', 'mmseqs2', 'target-only']) {
+      expect(
+        validateNodeParams({ id: `msa-${m}`, adapterId: 'localfold-af2', params: { msaMode: m } }),
+      ).toEqual([]);
+    }
+    expect(
+      validateNodeParams({ id: 'msa-bad', adapterId: 'localfold-af2', params: { msaMode: 'blast' } }).join(' '),
+    ).toMatch(/Invalid msaMode/);
+    expect(
+      validateNodeParams({ id: 'msa-empty-a3m', adapterId: 'localfold-af2', params: { msaMode: 'a3m', msaA3mText: '   ' } }).join(' '),
+    ).toMatch(/msaA3mText/);
+    expect(
+      validateNodeParams({
+        id: 'msa-ok-a3m',
+        adapterId: 'localfold-af2',
+        params: { msaMode: 'a3m', msaA3mText: '>q\nACDEFGHIKL\n' },
+      }),
+    ).toEqual([]);
+
+    // 4. Scorer numeric specs for motifRmsdThreshold, ipaeThreshold, ipsaeThreshold, targetAlignedBinderRmsdThreshold
+    expect(NUMERIC_SPECS['designability-scorer'].motifRmsdThreshold.defaultValue).toBe(1.0);
+    expect(NUMERIC_SPECS['designability-scorer'].ipaeThreshold.defaultValue).toBe(10.0);
+    expect(NUMERIC_SPECS['designability-scorer'].ipsaeThreshold.defaultValue).toBe(0);
+    expect(NUMERIC_SPECS['designability-scorer'].targetAlignedBinderRmsdThreshold.defaultValue).toBe(4.0);
+    expect(
+      validateNodeParams({
+        id: 'sc-ok',
+        adapterId: 'designability-scorer',
+        params: { motifRmsdThreshold: 1.0, ipaeThreshold: 10.0, ipsaeThreshold: 0.6, targetAlignedBinderRmsdThreshold: 4.0 },
+      }),
+    ).toEqual([]);
+    expect(
+      validateNodeParams({
+        id: 'sc-bad-ipsae',
+        adapterId: 'designability-scorer',
+        params: { ipsaeThreshold: 1.5 },
+      }).join(' '),
+    ).toMatch(/ipsaeThreshold/);
+
+    // 5. Worker fidelity & metadata contracts (RFD4, Genie 3, MPNN)
+    const rfd4Src = readFileSync(resolve(process.cwd(), 'src/lib/workers/rfd4.worker.ts'), 'utf8');
+    expect(rfd4Src).toContain("mode === 'inverse-folding' ? false : requestedEarlyStop");
+    expect(rfd4Src).toContain("bfactorSemantics: 'crystal-b'");
+    expect(rfd4Src).toContain("atomGranularity: 'all-atom'");
+    expect(rfd4Src).toContain("quantization: 'int8'");
+    expect(rfd4Src).toContain('degradedFallback');
+    expect(rfd4Src).toContain('designMeta.lockedChains');
+    expect(rfd4Src).toContain('designMeta.chainRoles');
+
+    const genie3Src = readFileSync(resolve(process.cwd(), 'src/lib/workers/genie3.worker.ts'), 'utf8');
+    expect(genie3Src).toContain("bfactorSemantics: 'none'");
+    expect(genie3Src).toContain("atomGranularity: 'ca-only'");
+    expect(genie3Src).toContain('...(lockedChains ? { lockedChains } : {})');
+    expect(genie3Src).toContain('...(chainRoles ? { chainRoles } : {})');
+
+    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    expect(mpnnSrc).toContain('propagatedLockedChains');
+    expect(mpnnSrc).toContain('structure.chainRoles');
   });
 });

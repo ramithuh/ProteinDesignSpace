@@ -407,6 +407,8 @@ self.onmessage = async (ev: MessageEvent) => {
         atomPresence: parsed.atomPresence,
         observedBackboneMask: parsed.observedBackboneMask,
         diagnostics: parsed.diagnostics,
+        bfactorSemantics: 'none',
+        atomGranularity: 'ca-only',
         ...(lockedChains ? { lockedChains } : {}),
         ...(fixedResidueIndices ? { fixedResidueIndices } : {}),
         ...(chainRoles ? { chainRoles } : {}),
@@ -418,7 +420,10 @@ self.onmessage = async (ev: MessageEvent) => {
         kind: 'SequenceSet',
         id: `genie3-seq-${structArtifact.id}`,
         parentStructureId: structArtifact.id,
+        sourceStructureId: structArtifact.id,
         sourceModelId: predictSequence ? 'genie3 (1-step SequenceNet)' : 'genie3 (poly-ALA backbone)',
+        ...(lockedChains ? { lockedChains } : {}),
+        ...(chainRoles ? { chainRoles } : {}),
         candidates: [
           {
             id: 'genie3-native-1',

@@ -59,6 +59,47 @@ const WATER_COMP_IDS = new Set(['HOH', 'DOD', 'WAT', 'H2O']);
 const DNA_COMP_IDS = new Set(['DA', 'DC', 'DG', 'DT', 'DI', 'DU', 'T', 'THY']);
 const RNA_COMP_IDS = new Set(['A', 'C', 'G', 'U', 'I', 'ADE', 'CYT', 'GUA', 'URA']);
 
+/**
+ * Common crystallographic buffers, precipitants, cryoprotectants, and waters that should NOT
+ * be silently auto-injected as conditioned RFD4 ligands unless explicitly named by the user
+ * in `contig` / `cropSegments` / `hbondSelection`.
+ * Preserves biological metals (ZN, MG, MN, CA, FE, FE2, CU, CO, NI) and cofactors/substrates.
+ */
+export const CRYSTALLIZATION_BUFFERS: ReadonlySet<string> = new Set([
+  'SO4',
+  'PO4',
+  'GOL',
+  'EDO',
+  'PEG',
+  'ACT',
+  'DMS',
+  'CL',
+  'NA',
+  'FMT',
+  'MPD',
+  'TRS',
+  'MES',
+  'EPE',
+  'CIT',
+  'TLA',
+  'BME',
+  'DTT',
+  'ACY',
+  'IPA',
+  'PGE',
+  'PG4',
+  '1PE',
+  'P6G',
+  'HOH',
+  'DOD',
+  'WAT',
+  'H2O',
+]);
+
+export function isCrystallizationBuffer(compId: string): boolean {
+  return CRYSTALLIZATION_BUFFERS.has(compId.trim().toUpperCase());
+}
+
 export interface Rfd4PolymerResidueEntry {
   authChain: string;
   authSeqId: number;
@@ -1044,7 +1085,7 @@ export function buildCanonicalConditionIntent(
 export function compileConditionToRfd4(
   intent: CanonicalConditionIntent,
   templateContext?: Rfd4TemplateContext,
-  opts?: { omitContig?: boolean },
+  opts?: { omitContig?: boolean; cropSegments?: string },
 ): {
   contig: string;
   conditions: Record<string, unknown>;
@@ -1121,17 +1162,52 @@ export function compileConditionToRfd4(
     }
   }
 
-  // Inject preserved template ligands/ions and nucleic acid chains into contig
+  // Inject preserved template ligands/ions and nucleic acid chains into contig.
+  // Skip crystallographic buffers/additives unless explicitly named by the user in contig,
+  // cropSegments, or hbondSelection (preserving biological metals like ZN/MG/FE2 and cofactors).
+  const explicitlyNamedLigands = new Set<string>();
+  const collectExplicitLigandRefs = (raw: string | undefined) => {
+    if (!raw) return;
+    for (const rawTok of raw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)) {
+      if (rawTok === '/0') continue;
+      const chainComp = /^([A-Za-z0-9_]+):([A-Za-z0-9]{1,5})$/.exec(rawTok);
+      if (chainComp && !/^\d+[A-Za-z]?$/.test(chainComp[2])) {
+        explicitlyNamedLigands.add(chainComp[2].toUpperCase());
+        continue;
+      }
+      if (/^[A-Za-z0-9]{1,5}$/.test(rawTok) && !/^\d+$/.test(rawTok)) {
+        explicitlyNamedLigands.add(rawTok.toUpperCase());
+      }
+    }
+  };
+  collectExplicitLigandRefs(intent.contig);
+  collectExplicitLigandRefs(opts?.cropSegments);
+  if (intent.hbondSelection) {
+    for (const seg of intent.hbondSelection.split(/[,|)\s'"]+/).filter(Boolean)) {
+      const parts = seg.split('/');
+      if (parts.length >= 2 && parts[1] && parts[1] !== '*') {
+        explicitlyNamedLigands.add(parts[1].trim().toUpperCase());
+      }
+    }
+  }
+
   const injectedLigands: Rfd4LigandEntry[] = [];
   const injectedNucleic: Rfd4PolymerChainInfo[] = [];
   if (templateContext) {
     const existingChains = preservedChainsInContig(contig);
     for (const lig of templateContext.ligands) {
-      if (!existingChains.has(lig.labelChain.toUpperCase())) {
+      const upperComp = lig.compId.toUpperCase();
+      const upperLabelChain = lig.labelChain.toUpperCase();
+      const explicitlySelected =
+        existingChains.has(upperLabelChain) || explicitlyNamedLigands.has(upperComp);
+      if (isCrystallizationBuffer(upperComp) && !explicitlySelected) {
+        continue;
+      }
+      if (!existingChains.has(upperLabelChain)) {
         if (!opts?.omitContig) {
           contig = `${contig},/0,${lig.labelChain}${lig.resId}`;
         }
-        existingChains.add(lig.labelChain.toUpperCase());
+        existingChains.add(upperLabelChain);
       }
       injectedLigands.push(lig);
     }

@@ -281,8 +281,9 @@ self.onmessage = async (ev: MessageEvent) => {
       const mode = String(p.mode ?? 'unconditional');
       const length = Math.max(30, Math.min(256, Number(p.length ?? 70)));
       const nsteps = Math.max(10, Math.min(120, Number(p.nsteps ?? 60)));
-      const recycleSchedule = (p.recycleSchedule ?? 'low') as 'none' | 'low' | 'medium';
-      const earlyStop = p.earlyStop !== false;
+      const recycleSchedule = (p.recycleSchedule ?? 'low') as 'none' | 'low' | 'medium' | 'high';
+      const requestedEarlyStop = Boolean(p.earlyStop);
+      const earlyStop = mode === 'inverse-folding' ? false : requestedEarlyStop;
       const seed = Number(p.seed ?? 42);
       const customSpecYaml = String(p.customSpecYaml ?? '').trim();
       const partialFraction = Math.max(0.05, Math.min(0.95, Number(p.partialFraction ?? 0.5)));
@@ -384,6 +385,7 @@ self.onmessage = async (ev: MessageEvent) => {
         }
         if (preset.inverseFolding) {
           genOpts.inverseFolding = true;
+          genOpts.earlyStop = false;
         }
 
         if (preset.cifUrl) {
@@ -417,6 +419,7 @@ self.onmessage = async (ev: MessageEvent) => {
             if (cond.inverseFolding) {
               await ensureLoaded(msg.id, true);
               genOpts.inverseFolding = true;
+              genOpts.earlyStop = false;
             }
           } else {
             runLabel = `RFD4 · ${cond.label}`;
@@ -429,7 +432,10 @@ self.onmessage = async (ev: MessageEvent) => {
             if (cond.partialFraction != null && cond.partialFraction > 0) {
               genOpts.partialTrajectoryFractionSteps = cond.partialFraction;
             }
-            if (cond.inverseFolding) genOpts.inverseFolding = true;
+            if (cond.inverseFolding) {
+              genOpts.inverseFolding = true;
+              genOpts.earlyStop = false;
+            }
             const compiled = cond.intent
               ? compileConditionToRfd4(cond.intent, prepared?.templateContext)
               : { contig: cond.contig, conditions: cond.conditions ?? {} };
@@ -518,6 +524,7 @@ self.onmessage = async (ev: MessageEvent) => {
           runLabel = `RFD4 partial (frac=${partialFraction})`;
         } else {
           genOpts.inverseFolding = true;
+          genOpts.earlyStop = false;
           runLabel = `RFD4 inverse-fold`;
         }
         const prepared = (await prepareTemplateForRfd4(msg.id, inputCif))!;
@@ -679,11 +686,13 @@ self.onmessage = async (ev: MessageEvent) => {
 
       let nativeSeq = rtToSeq(res.residueType ?? []);
       const uniqueNativeAAs = new Set(nativeSeq.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, '').split('')).size;
+      let degradedFallback: string | undefined;
 
       // Fallback recovery: if trunk logits were zero/NaN or collapsed to a single residue (e.g. poly-ALA)
       // while local_latents are valid, decode sequence directly using the autoencoder decoder's own
       // logit_linear head (by passing unconditioned C_SEQ from the batch).
       if (nativeSeq.length >= 10 && (logitsNonZero === 0 || logitsNan > 0 || uniqueNativeAAs <= 1)) {
+        degradedFallback = 'Degenerate trunk logits; attempted autoencoder decoder logit_linear recovery';
         console.warn('[rfd4] Degenerate trunk sequence readout detected; retrying via autoencoder decoder logit_linear head', {
           logitsNonZero,
           logitsNan,
@@ -728,6 +737,7 @@ self.onmessage = async (ev: MessageEvent) => {
               pdb: rfd4Mod.toPdbString(structure),
             };
             nativeSeq = recSeq;
+            degradedFallback = 'Recovered sequence via autoencoder decoder logit_linear head (trunk logits degraded)';
             console.info('[rfd4] Recovered sequence via decoder head:', recSeq.slice(0, 30), `(${recUnique} unique AAs)`);
           }
         } catch (recErr) {
@@ -780,7 +790,7 @@ self.onmessage = async (ev: MessageEvent) => {
           length: mode === 'unconditional' && !customSpecYaml ? length : null,
           nsteps,
           recycleSchedule,
-          earlyStop,
+          earlyStop: Boolean(genOpts.earlyStop),
           seed,
           activePresetId,
           condId: condArtifact?.id ?? null,
@@ -799,6 +809,10 @@ self.onmessage = async (ev: MessageEvent) => {
       );
 
       const designMeta = extractRfd4DesignMetadata(parsed, res.structure?.atoms, built.batch);
+      const earlyStopped =
+        typeof res.stepsRun === 'number' &&
+        typeof res.nsteps === 'number' &&
+        res.stepsRun < res.nsteps;
 
       const structArtifact: StructureArtifact = {
         kind: 'StructureArtifact',
@@ -819,6 +833,13 @@ self.onmessage = async (ev: MessageEvent) => {
         atomPresence: parsed.atomPresence,
         observedBackboneMask: parsed.observedBackboneMask,
         diagnostics: parsed.diagnostics,
+        bfactorSemantics: 'crystal-b',
+        atomGranularity: 'all-atom',
+        provenance: {
+          quantization: 'int8',
+          earlyStopped,
+          ...(degradedFallback ? { degradedFallback } : {}),
+        },
         ...designMeta,
         geometry,
       };
@@ -827,7 +848,10 @@ self.onmessage = async (ev: MessageEvent) => {
         kind: 'SequenceSet',
         id: `rfd4-seq-${structArtifact.id}`,
         parentStructureId: structArtifact.id,
+        sourceStructureId: structArtifact.id,
         sourceModelId: `rfd4-proteina (${mode})`,
+        ...(designMeta.lockedChains ? { lockedChains: designMeta.lockedChains } : {}),
+        ...(designMeta.chainRoles ? { chainRoles: designMeta.chainRoles } : {}),
         candidates: [
           {
             id: mode === 'inverse-folding' ? 'rfd4-invfold-1' : 'rfd4-native-1',

@@ -13,6 +13,7 @@ import {
   type KabschResult,
 } from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
+import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 import { ADAPTER_REGISTRY } from './registry';
 import { resolveFoldConfidence, selectFoldRepresentative } from './bio-capabilities';
 import type {
@@ -35,6 +36,7 @@ export interface KeyedCollectionItem<T = unknown> {
   score?: number | null;
   confidence?: number | null;
   confidenceAvailable?: boolean;
+  ipsae?: number | null;
   value: T;
 }
 
@@ -53,6 +55,7 @@ export interface JoinedBranchEntry<T = unknown> {
   score: number | null;
   confidence: number | null;
   confidenceAvailable: boolean;
+  ipsae?: number | null;
   item: KeyedCollectionItem<T> | null;
 }
 
@@ -153,6 +156,8 @@ export interface CompareBranchSummary {
   ptm: number | null;
   iptm: number | null;
   ipae: number | null;
+  ipsae: number | null;
+  ipsaeMin: number | null;
   binderPlddt: number | null;
   targetPlddt: number | null;
   binderScRmsd: number | null;
@@ -164,6 +169,8 @@ export interface CompareBranchSummary {
   geometry: GeometryStats | null;
   pae: Float32Array | null;
 }
+
+export type CompareBranchMetrics = CompareBranchSummary;
 
 export interface PairwiseAgreement {
   labelA: string;
@@ -510,6 +517,36 @@ function computeIpaeFromMatrix(pae: Float32Array, chainLengths: readonly number[
   return count > 0 ? sum / count : null;
 }
 
+function computeIpsaeFromFoldMatrix(
+  pae: Float32Array,
+  chainLengths: readonly number[],
+  chainIds?: readonly string[],
+): { ipsae: number; ipsaeMin: number } | null {
+  const L =
+    chainIds && chainIds.length > 0
+      ? chainIds.length
+      : chainLengths.reduce((a, b) => a + b, 0);
+  if (L <= 0) return null;
+  let perResChains: string[];
+  if (chainIds && chainIds.length === L) {
+    perResChains = [...chainIds];
+  } else if (chainLengths.length > 1 && chainLengths.reduce((a, b) => a + b, 0) === L) {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    perResChains = [];
+    for (let c = 0; c < chainLengths.length; c++) {
+      const cid = alphabet[c % alphabet.length];
+      for (let k = 0; k < chainLengths[c]; k++) perResChains.push(cid);
+    }
+  } else {
+    return null;
+  }
+  if (new Set(perResChains).size < 2) return null;
+  const sliced = sliceProteinPae(pae, L);
+  if (!sliced) return null;
+  const res = computeIpsae(sliced, perResChains, 10);
+  return res ? { ipsae: res.ipsae, ipsaeMin: res.ipsaeMin } : null;
+}
+
 /**
  * General keyed multi-branch collection join helper (Issue #5 / Issue #3).
  * Pairs items across arbitrary branches by canonical candidate identity `key`
@@ -614,6 +651,9 @@ export function joinKeyedCollections<T = unknown>(
             score: typeof item.score === 'number' && Number.isFinite(item.score) ? item.score : null,
             confidence: hasConf ? (item.confidence as number) : null,
             confidenceAvailable: hasConf,
+            ...(typeof item.ipsae === 'number' && Number.isFinite(item.ipsae)
+              ? { ipsae: item.ipsae }
+              : { ipsae: null }),
             item,
           };
           presentCount++;
@@ -627,6 +667,7 @@ export function joinKeyedCollections<T = unknown>(
             score: null,
             confidence: null,
             confidenceAvailable: false,
+            ipsae: null,
             item: null,
           };
         }
@@ -686,6 +727,7 @@ function extractBranchCandidateItems(
           score: Number.isFinite(row.scRmsd) ? row.scRmsd : null,
           confidence: hasConf ? row.meanPlddt : null,
           confidenceAvailable: hasConf,
+          ipsae: typeof row.ipsae === 'number' && Number.isFinite(row.ipsae) ? row.ipsae : null,
           value: {
             nodeId,
             kind: 'metrics' as const,
@@ -712,6 +754,12 @@ function extractBranchCandidateItems(
             ? `${f.sequenceId}#sample-${f.sampleIndex}`
             : f.sequenceId);
         const conf = resolveFoldConfidence(f);
+        const foldIpsae =
+          typeof f.ipsae === 'number' && Number.isFinite(f.ipsae)
+            ? f.ipsae
+            : f.pae && ((f.chainLengths && f.chainLengths.length > 1) || (f.chainIds && new Set(f.chainIds).size > 1))
+              ? (computeIpsaeFromFoldMatrix(f.pae, f.chainLengths ?? [], f.chainIds)?.ipsae ?? null)
+              : null;
         return {
           key,
           sequence: f.sequence,
@@ -719,6 +767,7 @@ function extractBranchCandidateItems(
           score: conf,
           confidence: conf,
           confidenceAvailable: conf !== null,
+          ipsae: foldIpsae,
           value: {
             nodeId,
             kind: 'fold' as const,
@@ -868,6 +917,12 @@ export function exportJoinedCollectionCsv<T = unknown>(
 ): string {
   const esc = (v: string): string =>
     /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  const includeIpsae = joined.rows.some((r) =>
+    joined.branchIds.some((bid) => {
+      const val = r.byBranch[bid]?.ipsae;
+      return typeof val === 'number' && Number.isFinite(val);
+    }),
+  );
   const headers = [
     'candidate_key',
     'present_count',
@@ -877,6 +932,7 @@ export function exportJoinedCollectionCsv<T = unknown>(
       `${id}_rank`,
       `${id}_score`,
       `${id}_confidence`,
+      ...(includeIpsae ? [`${id}_ipsae`] : []),
     ]),
   ];
   const lines = [headers.map(esc).join(',')];
@@ -890,6 +946,7 @@ export function exportJoinedCollectionCsv<T = unknown>(
       const entry = row.byBranch[bid];
       if (!entry || !entry.present) {
         cols.push('MISSING', '', '', '');
+        if (includeIpsae) cols.push('');
       } else {
         cols.push(
           'PRESENT',
@@ -897,6 +954,13 @@ export function exportJoinedCollectionCsv<T = unknown>(
           entry.score !== null ? String(entry.score) : '',
           entry.confidenceAvailable && entry.confidence !== null ? String(entry.confidence) : 'N/A',
         );
+        if (includeIpsae) {
+          cols.push(
+            typeof entry.ipsae === 'number' && Number.isFinite(entry.ipsae)
+              ? String(entry.ipsae)
+              : 'N/A',
+          );
+        }
       }
     }
     lines.push(cols.map(esc).join(','));
@@ -989,6 +1053,8 @@ function extractBranch(
     ptm: null,
     iptm: null,
     ipae: null,
+    ipsae: null,
+    ipsaeMin: null,
     binderPlddt: null,
     targetPlddt: null,
     binderScRmsd: null,
@@ -1070,6 +1136,8 @@ function extractBranch(
       ptm: row.ptm,
       iptm: row.iptm ?? null,
       ipae: row.ipae ?? null,
+      ipsae: typeof row.ipsae === 'number' && Number.isFinite(row.ipsae) ? row.ipsae : null,
+      ipsaeMin: typeof row.ipsaeMin === 'number' && Number.isFinite(row.ipsaeMin) ? row.ipsaeMin : null,
       binderPlddt: row.binderPlddt ?? null,
       targetPlddt: row.targetPlddt ?? null,
       binderScRmsd: row.binderScRmsd ?? null,
@@ -1128,7 +1196,17 @@ function extractBranch(
       findStructureArtifactById(outputsByNode, folds.parentStructureId) ??
       findUpstreamStructureArtifact(graph, nodeId, outputsByNode);
     const chainLengths = f.chainLengths ?? parsed.diagnostics.chainLengths;
+    const effectiveChainIds = f.chainIds ?? parsed.chainIds;
     const ipae = f.pae && chainLengths.length > 1 ? computeIpaeFromMatrix(f.pae, chainLengths) : null;
+    const computedIpsae =
+      typeof f.ipsae === 'number' && Number.isFinite(f.ipsae)
+        ? {
+            ipsae: f.ipsae,
+            ipsaeMin: typeof f.ipsaeMin === 'number' && Number.isFinite(f.ipsaeMin) ? f.ipsaeMin : null,
+          }
+        : f.pae && chainLengths.length > 1
+          ? computeIpsaeFromFoldMatrix(f.pae, chainLengths, effectiveChainIds)
+          : null;
     const conf = resolveFoldConfidence(f);
     // Compute confidence rank (1 = highest confidence) when not explicitly overridden
     const branchRank =
@@ -1144,7 +1222,7 @@ function extractBranch(
       cifText: null,
       caCoords: parsed.caCoords,
       resNums: parsed.resNums,
-      chainIds: f.chainIds ?? parsed.chainIds,
+      chainIds: effectiveChainIds,
       chainLengths,
       chainRoles: upstreamStruct?.chainRoles ?? null,
       sequence: f.sequence || parsed.sequence,
@@ -1164,6 +1242,8 @@ function extractBranch(
       ptm: f.ptm,
       iptm: f.iptm ?? null,
       ipae,
+      ipsae: computedIpsae?.ipsae ?? null,
+      ipsaeMin: computedIpsae?.ipsaeMin ?? null,
       foldElapsedMs: f.elapsedMs,
       geometry: geom,
       pae: f.pae ?? null,
@@ -1817,6 +1897,7 @@ export function buildComparisonState(
     if (b.scRmsd !== null) metricBits.push(`${b.scRmsd.toFixed(2)} Å`);
     if (b.meanPlddt !== null) metricBits.push(`pLDDT ${b.meanPlddt.toFixed(0)}`);
     if (b.iptm !== null) metricBits.push(`ipTM ${b.iptm.toFixed(2)}`);
+    if (b.ipsae !== null) metricBits.push(`ipSAE ${b.ipsae.toFixed(2)}`);
     if (metricBits.length > 0) return metricBits.join(' · ');
     if (b.length && b.length > 0) return `${b.length} aa`;
     if (b.hasNonProtein3D) return 'ligand/DNA';

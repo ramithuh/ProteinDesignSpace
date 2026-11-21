@@ -2476,4 +2476,178 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     expect(mockLiveWorkers).toBe(0);
     sIdle.destroy();
   });
+
+  it('Wave-3 designability-scorer: computes Dunbrack ipSAE (including AF3 protein-sliced PAE), propagates msaMode/msaDepth, and populates explicit failedGates', async () => {
+    const scheduler = new ExecutionScheduler();
+    const makeHelix = (n: number, ox: number, oy: number, oz: number): Float32Array => {
+      const c = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const theta = i * 1.745;
+        c[i * 3 + 0] = ox + 2.3 * Math.cos(theta);
+        c[i * 3 + 1] = oy + 2.3 * Math.sin(theta);
+        c[i * 3 + 2] = oz + i * 1.5;
+      }
+      return c;
+    };
+    const nTarget = 12;
+    const nBinder = 8;
+    const L = nTarget + nBinder;
+    const complexCa = new Float32Array(L * 3);
+    complexCa.set(makeHelix(nTarget, 0, 0, 0), 0);
+    complexCa.set(makeHelix(nBinder, 9, 0, 3), nTarget * 3);
+    const chainIds = [...Array(nTarget).fill('A'), ...Array(nBinder).fill('B')];
+    const lines: string[] = [];
+    for (let i = 0; i < L; i++) {
+      const ch = chainIds[i];
+      const res = i < nTarget ? i + 1 : i - nTarget + 1;
+      lines.push(
+        `ATOM  ${String(i + 1).padStart(5)}  CA  ALA ${ch}${String(res).padStart(4)}    ${complexCa[i * 3].toFixed(3).padStart(8)}${complexCa[i * 3 + 1].toFixed(3).padStart(8)}${complexCa[i * 3 + 2].toFixed(3).padStart(8)}  1.00 90.00           C  `,
+      );
+    }
+    lines.push('END');
+    const complexPdb = lines.join('\n');
+
+    // AF3-style 24x24 PAE (20 protein aa + 4 ligand tokens)
+    const makeAf3Pae = (interPae: number): Float32Array => {
+      const dim = L + 4;
+      const m = new Float32Array(dim * dim).fill(28.0);
+      for (let i = 0; i < L; i++) {
+        for (let j = 0; j < L; j++) {
+          const same = (i < nTarget) === (j < nTarget);
+          m[i * dim + j] = same ? 0.8 : interPae;
+        }
+      }
+      return m;
+    };
+
+    mockGenStructureFactory = () => ({
+      kind: 'StructureArtifact',
+      id: 'ipsae-gen-1',
+      label: 'Binder Complex',
+      sourceModelId: 'rfd4-proteina',
+      length: L,
+      sequence: 'A'.repeat(L),
+      caCoords: complexCa,
+      backbone4Coords: new Float32Array(L * 4 * 3),
+      pdbText: complexPdb,
+      chainIds,
+      chainLengths: [nTarget, nBinder],
+      chainRoles: { A: 'target', B: 'binder' },
+      lockedChains: ['A'],
+      geometry: { length: L, rg: 11, meanCaDist: 3.8, chainBreaks: 0, clashes: 0, helixPct: 80, sheetPct: 0, coilPct: 20 },
+    });
+
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'ipsae-folds-1',
+      parentStructureId: 'ipsae-gen-1',
+      folds: [
+        {
+          sequenceId: 'tight-interface',
+          sequence: 'A'.repeat(L),
+          foldModelId: 'localfold-boltz2',
+          pdbText: complexPdb,
+          caCoords: complexCa,
+          plddt: new Float32Array(L).fill(91),
+          meanPlddt: 91,
+          ptm: 0.89,
+          iptm: 0.85,
+          pae: makeAf3Pae(0.6), // high ipSAE (> 0.7)
+          chainLengths: [nTarget, nBinder],
+          chainIds,
+          msaMode: 'target-only',
+          msaDepth: 184,
+          elapsedMs: 42,
+        },
+        {
+          sequenceId: 'weak-interface',
+          sequence: 'G'.repeat(L),
+          foldModelId: 'localfold-boltz2',
+          pdbText: complexPdb,
+          caCoords: complexCa,
+          plddt: new Float32Array(L).fill(64.2), // fails pLDDT & binder pLDDT
+          meanPlddt: 64.2,
+          ptm: 0.65,
+          iptm: 0.45,
+          pae: makeAf3Pae(3.0), // low iPAE (3.0 < 10) but low ipSAE (~0.10 < 0.60)
+          chainLengths: [nTarget, nBinder],
+          chainIds,
+          msaMode: 'single',
+          msaDepth: 1,
+          elapsedMs: 48,
+        },
+      ],
+    });
+
+    const graph: WorkflowGraph = {
+      id: 'ipsae-scorer-test',
+      name: 'ipSAE Scorer',
+      nodes: [
+        { id: 'gen', adapterId: 'rfd4-proteina', params: { mode: 'unconditional', length: 70 } },
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: `${'A'.repeat(nTarget)}:${'A'.repeat(nBinder)}` } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { model: 'boltz2', recycles: 1, maxSequences: 2, seed: 0 } },
+        {
+          id: 'score',
+          adapterId: 'designability-scorer',
+          params: { scRmsdThreshold: 2.0, plddtThreshold: 70, ipsaeThreshold: 0.6 },
+        },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    };
+
+    const res = await scheduler.run(graph, () => {});
+    const metrics = res.outputsByNode.score.metrics as DesignabilityMetrics;
+    const byId = new Map(metrics.rows.map((r) => [r.sequenceId, r]));
+
+    const tight = byId.get('tight-interface')!;
+    expect(tight.designable).toBe(true);
+    expect(tight.failedGates).toEqual([]);
+    expect(tight.ipsae!).toBeGreaterThan(0.7);
+    expect(tight.ipsaeMin!).toBeCloseTo(tight.ipsae!, 5);
+    expect(tight.msaMode).toBe('target-only');
+    expect(tight.msaDepth).toBe(184);
+
+    const weak = byId.get('weak-interface')!;
+    expect(weak.designable).toBe(false);
+    expect(weak.ipsae!).toBeLessThan(0.6);
+    expect(weak.msaMode).toBe('single');
+    expect(weak.msaDepth).toBe(1);
+    expect(weak.failedGates!.some((g) => g.includes('pLDDT 64.2 < 70'))).toBe(true);
+    expect(weak.failedGates!.some((g) => g.includes('ipSAE') && g.includes('< 0.60'))).toBe(true);
+    expect(typeof res.refsByNode.score.metrics.summary.bestIpsae).toBe('number');
+
+    // External reference comparison explicitly records 'External reference (not self-consistency)' in failedGates
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'ipsae-folds-ext',
+      parentStructureId: 'different-origin-struct',
+      folds: [
+        {
+          sequenceId: 'ext-fold',
+          sequence: 'A'.repeat(L),
+          foldModelId: 'localfold-boltz2',
+          pdbText: complexPdb,
+          caCoords: complexCa,
+          plddt: new Float32Array(L).fill(92),
+          meanPlddt: 92,
+          ptm: 0.9,
+          iptm: 0.88,
+          pae: makeAf3Pae(0.6),
+          chainLengths: [nTarget, nBinder],
+          chainIds,
+          elapsedMs: 30,
+        },
+      ],
+    });
+    const extRes = await scheduler.run(graph, () => {}, { bypassCache: true });
+    const extMetrics = extRes.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(extMetrics.rows[0].designable).toBe(false);
+    expect(extMetrics.rows[0].failedGates).toContain('External reference (not self-consistency)');
+
+    await scheduler.releaseActiveGpu();
+  });
 });

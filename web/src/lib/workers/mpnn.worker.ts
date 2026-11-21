@@ -380,11 +380,15 @@ self.onmessage = async (ev: MessageEvent) => {
         }),
       );
 
+      const propagatedLockedChains = [...lockedChainSet];
       const seqSet: SequenceSet = {
         kind: 'SequenceSet',
         id: `seqset-${structure.id}-${family}-${seed}-${runHash}`,
         parentStructureId: structure.id,
+        sourceStructureId: structure.id,
         sourceModelId: `${family}/${modelName}`,
+        ...(propagatedLockedChains.length > 0 ? { lockedChains: propagatedLockedChains } : {}),
+        ...(structure.chainRoles ? { chainRoles: structure.chainRoles } : {}),
         candidates,
       };
 

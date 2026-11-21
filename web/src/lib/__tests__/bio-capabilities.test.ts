@@ -553,4 +553,102 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
     const caPdbIssues = validateBioCapabilities(caPdbGraph);
     expect(caPdbIssues.find((i) => i.code === 'mpnn-ca-only-backbone')?.fix?.label).toBe('Switch to Cα-ProteinMPNN');
   });
+
+  it('Wave-3 MSA preflight recommendations: Target-Only MSA for locked-target binders, MMseqs2 for natural proteins, and warning-free single-seq for de novo monomers', () => {
+    // 1. Multi-chain binder with locked target chain under msaMode='single' -> Enable Target-Only MSA
+    const binderGraph: WorkflowGraph = {
+      id: 'msa-binder',
+      name: 'Binder MSA',
+      nodes: [
+        { id: 'pdb', adapterId: 'pdb-input', params: { mode: 'pdb-id', pdbId: '5O45', benchmarkId: 'pdl1_5o45' } },
+        { id: 'gen', adapterId: 'rfd4-proteina', params: { mode: 'binder', lockChain: 'A', length: 70 } },
+        { id: 'fold', adapterId: 'localfold-af2', label: 'AF2-Multimer 1', params: { model: 'multimer', msaMode: 'single' } },
+      ],
+      edges: [
+        { fromNode: 'pdb', fromPort: 'structure', toNode: 'gen', toPort: 'structure' },
+        { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+      ],
+    };
+    const binderIssues = validateBioCapabilities(binderGraph);
+    const targetMsaWarn = binderIssues.find((i) => i.code === 'binder-single-seq-msa');
+    expect(targetMsaWarn).toBeDefined();
+    expect(targetMsaWarn!.severity).toBe('warning');
+    expect(targetMsaWarn!.fix).toEqual({
+      label: 'Enable Target-Only MSA',
+      nodeId: 'fold',
+      paramsPatch: { msaMode: 'target-only' },
+    });
+    // Applying fix clears the warning
+    binderGraph.nodes[2].params.msaMode = 'target-only';
+    expect(validateBioCapabilities(binderGraph).find((i) => i.code === 'binder-single-seq-msa')).toBeUndefined();
+
+    // 2. Natural protein from sequence-input under single-seq -> Enable MMseqs2 MSA
+    const seqGraph: WorkflowGraph = {
+      id: 'msa-natural-seq',
+      name: 'Natural Seq MSA',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQD' } },
+        { id: 'fold', adapterId: 'localfold-af2', label: 'AF2 Model 1', params: { model: 'monomer' } },
+      ],
+      edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+    };
+    const seqIssues = validateBioCapabilities(seqGraph);
+    const natSeqWarn = seqIssues.find((i) => i.code === 'natural-single-seq-msa');
+    expect(natSeqWarn).toBeDefined();
+    expect(natSeqWarn!.severity).toBe('warning');
+    expect(natSeqWarn!.fix).toEqual({
+      label: 'Enable MMseqs2 MSA',
+      nodeId: 'fold',
+      paramsPatch: { msaMode: 'mmseqs2' },
+    });
+    seqGraph.nodes[1].params.msaMode = 'mmseqs2';
+    expect(validateBioCapabilities(seqGraph).find((i) => i.code === 'natural-single-seq-msa')).toBeUndefined();
+
+    // 3. Natural/RCSB protein via pdb-input (pdb-id) -> MPNN -> LocalFold under single-seq -> Enable MMseqs2 MSA
+    const pdbNaturalGraph: WorkflowGraph = {
+      id: 'msa-natural-pdb',
+      name: 'Natural PDB MSA',
+      nodes: [
+        { id: 'pdb', adapterId: 'pdb-input', params: { mode: 'pdb-id', pdbId: '1PRW' } },
+        { id: 'mpnn', adapterId: 'web-protein-mpnn', params: { family: 'solublempnn' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { model: 'monomer', msaMode: 'single' } },
+      ],
+      edges: [
+        { fromNode: 'pdb', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
+        { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+      ],
+    };
+    expect(validateBioCapabilities(pdbNaturalGraph).find((i) => i.code === 'natural-single-seq-msa')?.fix).toEqual({
+      label: 'Enable MMseqs2 MSA',
+      nodeId: 'fold',
+      paramsPatch: { msaMode: 'mmseqs2' },
+    });
+
+    // 4. De novo single-chain monomers (RFD4 -> AF2 and Genie 3 -> Cα-MPNN -> AF2) are warning-free under 'single'
+    const rfd4MonomerGraph: WorkflowGraph = {
+      id: 'denovo-rfd4-mono',
+      name: 'De Novo RFD4 Monomer',
+      nodes: [
+        { id: 'gen', adapterId: 'rfd4-proteina', params: { mode: 'unconditional', length: 70 } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { model: 'monomer', msaMode: 'single' } },
+      ],
+      edges: [{ fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+    };
+    expect(validateBioCapabilities(rfd4MonomerGraph)).toEqual([]);
+
+    const genie3MonomerGraph: WorkflowGraph = {
+      id: 'denovo-g3-mono',
+      name: 'De Novo Genie3 Monomer',
+      nodes: [
+        { id: 'gen', adapterId: 'genie3', params: { taskMode: 'unconditional', length: 80 } },
+        { id: 'mpnn', adapterId: 'web-protein-mpnn', params: { family: 'ca', modelName: 'v_48_020' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { model: 'monomer', msaMode: 'single' } },
+      ],
+      edges: [
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
+        { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+      ],
+    };
+    expect(validateBioCapabilities(genie3MonomerGraph)).toEqual([]);
+  });
 });

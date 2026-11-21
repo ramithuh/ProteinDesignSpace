@@ -962,4 +962,110 @@ describe('multi-select 3D comparison state', () => {
     expect(cmpBad.allPairwise).toEqual([]);
     expect(cmpBad.kabschAligned).toBe(false);
   });
+
+  it('Wave-3 ipSAE surfacing in CompareBranchSummary/CompareBranchMetrics and exportJoinedCollectionCsv', () => {
+    const pdbLines: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const ch = i < 3 ? 'A' : 'B';
+      const rn = i < 3 ? i + 1 : i - 2;
+      pdbLines.push(
+        `ATOM  ${String(i + 1).padStart(5)}  CA  ALA ${ch}${String(rn).padStart(4)}    ${(i * 3.8).toFixed(3).padStart(8)}   0.000   0.000  1.00 90.00           C  `,
+      );
+    }
+    pdbLines.push('END');
+    const dimerPdb = pdbLines.join('\n');
+    const parsed = parsePdbBackbone(dimerPdb);
+    const geom = computeGeometryStats(parsed.caCoords, parsed.chainIds, parsed.resNums);
+    const pae = new Float32Array(36);
+    for (let i = 0; i < 6; i++) {
+      for (let j = 0; j < 6; j++) {
+        pae[i * 6 + j] = (i < 3) === (j < 3) ? 0.5 : 0.8;
+      }
+    }
+
+    const metricsBranch: DesignabilityMetrics = {
+      kind: 'DesignabilityMetrics',
+      id: 'm-ipsae',
+      passRate: 1,
+      rows: [
+        {
+          structureId: 'ref-dimer',
+          sequenceId: 'cand-1',
+          candidateKey: 'cand-1',
+          sequence: parsed.sequence,
+          scRmsd: 0.75,
+          scTm: 0.94,
+          meanPlddt: 91,
+          ptm: 0.88,
+          iptm: 0.84,
+          ipae: 0.8,
+          ipsae: 0.625,
+          ipsaeMin: 0.625,
+          designable: true,
+          failedGates: [],
+          alignedFoldPdb: dimerPdb,
+          designedPdb: dimerPdb,
+          pae,
+          plddt: new Float32Array(6).fill(91),
+          geometry: geom,
+          foldElapsedMs: 20,
+        },
+      ],
+      best: null,
+    };
+
+    const foldBranch: FoldedStructure = {
+      kind: 'FoldedStructure',
+      id: 'f-ipsae',
+      parentStructureId: 'ref-dimer',
+      folds: [
+        {
+          sequenceId: 'cand-1',
+          key: 'cand-1',
+          sequence: parsed.sequence,
+          foldModelId: 'localfold-multimer',
+          pdbText: dimerPdb,
+          caCoords: parsed.caCoords,
+          chainLengths: [3, 3],
+          chainIds: parsed.chainIds,
+          pae,
+          plddt: new Float32Array(6).fill(89),
+          meanPlddt: 89,
+          ptm: 0.86,
+          iptm: 0.82,
+          elapsedMs: 25,
+        },
+      ],
+    };
+
+    const g: WorkflowGraph = {
+      id: 'ipsae-cmp',
+      name: 'ipSAE Compare',
+      nodes: [
+        { id: 'sc', adapterId: 'designability-scorer', label: 'Scorer', params: {} },
+        { id: 'lf', adapterId: 'localfold-af2', label: 'Fold', params: {} },
+      ],
+      edges: [],
+    };
+    const outs: Record<string, Record<string, CanonicalArtifact>> = {
+      sc: { metrics: metricsBranch },
+      lf: { folds: foldBranch },
+    };
+
+    const cmp = buildComparisonState(g, ['sc', 'lf'], outs, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+    });
+    expect(cmp.branches[0].ipsae).toBeCloseTo(0.625, 4);
+    expect(cmp.branches[0].ipsaeMin).toBeCloseTo(0.625, 4);
+    expect(cmp.branches[1].ipsae).not.toBeNull();
+    expect(cmp.branches[1].ipsae!).toBeGreaterThan(0.6);
+    expect(cmp.models.some((m) => m.metricSummary?.includes('ipSAE'))).toBe(true);
+
+    const joined = joinBranchArtifacts(g, ['sc', 'lf'], outs);
+    const csv = exportJoinedCollectionCsv(joined);
+    expect(csv).toContain('sc_ipsae');
+    expect(csv).toContain('lf_ipsae');
+    expect(csv).toContain('0.625');
+  });
 });
