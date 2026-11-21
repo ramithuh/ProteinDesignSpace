@@ -14,6 +14,7 @@
   import { decodeHashToGraph, encodeGraphToHash } from '$lib/engine/share';
   import { clearAllModelCaches, getCacheStats } from '$lib/engine/opfs-cache';
   import { COMPARE_PALETTE, buildComparisonState } from '$lib/engine/compare';
+  import { estimateRunRequirements, type RunPreflightSummary } from '$lib/engine/run-preflight';
   import type {
     CanonicalArtifact,
     ConditionSpecArtifact,
@@ -29,6 +30,7 @@
   import MolSuperposeViewer from '$lib/viewer/MolSuperposeViewer.svelte';
   import ArtifactPeekPanel from '$lib/ui/ArtifactPeekPanel.svelte';
   import ComparePeekPanel from '$lib/ui/ComparePeekPanel.svelte';
+  import FirstRunModal from '$lib/ui/FirstRunModal.svelte';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
   import WorkflowCanvas from '$lib/ui/WorkflowCanvas.svelte';
   import RecipeDrawer from '$lib/ui/RecipeDrawer.svelte';
@@ -47,11 +49,17 @@
   let activeGpuWorker = $state<string | null>(null);
   let cacheUsedMB = $state<number>(0);
 
-  // Header popovers
+  // Header popovers & first-run confirmation dialog
   let sysMenuOpen = $state(false);
   let moreMenuOpen = $state(false);
   let sysWrapEl: HTMLDivElement | null = $state(null);
   let moreWrapEl: HTMLDivElement | null = $state(null);
+  let firstRunAck = $state(false);
+  let pendingRun = $state<{
+    bypassCache: boolean;
+    upToNodeId?: string;
+    preflight: RunPreflightSummary;
+  } | null>(null);
 
   // Active workflow state
   let selectedPresetId = $state(WORKFLOW_PRESETS[0].id);
@@ -194,6 +202,7 @@
   }
 
   function handleWindowKeydown(ev: KeyboardEvent) {
+    if (pendingRun) return;
     if (ev.key === 'Escape') {
       sysMenuOpen = false;
       moreMenuOpen = false;
@@ -239,6 +248,7 @@
       if (savedSplit === 'horizontal' || savedSplit === 'vertical') {
         splitMode = savedSplit;
       }
+      firstRunAck = localStorage.getItem('denovo-first-run-ack') === '1';
     } catch {
       applyTheme('dark');
     }
@@ -413,7 +423,27 @@
 
   let validationErrors = $derived(validateGraph(graph));
 
-  async function runWorkflow(bypassCache = false, upToNodeId?: string) {
+  function confirmPendingRun(rememberChoice: boolean) {
+    const req = pendingRun;
+    pendingRun = null;
+    if (rememberChoice) {
+      firstRunAck = true;
+      try {
+        localStorage.setItem('denovo-first-run-ack', '1');
+      } catch {
+        /* ignore */
+      }
+    }
+    if (req) {
+      void runWorkflow(req.bypassCache, req.upToNodeId, true);
+    }
+  }
+
+  function cancelPendingRun() {
+    pendingRun = null;
+  }
+
+  async function runWorkflow(bypassCache = false, upToNodeId?: string, confirmed = false) {
     if (isRunning) return;
     moreMenuOpen = false;
     const plainGraph = $state.snapshot(graph) as WorkflowGraph;
@@ -422,6 +452,13 @@
     if (errs.length > 0) {
       runError = errs.join('\n');
       return;
+    }
+    if (!confirmed && !firstRunAck) {
+      const preflight = estimateRunRequirements(targetGraph);
+      if (preflight.usesWebGpu || preflight.totalDownloadMB > 0) {
+        pendingRun = { bypassCache, upToNodeId, preflight };
+        return;
+      }
     }
     isRunning = true;
     runTargetIds = targetGraph.nodes.map((n) => n.id);
@@ -1372,6 +1409,17 @@
       </div>
     </section>
   </div>
+
+{#if pendingRun}
+  <FirstRunModal
+    preflight={pendingRun.preflight}
+    webgpuSupported={webgpuSupported !== false}
+    {webgpuDetail}
+    isPartialRun={Boolean(pendingRun.upToNodeId)}
+    onConfirm={confirmPendingRun}
+    onCancel={cancelPendingRun}
+  />
+{/if}
 
 <style>
   .app-header {
