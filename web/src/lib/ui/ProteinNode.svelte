@@ -158,23 +158,26 @@
 >
   <div class="stripe"></div>
 
+  {#if data.onDelete}
+    <button
+      type="button"
+      class="del-btn"
+      title="Remove block (Backspace)"
+      aria-label="Remove block"
+      onclick={(e) => {
+        e.stopPropagation();
+        data.onDelete?.(id);
+      }}
+    >
+      <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+        <path d="M2 2L8 8M8 2L2 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+      </svg>
+    </button>
+  {/if}
+
   <div class="header">
     <span class="stage">{manifest?.stage ?? 'node'}</span>
     <span class="rt">{manifest?.runtime ?? 'cpu'}</span>
-    {#if data.onDelete}
-      <button
-        type="button"
-        class="del-btn"
-        title="Remove block"
-        aria-label="Remove block"
-        onclick={(e) => {
-          e.stopPropagation();
-          data.onDelete?.(id);
-        }}
-      >
-        ×
-      </button>
-    {/if}
   </div>
 
   <div class="title">{data.label || manifest?.shortName || data.adapterId}</div>
@@ -418,28 +421,42 @@
     font-size: 8.5px;
   }
   .del-btn {
-    background: var(--err-bg);
-    color: var(--err-text);
-    border: 1px solid var(--err-border);
-    border-radius: 3px;
-    width: 16px;
-    height: 16px;
-    line-height: 13px;
+    position: absolute;
+    top: -7px;
+    right: -7px;
+    z-index: 4;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
     padding: 0;
-    font-size: 12px;
+    border-radius: 999px;
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.14);
     cursor: pointer;
     opacity: 0;
+    transform: scale(0.88);
     pointer-events: none;
-    transition: opacity 0.12s ease;
+    transition:
+      opacity 120ms ease,
+      transform 120ms ease,
+      background-color 120ms ease,
+      border-color 120ms ease,
+      color 120ms ease;
   }
   .p-node:hover .del-btn,
   .p-node.selected .del-btn,
   .del-btn:focus-visible {
     opacity: 1;
+    transform: scale(1);
     pointer-events: auto;
   }
   .del-btn:hover {
-    background: #dc2626;
+    background: #ef4444;
+    border-color: #ef4444;
     color: #fff;
   }
   .title {
