@@ -440,19 +440,179 @@ export interface InsertBlockResult {
   graph: WorkflowGraph;
   nodeId: string;
   wiredEdge?: WorkflowEdge;
+  proposedEdges: WorkflowEdge[];
+}
+
+export interface InsertBlockOptions {
+  /** If true (default for backwards-compat), immediately commit proposed edges to graph.edges. Set false for ghost preview UX. */
+  autoCommit?: boolean;
+}
+
+/**
+ * Compute up to N non-conflicting proposed wires for a newly inserted node:
+ * - When inserted via + Add Block (no dropPos): anchors on `selectedNodeId`, and if the new node
+ *   still has unconnected required inputs (e.g. scRMSD/scTM needs `structure` + `folds`), walks
+ *   upstream from `selectedNodeId` to propose the nearest matching ancestor output too.
+ * - When inserted via drag-and-drop (`dropPos` given): uses spatial proximity to nearby upstream
+ *   nodes only; dropping into open space on a complex graph (>= 4 nodes) proposes 0 wires.
+ */
+export function proposeConnectionsForNode(
+  graphWithNode: WorkflowGraph,
+  newNodeId: string,
+  selectedNodeId?: string | null,
+  dropPos?: { x: number; y: number },
+): WorkflowEdge[] {
+  const newNode = graphWithNode.nodes.find((n) => n.id === newNodeId);
+  if (!newNode) return [];
+  const manifest = ADAPTER_REGISTRY[newNode.adapterId];
+  if (!manifest) return [];
+
+  const occupiedTargets = new Set(graphWithNode.edges.map((e) => `${e.toNode}:${e.toPort}`));
+  const proposed: WorkflowEdge[] = [];
+
+  const tryAddEdge = (fromId: string, fromPort: string, toId: string, toPort: string): boolean => {
+    const targetKey = `${toId}:${toPort}`;
+    if (occupiedTargets.has(targetKey)) return false;
+    const trialGraph: WorkflowGraph = {
+      ...graphWithNode,
+      edges: [...graphWithNode.edges, ...proposed],
+    };
+    if (!validateConnection(trialGraph, fromId, fromPort, toId, toPort).valid) return false;
+    occupiedTargets.add(targetKey);
+    proposed.push({ fromNode: fromId, fromPort, toNode: toId, toPort });
+    return true;
+  };
+
+  const findFirstValidEdge = (fromId: string, toId: string, allowOptional = true): WorkflowEdge | undefined => {
+    const fromNode = graphWithNode.nodes.find((n) => n.id === fromId);
+    const toNode = graphWithNode.nodes.find((n) => n.id === toId);
+    if (!fromNode || !toNode) return undefined;
+    const fromManifest = ADAPTER_REGISTRY[fromNode.adapterId];
+    const toManifest = ADAPTER_REGISTRY[toNode.adapterId];
+    if (!fromManifest || !toManifest) return undefined;
+
+    for (const fromPort of Object.keys(fromManifest.outputs)) {
+      for (const [toPort, inSpec] of Object.entries(toManifest.inputs)) {
+        if (!allowOptional && inSpec.required === false) continue;
+        if (occupiedTargets.has(`${toId}:${toPort}`)) continue;
+        const trialGraph: WorkflowGraph = {
+          ...graphWithNode,
+          edges: [...graphWithNode.edges, ...proposed],
+        };
+        if (validateConnection(trialGraph, fromId, fromPort, toId, toPort).valid) {
+          return { fromNode: fromId, fromPort, toNode: toId, toPort };
+        }
+      }
+    }
+    return undefined;
+  };
+
+  // Determine anchor node
+  let anchorNode: WorkflowNode | undefined;
+  if (dropPos) {
+    // Spatial proximity overrides stale selection when dragging onto canvas
+    const existingCount = graphWithNode.nodes.length - 1;
+    let bestDist = Infinity;
+    for (const n of graphWithNode.nodes) {
+      if (n.id === newNodeId || !n.position) continue;
+      const dx = dropPos.x - n.position.x;
+      const dy = Math.abs(dropPos.y - n.position.y);
+      // Upstream neighbor sits to the left (dx > 0) within ~420px horizontally and 220px vertically
+      const inUpstreamZone = dx >= -60 && dx <= 420 && dy <= 220;
+      const inDownstreamZone =
+        (manifest.stage === 'source' || manifest.stage === 'condition') &&
+        dx <= 60 &&
+        dx >= -420 &&
+        dy <= 220;
+      if (!inUpstreamZone && !inDownstreamZone) continue;
+      const d = Math.hypot(dx, dy);
+      if (d < bestDist) {
+        bestDist = d;
+        anchorNode = n;
+      }
+    }
+    // On complex graphs (>= 4 existing nodes), dropping in open space proposes nothing
+    if (!anchorNode && existingCount >= 4) {
+      return [];
+    }
+  } else if (selectedNodeId) {
+    anchorNode = graphWithNode.nodes.find((n) => n.id === selectedNodeId && n.id !== newNodeId);
+  }
+
+  if (!anchorNode) return [];
+
+  const anchorManifest = ADAPTER_REGISTRY[anchorNode.adapterId];
+  const insertUpstream =
+    manifest.stage === 'source' ||
+    (manifest.stage === 'condition' && anchorManifest?.stage !== 'source');
+
+  if (insertUpstream) {
+    const e = findFirstValidEdge(newNodeId, anchorNode.id, true);
+    if (e) tryAddEdge(e.fromNode, e.fromPort, e.toNode, e.toPort);
+    return proposed;
+  }
+
+  // Match compatible output(s) from anchorNode into newNode
+  const directEdge = findFirstValidEdge(anchorNode.id, newNodeId, true);
+  if (directEdge) {
+    tryAddEdge(directEdge.fromNode, directEdge.fromPort, directEdge.toNode, directEdge.toPort);
+  }
+
+  // Multi-port ancestor completion: if newNode still has unconnected REQUIRED inputs
+  // (e.g., adding scRMSD/scTM while LocalFold is selected -> also propose ancestor StructureArtifact),
+  // BFS upstream from anchorNode to find the nearest matching producer.
+  const missingRequiredPorts = Object.entries(manifest.inputs)
+    .filter(([port, spec]) => spec.required !== false && !occupiedTargets.has(`${newNodeId}:${port}`))
+    .map(([port]) => port);
+
+  if (missingRequiredPorts.length > 0) {
+    const visited = new Set<string>([anchorNode.id, newNodeId]);
+    const queue: string[] = [];
+    for (const e of graphWithNode.edges) {
+      if (e.toNode === anchorNode.id && !visited.has(e.fromNode)) {
+        visited.add(e.fromNode);
+        queue.push(e.fromNode);
+      }
+    }
+
+    while (queue.length > 0 && proposed.length < 2) {
+      const ancId = queue.shift()!;
+      const ancNode = graphWithNode.nodes.find((n) => n.id === ancId);
+      const ancManifest = ancNode ? ADAPTER_REGISTRY[ancNode.adapterId] : undefined;
+      if (ancNode && ancManifest) {
+        for (const toPort of missingRequiredPorts) {
+          if (occupiedTargets.has(`${newNodeId}:${toPort}`)) continue;
+          const reqType = manifest.inputs[toPort]?.type;
+          const matchingOut = Object.entries(ancManifest.outputs).find(([, s]) => s.type === reqType);
+          if (matchingOut) {
+            tryAddEdge(ancId, matchingOut[0], newNodeId, toPort);
+          }
+        }
+      }
+      for (const e of graphWithNode.edges) {
+        if (e.toNode === ancId && !visited.has(e.fromNode)) {
+          visited.add(e.fromNode);
+          queue.push(e.fromNode);
+        }
+      }
+    }
+  }
+
+  return proposed;
 }
 
 /**
  * Pure helper to insert a new block into a WorkflowGraph with:
  * - collision-free deterministic node ID + readable label + default params
  * - smart placement (dropPos if given, else 280px right of selectedNode with vertical nudge if occupied, else { x: 60, y: 60 })
- * - auto-wiring of the first validateConnection-valid port pair without overwriting an already-occupied target input port.
+ * - proposed compatible wire(s) (committed immediately if `options.autoCommit !== false`, or returned as `proposedEdges` only when `autoCommit: false`).
  */
 export function insertBlockSmart(
   graph: WorkflowGraph,
   adapterId: string,
   selectedNodeId?: string | null,
   dropPos?: { x: number; y: number },
+  options?: InsertBlockOptions,
 ): InsertBlockResult {
   const manifest = ADAPTER_REGISTRY[adapterId];
   if (!manifest) {
@@ -519,48 +679,19 @@ export function insertBlockSmart(
     edges: [...graph.edges],
   };
 
-  let wiredEdge: WorkflowEdge | undefined;
-  if (selectedNode) {
-    const occupiedTargets = new Set(graph.edges.map((e) => `${e.toNode}:${e.toPort}`));
+  const proposedEdges = proposeConnectionsForNode(graphWithNode, nodeId, selectedNodeId, dropPos);
+  const autoCommit = options?.autoCommit !== false;
+  const wiredEdge = autoCommit ? proposedEdges[0] : undefined;
 
-    const findFirstValidEdge = (fromId: string, toId: string): WorkflowEdge | undefined => {
-      const fromNode = graphWithNode.nodes.find((n) => n.id === fromId);
-      const toNode = graphWithNode.nodes.find((n) => n.id === toId);
-      if (!fromNode || !toNode) return undefined;
-      const fromManifest = ADAPTER_REGISTRY[fromNode.adapterId];
-      const toManifest = ADAPTER_REGISTRY[toNode.adapterId];
-      if (!fromManifest || !toManifest) return undefined;
-
-      for (const fromPort of Object.keys(fromManifest.outputs)) {
-        for (const toPort of Object.keys(toManifest.inputs)) {
-          if (occupiedTargets.has(`${toId}:${toPort}`)) continue;
-          if (validateConnection(graphWithNode, fromId, fromPort, toId, toPort).valid) {
-            return { fromNode: fromId, fromPort, toNode: toId, toPort };
-          }
-        }
-      }
-      return undefined;
-    };
-
-    const selManifest = ADAPTER_REGISTRY[selectedNode.adapterId];
-    const insertUpstream =
-      manifest.stage === 'source' ||
-      (manifest.stage === 'condition' && selManifest?.stage !== 'source');
-
-    if (insertUpstream) {
-      wiredEdge = findFirstValidEdge(nodeId, selectedNode.id);
-    } else {
-      wiredEdge = findFirstValidEdge(selectedNode.id, nodeId);
-    }
-  }
-
-  const nextGraph: WorkflowGraph = wiredEdge
-    ? { ...graphWithNode, edges: [...graphWithNode.edges, wiredEdge] }
-    : graphWithNode;
+  const nextGraph: WorkflowGraph =
+    autoCommit && proposedEdges.length > 0
+      ? { ...graphWithNode, edges: [...graphWithNode.edges, ...proposedEdges] }
+      : graphWithNode;
 
   return {
     graph: nextGraph,
     nodeId,
+    proposedEdges,
     ...(wiredEdge ? { wiredEdge } : {}),
   };
 }

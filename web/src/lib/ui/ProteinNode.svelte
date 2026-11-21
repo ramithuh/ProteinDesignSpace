@@ -18,6 +18,8 @@
     inputPortsConnected?: Record<string, boolean>;
     inputPortsReady?: Record<string, boolean>;
     outputPortsReady?: Record<string, boolean>;
+    compareColor?: string;
+    compareBadge?: string;
     onDelete?: (nodeId: string) => void;
     onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
     [key: string]: unknown;
@@ -153,15 +155,26 @@
 <div
   class="p-node"
   class:selected
+  class:comparing={Boolean(data.compareColor)}
   class:pipeline-running={isPipelineRunning}
   class:queued={isNodeQueued}
   class:running={isNodeRunning}
   class:loading={st?.status === 'loading'}
   class:done={isNodeDone}
   class:err={st?.status === 'error'}
-  style="--stage-color: {stageColor}"
+  style="--stage-color: {stageColor}{data.compareColor ? `; --compare-color: ${data.compareColor}` : ''}"
 >
   <div class="stripe"></div>
+
+  {#if data.compareBadge && data.compareColor}
+    <span
+      class="compare-badge"
+      style="background: {data.compareColor}"
+      title={`Comparing in 3D as model ${data.compareBadge}`}
+    >
+      {data.compareBadge}
+    </span>
+  {/if}
 
   {#if data.onDelete}
     <button
@@ -318,6 +331,30 @@
   .p-node.queued:hover {
     opacity: 0.8;
     filter: saturate(0.75);
+  }
+  .p-node.comparing {
+    border-color: var(--compare-color);
+    box-shadow:
+      0 0 0 2.5px color-mix(in srgb, var(--compare-color) 42%, transparent),
+      var(--node-shadow);
+  }
+  .compare-badge {
+    position: absolute;
+    top: -8px;
+    left: -8px;
+    z-index: 5;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 800;
+    color: #090d16;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+    pointer-events: none;
   }
   .p-node.err {
     opacity: 1;

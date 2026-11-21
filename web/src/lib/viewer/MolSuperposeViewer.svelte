@@ -1,10 +1,13 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
+  import type { ViewerModelSpec } from '$lib/engine/compare';
 
   interface Props {
     designedPdb: string | null;
     refoldPdb?: string | null;
     trajectoryPdb?: string | null;
+    /** Optional multi-model comparison specs (takes precedence over designedPdb/refoldPdb when non-null). */
+    models?: ViewerModelSpec[] | null;
     /** 0-based user frame index (0..T-1). Mapped to Mol* modelIndex = frame + 1. */
     frameIndex?: number;
     showDesigned?: boolean;
@@ -15,12 +18,15 @@
     height?: number;
     label?: string;
     onResidueClick?: (info: { chain: string; seqId: number; compId: string }) => void;
+    onToggleModelVisibility?: (modelId: string) => void;
+    onSoloModel?: (modelId: string) => void;
   }
 
   let {
     designedPdb,
     refoldPdb = null,
     trajectoryPdb = null,
+    models = null,
     frameIndex = undefined,
     showDesigned = true,
     showRefold = true,
@@ -30,6 +36,8 @@
     height = 420,
     label = undefined,
     onResidueClick = undefined,
+    onToggleModelVisibility = undefined,
+    onSoloModel = undefined,
   }: Props = $props();
 
   let containerEl: HTMLDivElement | null = $state(null);
@@ -40,6 +48,7 @@
   let pluginPromise: Promise<any> | null = null;
   let destroyed = false;
   let trajModelRef = $state<string | null>(null);
+  let modelRefs = new Map<string, string>();
   let loadSeq = 0;
   let initError = $state<string | null>(null);
 
@@ -256,8 +265,109 @@
     });
   }
 
-  // Re-render full scene when structures or visibility toggles change
+  async function renderMultiModels(specs: ViewerModelSpec[]) {
+    const mySeq = ++loadSeq;
+    initError = null;
+    modelRefs = new Map();
+    trajModelRef = null;
+    if (specs.length === 0) {
+      if (plugin) await plugin.clear();
+      return;
+    }
+
+    try {
+      const ctx = await ensurePlugin();
+      if (destroyed || !ctx || mySeq !== loadSeq) return;
+
+      await ctx.clear();
+      if (destroyed || mySeq !== loadSeq) return;
+
+      const [{ Color }, { setSubtreeVisibility }] = await Promise.all([
+        import('molstar/lib/mol-util/color'),
+        import('molstar/lib/mol-plugin/behavior/static/state'),
+      ]);
+      if (destroyed || mySeq !== loadSeq) return;
+
+      const nextRefs = new Map<string, string>();
+      for (const m of specs) {
+        const fmt = /^\s*(data_|loop_|_atom_site\.)/m.test(m.pdbText) ? 'mmcif' : 'pdb';
+        const data = await ctx.builders.data.rawData({
+          data: m.pdbText,
+          label: m.label,
+        });
+        const traj = await ctx.builders.structure.parseTrajectory(data, fmt);
+        const model = await ctx.builders.structure.createModel(traj, { modelIndex: 0 });
+        if (destroyed || mySeq !== loadSeq) return;
+        const struct = await ctx.builders.structure.createStructure(model);
+        const repr = await ctx.builders.structure.representation.addRepresentation(
+          struct,
+          m.colorByPlddt
+            ? {
+                type: 'cartoon',
+                color: 'plddt-confidence',
+                typeParams: { alpha: m.alpha },
+              }
+            : {
+                type: 'cartoon',
+                color: 'uniform',
+                colorParams: { value: Color(m.colorHex) },
+                typeParams: { alpha: m.alpha },
+              },
+        );
+        if (destroyed || mySeq !== loadSeq) return;
+        const ref = repr?.ref ?? struct.ref;
+        nextRefs.set(m.id, ref);
+        if (!m.visible) {
+          setSubtreeVisibility(ctx.state.data, ref, true);
+        }
+      }
+
+      if (destroyed || mySeq !== loadSeq) return;
+      modelRefs = nextRefs;
+      applyIllustrative(illustrative);
+      ctx.canvas3d?.requestCameraReset();
+    } catch (err) {
+      if (!destroyed && mySeq === loadSeq) {
+        initError = err instanceof Error ? err.message : String(err);
+      }
+    }
+  }
+
+  async function syncModelVisibility(specs: ViewerModelSpec[]) {
+    if (destroyed || !plugin || modelRefs.size === 0) return;
+    try {
+      const { setSubtreeVisibility } = await import('molstar/lib/mol-plugin/behavior/static/state');
+      if (destroyed || !plugin) return;
+      for (const m of specs) {
+        const ref = modelRefs.get(m.id);
+        if (ref && plugin.state?.data?.cells?.has(ref)) {
+          // Mol* setSubtreeVisibility(state, ref, isHidden): true hides, false shows
+          setSubtreeVisibility(plugin.state.data, ref, !m.visible);
+        }
+      }
+    } catch {
+      /* ignore transient state updates */
+    }
+  }
+
+  // Structural signature for multi-model mode (excludes `visible` so eye/solo toggles never reload or reset camera)
+  let multiRenderKey = $derived.by((): string | null => {
+    if (models === null) return null;
+    return models
+      .map(
+        (m) =>
+          `${m.id}|${m.colorHex}|${m.alpha}|${m.colorByPlddt ? 1 : 0}|${m.pdbText.length}|${m.pdbText.slice(0, 64)}|${m.pdbText.slice(-64)}`,
+      )
+      .join('||');
+  });
+
+  // Re-render full scene when structures or structural compare inputs change
   $effect(() => {
+    if (multiRenderKey !== null) {
+      const snapshot = untrack(() => models ?? []);
+      void renderMultiModels(snapshot);
+      return;
+    }
     const d = designedPdb;
     const r = refoldPdb;
     const t = trajectoryPdb;
@@ -265,6 +375,14 @@
     const sd = showDesigned;
     const sr = showRefold;
     void renderScene(d, r, t, useT, sd, sr, untrack(() => frameIndex));
+  });
+
+  // Camera-preserving incremental visibility sync when only `visible` flags change in compare mode
+  $effect(() => {
+    if (!models) return;
+    const visSig = models.map((m) => `${m.id}:${m.visible ? 1 : 0}`).join(',');
+    void visSig;
+    void syncModelVisibility(models);
   });
 
   // Fast incremental scrub when only frameIndex changes
@@ -304,7 +422,43 @@
   {#if label}
     <div class="badge">{label}</div>
   {/if}
-  {#if designedPdb && refoldPdb && showDesigned && showRefold && !showTrajectory}
+  {#if models && models.length > 0}
+    <div class="compare-legend" role="group" aria-label="Compared 3D structures">
+      {#each models as m (m.id)}
+        <div class="cmp-chip" class:is-hidden={!m.visible}>
+          <button
+            type="button"
+            class="cmp-chip-main"
+            title={m.visible ? `Hide ${m.label}` : `Show ${m.label}`}
+            onclick={() => onToggleModelVisibility?.(m.id)}
+          >
+            <span
+              class="cmp-swatch"
+              class:ref={m.isReference}
+              style="background: {m.colorCss}; opacity: {m.visible ? 1 : 0.35}"
+            ></span>
+            {#if m.badge}
+              <span class="cmp-badge">{m.badge}</span>
+            {/if}
+            <span class="cmp-lbl">{m.label}</span>
+            {#if m.metricSummary}
+              <span class="cmp-stat">{m.metricSummary}</span>
+            {/if}
+          </button>
+          {#if onSoloModel && !m.isReference && models.length > 1}
+            <button
+              type="button"
+              class="solo-btn"
+              title={`Solo ${m.label} (click again to show all)`}
+              onclick={() => onSoloModel?.(m.id)}
+            >
+              S
+            </button>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {:else if designedPdb && refoldPdb && showDesigned && showRefold && !showTrajectory}
     <div class="legend">
       <span class="swatch designed"></span> Designed
       <span class="swatch plddt"></span> Refold (pLDDT)
@@ -313,8 +467,10 @@
   <div bind:this={containerEl} class="canvas-wrap">
     <canvas bind:this={canvasEl} class="mol-canvas"></canvas>
   </div>
-  {#if !designedPdb && !refoldPdb}
-    <div class="empty">Run a pipeline to visualize designed &amp; refolded 3D structures</div>
+  {#if (!models || models.length === 0) && !designedPdb && !refoldPdb}
+    <div class="empty">
+      {models ? 'Run the selected blocks to compare their 3D structures' : 'Run a pipeline to visualize designed & refolded 3D structures'}
+    </div>
   {/if}
   {#if initError}
     <div class="err-overlay">Mol* error: {initError}</div>
@@ -364,6 +520,83 @@
     padding: 4px 10px;
     border-radius: 4px;
     pointer-events: none;
+  }
+  .compare-legend {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    right: 10px;
+    z-index: 10;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    pointer-events: none;
+  }
+  .cmp-chip {
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    background: var(--overlay-bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    overflow: hidden;
+    backdrop-filter: blur(4px);
+    transition: opacity 120ms ease;
+  }
+  .cmp-chip.is-hidden {
+    opacity: 0.5;
+  }
+  .cmp-chip-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    padding: 3px 7px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .cmp-chip-main:hover {
+    background: var(--bg-surface-hover);
+  }
+  .cmp-swatch {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .cmp-swatch.ref {
+    border: 1px dashed rgba(255, 255, 255, 0.5);
+  }
+  .cmp-badge {
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .cmp-lbl {
+    max-width: 115px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cmp-stat {
+    color: var(--text-dim);
+  }
+  .solo-btn {
+    border: none;
+    border-left: 1px solid var(--border-subtle);
+    background: transparent;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 3px 6px;
+    cursor: pointer;
+  }
+  .solo-btn:hover {
+    background: var(--accent);
+    color: #fff;
   }
   .swatch {
     width: 10px;

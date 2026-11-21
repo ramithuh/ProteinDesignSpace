@@ -13,6 +13,7 @@
   } from '$lib/engine/peek';
   import { decodeHashToGraph, encodeGraphToHash } from '$lib/engine/share';
   import { clearAllModelCaches, getCacheStats } from '$lib/engine/opfs-cache';
+  import { COMPARE_PALETTE, buildComparisonState } from '$lib/engine/compare';
   import type {
     CanonicalArtifact,
     ConditionSpecArtifact,
@@ -27,6 +28,7 @@
   } from '$lib/engine/types';
   import MolSuperposeViewer from '$lib/viewer/MolSuperposeViewer.svelte';
   import ArtifactPeekPanel from '$lib/ui/ArtifactPeekPanel.svelte';
+  import ComparePeekPanel from '$lib/ui/ComparePeekPanel.svelte';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
   import WorkflowCanvas from '$lib/ui/WorkflowCanvas.svelte';
   import RecipeDrawer from '$lib/ui/RecipeDrawer.svelte';
@@ -54,8 +56,52 @@
   // Active workflow state
   let selectedPresetId = $state(WORKFLOW_PRESETS[0].id);
   let graph = $state<WorkflowGraph>(autoLayoutGraph(structuredClone(WORKFLOW_PRESETS[0].graph)));
-  let selectedNodeId = $state<string>(WORKFLOW_PRESETS[0].graph.nodes[0].id);
+  let selectedNodeIds = $state<string[]>([WORKFLOW_PRESETS[0].graph.nodes[0].id]);
+  let selectedNodeId = $derived(selectedNodeIds[selectedNodeIds.length - 1] ?? '');
+  let isCompareMode = $derived(selectedNodeIds.length >= 2);
+  let compareLayout = $state<'overlay' | 'side-by-side'>('overlay');
+  let compareColorMode = $state<'by-model' | 'plddt'>('by-model');
+  let hiddenCompareModelIds = $state<string[]>([]);
+  let branchCandidateIdx = $state<Record<string, number>>({});
   let isRunning = $state(false);
+
+  function setSingleSelection(id: string) {
+    selectedNodeIds = id ? [id] : [];
+    hiddenCompareModelIds = [];
+  }
+
+  function handleSelectNodes(ids: string[]) {
+    const valid = ids.filter((id) => graph.nodes.some((n) => n.id === id)).slice(0, COMPARE_PALETTE.length);
+    selectedNodeIds = valid.length > 0 ? valid : graph.nodes[0]?.id ? [graph.nodes[0].id] : [];
+    hiddenCompareModelIds = [];
+    selectedPeekSlotId = null;
+    selectedEdgeId = null;
+    if (selectedNodeIds.length >= 2) {
+      rightPanelTab = 'peek';
+    }
+  }
+
+  function toggleCompareModelVisibility(modelId: string) {
+    if (hiddenCompareModelIds.includes(modelId)) {
+      hiddenCompareModelIds = hiddenCompareModelIds.filter((id) => id !== modelId);
+    } else {
+      hiddenCompareModelIds = [...hiddenCompareModelIds, modelId];
+    }
+  }
+
+  function soloCompareModel(modelId: string) {
+    const allIds = comparisonState?.models.map((m) => m.id) ?? [];
+    const others = allIds.filter((id) => id !== modelId && id !== 'ref-designed');
+    const alreadySolo =
+      others.length > 0 &&
+      others.every((id) => hiddenCompareModelIds.includes(id)) &&
+      !hiddenCompareModelIds.includes(modelId);
+    if (alreadySolo) {
+      hiddenCompareModelIds = [];
+    } else {
+      hiddenCompareModelIds = others;
+    }
+  }
   let runTargetIds = $state<string[]>([]);
   let showRecipe = $state(false);
   let shareToast = $state<string | null>(null);
@@ -231,7 +277,7 @@
         if (decoded) {
           graph = decoded;
           selectedPresetId = decoded.id;
-          selectedNodeId = decoded.nodes[0]?.id ?? '';
+          setSingleSelection(decoded.nodes[0]?.id ?? '');
           showToastMessage('Loaded shared workflow from URL', 3000);
         }
       } catch {
@@ -264,7 +310,8 @@
     selectedPresetId = presetId;
     const g = structuredClone(preset.graph);
     graph = g.nodes.some((n) => !n.position) ? autoLayoutGraph(g) : g;
-    selectedNodeId = graph.nodes[0]?.id ?? '';
+    setSingleSelection(graph.nodes[0]?.id ?? '');
+    branchCandidateIdx = {};
     selectedPeekSlotId = null;
     selectedEdgeId = null;
     rightPanelTab = 'params';
@@ -279,7 +326,7 @@
   }
 
   function handleSelectNode(nodeId: string) {
-    selectedNodeId = nodeId;
+    setSingleSelection(nodeId);
     selectedPeekSlotId = null;
     selectedEdgeId = null;
     const clicked = graph.nodes.find((n) => n.id === nodeId);
@@ -294,21 +341,21 @@
   }
 
   function handleBlockAdded(nodeId: string) {
-    selectedNodeId = nodeId;
+    setSingleSelection(nodeId);
     selectedPeekSlotId = null;
     selectedEdgeId = null;
     rightPanelTab = 'params';
   }
 
   function handleSelectEdge(edge: WorkflowEdge) {
-    selectedNodeId = edge.toNode;
+    setSingleSelection(edge.toNode);
     selectedPeekSlotId = `in:${edge.toPort}`;
     selectedEdgeId = makeEdgeId(edge.fromNode, edge.fromPort, edge.toNode, edge.toPort);
     rightPanelTab = 'peek';
   }
 
   function handlePeekPort(nodeId: string, direction: 'in' | 'out', portName: string) {
-    selectedNodeId = nodeId;
+    setSingleSelection(nodeId);
     selectedPeekSlotId = `${direction}:${portName}`;
     if (direction === 'in') {
       const edge = graph.edges.find((e) => e.toNode === nodeId && e.toPort === portName);
@@ -350,8 +397,9 @@
     nodeStates = nextStates;
 
     graph = next;
-    if (!nextById.has(selectedNodeId)) {
-      selectedNodeId = next.nodes[0]?.id ?? '';
+    const kept = selectedNodeIds.filter((id) => nextById.has(id));
+    if (kept.length !== selectedNodeIds.length) {
+      selectedNodeIds = kept.length > 0 ? kept : next.nodes[0]?.id ? [next.nodes[0].id] : [];
     }
     runError = null;
   }
@@ -408,19 +456,25 @@
       activeGpuWorker = scheduler.getActiveGpuAdapter();
 
       if (upToNodeId) {
-        selectedNodeId = upToNodeId;
+        setSingleSelection(upToNodeId);
         selectedPeekSlotId = null;
         selectedEdgeId = null;
       } else {
         // Auto-focus a scorer or fold node if present so results appear immediately
+        const scorersWithData = graph.nodes.filter(
+          (n) => n.adapterId === 'designability-scorer' && outputsByNode[n.id],
+        );
         const lastScorer = [...graph.nodes].reverse().find((n) => n.adapterId === 'designability-scorer');
         const lastFold = [...graph.nodes].reverse().find((n) => n.adapterId === 'localfold-af2');
-        if (lastScorer) {
-          selectedNodeId = lastScorer.id;
+        if (scorersWithData.length >= 2) {
+          // Forked benchmark (e.g. AF2 vs RoseTTAFold3): auto-open multi-branch 3D comparison!
+          handleSelectNodes(scorersWithData.slice(0, COMPARE_PALETTE.length).map((n) => n.id));
+        } else if (lastScorer) {
+          setSingleSelection(lastScorer.id);
           selectedPeekSlotId = null;
           selectedEdgeId = null;
         } else if (lastFold) {
-          selectedNodeId = lastFold.id;
+          setSingleSelection(lastFold.id);
           selectedPeekSlotId = null;
           selectedEdgeId = null;
         }
@@ -499,7 +553,7 @@
       const laid = parsed.nodes.some((n) => !n.position) ? autoLayoutGraph(parsed) : parsed;
       selectedPresetId = laid.id;
       handleGraphChange(laid);
-      selectedNodeId = laid.nodes[0]?.id ?? '';
+      setSingleSelection(laid.nodes[0]?.id ?? '');
       selectedPeekSlotId = null;
       selectedEdgeId = null;
       rightPanelTab = 'params';
@@ -758,6 +812,48 @@
   let scRmsdThreshold = $derived(Number(activeScorerNode?.params.scRmsdThreshold ?? 2.0));
   let plddtThreshold = $derived(Number(activeScorerNode?.params.plddtThreshold ?? 70));
 
+  // Multi-select 3D comparison derived state
+  let compareColors = $derived.by((): Record<string, { badge: string; css: string }> => {
+    if (!isCompareMode) return {};
+    const map: Record<string, { badge: string; css: string }> = {};
+    selectedNodeIds.slice(0, COMPARE_PALETTE.length).forEach((id, idx) => {
+      const slot = COMPARE_PALETTE[idx];
+      map[id] = { badge: slot.badge, css: slot.css };
+    });
+    return map;
+  });
+
+  let comparisonState = $derived.by(() => {
+    if (!isCompareMode) return null;
+    return buildComparisonState(graph, selectedNodeIds, outputsByNode, {
+      layout: compareLayout,
+      colorMode: compareColorMode,
+      branchCandidateIdx,
+      hiddenModelIds: new Set(hiddenCompareModelIds),
+    });
+  });
+
+  // Discoverable 1-click compare CTA when a graph has >= 2 scorers (or >= 2 folds) with outputs
+  let comparableBranchIds = $derived.by((): string[] => {
+    const scorers = graph.nodes
+      .filter((n) => n.adapterId === 'designability-scorer' && outputsByNode[n.id])
+      .map((n) => n.id);
+    if (scorers.length >= 2) return scorers.slice(0, COMPARE_PALETTE.length);
+    const folds = graph.nodes
+      .filter((n) => n.adapterId === 'localfold-af2' && outputsByNode[n.id])
+      .map((n) => n.id);
+    if (folds.length >= 2) return folds.slice(0, COMPARE_PALETTE.length);
+    return [];
+  });
+
+  let compareViewerLabel = $derived.by((): string => {
+    if (!comparisonState) return viewerLabel;
+    if (comparisonState.pairwise) {
+      return `Compare ${comparisonState.branches.length} blocks · ${comparisonState.pairwise.badgeA}↔${comparisonState.pairwise.badgeB} RMSD ${comparisonState.pairwise.rmsd.toFixed(2)} Å`;
+    }
+    return `Compare ${comparisonState.branches.length} blocks · ${comparisonState.effectiveLayout === 'side-by-side' ? 'Side-by-side' : 'Overlay'}`;
+  });
+
   // Reset row index when switching between different scorer branches
   $effect(() => {
     void peekMetrics?.id;
@@ -992,6 +1088,8 @@
         <WorkflowCanvas
           {graph}
           {selectedNodeId}
+          {selectedNodeIds}
+          {compareColors}
           {selectedEdgeId}
           {nodeStates}
           {outputsByNode}
@@ -1001,6 +1099,7 @@
           fillHeight={splitMode === 'horizontal'}
           onGraphChange={handleGraphChange}
           onSelectNode={handleSelectNode}
+          onSelectNodes={handleSelectNodes}
           onBlockAdded={handleBlockAdded}
           onSelectEdge={handleSelectEdge}
           onPeekPort={handlePeekPort}
@@ -1049,49 +1148,102 @@
     <section class="results-grid" class:stacked-pane={splitMode === 'horizontal'}>
       <div class="viewer-col">
         <div class="viewer-bar">
-          <label><input type="checkbox" bind:checked={showDesigned} /> Designed</label>
-          <label><input type="checkbox" bind:checked={showRefold} /> Refold (pLDDT)</label>
-          <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
-          {#if viewerStructureMeta?.trajectoryPdb}
-            <label><input type="checkbox" bind:checked={showTrajectory} /> Trajectory</label>
-            {#if showTrajectory}
-              <input
-                type="range"
-                min="0"
-                max={Math.max(0, (viewerStructureMeta.trajectoryFrameCount ?? 1) - 1)}
-                bind:value={trajFrame}
-                class="slider"
-              />
-              <code class="mono">{trajFrame + 1}/{viewerStructureMeta.trajectoryFrameCount}</code>
+          {#if isCompareMode && comparisonState}
+            <div class="seg-group" role="group" aria-label="3D comparison layout">
+              <button
+                type="button"
+                class="seg-btn"
+                class:active={comparisonState.effectiveLayout === 'overlay'}
+                disabled={comparisonState.forcedSideBySide}
+                title={comparisonState.forcedSideBySide
+                  ? 'Structures have different lengths — using side-by-side'
+                  : 'Superpose models in one frame'}
+                onclick={() => (compareLayout = 'overlay')}
+              >
+                Overlay
+              </button>
+              <button
+                type="button"
+                class="seg-btn"
+                class:active={comparisonState.effectiveLayout === 'side-by-side'}
+                onclick={() => (compareLayout = 'side-by-side')}
+              >
+                Side-by-Side
+              </button>
+            </div>
+            <div class="seg-group" role="group" aria-label="3D ribbon color mode">
+              <button
+                type="button"
+                class="seg-btn"
+                class:active={compareColorMode === 'by-model'}
+                onclick={() => (compareColorMode = 'by-model')}
+              >
+                By Model
+              </button>
+              <button
+                type="button"
+                class="seg-btn"
+                class:active={compareColorMode === 'plddt'}
+                onclick={() => (compareColorMode = 'plddt')}
+              >
+                pLDDT
+              </button>
+            </div>
+            <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
+            <button
+              type="button"
+              class="cmp-exit-mini"
+              onclick={() => setSingleSelection(selectedNodeId)}
+              title="Exit comparison mode (Esc)"
+            >
+              × Exit
+            </button>
+          {:else}
+            <label><input type="checkbox" bind:checked={showDesigned} /> Designed</label>
+            <label><input type="checkbox" bind:checked={showRefold} /> Refold (pLDDT)</label>
+            <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
+            {#if viewerStructureMeta?.trajectoryPdb}
+              <label><input type="checkbox" bind:checked={showTrajectory} /> Trajectory</label>
+              {#if showTrajectory}
+                <input
+                  type="range"
+                  min="0"
+                  max={Math.max(0, (viewerStructureMeta.trajectoryFrameCount ?? 1) - 1)}
+                  bind:value={trajFrame}
+                  class="slider"
+                />
+                <code class="mono">{trajFrame + 1}/{viewerStructureMeta.trajectoryFrameCount}</code>
+              {/if}
             {/if}
-          {/if}
 
-          {#if hasConditionerNode || hasMpnnNode}
-            <label class="pick-mode" title="Choose what clicking a 3D residue in Mol* modifies">
-              Pick:
-              <select class="pick-select" bind:value={molPickMode}>
-                <option value="auto">Auto</option>
-                <option value="off">Off</option>
-                {#if hasConditionerNode}
-                  <option value="hotspots">Hotspots</option>
-                  <option value="motif">Motif</option>
-                {/if}
-                {#if hasMpnnNode}
-                  <option value="mpnn">Fix MPNN</option>
-                {/if}
-              </select>
-            </label>
-          {/if}
+            {#if hasConditionerNode || hasMpnnNode}
+              <label class="pick-mode" title="Choose what clicking a 3D residue in Mol* modifies">
+                Pick:
+                <select class="pick-select" bind:value={molPickMode}>
+                  <option value="auto">Auto</option>
+                  <option value="off">Off</option>
+                  {#if hasConditionerNode}
+                    <option value="hotspots">Hotspots</option>
+                    <option value="motif">Motif</option>
+                  {/if}
+                  {#if hasMpnnNode}
+                    <option value="mpnn">Fix MPNN</option>
+                  {/if}
+                </select>
+              </label>
+            {/if}
 
-          {#if lastPickedResidue}
-            <span class="picked">Clicked: <code>{lastPickedResidue}</code></span>
+            {#if lastPickedResidue}
+              <span class="picked">Clicked: <code>{lastPickedResidue}</code></span>
+            {/if}
           {/if}
         </div>
 
         <MolSuperposeViewer
-          designedPdb={viewerDesignedPdb}
-          refoldPdb={viewerRefoldPdb}
-          trajectoryPdb={viewerStructureMeta?.trajectoryPdb ?? null}
+          designedPdb={isCompareMode ? null : viewerDesignedPdb}
+          refoldPdb={isCompareMode ? null : viewerRefoldPdb}
+          models={isCompareMode && comparisonState ? comparisonState.models : null}
+          trajectoryPdb={isCompareMode ? null : (viewerStructureMeta?.trajectoryPdb ?? null)}
           frameIndex={showTrajectory ? trajFrame : undefined}
           {showDesigned}
           {showRefold}
@@ -1099,11 +1251,13 @@
           {illustrative}
           {theme}
           height={splitMode === 'horizontal' ? 350 : 460}
-          label={viewerLabel}
+          label={isCompareMode ? compareViewerLabel : viewerLabel}
           onResidueClick={handleResidueClick}
+          onToggleModelVisibility={toggleCompareModelVisibility}
+          onSoloModel={soloCompareModel}
         />
 
-        {#if viewerStructureMeta}
+        {#if !isCompareMode && viewerStructureMeta}
           <div class="geom-strip">
             <span>L = <b>{viewerStructureMeta.length} aa</b></span>
             <span>R<sub>g</sub> = <b>{viewerStructureMeta.geometry.rg.toFixed(1)} Å</b></span>
@@ -1137,12 +1291,21 @@
             class:active={rightPanelTab === 'peek'}
             onclick={() => (rightPanelTab = 'peek')}
           >
-            Peek
-            {#if hasPeekData}
-              <span class="live-dot" title="Outputs or inputs ready to inspect"></span>
+            {isCompareMode ? `Compare (${selectedNodeIds.length})` : 'Peek'}
+            {#if hasPeekData || isCompareMode}
+              <span class="live-dot" title="Outputs or comparison ready"></span>
             {/if}
           </button>
-          {#if selectedNode}
+          {#if !isCompareMode && comparableBranchIds.length >= 2}
+            <button
+              type="button"
+              class="cmp-launch-btn"
+              title="Compare branches in 3D (or ⌘-click / Shift-click blocks on the canvas)"
+              onclick={() => handleSelectNodes(comparableBranchIds)}
+            >
+              Compare branches ({comparableBranchIds.length})
+            </button>
+          {:else if selectedNode && !isCompareMode}
             <span class="tab-node-ctx" title={selectedNode.label ?? selectedNode.adapterId}>
               {selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
             </span>
@@ -1164,6 +1327,19 @@
                 Select a block on the canvas or click <b>+ Add Block</b> to configure parameters.
               </div>
             {/if}
+          {:else if isCompareMode && comparisonState}
+            <ComparePeekPanel
+              comparison={comparisonState}
+              {scRmsdThreshold}
+              {plddtThreshold}
+              {isRunning}
+              onSelectBranchCandidate={(nodeId, idx) => {
+                branchCandidateIdx = { ...branchCandidateIdx, [nodeId]: idx };
+              }}
+              onFocusSingle={(nodeId) => handleSelectNode(nodeId)}
+              onRunUpToNode={(id) => runWorkflow(false, id)}
+              onExitCompare={() => setSingleSelection(selectedNodeId)}
+            />
           {:else}
             <ArtifactPeekPanel
               node={selectedNode}
@@ -1183,7 +1359,7 @@
               onRunUpToNode={(id) => runWorkflow(false, id)}
               onJumpToScorer={() => {
                 if (latestScorerHit) {
-                  selectedNodeId = latestScorerHit.nodeId;
+                  setSingleSelection(latestScorerHit.nodeId);
                   selectedPeekSlotId = null;
                   selectedEdgeId = null;
                   rightPanelTab = 'peek';
@@ -1698,6 +1874,66 @@
     margin-left: auto;
     font-size: 11px;
     color: var(--accent-soft);
+  }
+  .seg-group {
+    display: inline-flex;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    overflow: hidden;
+    background: var(--bg-surface);
+  }
+  .seg-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .seg-btn:not(:last-child) {
+    border-right: 1px solid var(--border-subtle);
+  }
+  .seg-btn.active {
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+  .seg-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .cmp-exit-mini {
+    margin-left: auto;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border-radius: 5px;
+    padding: 2px 7px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .cmp-exit-mini:hover {
+    color: var(--text-primary);
+    border-color: var(--accent);
+  }
+  .cmp-launch-btn {
+    margin-left: auto;
+    margin-bottom: 4px;
+    border: 1px solid var(--accent);
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+    border-radius: 999px;
+    padding: 2px 9px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .cmp-launch-btn:hover {
+    background: var(--accent);
+    color: #fff;
   }
   .geom-strip {
     display: flex;

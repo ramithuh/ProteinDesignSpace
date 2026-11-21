@@ -35,6 +35,8 @@
   interface Props {
     graph: WorkflowGraph;
     selectedNodeId: string;
+    selectedNodeIds?: string[];
+    compareColors?: Record<string, { badge: string; css: string }>;
     selectedEdgeId?: string | null;
     nodeStates: Record<string, NodeProgressEvent>;
     outputsByNode: Record<string, Record<string, CanonicalArtifact>>;
@@ -44,6 +46,7 @@
     fillHeight?: boolean;
     onGraphChange: (next: WorkflowGraph) => void;
     onSelectNode: (nodeId: string) => void;
+    onSelectNodes?: (nodeIds: string[]) => void;
     onBlockAdded?: (nodeId: string) => void;
     onSelectEdge?: (edge: WorkflowEdge) => void;
     onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
@@ -52,6 +55,8 @@
   let {
     graph,
     selectedNodeId,
+    selectedNodeIds = [],
+    compareColors = {},
     selectedEdgeId = null,
     nodeStates,
     outputsByNode,
@@ -61,6 +66,7 @@
     fillHeight = false,
     onGraphChange,
     onSelectNode,
+    onSelectNodes = undefined,
     onBlockAdded = undefined,
     onSelectEdge = undefined,
     onPeekPort = undefined,
@@ -82,6 +88,81 @@
   let wirePopoverEl: HTMLDivElement | null = $state(null);
   let catalogOpen = $state(false);
   let wireLegendOpen = $state(false);
+  // Ephemeral ghost auto-connection proposals (never committed until user accepts via Tab/Enter/click)
+  let proposedEdges = $state<WorkflowEdge[]>([]);
+  let proposedForNodeId = $state<string | null>(null);
+  let blockAcceptUntil = 0;
+
+  function clearProposals() {
+    if (proposedEdges.length > 0 || proposedForNodeId !== null) {
+      proposedEdges = [];
+      proposedForNodeId = null;
+    }
+  }
+
+  function commitProposedEdge(edge: WorkflowEdge) {
+    if (disabled) return;
+    const filtered = graph.edges.filter(
+      (e) => !(e.toNode === edge.toNode && e.toPort === edge.toPort),
+    );
+    const check = validateConnection(
+      { ...graph, edges: filtered },
+      edge.fromNode,
+      edge.fromPort,
+      edge.toNode,
+      edge.toPort,
+    );
+    if (!check.valid) {
+      dismissProposedEdge(edge);
+      return;
+    }
+    onGraphChange({ ...graph, edges: [...filtered, edge] });
+    proposedEdges = proposedEdges.filter(
+      (p) =>
+        !(
+          p.fromNode === edge.fromNode &&
+          p.fromPort === edge.fromPort &&
+          p.toNode === edge.toNode &&
+          p.toPort === edge.toPort
+        ),
+    );
+    if (proposedEdges.length === 0) proposedForNodeId = null;
+  }
+
+  function dismissProposedEdge(edge: WorkflowEdge) {
+    proposedEdges = proposedEdges.filter(
+      (p) =>
+        !(
+          p.fromNode === edge.fromNode &&
+          p.fromPort === edge.fromPort &&
+          p.toNode === edge.toNode &&
+          p.toPort === edge.toPort
+        ),
+    );
+    if (proposedEdges.length === 0) proposedForNodeId = null;
+  }
+
+  function commitAllProposedEdges() {
+    if (disabled || proposedEdges.length === 0) return;
+    let nextEdges = [...graph.edges];
+    for (const edge of proposedEdges) {
+      const filtered = nextEdges.filter(
+        (e) => !(e.toNode === edge.toNode && e.toPort === edge.toPort),
+      );
+      const check = validateConnection(
+        { ...graph, edges: filtered },
+        edge.fromNode,
+        edge.fromPort,
+        edge.toNode,
+        edge.toPort,
+      );
+      if (check.valid) {
+        nextEdges = [...filtered, edge];
+      }
+    }
+    clearProposals();
+    onGraphChange({ ...graph, edges: nextEdges });
+  }
 
   let flowApi: ReturnType<typeof useSvelteFlow> | null = null;
   try {
@@ -165,21 +246,50 @@
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
   }
 
+  // Clear stale ghost proposals when switching workflows or starting a run
+  $effect(() => {
+    void graph.id;
+    if (isRunning) clearProposals();
+  });
+  $effect(() => {
+    void graph.id;
+    clearProposals();
+  });
+
   function handleWindowKeydown(ev: KeyboardEvent) {
     if (ev.key === 'Escape') {
+      if (proposedEdges.length > 0) {
+        clearProposals();
+        return;
+      }
       if (wireLegendOpen) {
         wireLegendOpen = false;
       }
       if (catalogOpen) {
         catalogOpen = false;
       }
+      if (selectedNodeIds.length > 1 && onSelectNodes) {
+        onSelectNodes(selectedNodeId ? [selectedNodeId] : []);
+      }
       return;
     }
     if (disabled || ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (isEditableElement(ev.target) || isEditableElement(document.activeElement)) return;
 
+    if (
+      proposedEdges.length > 0 &&
+      !catalogOpen &&
+      (ev.key === 'Tab' || ev.key === 'Enter') &&
+      performance.now() >= blockAcceptUntil
+    ) {
+      ev.preventDefault();
+      commitAllProposedEdges();
+      return;
+    }
+
     if (ev.key === '/' || (ev.shiftKey && (ev.key === 'A' || ev.key === 'a'))) {
       ev.preventDefault();
+      clearProposals();
       wireLegendOpen = false;
       catalogOpen = true;
     }
@@ -205,6 +315,7 @@
 
   $effect(() => {
     const laid = graph.nodes.some((n) => !n.position) ? autoLayoutGraph(graph) : graph;
+    const selSet = new Set(selectedNodeIds.length > 0 ? selectedNodeIds : selectedNodeId ? [selectedNodeId] : []);
     flowNodes = laid.nodes.map((n) => {
       const inputPortsConnected: Record<string, boolean> = {};
       const inputPortsReady: Record<string, boolean> = {};
@@ -220,11 +331,12 @@
       for (const port of Object.keys(outputsByNode[n.id] ?? {})) {
         outputPortsReady[port] = true;
       }
+      const cmp = compareColors[n.id];
       return {
         id: n.id,
         type: 'protein',
         position: n.position ?? { x: 40, y: 80 },
-        selected: n.id === selectedNodeId,
+        selected: selSet.has(n.id),
         data: {
           adapterId: n.adapterId,
           label: n.label ?? ADAPTER_REGISTRY[n.adapterId]?.shortName ?? n.adapterId,
@@ -235,6 +347,8 @@
           inputPortsConnected,
           inputPortsReady,
           outputPortsReady,
+          compareColor: cmp?.css,
+          compareBadge: cmp?.badge,
           onDelete: disabled ? undefined : removeNode,
           onPeekPort,
         },
@@ -298,6 +412,47 @@
         data: { laneStagger },
       };
     });
+
+    // Append ephemeral ghost proposals (never stored in graph.edges until accepted)
+    if (proposedEdges.length > 0 && !isRunning) {
+      const nodeIdSet = new Set(laid.nodes.map((n) => n.id));
+      const validGhosts = proposedEdges.filter(
+        (pe) => nodeIdSet.has(pe.fromNode) && nodeIdSet.has(pe.toNode),
+      );
+      const ghostFlowEdges: Edge[] = validGhosts.map((pe) => {
+        const col = edgeColor(pe.fromNode, pe.fromPort);
+        const fanIdx = outCounts.get(pe.fromNode) ?? 0;
+        outCounts.set(pe.fromNode, fanIdx + 1);
+        const laneStagger = fanIdx > 0 ? (fanIdx - 1) * 12 : 0;
+        return {
+          id: `ghost:${makeEdgeId(pe.fromNode, pe.fromPort, pe.toNode, pe.toPort)}`,
+          type: 'smart',
+          source: pe.fromNode,
+          sourceHandle: pe.fromPort,
+          target: pe.toNode,
+          targetHandle: pe.toPort,
+          selected: false,
+          selectable: false,
+          animated: false,
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 15,
+            height: 15,
+            color: col,
+          },
+          style: `stroke: ${col}; stroke-width: 2px; opacity: 0.68; cursor: pointer;`,
+          data: {
+            laneStagger,
+            proposed: true,
+            proposedCount: validGhosts.length,
+            toPort: pe.toPort,
+            onAccept: () => commitProposedEdge(pe),
+            onDismiss: () => dismissProposedEdge(pe),
+          },
+        };
+      });
+      flowEdges = [...flowEdges, ...ghostFlowEdges];
+    }
   });
 
   const isValidConnection: IsValidConnection = (conn) => {
@@ -324,6 +479,9 @@
     // Replace any existing wire occupying the same target input port (ComfyUI behavior)
     const filtered = graph.edges.filter((e) => !(e.toNode === dst && e.toPort === toPort));
     const newEdge: WorkflowEdge = { fromNode: src, fromPort, toNode: dst, toPort };
+    // Clear any ghost proposal targeting the same input port
+    proposedEdges = proposedEdges.filter((pe) => !(pe.toNode === dst && pe.toPort === toPort));
+    if (proposedEdges.length === 0) proposedForNodeId = null;
     onGraphChange({ ...graph, edges: [...filtered, newEdge] });
   }
 
@@ -348,6 +506,7 @@
 
   function handleDelete({ nodes: delNodes, edges: delEdges }: { nodes: Node[]; edges: Edge[] }) {
     if (disabled) return;
+    clearProposals();
     const rmNodeIds = new Set(delNodes.map((n) => n.id));
     const rmEdgeIds = new Set(delEdges.map((e) => e.id));
     const nextNodes = graph.nodes.filter((n) => !rmNodeIds.has(n.id));
@@ -363,6 +522,7 @@
 
   function removeNode(nodeId: string) {
     if (disabled) return;
+    clearProposals();
     const nextNodes = graph.nodes.filter((n) => n.id !== nodeId);
     const nextEdges = graph.edges.filter((e) => e.fromNode !== nodeId && e.toNode !== nodeId);
     onGraphChange({ ...graph, nodes: nextNodes, edges: nextEdges });
@@ -372,13 +532,18 @@
   function addBlock(adapterId: string, dropPos?: { x: number; y: number }) {
     if (disabled) return;
     if (!ADAPTER_REGISTRY[adapterId]) return;
-    const { graph: nextGraph, nodeId } = insertBlockSmart(
+    const { graph: nextGraph, nodeId, proposedEdges: nextProposals } = insertBlockSmart(
       graph,
       adapterId,
       selectedNodeId || undefined,
       dropPos,
+      { autoCommit: false },
     );
     catalogOpen = false;
+    // Guard against Enter keystroke from BlockCatalogPopover immediately auto-committing
+    blockAcceptUntil = performance.now() + 180;
+    proposedEdges = nextProposals;
+    proposedForNodeId = nextProposals.length > 0 ? nodeId : null;
     onGraphChange(nextGraph);
     if (onBlockAdded) {
       onBlockAdded(nodeId);
@@ -428,12 +593,14 @@
 
   async function handleAutoLayout() {
     if (disabled) return;
+    clearProposals();
     onGraphChange(autoLayoutGraph(graph));
     scheduleFitView(250);
   }
 
   function handleClear() {
     if (disabled) return;
+    clearProposals();
     catalogOpen = false;
     wireLegendOpen = false;
     onGraphChange({ ...graph, nodes: [], edges: [] });
@@ -532,6 +699,17 @@
     <div class="toast">{validationToast}</div>
   {/if}
 
+  {#if proposedEdges.length > 1 && !isRunning}
+    <div class="ghost-bar canvas-overlay" role="region" aria-label="Proposed connections">
+      <button type="button" class="gbar-accept" onclick={commitAllProposedEdges}>
+        ✓ Connect {proposedEdges.length} wires <kbd>Tab</kbd>
+      </button>
+      <button type="button" class="gbar-dismiss" onclick={clearProposals}>
+        Dismiss <kbd>Esc</kbd>
+      </button>
+    </div>
+  {/if}
+
   <div class="flow-inner">
     <SvelteFlow
       bind:nodes={flowNodes}
@@ -542,6 +720,7 @@
       nodesDraggable={!disabled}
       nodesConnectable={!disabled}
       zoomOnDoubleClick={false}
+      multiSelectionKey={['Meta', 'Control', 'Shift']}
       deleteKey={disabled ? null : ['Backspace', 'Delete']}
       fitView
       fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
@@ -550,17 +729,48 @@
       onnodedragstop={handleNodeDragStop}
       ondelete={handleDelete}
       onpaneclick={() => {
+        clearProposals();
         catalogOpen = false;
         wireLegendOpen = false;
       }}
-      onnodeclick={({ node }) => {
+      onnodeclick={({ node, event }) => {
         catalogOpen = false;
         wireLegendOpen = false;
+        if (proposedForNodeId && node.id !== proposedForNodeId) {
+          clearProposals();
+        }
+        const multiKey = Boolean(event?.metaKey || event?.ctrlKey || event?.shiftKey);
+        if (multiKey && onSelectNodes) {
+          const cur =
+            selectedNodeIds.length > 0
+              ? selectedNodeIds
+              : selectedNodeId
+                ? [selectedNodeId]
+                : [];
+          if (cur.includes(node.id)) {
+            if (cur.length > 1) {
+              onSelectNodes(cur.filter((id) => id !== node.id));
+            }
+          } else if (cur.length >= 4) {
+            flashToast('Compare mode supports up to 4 blocks at once');
+          } else {
+            onSelectNodes([...cur, node.id]);
+          }
+          return;
+        }
         onSelectNode(node.id);
       }}
       onedgeclick={({ edge }) => {
         catalogOpen = false;
         wireLegendOpen = false;
+        if (edge.id.startsWith('ghost:')) {
+          const matched = proposedEdges.find(
+            (pe) => `ghost:${makeEdgeId(pe.fromNode, pe.fromPort, pe.toNode, pe.toPort)}` === edge.id,
+          );
+          if (matched) commitProposedEdge(matched);
+          return;
+        }
+        clearProposals();
         const found = graph.edges.find(
           (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === edge.id,
         );
@@ -746,6 +956,61 @@
     font-size: 10px;
     color: var(--text-dim);
     line-height: 1.4;
+  }
+  .ghost-bar {
+    position: absolute;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 24;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border-radius: 999px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.26);
+  }
+  .gbar-accept,
+  .gbar-dismiss {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: none;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .gbar-accept {
+    background: #2563eb;
+    color: #fff;
+  }
+  .gbar-accept:hover {
+    background: #1d4ed8;
+  }
+  .gbar-dismiss {
+    background: transparent;
+    color: var(--text-muted);
+  }
+  .gbar-dismiss:hover {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+  }
+  .ghost-bar kbd {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    padding: 0 4px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    background: rgba(255, 255, 255, 0.14);
+  }
+  .gbar-dismiss kbd {
+    border-color: var(--border-strong);
+    background: var(--bg-surface-2);
   }
   .toast {
     position: absolute;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     BaseEdge,
+    EdgeLabel,
     getSmoothStepPath,
     useNodes,
     type EdgeProps,
@@ -27,6 +28,16 @@
   }: EdgeProps = $props();
 
   const nodes = useNodes();
+
+  let isProposed = $derived(Boolean(data?.proposed));
+  let proposedCount = $derived(typeof data?.proposedCount === 'number' ? data.proposedCount : 1);
+  let targetPortLabel = $derived(typeof data?.toPort === 'string' ? data.toPort : '');
+  let onAccept = $derived(
+    typeof data?.onAccept === 'function' ? (data.onAccept as () => void) : undefined,
+  );
+  let onDismiss = $derived(
+    typeof data?.onDismiss === 'function' ? (data.onDismiss as () => void) : undefined,
+  );
 
   let routed = $derived.by(() => {
     const rects: ObstacleRect[] = nodes.current.map((n) => ({
@@ -77,10 +88,131 @@
   path={routed.path}
   labelX={routed.labelX}
   labelY={routed.labelY}
-  {label}
+  label={isProposed ? undefined : label}
   {labelStyle}
   {markerStart}
   {markerEnd}
   {interactionWidth}
+  class={isProposed ? 'ghost-wire-path' : undefined}
   {style}
 />
+
+{#if isProposed && onAccept && onDismiss}
+  <EdgeLabel x={routed.labelX} y={routed.labelY} transparent selectEdgeOnClick={false}>
+    <div class="ghost-pill" role="group" aria-label="Proposed wire action">
+      <button
+        type="button"
+        class="ghost-accept"
+        title="Accept proposed connection (Tab or Enter)"
+        onclick={(e) => {
+          e.stopPropagation();
+          onAccept?.();
+        }}
+      >
+        <span class="chk">✓</span>
+        {#if proposedCount === 1}
+          Connect <kbd>Tab</kbd>
+        {:else}
+          +{targetPortLabel || 'wire'}
+        {/if}
+      </button>
+      <button
+        type="button"
+        class="ghost-dismiss"
+        title="Dismiss proposed connection (Esc)"
+        aria-label="Dismiss proposed connection"
+        onclick={(e) => {
+          e.stopPropagation();
+          onDismiss?.();
+        }}
+      >
+        ×
+      </button>
+    </div>
+  </EdgeLabel>
+{/if}
+
+<style>
+  :global(.svelte-flow__edge-path.ghost-wire-path) {
+    stroke-dasharray: 6 5;
+    animation: ghost-dash 0.75s linear infinite;
+  }
+  :global(.svelte-flow__edge:hover .svelte-flow__edge-path.ghost-wire-path) {
+    opacity: 1 !important;
+    stroke-width: 2.8px !important;
+  }
+  @keyframes ghost-dash {
+    to {
+      stroke-dashoffset: -11;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :global(.svelte-flow__edge-path.ghost-wire-path) {
+      animation: none;
+    }
+  }
+
+  .ghost-pill {
+    display: inline-flex;
+    align-items: center;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+    overflow: hidden;
+    pointer-events: auto;
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  }
+  .ghost-accept {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 3px 7px 3px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .ghost-accept:hover {
+    background: var(--accent);
+    color: #fff;
+  }
+  .ghost-accept .chk {
+    color: #10b981;
+    font-weight: 700;
+  }
+  .ghost-accept:hover .chk {
+    color: #fff;
+  }
+  .ghost-accept kbd {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9px;
+    padding: 0 4px;
+    border-radius: 3px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface-2);
+    color: var(--text-muted);
+  }
+  .ghost-accept:hover kbd {
+    border-color: rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.16);
+    color: #fff;
+  }
+  .ghost-dismiss {
+    border: none;
+    border-left: 1px solid var(--border-subtle);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1;
+    padding: 3px 7px;
+    cursor: pointer;
+  }
+  .ghost-dismiss:hover {
+    background: var(--err-bg);
+    color: var(--err-strong);
+  }
+</style>
