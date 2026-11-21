@@ -21,13 +21,16 @@
   } from '$lib/protein-ops/rcsb';
   import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
   import NumericInput from './NumericInput.svelte';
-  import type { WorkflowNode } from '$lib/engine/types';
+  import type { CanonicalArtifact, NodeProgressEvent, StructureArtifact, WorkflowNode } from '$lib/engine/types';
 
   interface Props {
     node: WorkflowNode;
     disabled?: boolean;
     embedded?: boolean;
+    nodeOutput?: Record<string, CanonicalArtifact>;
+    nodeState?: NodeProgressEvent;
     onUpdate: (nodeId: string, params: Record<string, unknown>) => void;
+    onUpdateLabel?: (nodeId: string, label: string) => void;
     onRunUpTo?: (nodeId: string) => void;
   }
 
@@ -35,9 +38,16 @@
     node,
     disabled = false,
     embedded = false,
+    nodeOutput = undefined,
+    nodeState = undefined,
     onUpdate,
+    onUpdateLabel = undefined,
     onRunUpTo = undefined,
   }: Props = $props();
+
+  let liveStructure = $derived<StructureArtifact | null>(
+    nodeOutput?.structure?.kind === 'StructureArtifact' ? nodeOutput.structure : null,
+  );
 
   let manifest = $derived(ADAPTER_REGISTRY[node.adapterId]);
   let stageColor = $derived(STAGE_COLORS[manifest?.stage ?? 'source'] ?? '#64748b');
@@ -112,7 +122,7 @@
     pdbFetchSummary = null;
   });
 
-  async function handleFetchPdbId(overrideId?: string) {
+  async function handleFetchPdbId(overrideId?: string, benchmarkIdOverride?: string) {
     const rawId = overrideId ?? String(node.params.pdbId ?? '');
     const normId = normalizePdbId(rawId);
     const check = validatePdbId(normId);
@@ -122,6 +132,12 @@
     }
     const targetNodeId = node.id;
     const baseParams = { ...node.params };
+    const nextBenchId =
+      benchmarkIdOverride !== undefined
+        ? benchmarkIdOverride
+        : overrideId
+          ? ''
+          : String(baseParams.benchmarkId ?? '');
     pdbFetchBusy = true;
     pdbFetchError = null;
     pdbFetchSummary = null;
@@ -134,6 +150,7 @@
         fetchedPdbId: res.pdbId,
         filename: res.filename,
         pdbText: res.text,
+        benchmarkId: nextBenchId,
       });
       const extras = [
         res.ligandNames.length > 0 ? `ligands: ${res.ligandNames.join(', ')}` : '',
@@ -212,27 +229,34 @@
       {#if node.params.mode === 'pdb-id'}
         {@const pdbIdVal = String(node.params.pdbId ?? '')}
         {@const pdbIdCheck = validatePdbId(pdbIdVal)}
+        {@const isAutoFetching = nodeState?.status === 'loading'}
+        {@const isBusy = pdbFetchBusy || isAutoFetching}
         {@const isAlreadyLoaded =
           pdbIdCheck.status === 'ok' &&
-          normalizePdbId(String(node.params.fetchedPdbId ?? '')) === normalizePdbId(pdbIdVal) &&
-          String(node.params.pdbText ?? '').trim().length > 0}
+          (Boolean(liveStructure) ||
+            (normalizePdbId(String(node.params.fetchedPdbId ?? '')) === normalizePdbId(pdbIdVal) &&
+              String(node.params.pdbText ?? '').trim().length > 0))}
         <div class="full pdb-fetch-wrap">
           <span class="field-lbl">RCSB PDB ID</span>
           <div class="pdb-fetch-row">
             <input
               type="text"
               class:input-error={pdbIdVal.trim().length > 0 && pdbIdCheck.status === 'error'}
-              disabled={disabled || pdbFetchBusy}
+              disabled={disabled || isBusy}
               placeholder="e.g. 1PRW, 5O45, 4JHW"
               maxlength="12"
               value={pdbIdVal}
               oninput={(e) => {
                 pdbFetchError = null;
                 pdbFetchSummary = null;
-                setParam('pdbId', e.currentTarget.value.toUpperCase());
+                onUpdate(node.id, {
+                  ...node.params,
+                  pdbId: e.currentTarget.value.toUpperCase(),
+                  benchmarkId: '',
+                });
               }}
               onkeydown={(e) => {
-                if (e.key === 'Enter' && pdbIdCheck.status === 'ok' && !disabled && !pdbFetchBusy) {
+                if (e.key === 'Enter' && pdbIdCheck.status === 'ok' && !disabled && !isBusy) {
                   e.preventDefault();
                   void handleFetchPdbId();
                 }
@@ -241,10 +265,10 @@
             <button
               type="button"
               class="fetch-btn"
-              disabled={disabled || pdbFetchBusy || pdbIdCheck.status === 'error'}
+              disabled={disabled || isBusy || pdbIdCheck.status === 'error'}
               onclick={() => void handleFetchPdbId()}
             >
-              {pdbFetchBusy ? 'Fetching…' : isAlreadyLoaded ? '↻ Refetch' : '↓ Fetch'}
+              {isBusy ? 'Fetching…' : isAlreadyLoaded ? '↻ Refetch' : '↓ Fetch'}
             </button>
           </div>
           <div class="quick-chips">
@@ -253,8 +277,8 @@
               <button
                 type="button"
                 class="quick-chip"
-                disabled={disabled || pdbFetchBusy}
-                onclick={() => void handleFetchPdbId(ex.id)}
+                disabled={disabled || isBusy}
+                onclick={() => void handleFetchPdbId(ex.id, '')}
                 title={`Fetch ${ex.id} (${ex.name}) from RCSB PDB`}
               >
                 {ex.id} · {ex.name}
@@ -264,42 +288,62 @@
           <label class="bench-pick">
             <span>Or pick a curated benchmark target</span>
             <select
-              disabled={disabled || pdbFetchBusy}
-              value=""
+              disabled={disabled || isBusy}
+              value={String(node.params.benchmarkId ?? '')}
               onchange={(e) => {
-                const picked = e.currentTarget.value;
-                if (picked) void handleFetchPdbId(picked);
-                e.currentTarget.value = '';
+                const benchId = e.currentTarget.value;
+                const bench = getBenchmarkById(benchId);
+                if (!bench) return;
+                pdbFetchError = null;
+                pdbFetchSummary = null;
+                onUpdateLabel?.(node.id, `PDB: ${bench.name} (${bench.pdbId})`);
+                onUpdate(node.id, {
+                  ...node.params,
+                  mode: 'pdb-id',
+                  pdbId: bench.pdbId,
+                  fetchedPdbId: '',
+                  filename: `${bench.pdbId}.cif`,
+                  pdbText: '',
+                  benchmarkId: bench.id,
+                });
               }}
             >
               <option value="">Select a curated benchmark PDB…</option>
               <optgroup label="PPI Binders (RFdiffusion / Genie 3 / BindCraft)">
                 {#each BENCHMARK_TARGETS.filter((b) => b.category === 'binder') as b (b.id)}
-                  <option value={b.pdbId}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
+                  <option value={b.id}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
                 {/each}
               </optgroup>
               <optgroup label="Motif Scaffolding (RFdiffusion / MotifBench)">
                 {#each BENCHMARK_TARGETS.filter((b) => b.category === 'motif') as b (b.id)}
-                  <option value={b.pdbId}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
+                  <option value={b.id}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
                 {/each}
               </optgroup>
               <optgroup label="AME Enzymes, Ligands & DNA (RFD4 All-Atom)">
                 {#each BENCHMARK_TARGETS.filter((b) => b.category === 'enzyme-ligand') as b (b.id)}
-                  <option value={b.pdbId}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
+                  <option value={b.id}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
                 {/each}
               </optgroup>
             </select>
           </label>
           {#if pdbFetchError}
             <span class="field-hint err">{pdbFetchError}</span>
+          {:else if nodeState?.status === 'error' && nodeState.error}
+            <span class="field-hint err">{nodeState.error}</span>
+          {:else if isBusy}
+            <span class="field-hint">Fetching {normalizePdbId(pdbIdVal) || 'structure'} from RCSB PDB for 3D preview…</span>
           {:else if pdbFetchSummary}
             <span class="field-hint ok">✓ {pdbFetchSummary}</span>
+          {:else if liveStructure}
+            <span class="field-hint ok">
+              ✓ Loaded {liveStructure.label} · {liveStructure.diagnostics?.chainCount ?? 1} chain{(liveStructure.diagnostics?.chainCount ?? 1) === 1 ? '' : 's'} (previewed in 3D)
+            </span>
           {:else if isAlreadyLoaded}
             <span class="field-hint ok">✓ Ready ({String(node.params.filename || `${normalizePdbId(pdbIdVal)}.cif`)} loaded)</span>
           {:else if pdbIdCheck.status === 'error'}
             <span class="field-hint" class:err={pdbIdVal.trim().length > 0}>{pdbIdCheck.message}</span>
           {:else}
-            <span class="field-hint">Click Fetch to preview now, or click Run to auto-fetch from RCSB PDB.</span>
+            <span class="field-hint">Enter a 4-character PDB ID to auto-preview in 3D.</span>
           {/if}
         </div>
       {:else if node.params.mode === 'custom'}

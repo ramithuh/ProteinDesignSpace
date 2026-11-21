@@ -520,12 +520,20 @@
     };
   }
 
+  function updateNodeLabel(nodeId: string, label: string) {
+    graph = {
+      ...graph,
+      nodes: graph.nodes.map((n) => (n.id === nodeId ? { ...n, label } : n)),
+    };
+  }
+
   let validationErrors = $derived(validateGraph(graph));
   let bioIssues = $derived(validateBioCapabilities(graph));
 
   // Instant CPU/fetch preview for starting inputs (PDB Input & Sequence Input) so users can
   // inspect structures in 3D or compare PDBs immediately without needing to click Run.
   const previewedInputSigs = new Map<string, string>();
+  const inFlightInputSigs = new Map<string, string>();
 
   function computeInputPreviewSig(node: { adapterId: string; params: Record<string, unknown> }): string | null {
     const p = node.params ?? {};
@@ -559,7 +567,10 @@
     const nodes = graph.nodes;
     const activeIds = new Set(nodes.map((n) => n.id));
     for (const id of [...previewedInputSigs.keys()]) {
-      if (!activeIds.has(id)) previewedInputSigs.delete(id);
+      if (!activeIds.has(id)) {
+        previewedInputSigs.delete(id);
+        inFlightInputSigs.delete(id);
+      }
     }
 
     for (const node of nodes) {
@@ -567,6 +578,7 @@
       const sig = computeInputPreviewSig(node);
       if (!sig) continue;
       const hasOut = Boolean(outputsByNode[node.id] && Object.keys(outputsByNode[node.id]).length > 0);
+      if (inFlightInputSigs.get(node.id) === sig) continue;
       if (previewedInputSigs.get(node.id) === sig && hasOut) continue;
 
       previewedInputSigs.set(node.id, sig);
@@ -587,6 +599,7 @@
       }
 
       // pdb-input (sync parse for demo/custom/cached, async RCSB fetch for pdb-id)
+      inFlightInputSigs.set(node.id, sig);
       const mode = String(nodeSnap.params.mode ?? 'demo-bundle');
       const needsFetch =
         mode === 'pdb-id' &&
@@ -611,6 +624,7 @@
 
       void materializePdbInputNode(nodeSnap)
         .then((structure) => {
+          if (inFlightInputSigs.get(node.id) === sig) inFlightInputSigs.delete(node.id);
           if (previewedInputSigs.get(node.id) !== sig) return;
           if (!graph.nodes.some((n) => n.id === node.id)) return;
           outputsByNode = { ...outputsByNode, [node.id]: { structure } };
@@ -624,6 +638,7 @@
           };
         })
         .catch((err) => {
+          if (inFlightInputSigs.get(node.id) === sig) inFlightInputSigs.delete(node.id);
           if (previewedInputSigs.get(node.id) !== sig) return;
           if (!graph.nodes.some((n) => n.id === node.id)) return;
           nodeStates = {
@@ -1678,7 +1693,10 @@
                 node={selectedNode}
                 embedded
                 disabled={isRunning}
+                nodeOutput={outputsByNode[selectedNode.id]}
+                nodeState={nodeStates[selectedNode.id]}
                 onUpdate={updateNodeParams}
+                onUpdateLabel={updateNodeLabel}
                 onRunUpTo={(id) => runWorkflow(false, id)}
               />
             {:else}
