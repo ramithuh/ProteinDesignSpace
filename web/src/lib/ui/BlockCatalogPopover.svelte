@@ -30,6 +30,7 @@
   let focusPane = $state<'main' | 'flyout'>('main');
   let flyoutFromKeyboard = $state(false);
   let flyoutCategoryId = $state<string | null>(null);
+  let expandedGroups = $state<Record<string, boolean>>({});
 
   let shellEl: HTMLDivElement | null = $state(null);
   let mainEl: HTMLDivElement | null = $state(null);
@@ -54,9 +55,33 @@
     return found;
   });
 
+  function isSubGroupOpen(catId: string, subGrp: { title: string; collapsible?: boolean; defaultCollapsed?: boolean }): boolean {
+    if (!subGrp.collapsible) return true;
+    if (query.trim().length > 0) return true;
+    const key = `${catId}::${subGrp.title}`;
+    if (key in expandedGroups) return expandedGroups[key];
+    return !subGrp.defaultCollapsed;
+  }
+
+  function toggleSubGroup(catId: string, title: string, currentlyOpen: boolean) {
+    const key = `${catId}::${title}`;
+    expandedGroups = { ...expandedGroups, [key]: !currentlyOpen };
+  }
+
+  let visibleFlyoutSubs = $derived.by((): CatalogSubItem[] => {
+    if (!flyoutEntry) return [];
+    const out: CatalogSubItem[] = [];
+    for (const grp of flyoutEntry.matchingSubGroups) {
+      if (isSubGroupOpen(flyoutEntry.category.id, grp)) {
+        out.push(...grp.items);
+      }
+    }
+    return out;
+  });
+
   let activeDescendantId = $derived.by((): string | undefined => {
     if (focusPane === 'flyout' && flyoutEntry) {
-      const sub = flyoutEntry.matchingSubItems[activeSubIdx];
+      const sub = visibleFlyoutSubs[activeSubIdx];
       return sub ? `cat-sub-${flyoutEntry.category.id}-${sub.key}` : undefined;
     }
     return activeEntry ? `cat-item-${activeEntry.category.id}` : undefined;
@@ -166,7 +191,7 @@
   });
 
   $effect(() => {
-    const subs = flyoutEntry?.matchingSubItems ?? [];
+    const subs = visibleFlyoutSubs;
     if (subs.length === 0 || activeSubIdx >= subs.length) {
       activeSubIdx = 0;
     }
@@ -267,8 +292,8 @@
 
     if (ev.key === 'ArrowDown') {
       ev.preventDefault();
-      if (focusPane === 'flyout' && flyoutEntry && flyoutEntry.matchingSubItems.length > 0) {
-        activeSubIdx = (activeSubIdx + 1) % flyoutEntry.matchingSubItems.length;
+      if (focusPane === 'flyout' && flyoutEntry && visibleFlyoutSubs.length > 0) {
+        activeSubIdx = (activeSubIdx + 1) % visibleFlyoutSubs.length;
         scrollFlyoutItemIntoView(activeSubIdx);
       } else if (filteredCategories.length > 0) {
         activeIdx = (activeIdx + 1) % filteredCategories.length;
@@ -284,8 +309,8 @@
 
     if (ev.key === 'ArrowUp') {
       ev.preventDefault();
-      if (focusPane === 'flyout' && flyoutEntry && flyoutEntry.matchingSubItems.length > 0) {
-        const len = flyoutEntry.matchingSubItems.length;
+      if (focusPane === 'flyout' && flyoutEntry && visibleFlyoutSubs.length > 0) {
+        const len = visibleFlyoutSubs.length;
         activeSubIdx = (activeSubIdx - 1 + len) % len;
         scrollFlyoutItemIntoView(activeSubIdx);
       } else if (filteredCategories.length > 0) {
@@ -333,7 +358,7 @@
       ev.stopPropagation();
       if (disabled) return;
       if (focusPane === 'flyout' && flyoutEntry) {
-        const sub = flyoutEntry.matchingSubItems[activeSubIdx];
+        const sub = visibleFlyoutSubs[activeSubIdx];
         if (sub) {
           onInsert(sub.insert);
           return;
@@ -448,55 +473,75 @@
 
       <div class="flyout-list">
         {#each flyoutEntry.matchingSubGroups as subGrp (subGrp.title)}
-          <div class="group-hdr">{subGrp.title}</div>
-          {#each subGrp.items as sub (sub.key)}
-            {@const subIdx = flatSubs.indexOf(sub)}
-            {@const isSubActive =
-              (focusPane === 'flyout' && subIdx === activeSubIdx) ||
-              (focusPane === 'main' && Boolean(query.trim()) && flyoutEntry.hasNarrowedSubMatch && subIdx === 0)}
+          {@const grpOpen = isSubGroupOpen(flyoutEntry.category.id, subGrp)}
+          {#if subGrp.collapsible}
             <button
-              id={`cat-sub-${flyoutEntry.category.id}-${sub.key}`}
               type="button"
-              class="flyout-item"
-              class:active={isSubActive}
-              data-sub-idx={subIdx}
-              data-sub-key={sub.key}
-              role="option"
-              aria-selected={isSubActive}
-              tabindex="-1"
-              draggable={!disabled}
-              {disabled}
-              onmouseenter={() => {
-                clearCloseTimer();
-                flyoutFromKeyboard = false;
-                focusPane = 'flyout';
-                activeSubIdx = subIdx;
-              }}
-              ondragstart={(e) => {
-                searchInputEl?.focus();
-                onDragStart?.(e, sub.insert);
-              }}
+              class="group-toggle"
+              class:open={grpOpen}
+              aria-expanded={grpOpen}
               onclick={() => {
                 searchInputEl?.focus();
-                handleInsertSubItem(sub);
+                toggleSubGroup(flyoutEntry.category.id, subGrp.title, grpOpen);
               }}
             >
-              <div class="sub-main">
-                <div class="sub-top">
-                  <span class="sub-label">{sub.label}</span>
-                  {#if sub.badge}
-                    <span class="sub-badge" class:warn={sub.nonCommercial}>{sub.badge}</span>
+              <span class="grp-chev" aria-hidden="true">▸</span>
+              <span class="grp-label">{subGrp.title}</span>
+              <span class="grp-count">{subGrp.items.length}</span>
+            </button>
+          {:else}
+            <div class="group-hdr">{subGrp.title}</div>
+          {/if}
+          {#if grpOpen}
+            {#each subGrp.items as sub (sub.key)}
+              {@const subIdx = visibleFlyoutSubs.indexOf(sub)}
+              {@const isSubActive =
+                (focusPane === 'flyout' && subIdx === activeSubIdx) ||
+                (focusPane === 'main' && Boolean(query.trim()) && flyoutEntry.hasNarrowedSubMatch && subIdx === 0)}
+              <button
+                id={`cat-sub-${flyoutEntry.category.id}-${sub.key}`}
+                type="button"
+                class="flyout-item"
+                class:active={isSubActive}
+                data-sub-idx={subIdx}
+                data-sub-key={sub.key}
+                role="option"
+                aria-selected={isSubActive}
+                tabindex="-1"
+                draggable={!disabled}
+                {disabled}
+                onmouseenter={() => {
+                  clearCloseTimer();
+                  flyoutFromKeyboard = false;
+                  focusPane = 'flyout';
+                  activeSubIdx = subIdx;
+                }}
+                ondragstart={(e) => {
+                  searchInputEl?.focus();
+                  onDragStart?.(e, sub.insert);
+                }}
+                onclick={() => {
+                  searchInputEl?.focus();
+                  handleInsertSubItem(sub);
+                }}
+              >
+                <div class="sub-main">
+                  <div class="sub-top">
+                    <span class="sub-label">{sub.label}</span>
+                    {#if sub.badge}
+                      <span class="sub-badge" class:warn={sub.nonCommercial}>{sub.badge}</span>
+                    {/if}
+                  </div>
+                  {#if sub.subtitle}
+                    <div class="sub-desc">{sub.subtitle}</div>
+                  {/if}
+                  {#if sub.meta}
+                    <div class="sub-meta">{sub.meta}</div>
                   {/if}
                 </div>
-                {#if sub.subtitle}
-                  <div class="sub-desc">{sub.subtitle}</div>
-                {/if}
-                {#if sub.meta}
-                  <div class="sub-meta">{sub.meta}</div>
-                {/if}
-              </div>
-            </button>
-          {/each}
+              </button>
+            {/each}
+          {/if}
         {/each}
       </div>
 
@@ -581,6 +626,61 @@
   }
   .group-hdr:first-child {
     padding-top: 2px;
+  }
+  .group-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    margin-top: 4px;
+    padding: 6px 8px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-surface-2);
+    color: var(--text-secondary);
+    cursor: pointer;
+    text-align: left;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+  .group-toggle:hover {
+    background: var(--bg-surface-selected);
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+  }
+  .group-toggle.open {
+    margin-bottom: 2px;
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+  }
+  .grp-chev {
+    display: inline-block;
+    font-size: 11px;
+    line-height: 1;
+    color: var(--text-dim);
+    transition: transform 140ms ease;
+  }
+  .group-toggle.open .grp-chev {
+    transform: rotate(90deg);
+    color: var(--accent-bright);
+  }
+  .grp-label {
+    flex: 1;
+    min-width: 0;
+  }
+  .grp-count {
+    font-size: 9.5px;
+    font-weight: 600;
+    color: var(--text-dim);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0 6px;
+    line-height: 16px;
   }
   .cat-item {
     display: flex;

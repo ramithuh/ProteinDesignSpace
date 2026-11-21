@@ -1,7 +1,13 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { SvelteFlowProvider } from '@xyflow/svelte';
-  import { ExecutionScheduler, attachProgrammaticApi } from '$lib/engine/scheduler';
+  import {
+    ExecutionScheduler,
+    attachProgrammaticApi,
+    materializePdbInputNode,
+    materializeSequenceInputNode,
+  } from '$lib/engine/scheduler';
+  import { isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
   import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from '$lib/engine/registry';
   import { autoLayoutGraph, defaultParamsForAdapter, insertBlockSmart, validateGraph } from '$lib/engine/graph-utils';
   import {
@@ -516,6 +522,121 @@
 
   let validationErrors = $derived(validateGraph(graph));
   let bioIssues = $derived(validateBioCapabilities(graph));
+
+  // Instant CPU/fetch preview for starting inputs (PDB Input & Sequence Input) so users can
+  // inspect structures in 3D or compare PDBs immediately without needing to click Run.
+  const previewedInputSigs = new Map<string, string>();
+
+  function computeInputPreviewSig(node: { adapterId: string; params: Record<string, unknown> }): string | null {
+    const p = node.params ?? {};
+    if (node.adapterId === 'pdb-input') {
+      const mode = String(p.mode ?? 'demo-bundle');
+      if (mode === 'pdb-id') {
+        const normId = normalizePdbId(String(p.pdbId ?? ''));
+        if (!isValidPdbId(normId)) return null;
+        const cachedFor = normalizePdbId(String(p.fetchedPdbId ?? ''));
+        const txt = String(p.pdbText ?? '');
+        const hasCached = txt.trim().length > 0 && cachedFor === normId;
+        return `pdb-id|${normId}|${hasCached ? txt.length : 0}|${String(p.benchmarkId ?? '')}`;
+      }
+      if (mode === 'custom') {
+        const txt = String(p.pdbText ?? '').trim();
+        if (txt.length === 0) return null;
+        return `custom|${txt.length}|${txt.slice(0, 64)}|${String(p.filename ?? '')}|${String(p.benchmarkId ?? '')}`;
+      }
+      return `demo-bundle|${String(p.benchmarkId ?? '')}`;
+    }
+    if (node.adapterId === 'sequence-input') {
+      const raw = String(p.sequence ?? '').trim();
+      if (raw.length < 5) return null;
+      return `seq|${raw.length}|${raw.slice(0, 64)}|${String(p.label ?? '')}`;
+    }
+    return null;
+  }
+
+  $effect(() => {
+    if (isRunning) return;
+    const nodes = graph.nodes;
+    const activeIds = new Set(nodes.map((n) => n.id));
+    for (const id of [...previewedInputSigs.keys()]) {
+      if (!activeIds.has(id)) previewedInputSigs.delete(id);
+    }
+
+    for (const node of nodes) {
+      if (node.adapterId !== 'pdb-input' && node.adapterId !== 'sequence-input') continue;
+      const sig = computeInputPreviewSig(node);
+      if (!sig) continue;
+      const hasOut = Boolean(outputsByNode[node.id] && Object.keys(outputsByNode[node.id]).length > 0);
+      if (previewedInputSigs.get(node.id) === sig && hasOut) continue;
+
+      previewedInputSigs.set(node.id, sig);
+      const nodeSnap = $state.snapshot(node);
+
+      if (node.adapterId === 'sequence-input') {
+        try {
+          const seqSet = materializeSequenceInputNode(nodeSnap);
+          outputsByNode = { ...outputsByNode, [node.id]: { sequences: seqSet } };
+          nodeStates = {
+            ...nodeStates,
+            [node.id]: { nodeId: node.id, status: 'done', detail: `${seqSet.candidates.length} sequence(s)` },
+          };
+        } catch {
+          // Wait quietly until user finishes typing a valid sequence
+        }
+        continue;
+      }
+
+      // pdb-input (sync parse for demo/custom/cached, async RCSB fetch for pdb-id)
+      const mode = String(nodeSnap.params.mode ?? 'demo-bundle');
+      const needsFetch =
+        mode === 'pdb-id' &&
+        !(
+          String(nodeSnap.params.pdbText ?? '').trim().length > 0 &&
+          normalizePdbId(String(nodeSnap.params.fetchedPdbId ?? '')) ===
+            normalizePdbId(String(nodeSnap.params.pdbId ?? ''))
+        );
+      if (needsFetch) {
+        const normId = normalizePdbId(String(nodeSnap.params.pdbId ?? ''));
+        nodeStates = {
+          ...nodeStates,
+          [node.id]: {
+            nodeId: node.id,
+            status: 'loading',
+            phase: 'fetch',
+            progress: 0.25,
+            detail: `Fetching ${normId} from RCSB PDB...`,
+          },
+        };
+      }
+
+      void materializePdbInputNode(nodeSnap)
+        .then((structure) => {
+          if (previewedInputSigs.get(node.id) !== sig) return;
+          if (!graph.nodes.some((n) => n.id === node.id)) return;
+          outputsByNode = { ...outputsByNode, [node.id]: { structure } };
+          nodeStates = {
+            ...nodeStates,
+            [node.id]: {
+              nodeId: node.id,
+              status: 'done',
+              detail: `L=${structure.length} aa`,
+            },
+          };
+        })
+        .catch((err) => {
+          if (previewedInputSigs.get(node.id) !== sig) return;
+          if (!graph.nodes.some((n) => n.id === node.id)) return;
+          nodeStates = {
+            ...nodeStates,
+            [node.id]: {
+              nodeId: node.id,
+              status: 'error',
+              error: err instanceof Error ? err.message : String(err),
+            },
+          };
+        });
+    }
+  });
 
   function applyBioFix(issue: BioCompatibilityIssue) {
     if (!issue.fix || isRunning) return;

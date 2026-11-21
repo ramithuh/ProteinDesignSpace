@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   buildCanonicalConditionIntent,
+  buildDefaultGenie3ConditionFromTemplate,
   checkGenie3ConditionCompatibility,
   compileConditionToGenie3Spec,
   compileConditionToRfd4,
@@ -173,5 +174,60 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
       expect(b.approxTokens).toBeLessThanOrEqual(300);
       expect(b.conditionParams.contig.length).toBeGreaterThan(0);
     }
+  });
+
+  it('auto-builds Genie 3 binder/motif specs when a template PDB is wired directly without a Conditioning block', () => {
+    const tpl = makeSampleTemplate();
+
+    // 1. Generic PDB -> Genie 3 defaults to de novo binder design on Chain A with requested binder length
+    const autoGeneric = buildDefaultGenie3ConditionFromTemplate(tpl, 64);
+    const genericCompiled = compileConditionToGenie3Spec(autoGeneric, tpl, 64);
+    expect(genericCompiled.mode).toBe('binder');
+    expect(genericCompiled.chainLengths).toEqual([64, tpl.length]);
+
+    // 2. Curated Genie 3 benchmark PDB (e.g. 1PRW motif) auto-applies its motif spec
+    const motifTpl: StructureArtifact = { ...tpl, benchmarkId: 'rfd_1prw_efhand' };
+    const autoMotif = buildDefaultGenie3ConditionFromTemplate(motifTpl, 80);
+    expect(autoMotif.intent?.motifSpans).toEqual(['A16-35', 'A52-71']);
+
+    // 3. Curated binder benchmark (PD-L1 5O45) adapts binder length to Genie 3 slider while preserving hotspots
+    const pdl1Tpl: StructureArtifact = { ...tpl, benchmarkId: 'pdl1_5o45' };
+    const autoPdl1 = buildDefaultGenie3ConditionFromTemplate(pdl1Tpl, 80);
+    expect(autoPdl1.intent?.lockChain).toBe('A');
+    expect(autoPdl1.intent?.hotspots).toEqual(['A54', 'A56', 'A66', 'A115']);
+    expect(autoPdl1.intent?.contig).toBe('A17-132,/0,80-80');
+
+    // 4. Non-Genie 3 benchmark (enzyme/ligand) fails clearly instead of silently running unconditional
+    const samTpl: StructureArtifact = { ...tpl, benchmarkId: 'sm_7c7m_sam' };
+    expect(() => buildDefaultGenie3ConditionFromTemplate(samTpl, 80)).toThrow(/RFD4-Proteina/i);
+
+    // 5. Layer 1 warns when RFD4 has a wired template in unconditional mode, and infers multimer on direct PDB -> Genie 3 -> AF2
+    const directBinderGraph: WorkflowGraph = {
+      id: 'direct-binder',
+      name: 'Direct Binder',
+      nodes: [
+        { id: 'pdb', adapterId: 'pdb-input', params: { mode: 'pdb-id', pdbId: '5O45', benchmarkId: 'pdl1_5o45' } },
+        { id: 'g3', adapterId: 'genie3', params: { length: 80 } },
+        { id: 'lf', adapterId: 'localfold-af2', params: { model: 'monomer' } },
+      ],
+      edges: [
+        { fromNode: 'pdb', fromPort: 'structure', toNode: 'g3', toPort: 'template' },
+        { fromNode: 'g3', fromPort: 'sequences', toNode: 'lf', toPort: 'sequences' },
+      ],
+    };
+    const directIssues = validateBioCapabilities(directBinderGraph);
+    expect(directIssues.some((i) => i.code === 'multimer-into-af2-monomer' && i.nodeId === 'lf')).toBe(true);
+
+    const rfd4UnusedTpl: WorkflowGraph = {
+      id: 'rfd4-unused-tpl',
+      name: 'RFD4 Unused Template',
+      nodes: [
+        { id: 'pdb', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+        { id: 'rfd4', adapterId: 'rfd4-proteina', params: { mode: 'unconditional', length: 70 } },
+      ],
+      edges: [{ fromNode: 'pdb', fromPort: 'structure', toNode: 'rfd4', toPort: 'template' }],
+    };
+    const rfd4Issues = validateBioCapabilities(rfd4UnusedTpl);
+    expect(rfd4Issues.some((i) => i.code === 'rfd4-unused-template' && i.fix?.paramsPatch?.mode === 'partial')).toBe(true);
   });
 });

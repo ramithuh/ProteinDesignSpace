@@ -5,6 +5,7 @@
 //    for both protein motif scaffolding and PPI binder design!
 
 import { parseStructureText } from '$lib/protein-ops/pdb';
+import { getBenchmarkById } from './benchmarks';
 import type {
   CanonicalConditionIntent,
   ConditionSpecArtifact,
@@ -180,6 +181,77 @@ export function checkGenie3ConditionCompatibility(
     };
   }
   return { supported: true };
+}
+
+/**
+ * Build an automatic ConditionSpec when a user wires a template PDB directly into Genie 3
+ * without an explicit Conditioning block:
+ * - If the template came from a curated benchmark, applies its curated hotspots / motif spec
+ *   (adapting binder length to Genie 3's Length slider).
+ * - Otherwise, designs a de novo binder of `defaultLength` aa against the template's primary chain.
+ */
+export function buildDefaultGenie3ConditionFromTemplate(
+  template: StructureArtifact,
+  defaultLength: number,
+): ConditionSpecArtifact {
+  const clampedLen = Math.max(20, Math.min(200, Math.round(defaultLength || 80)));
+
+  if (template.benchmarkId) {
+    const bench = getBenchmarkById(template.benchmarkId);
+    if (bench) {
+      if (!bench.supportsGenie3) {
+        throw new Error(
+          `${bench.shortLabel} requires all-atom enzyme/ligand/DNA conditioning, which is supported by RFD4-Proteina rather than Genie 3.`,
+        );
+      }
+      const cp = bench.conditionParams;
+      let contig = cp.contig;
+      if (bench.category === 'binder' && contig.includes('/0')) {
+        // Respect Genie 3's Length slider for the designed binder chain while keeping the curated target crop
+        const parts = contig.split(/[,\s]+/).filter(Boolean);
+        const updated = parts.map((tok) => (/^\d+(?:-\d+)?$/.test(tok) ? `${clampedLen}-${clampedLen}` : tok));
+        contig = updated.join(',');
+      }
+      const intent = buildCanonicalConditionIntent({
+        contig,
+        lockChain: cp.lockChain ?? '',
+        hotspots: cp.hotspots ?? '',
+        motifSpan: cp.motifSpan ?? '',
+        unindexedMotif: false,
+        benchmarkId: bench.id,
+        pdbId: bench.pdbId,
+      });
+      return {
+        kind: 'ConditionSpec',
+        id: `auto-g3-${bench.id}-L${clampedLen}`,
+        label: bench.shortLabel,
+        contig: intent.contig,
+        conditions: {},
+        intent,
+        inputCif: template.cifText ?? template.pdbText,
+        specMode: true,
+        summary: `${bench.shortLabel} (auto)`,
+      };
+    }
+  }
+
+  // Generic template PDB: design a de novo binder against the template's first protein chain
+  const firstChain = (template.chainIds?.[0] || 'A').toUpperCase();
+  const intent = buildCanonicalConditionIntent({
+    contig: `/0,${clampedLen}-${clampedLen}`,
+    lockChain: firstChain,
+  });
+  return {
+    kind: 'ConditionSpec',
+    id: `auto-g3-binder-${template.id}-L${clampedLen}`,
+    label: `Binder vs ${template.label}`,
+    contig: intent.contig,
+    conditions: {},
+    intent,
+    inputCif: template.cifText ?? template.pdbText,
+    specMode: true,
+    summary: `binder ${clampedLen} aa vs chain ${firstChain}`,
+  };
 }
 
 export interface Genie3CompiledSpec {

@@ -4,6 +4,7 @@
 // Layer 2: Runtime pre-dispatch artifact validation (called in scheduler.ts before launching GPU workers).
 
 import { LOCALFOLD_MODEL_OPTIONS } from './registry';
+import { getBenchmarkById } from './benchmarks';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import { checkGenie3ConditionCompatibility } from './conditioning';
 import type {
@@ -114,12 +115,18 @@ function inferNodeOutputProfile(
   if (node.adapterId === 'pdb-input') {
     const mode = String(node.params.mode ?? 'demo-bundle');
     const pdbText = String(node.params.pdbText ?? '').trim();
+    const benchId = String(node.params.benchmarkId ?? '').trim();
+    const bench = benchId ? getBenchmarkById(benchId) : undefined;
     if ((mode === 'custom' || mode === 'pdb-id') && pdbText.length > 0) {
       try {
         const parsed = parseStructureText(pdbText);
         const entities = new Set<BioEntityKind>(['protein']);
-        if (parsed.diagnostics.hasLigands) entities.add('ligand');
-        if (parsed.diagnostics.hasNucleicAcids) entities.add('dna');
+        if (bench) {
+          for (const e of bench.entities) entities.add(e);
+        } else {
+          if (parsed.diagnostics.hasLigands) entities.add('ligand');
+          if (parsed.diagnostics.hasNucleicAcids) entities.add('dna');
+        }
         const chainCount = Math.max(1, parsed.diagnostics.chainCount);
         profile = {
           entities,
@@ -128,8 +135,15 @@ function inferNodeOutputProfile(
           estimatedTokens: parsed.nResidues,
         };
       } catch {
-        profile.estimatedTokens = 80;
+        profile.estimatedTokens = bench?.approxTokens ?? 80;
       }
+    } else if (bench) {
+      profile = {
+        entities: new Set<BioEntityKind>(bench.entities),
+        stoichiometry: 'monomer',
+        chainCount: 1,
+        estimatedTokens: bench.approxTokens,
+      };
     } else {
       profile.estimatedTokens = 53;
     }
@@ -203,12 +217,22 @@ function inferNodeOutputProfile(
   } else if (node.adapterId === 'genie3') {
     const cond = upstreamProfileForPort('condition');
     const tpl = upstreamProfileForPort('template');
-    const chainCount = Math.max(1, cond?.chainCount ?? 1);
-    const estimatedTokens = Math.max(
-      Number(node.params.length ?? 80),
-      cond?.estimatedTokens ?? 0,
-      tpl?.estimatedTokens ?? 0,
-    );
+    const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'template');
+    const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
+    const tplBenchId =
+      tplNode?.adapterId === 'pdb-input' ? String(tplNode.params.benchmarkId ?? '').trim() : '';
+    const tplBench = tplBenchId ? getBenchmarkById(tplBenchId) : undefined;
+    // Direct PDB -> Genie 3 (no explicit Conditioning block) defaults to 2-chain binder design
+    // unless the benchmark target is a single-chain motif scaffold.
+    const autoTemplateChains = tpl && !cond ? (tplBench?.category === 'motif' ? 1 : 2) : 1;
+    const chainCount = Math.max(1, cond?.chainCount ?? 1, autoTemplateChains);
+    const binderLen = Number(node.params.length ?? 80);
+    const estimatedTokens =
+      tpl && !cond
+        ? tplBench
+          ? tplBench.approxTokens
+          : binderLen + tpl.estimatedTokens
+        : Math.max(binderLen, cond?.estimatedTokens ?? 0, tpl?.estimatedTokens ?? 0);
     profile = {
       entities: new Set<BioEntityKind>(['protein']),
       stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
@@ -263,6 +287,22 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
     if (node.adapterId === 'genie3') {
       const condEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'condition');
       const condNode = condEdge ? graph.nodes.find((n) => n.id === condEdge.fromNode) : null;
+      const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'template');
+      const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
+
+      if (!condNode && tplNode?.adapterId === 'pdb-input') {
+        const benchId = String(tplNode.params.benchmarkId ?? '').trim();
+        const bench = benchId ? getBenchmarkById(benchId) : undefined;
+        if (bench && !bench.supportsGenie3) {
+          issues.push({
+            severity: 'warning',
+            code: 'genie3-unsupported-benchmark',
+            nodeId: node.id,
+            message: `${bench.shortLabel} requires all-atom enzyme/ligand/DNA conditioning, which is supported by RFD4-Proteina rather than ${node.label ?? 'Genie 3'}.`,
+          });
+        }
+      }
+
       if (condNode && condNode.adapterId === 'rfd4-conditioner') {
         const tp = String(condNode.params.taskPreset ?? 'custom');
         const hbond = String(condNode.params.hbondMode ?? 'none');
@@ -283,6 +323,26 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
             message: `${node.label ?? 'Genie 3'} supports protein motif scaffolding and PPI binder design, not ${reasons.join(', ')}. Use RFD4-Proteina for those constraints.`,
           });
         }
+      }
+    }
+
+    if (node.adapterId === 'rfd4-proteina') {
+      const mode = String(node.params.mode ?? 'unconditional');
+      const hasTpl = graph.edges.some((e) => e.toNode === node.id && e.toPort === 'template');
+      const hasCond = graph.edges.some((e) => e.toNode === node.id && e.toPort === 'condition');
+      const hasYaml = String(node.params.customSpecYaml ?? '').trim().length > 0;
+      if (hasTpl && !hasCond && mode === 'unconditional' && !hasYaml) {
+        issues.push({
+          severity: 'warning',
+          code: 'rfd4-unused-template',
+          nodeId: node.id,
+          message: `${node.label ?? 'RFD4-Proteina'} has a wired template structure but is set to Unconditional mode (the template will be ignored). Switch to Partial Diffusion or wire a Conditioning block.`,
+          fix: {
+            label: 'Switch to Partial Diffusion',
+            nodeId: node.id,
+            paramsPatch: { mode: 'partial' },
+          },
+        });
       }
     }
 

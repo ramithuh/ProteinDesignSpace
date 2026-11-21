@@ -30,6 +30,8 @@ export interface CatalogSubItem {
 export interface CatalogSubGroup {
   title: string;
   items: CatalogSubItem[];
+  collapsible?: boolean;
+  defaultCollapsed?: boolean;
 }
 
 export interface CatalogItem {
@@ -344,9 +346,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         searchBlob: `${seq.id} ${seq.shortName} ${seq.displayName} ${CONCISE_BLOCK_ROLES['sequence-input']} fasta amino acid sequence input`.toLowerCase(),
       },
     ];
-    const motifBenchItems: CatalogSubItem[] = BENCHMARK_TARGETS.filter(
-      (b) => b.category === 'motif' || b.category === 'enzyme-ligand',
-    ).map((b) => ({
+    const makeBenchmarkItem = (b: (typeof BENCHMARK_TARGETS)[number], extraTokens: string): CatalogSubItem => ({
       key: `bench-${b.id}`,
       label: b.shortLabel,
       subtitle: b.biology,
@@ -359,39 +359,32 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
           pdbId: b.pdbId,
           filename: `${b.pdbId}.cif`,
           pdbText: '',
+          benchmarkId: b.id,
         },
         label: `PDB: ${b.name} (${b.pdbId})`,
       },
-      searchBlob: `${b.id} ${b.name} ${b.shortLabel} ${b.pdbId} ${b.biology} benchmark motif enzyme ligand dna`.toLowerCase(),
-    }));
+      searchBlob: `${b.id} ${b.name} ${b.shortLabel} ${b.pdbId} ${b.biology} benchmark ${extraTokens}`.toLowerCase(),
+    });
 
     const binderBenchItems: CatalogSubItem[] = BENCHMARK_TARGETS.filter(
       (b) => b.category === 'binder',
-    ).map((b) => ({
-      key: `bench-${b.id}`,
-      label: b.shortLabel,
-      subtitle: b.biology,
-      meta: `${b.sourceFamily} · ~${b.approxTokens} tok`,
-      badge: b.tier === 'fast' ? 'Fast' : 'Standard',
-      insert: {
-        adapterId: 'pdb-input',
-        params: {
-          mode: 'pdb-id',
-          pdbId: b.pdbId,
-          filename: `${b.pdbId}.cif`,
-          pdbText: '',
-        },
-        label: `PDB: ${b.name} (${b.pdbId})`,
-      },
-      searchBlob: `${b.id} ${b.name} ${b.shortLabel} ${b.pdbId} ${b.biology} benchmark ppi binder target`.toLowerCase(),
-    }));
+    ).map((b) => makeBenchmarkItem(b, 'ppi binder target'));
+
+    const motifBenchItems: CatalogSubItem[] = BENCHMARK_TARGETS.filter(
+      (b) => b.category === 'motif',
+    ).map((b) => makeBenchmarkItem(b, 'motif scaffold'));
+
+    const enzymeBenchItems: CatalogSubItem[] = BENCHMARK_TARGETS.filter(
+      (b) => b.category === 'enzyme-ligand',
+    ).map((b) => makeBenchmarkItem(b, 'enzyme ligand dna cofactor'));
 
     const subGroups: CatalogSubGroup[] = [
       { title: 'Starting Inputs', items },
-      { title: 'Benchmark Targets · PPI Binders', items: binderBenchItems },
-      { title: 'Benchmark Targets · Motifs, Enzymes & Ligands', items: motifBenchItems },
+      { title: 'PPI Binders', items: binderBenchItems, collapsible: true, defaultCollapsed: true },
+      { title: 'Motif Scaffolding', items: motifBenchItems, collapsible: true, defaultCollapsed: true },
+      { title: 'Enzymes, Ligands & DNA', items: enzymeBenchItems, collapsible: true, defaultCollapsed: true },
     ];
-    const allItems = [...items, ...binderBenchItems, ...motifBenchItems];
+    const allItems = [...items, ...binderBenchItems, ...motifBenchItems, ...enzymeBenchItems];
     const identityBlob = 'inputs input source pdb sequence fasta mmcif benchmark';
     const searchBlob = `${identityBlob} ${allItems.map((i) => i.searchBlob).join(' ')}`;
     return {

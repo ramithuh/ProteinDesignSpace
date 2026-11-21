@@ -215,7 +215,14 @@ export function coordsToPolyGlyPdb(coords: Float32Array, nResidues: number): str
   return coordsToBackbonePdb(coords, nResidues, { atomsPerRes: 3 });
 }
 
-const WATER_RESNAMES = new Set(['HOH', 'WAT', 'DOD', 'H2O', 'TIP', 'TIP3']);
+// Water + common X-ray crystallization buffers/salts/cryoprotectants that should not
+// trigger false "small-molecule ligand" warnings on pure-protein RCSB structures (e.g. 5O45).
+const WATER_RESNAMES = new Set([
+  'HOH', 'WAT', 'DOD', 'H2O', 'TIP', 'TIP3',
+  'EDO', 'GOL', 'SO4', 'PO4', 'CL', 'NA', 'K', 'BR', 'IOD',
+  'ACT', 'ACY', 'DMS', 'DMSO', 'PEG', 'PG4', 'PGE', '1PE', 'PE4', 'P6G',
+  'MPD', 'TRS', 'CIT', 'FMT', 'MES', 'EPE', 'HEP', 'IPA', 'BME', 'UNX',
+]);
 const NUCLEIC_RESNAMES = new Set([
   'DA', 'DC', 'DG', 'DT', 'DU', 'DI',
   'A', 'C', 'G', 'U', 'T', 'I',

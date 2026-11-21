@@ -190,10 +190,35 @@
         if (destroyed || mySeq !== loadSeq) return;
         if (useTraj) trajModelRef = model.ref;
         const struct = await ctx.builders.structure.createStructure(model);
+        // Color multi-chain complexes (e.g. binder + target) by chain so binder and target
+        // stand apart clearly in 3D without needing an overlay/scRMSD block.
+        let isMultiChain = false;
+        if (!hasOverlay) {
+          if (fmt === 'pdb') {
+            const chains = new Set<string>();
+            for (const line of text.split('\n')) {
+              if (line.startsWith('ATOM  ') && line.length >= 22) {
+                chains.add(line[21]);
+                if (chains.size >= 2) {
+                  isMultiChain = true;
+                  break;
+                }
+              }
+            }
+          } else {
+            // mmCIF: check Mol* structure units/chains directly
+            const sData = struct.data;
+            if (sData && sData.units.length > 1) {
+              isMultiChain = true;
+            }
+          }
+        }
         await ctx.builders.structure.representation.addRepresentation(struct, {
           type: 'cartoon',
-          color: 'uniform',
-          colorParams: { value: Color(hasOverlay ? 0x94a3b8 : 0x60a5fa) },
+          color: hasOverlay ? 'uniform' : isMultiChain ? 'chain-id' : 'uniform',
+          ...(hasOverlay || !isMultiChain
+            ? { colorParams: { value: Color(hasOverlay ? 0x94a3b8 : 0x60a5fa) } }
+            : {}),
           typeParams: { alpha: hasOverlay ? 0.45 : 1.0 },
         });
       }

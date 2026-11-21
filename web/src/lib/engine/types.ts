@@ -54,6 +54,8 @@ export interface StructureArtifact {
   chainIds?: string[];
   chainLengths?: number[];
   diagnostics?: StructureParseDiagnostics;
+  /** Optional curated benchmark ID when loaded from a benchmark target preset. */
+  benchmarkId?: string;
   /** Optional multi-model PDB when trajectory frames are available. */
   trajectoryPdb?: string;
   trajectoryFrameCount?: number;

@@ -15,6 +15,7 @@
   } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import { ADAPTER_REGISTRY } from '$lib/engine/registry';
+  import { getBenchmarkById } from '$lib/engine/benchmarks';
   import type { CatalogInsertRequest } from '$lib/engine/catalog';
   import { makeEdgeId } from '$lib/engine/peek';
   import {
@@ -340,6 +341,26 @@
         outputPortsReady[port] = true;
       }
       const cmp = compareColors[n.id];
+      let autoModeHint: string | undefined;
+      if (n.adapterId === 'genie3') {
+        if (inputPortsConnected.condition) {
+          autoModeHint = 'Conditioned';
+        } else if (inputPortsConnected.template) {
+          const tplEdge = laid.edges.find((e) => e.toNode === n.id && e.toPort === 'template');
+          const tplNode = tplEdge ? laid.nodes.find((x) => x.id === tplEdge.fromNode) : null;
+          const benchId =
+            tplNode?.adapterId === 'pdb-input' ? String(tplNode.params.benchmarkId ?? '').trim() : '';
+          const bench = benchId ? getBenchmarkById(benchId) : undefined;
+          if (bench && bench.supportsGenie3) {
+            autoModeHint =
+              bench.category === 'binder'
+                ? `Binder · ${bench.pdbId} hotspots`
+                : `Motif · ${bench.pdbId}`;
+          } else {
+            autoModeHint = 'Binder vs template';
+          }
+        }
+      }
       return {
         id: n.id,
         type: 'protein',
@@ -357,6 +378,7 @@
           outputPortsReady,
           compareColor: cmp?.css,
           compareBadge: cmp?.badge,
+          autoModeHint,
           onDelete: disabled ? undefined : removeNode,
           onPeekPort,
         },

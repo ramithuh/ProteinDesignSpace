@@ -20,6 +20,7 @@
     outputPortsReady?: Record<string, boolean>;
     compareColor?: string;
     compareBadge?: string;
+    autoModeHint?: string;
     onDelete?: (nodeId: string) => void;
     onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
     [key: string]: unknown;
@@ -112,6 +113,7 @@
       case 'genie3': {
         const len = Number(p.length ?? 80);
         const steps = Number(p.nSampleStep ?? 100);
+        if (data.autoModeHint) return `${data.autoModeHint} · ${len} aa · ${steps} steps`;
         return `${len} aa · ${steps} steps`;
       }
       case 'web-protein-mpnn': {

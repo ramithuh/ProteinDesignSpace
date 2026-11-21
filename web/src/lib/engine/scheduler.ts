@@ -34,6 +34,143 @@ function fnv1a(str: string): string {
   return (h >>> 0).toString(16).padStart(8, '0');
 }
 
+/**
+ * Pure CPU/fetch materializer for a `pdb-input` node.
+ * Shared by both ExecutionScheduler and instant live 3D preview (no Run needed).
+ */
+export async function materializePdbInputNode(
+  node: WorkflowNode,
+  onProgress?: (ev: NodeProgressEvent) => void,
+): Promise<StructureArtifact> {
+  const mode = String(node.params.mode ?? 'demo-bundle');
+  let rawText: string;
+  let filename: string;
+  if (mode === 'pdb-id') {
+    const normId = normalizePdbId(String(node.params.pdbId ?? ''));
+    if (!normId) {
+      throw new Error('PDB Input is in PDB ID mode, but no PDB ID was entered.');
+    }
+    const cachedText = String(node.params.pdbText ?? '').trim();
+    const fetchedFor = normalizePdbId(String(node.params.fetchedPdbId ?? ''));
+    if (cachedText.length > 0 && fetchedFor === normId) {
+      rawText = cachedText;
+      filename = String(node.params.filename || `${normId}.cif`);
+    } else {
+      onProgress?.({
+        nodeId: node.id,
+        status: 'loading',
+        phase: 'fetch',
+        progress: 0.2,
+        detail: `Fetching ${normId} from RCSB PDB...`,
+      });
+      const fetched = await fetchStructureByPdbId(normId);
+      rawText = fetched.text;
+      filename = fetched.filename;
+    }
+  } else if (mode === 'custom' && String(node.params.pdbText ?? '').trim().length > 0) {
+    rawText = String(node.params.pdbText);
+    filename = String(node.params.filename || 'uploaded.pdb');
+  } else {
+    rawText = generateSampleHelixBundlePdb();
+    filename = 'demo_3helix_53aa.pdb';
+  }
+  const parsed = parseStructureText(rawText);
+  if (parsed.nResidues < 3) {
+    throw new Error('Input PDB/mmCIF must contain at least 3 residues with Cα atoms');
+  }
+  const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
+  const benchmarkId = String(node.params.benchmarkId ?? '').trim() || undefined;
+  return {
+    kind: 'StructureArtifact',
+    id: `pdb-${fnv1a(rawText)}`,
+    label: `${filename} (L=${parsed.nResidues})`,
+    sourceModelId: 'pdb-input',
+    length: parsed.nResidues,
+    sequence: parsed.sequence,
+    caCoords: parsed.caCoords,
+    backbone4Coords: parsed.backbone4Coords,
+    pdbText: parsed.pdbText,
+    cifText: parsed.format === 'mmcif' ? rawText : undefined,
+    chainIds: parsed.chainIds,
+    chainLengths: parsed.diagnostics.chainLengths,
+    diagnostics: parsed.diagnostics,
+    ...(benchmarkId ? { benchmarkId } : {}),
+    geometry,
+  };
+}
+
+/**
+ * Pure CPU materializer for a `sequence-input` node.
+ * Shared by both ExecutionScheduler and instant live preview (no Run needed).
+ */
+export function materializeSequenceInputNode(node: WorkflowNode): {
+  kind: 'SequenceSet';
+  id: string;
+  parentStructureId: string;
+  sourceModelId: string;
+  candidates: Array<{
+    id: string;
+    sequence: string;
+    chainLengths?: number[];
+    score: null;
+    globalScore: null;
+    sourceModelId: string;
+  }>;
+} {
+  const raw = String(node.params.sequence ?? '').trim();
+  if (!raw) throw new Error('Sequence Input is empty');
+  const candidates: Array<{
+    id: string;
+    sequence: string;
+    chainLengths?: number[];
+    score: null;
+    globalScore: null;
+    sourceModelId: string;
+  }> = [];
+  if (raw.includes('>')) {
+    const blocks = raw.split(/^>/m).filter((b) => b.trim().length > 0);
+    const seenIds = new Map<string, number>();
+    blocks.forEach((b, idx) => {
+      const lines = b.split('\n');
+      const baseHeader = lines[0].trim().split(/\s+/)[0] || `seq-${idx + 1}`;
+      const split = splitMultiChainSequence(lines.slice(1).join(''));
+      if (split.concatenated.length >= 5) {
+        const count = seenIds.get(baseHeader) ?? 0;
+        seenIds.set(baseHeader, count + 1);
+        const id = count === 0 ? baseHeader : `${baseHeader}_${count + 1}`;
+        candidates.push({
+          id,
+          sequence: split.concatenated,
+          ...(split.chains.length > 1 ? { chainLengths: split.chainLengths } : {}),
+          score: null,
+          globalScore: null,
+          sourceModelId: 'sequence-input',
+        });
+      }
+    });
+  } else {
+    const split = splitMultiChainSequence(raw);
+    if (split.concatenated.length >= 5) {
+      candidates.push({
+        id: String(node.params.label || 'custom-seq-1'),
+        sequence: split.concatenated,
+        ...(split.chains.length > 1 ? { chainLengths: split.chainLengths } : {}),
+        score: null,
+        globalScore: null,
+        sourceModelId: 'sequence-input',
+      });
+    }
+  }
+  if (candidates.length === 0) throw new Error('No valid amino acid sequences (>= 5 aa) found');
+  return {
+    kind: 'SequenceSet',
+    id: `seqin-${fnv1a(raw)}`,
+    parentStructureId: 'none',
+    sourceModelId: 'sequence-input',
+    candidates,
+  };
+}
+
 function topoSort(graph: WorkflowGraph): WorkflowNode[] {
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const indeg = new Map<string, number>(graph.nodes.map((n) => [n.id, 0]));
@@ -250,117 +387,13 @@ export class ExecutionScheduler {
     onProgress?: (ev: NodeProgressEvent) => void,
   ): Promise<Record<string, CanonicalArtifact>> {
     if (node.adapterId === 'pdb-input') {
-      const mode = String(node.params.mode ?? 'demo-bundle');
-      let rawText: string;
-      let filename: string;
-      if (mode === 'pdb-id') {
-        const normId = normalizePdbId(String(node.params.pdbId ?? ''));
-        if (!normId) {
-          throw new Error('PDB Input is in PDB ID mode, but no PDB ID was entered.');
-        }
-        const cachedText = String(node.params.pdbText ?? '').trim();
-        const fetchedFor = normalizePdbId(String(node.params.fetchedPdbId ?? ''));
-        if (cachedText.length > 0 && fetchedFor === normId) {
-          rawText = cachedText;
-          filename = String(node.params.filename || `${normId}.cif`);
-        } else {
-          onProgress?.({
-            nodeId: node.id,
-            status: 'loading',
-            phase: 'fetch',
-            progress: 0.2,
-            detail: `Fetching ${normId} from RCSB PDB...`,
-          });
-          const fetched = await fetchStructureByPdbId(normId);
-          rawText = fetched.text;
-          filename = fetched.filename;
-        }
-      } else if (mode === 'custom' && String(node.params.pdbText ?? '').trim().length > 0) {
-        rawText = String(node.params.pdbText);
-        filename = String(node.params.filename || 'uploaded.pdb');
-      } else {
-        rawText = generateSampleHelixBundlePdb();
-        filename = 'demo_3helix_53aa.pdb';
-      }
-      const parsed = parseStructureText(rawText);
-      if (parsed.nResidues < 3) {
-        throw new Error('Input PDB/mmCIF must contain at least 3 residues with Cα atoms');
-      }
-      const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
-      const art: StructureArtifact = {
-        kind: 'StructureArtifact',
-        id: `pdb-${fnv1a(rawText)}`,
-        label: `${filename} (L=${parsed.nResidues})`,
-        sourceModelId: 'pdb-input',
-        length: parsed.nResidues,
-        sequence: parsed.sequence,
-        caCoords: parsed.caCoords,
-        backbone4Coords: parsed.backbone4Coords,
-        pdbText: parsed.pdbText,
-        cifText: parsed.format === 'mmcif' ? rawText : undefined,
-        chainIds: parsed.chainIds,
-        chainLengths: parsed.diagnostics.chainLengths,
-        diagnostics: parsed.diagnostics,
-        geometry,
-      };
+      const art = await materializePdbInputNode(node, onProgress);
       return { structure: art };
     }
 
     if (node.adapterId === 'sequence-input') {
-      const raw = String(node.params.sequence ?? '').trim();
-      if (!raw) throw new Error('Sequence Input is empty');
-      const candidates: Array<{
-        id: string;
-        sequence: string;
-        chainLengths?: number[];
-        score: null;
-        globalScore: null;
-        sourceModelId: string;
-      }> = [];
-      if (raw.includes('>')) {
-        const blocks = raw.split(/^>/m).filter((b) => b.trim().length > 0);
-        const seenIds = new Map<string, number>();
-        blocks.forEach((b, idx) => {
-          const lines = b.split('\n');
-          const baseHeader = lines[0].trim().split(/\s+/)[0] || `seq-${idx + 1}`;
-          const split = splitMultiChainSequence(lines.slice(1).join(''));
-          if (split.concatenated.length >= 5) {
-            const count = seenIds.get(baseHeader) ?? 0;
-            seenIds.set(baseHeader, count + 1);
-            const id = count === 0 ? baseHeader : `${baseHeader}_${count + 1}`;
-            candidates.push({
-              id,
-              sequence: split.concatenated,
-              ...(split.chains.length > 1 ? { chainLengths: split.chainLengths } : {}),
-              score: null,
-              globalScore: null,
-              sourceModelId: 'sequence-input',
-            });
-          }
-        });
-      } else {
-        const split = splitMultiChainSequence(raw);
-        if (split.concatenated.length >= 5) {
-          candidates.push({
-            id: String(node.params.label || 'custom-seq-1'),
-            sequence: split.concatenated,
-            ...(split.chains.length > 1 ? { chainLengths: split.chainLengths } : {}),
-            score: null,
-            globalScore: null,
-            sourceModelId: 'sequence-input',
-          });
-        }
-      }
-      if (candidates.length === 0) throw new Error('No valid amino acid sequences (>= 5 aa) found');
-      return {
-        sequences: {
-          kind: 'SequenceSet',
-          id: `seqin-${fnv1a(raw)}`,
-          parentStructureId: 'none',
-          sourceModelId: 'sequence-input',
-          candidates,
-        },
-      };
+      const seqSet = materializeSequenceInputNode(node);
+      return { sequences: seqSet };
     }
 
     if (node.adapterId === 'rfd4-conditioner') {

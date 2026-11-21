@@ -5,7 +5,10 @@
 
 import { parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
-import { compileConditionToGenie3Spec } from '$lib/engine/conditioning';
+import {
+  buildDefaultGenie3ConditionFromTemplate,
+  compileConditionToGenie3Spec,
+} from '$lib/engine/conditioning';
 import type { ConditionSpecArtifact, SequenceSet, StructureArtifact } from '$lib/engine/types';
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -136,8 +139,10 @@ self.onmessage = async (ev: MessageEvent) => {
       let batch: Record<string, unknown> | undefined;
       let compiledSummary = '';
       let expectedChainLengths: number[] | undefined;
-      if (condArtifact) {
-        const compiled = compileConditionToGenie3Spec(condArtifact, template, length);
+      const effectiveCond =
+        condArtifact ?? (template ? buildDefaultGenie3ConditionFromTemplate(template, length) : undefined);
+      if (effectiveCond) {
+        const compiled = compileConditionToGenie3Spec(effectiveCond, template, length);
         batch = genie3Mod.createFeaturesFromSpec({
           length: compiled.length,
           asymId: compiled.asymId,
