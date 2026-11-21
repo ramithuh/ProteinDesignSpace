@@ -1994,6 +1994,26 @@
   let peekSequences = $derived<SequenceSet | null>(
     activeArtifact?.kind === 'SequenceSet' ? activeArtifact : null,
   );
+  let peekPerResidue = $derived(
+    activeArtifact?.kind === 'MutationMatrix' || activeArtifact?.kind === 'ResidueTrack'
+      ? activeArtifact
+      : null,
+  );
+  // When peeking a per-residue heatmap/track (e.g. ThermoMPNN mutations or Dyna-1 track),
+  // display the node's sibling B-factor-painted StructureArtifact in 3D if present.
+  let perResidueDisplayStructure = $derived.by((): StructureArtifact | null => {
+    if (!peekPerResidue) return null;
+    if (selectedNode) {
+      const outs = outputsByNode[selectedNode.id];
+      if (outs) {
+        const sibling = Object.values(outs).find(
+          (a): a is StructureArtifact => a.kind === 'StructureArtifact',
+        );
+        if (sibling) return sibling;
+      }
+    }
+    return contextStructure;
+  });
 
   // Latest scorer result anywhere in the graph (for "+ Save to Campaign" and "Scorer summary →")
   let latestScorerHit = $derived.by((): { nodeId: string; metrics: DesignabilityMetrics } | null => {
@@ -2025,6 +2045,9 @@
   let viewerDesignedPdb = $derived.by((): string | null => {
     if (peekMetrics) return activeRow?.designedPdb ?? contextStructure?.cifText ?? contextStructure?.pdbText ?? null;
     if (activePeekStructure) return activePeekStructure.cifText ?? activePeekStructure.pdbText;
+    if (perResidueDisplayStructure) {
+      return perResidueDisplayStructure.cifText ?? perResidueDisplayStructure.pdbText;
+    }
     if (peekSequences) {
       // Clear 3D viewport when peeking a sequence-only wire/port unless user explicitly
       // previews the parent backbone (keeps Parameters-tab 3D residue picking intact).
@@ -2043,6 +2066,7 @@
 
   let viewerStructureMeta = $derived<StructureArtifact | null>(
     activePeekStructure ??
+      perResidueDisplayStructure ??
       (peekMetrics || (peekSequences && (!isPeekingSequenceSlot || showSeqParentBackbone))
         ? contextStructure
         : null),
@@ -2051,6 +2075,7 @@
   let viewerAtomGranularity = $derived.by((): AtomGranularity | undefined => {
     if (isCompareMode) return undefined;
     if (peekStructure) return peekStructure.atomGranularity;
+    if (perResidueDisplayStructure) return perResidueDisplayStructure.atomGranularity;
     if (peekFoldSet) return 'all-atom';
     if (peekMetrics) {
       return showDesigned && !showRefold ? contextStructure?.atomGranularity : undefined;
@@ -2079,6 +2104,12 @@
       return (
         peekStructure.bfactorSemantics ??
         (peekStructure.sourceModelId === 'pdb-input' ? 'crystal-b' : undefined)
+      );
+    }
+    if (perResidueDisplayStructure) {
+      return (
+        perResidueDisplayStructure.bfactorSemantics ??
+        (perResidueDisplayStructure.sourceModelId === 'pdb-input' ? 'crystal-b' : undefined)
       );
     }
     if (peekSequences && (!isPeekingSequenceSlot || showSeqParentBackbone)) {
@@ -2129,6 +2160,9 @@
         return `${dirTag}${fromTag} · Design ${activePeekStructureIdx + 1}/${peekStructureItems.length} · ${activePeekStructure.label}`;
       }
       return `${dirTag}${fromTag} · ${activePeekStructure.label}`;
+    }
+    if (peekPerResidue && perResidueDisplayStructure) {
+      return `${dirTag} · ${perResidueDisplayStructure.label}`;
     }
     if (peekSequences) {
       if (isPeekingSequenceSlot && !showSeqParentBackbone) {

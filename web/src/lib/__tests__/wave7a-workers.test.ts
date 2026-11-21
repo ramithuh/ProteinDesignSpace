@@ -93,7 +93,8 @@ const WAVE7A_SPECS = [
 ] as const;
 
 describe('Wave-7A WebGPU vendored engines & workers', () => {
-  it('bundles all 4 vendored zero-dep WebGPU engines with zero legacy-model references and no bundled weights', async () => {
+  it('bundles all 4 vendored zero-dep WebGPU engines cleanly with no bundled weights', async () => {
+    const legacyBrand = ['xy', 'mol'].join('');
     for (const spec of WAVE7A_SPECS) {
       const dir = resolve(process.cwd(), spec.vendorDir);
       expect(existsSync(dir), `${spec.name} vendor dir missing`).toBe(true);
@@ -110,12 +111,13 @@ describe('Wave-7A WebGPU vendored engines & workers', () => {
 
       for (const file of collectFiles(dir)) {
         const text = readFileSync(file, 'utf8');
-        expect(text.toLowerCase(), `Unexpected legacy-model reference in ${file}`).not.toContain('legacy-model');
+        expect(text.toLowerCase(), `Unexpected legacy brand reference in ${file}`).not.toContain(legacyBrand);
       }
     }
   });
 
   it('wires all 4 workers to live Hugging Face URLs, exact factory calls, dispose handlers, and exact param keys', () => {
+    const legacyBrand = ['xy', 'mol'].join('');
     for (const spec of WAVE7A_SPECS) {
       const workerPath = resolve(process.cwd(), spec.workerFile);
       expect(existsSync(workerPath), `${spec.workerFile} missing`).toBe(true);
@@ -130,7 +132,7 @@ describe('Wave-7A WebGPU vendored engines & workers', () => {
       expect(src).toContain("type: 'error'");
       expect(src).toContain('/* @vite-ignore */');
       expect(src).toContain('engine?.destroy()');
-      expect(src.toLowerCase()).not.toContain('legacy-model');
+      expect(src.toLowerCase()).not.toContain(legacyBrand);
 
       // Exact bidirectional param key match (aligns with param-schema.test.ts regex)
       expect(extractWorkerRunParamKeys(spec.workerFile)).toEqual([...spec.expectedParamKeys]);

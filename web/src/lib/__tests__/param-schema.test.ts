@@ -252,6 +252,10 @@ describe('declarative ParamSchema & modes single source of truth', () => {
         file: 'src/lib/workers/localfold.worker.ts',
         extraHelperKeys: ['maxSequences'], // read inside selectFoldWorkItems(seqSet, p)
       },
+      { adapterId: 'thermompnn', file: 'src/lib/workers/thermompnn.worker.ts' },
+      { adapterId: 'ligandmpnn', file: 'src/lib/workers/ligandmpnn.worker.ts' },
+      { adapterId: 'lasermpnn', file: 'src/lib/workers/lasermpnn.worker.ts' },
+      { adapterId: 'antifold-esmif1', file: 'src/lib/workers/antifold.worker.ts' },
     ];
 
     for (const target of WORKER_TARGETS) {
