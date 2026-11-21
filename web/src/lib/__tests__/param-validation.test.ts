@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   NUMERIC_SPECS,
   commitNumericDraft,
+  computeUploadDigest,
   isValidResidueToken,
+  isValidSha256Hex,
   sanitizeNumericDraft,
   validateJsonOverride,
   validateNodeParams,
@@ -12,6 +15,7 @@ import {
   validateSequenceText,
   validateStructureText,
 } from '../engine/param-validation';
+import { generateSampleHelixBundlePdb } from '../protein-ops/pdb';
 
 describe('parameter validation & numeric sanitization', () => {
   it('rejects fractional count parameters but preserves continuous parameters', () => {
@@ -191,5 +195,171 @@ describe('parameter validation & numeric sanitization', () => {
     // Bounds aligned with NUMERIC_SPECS['web-protein-mpnn'] (1..8, 0.01..1.5)
     expect(mpnnSrc).toContain('Math.min(8,');
     expect(mpnnSrc).toContain('Math.min(1.5,');
+  });
+
+  it('computes exact FIPS 180-4 SHA-256 upload digests matching Node crypto', () => {
+    const samples = [
+      '',
+      'abc',
+      'The quick brown fox jumps over the lazy dog',
+      'Ångström α/β motif — 1PRW',
+      generateSampleHelixBundlePdb(),
+    ];
+    for (const s of samples) {
+      const expected = createHash('sha256').update(s, 'utf8').digest('hex');
+      const actual = computeUploadDigest(s);
+      expect(actual).toBe(expected);
+      expect(isValidSha256Hex(actual)).toBe(true);
+    }
+    expect(isValidSha256Hex('not-a-sha')).toBe(false);
+  });
+
+  it('blocks missing or mismatched custom PDB uploads until matching digest is uploaded or explicitly cleared (Issue #1)', () => {
+    const pdbA = generateSampleHelixBundlePdb();
+    const pdbB = pdbA + '\nREMARK altered\n';
+    const shaA = computeUploadDigest(pdbA);
+
+    // 1. Missing custom upload blocks with filename + digest details
+    const missingErrs = validateNodeParams({
+      id: 'src',
+      adapterId: 'pdb-input',
+      label: 'Custom Target',
+      params: {
+        mode: 'custom',
+        pdbText: '',
+        filename: 'target.pdb',
+        expectedFilename: 'target.pdb',
+        missingUpload: true,
+        expectedPdbSha256: shaA,
+      },
+    });
+    expect(missingErrs).toHaveLength(1);
+    expect(missingErrs[0]).toMatch(/target\.pdb/);
+    expect(missingErrs[0]).toContain(shaA.slice(0, 12));
+
+    // 2. Wrong re-uploaded file blocks with digest mismatch
+    const mismatchErrs = validateNodeParams({
+      id: 'src',
+      adapterId: 'pdb-input',
+      label: 'Custom Target',
+      params: {
+        mode: 'custom',
+        pdbText: pdbB,
+        filename: 'other.pdb',
+        expectedFilename: 'target.pdb',
+        missingUpload: true,
+        expectedPdbSha256: shaA,
+      },
+    });
+    expect(mismatchErrs).toHaveLength(1);
+    expect(mismatchErrs[0]).toMatch(/does not match expected custom upload/i);
+    expect(mismatchErrs[0]).toMatch(/target\.pdb/);
+
+    // 3. Matching re-uploaded file passes even while NodeInspector leaves missingUpload/expectedPdbSha256 attached
+    expect(
+      validateNodeParams({
+        id: 'src',
+        adapterId: 'pdb-input',
+        label: 'Custom Target',
+        params: {
+          mode: 'custom',
+          pdbText: pdbA,
+          filename: 'target.pdb',
+          expectedFilename: 'target.pdb',
+          missingUpload: true,
+          expectedPdbSha256: shaA,
+        },
+      }),
+    ).toEqual([]);
+
+    // 4. Explicitly clearing expectedPdbSha256 allows replacing with a different valid PDB
+    expect(
+      validateNodeParams({
+        id: 'src',
+        adapterId: 'pdb-input',
+        label: 'Custom Target',
+        params: {
+          mode: 'custom',
+          pdbText: pdbB,
+          filename: 'other.pdb',
+          missingUpload: false,
+          expectedPdbSha256: '',
+        },
+      }),
+    ).toEqual([]);
+
+    // 5. Explicitly switching mode to demo-bundle or valid pdb-id unblocks validation
+    expect(
+      validateNodeParams({
+        id: 'src',
+        adapterId: 'pdb-input',
+        params: {
+          mode: 'demo-bundle',
+          pdbText: '',
+          missingUpload: true,
+          expectedPdbSha256: shaA,
+        },
+      }),
+    ).toEqual([]);
+
+    // 6. Malformed expectedPdbSha256 or unknown pdb-input mode is rejected
+    expect(
+      validateNodeParams({
+        id: 'src',
+        adapterId: 'pdb-input',
+        params: { mode: 'custom', pdbText: pdbA, expectedPdbSha256: 'bad-digest' },
+      }).join(' '),
+    ).toMatch(/Invalid expectedPdbSha256/i);
+    expect(
+      validateNodeParams({
+        id: 'src',
+        adapterId: 'pdb-input',
+        params: { mode: 'bogus' },
+      }).join(' '),
+    ).toMatch(/Unknown PDB Input mode/i);
+  });
+
+  it('reports every unresolvedImportIssues entry and blocks execution until resolved (Issue #1)', () => {
+    const errs = validateNodeParams({
+      id: 'g3',
+      adapterId: 'genie3',
+      label: 'Genie 3',
+      params: {
+        taskMode: 'unconditional',
+        unresolvedImportIssues: [
+          'Legacy CATH fold conditioning (cathCode="3.40.50") is not supported by Genie 3.',
+          'Legacy H-bond conditioning (hbondMode="ACCEPTOR") is not supported by Genie 3.',
+        ],
+      },
+    });
+    expect(errs).toHaveLength(2);
+    expect(errs[0]).toMatch(/CATH.*3\.40\.50/);
+    expect(errs[1]).toMatch(/H-bond.*ACCEPTOR/);
+
+    // Non-array malformed unresolvedImportIssues (e.g. object) also blocks cleanly with JSON representation
+    const objErrs = validateNodeParams({
+      id: 'g3',
+      adapterId: 'genie3',
+      label: 'Genie 3',
+      params: {
+        taskMode: 'unconditional',
+        unresolvedImportIssues: { field: 'cathCode' },
+      },
+    });
+    expect(objErrs).toHaveLength(1);
+    expect(objErrs[0]).toContain('{"field":"cathCode"}');
+
+    // Clearing unresolvedImportIssues removes the block
+    expect(
+      validateNodeParams({
+        id: 'g3',
+        adapterId: 'genie3',
+        label: 'Genie 3',
+        params: {
+          taskMode: 'unconditional',
+          unresolvedImportIssues: [],
+        },
+      }),
+    ).toEqual([]);
   });
 });

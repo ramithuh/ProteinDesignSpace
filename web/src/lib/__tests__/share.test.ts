@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { LOCALFOLD_MODEL_OPTIONS, WORKFLOW_PRESETS } from '$lib/engine/registry';
-import { defaultParamsForAdapter } from '$lib/engine/graph-utils';
+import { defaultParamsForAdapter, validateGraph } from '$lib/engine/graph-utils';
+import { computeUploadDigest } from '$lib/engine/param-validation';
+import { ExecutionScheduler } from '$lib/engine/scheduler';
 import {
   decodeHashToGraph,
   encodeGraphToHash,
@@ -138,11 +140,12 @@ describe('engine/share', () => {
     expect(decoded!.nodes.every((n) => n.position !== undefined)).toBe(true);
   });
 
-  it('strips huge pdbText (> 1500 chars) cleanly in both #p= and #g= modes while preserving small PDBs', async () => {
+  it('strips huge pdbText (> 1500 chars) in #p= and #g= without reverting to demo-bundle, records SHA-256 digest, and blocks until matching re-upload', async () => {
     const hugePdb = generateSampleHelixBundlePdb();
     expect(hugePdb.length).toBeGreaterThan(1500);
+    const expectedSha = computeUploadDigest(hugePdb);
 
-    // 1. Preset-diff mode
+    // 1. Preset-diff (#p=) mode
     const presetGraph = structuredClone(WORKFLOW_PRESETS.find((p) => p.id === 'pdb-refold-qc')!.graph);
     presetGraph.nodes[0].params.mode = 'custom';
     presetGraph.nodes[0].params.pdbText = hugePdb;
@@ -151,12 +154,33 @@ describe('engine/share', () => {
     const encPreset = await encodeGraphToHash(presetGraph);
     expect(encPreset.mode).toBe('preset-diff');
     expect(encPreset.strippedPdb).toBe(true);
-    expect(encPreset.length).toBeLessThan(200);
+    expect(encPreset.length).toBeLessThan(260);
     const decPreset = await decodeHashToGraph(encPreset.hash);
-    // Oversized pdbText strip resets mode to demo-bundle & default filename so shared link stays runnable
-    expect(decPreset!.nodes[0].params.mode).toBe('demo-bundle');
-    expect(decPreset!.nodes[0].params.filename).toBe('demo_3helix_53aa.pdb');
+    expect(decPreset).not.toBeNull();
+    // Must NOT silently revert to demo-bundle; keeps custom mode + digest metadata and blocks execution
+    expect(decPreset!.nodes[0].params.mode).toBe('custom');
+    expect(decPreset!.nodes[0].params.filename).toBe('huge_upload.pdb');
+    expect(decPreset!.nodes[0].params.expectedFilename).toBe('huge_upload.pdb');
+    expect(decPreset!.nodes[0].params.missingUpload).toBe(true);
+    expect(decPreset!.nodes[0].params.expectedPdbSha256).toBe(expectedSha);
     expect(decPreset!.nodes[0].params.pdbText).toBe('');
+    const presetErrs = validateGraph(decPreset!);
+    expect(presetErrs.length).toBeGreaterThan(0);
+    expect(presetErrs.join(' ')).toMatch(/huge_upload\.pdb/);
+    expect(presetErrs.join(' ')).toContain(expectedSha.slice(0, 12));
+
+    // ExecutionScheduler must refuse to run dependent downstream pipeline while upload is missing
+    const scheduler = new ExecutionScheduler();
+    await expect(scheduler.run(decPreset!, () => {})).rejects.toThrow(/huge_upload\.pdb/);
+
+    // Re-uploading a mismatched PDB stays blocked
+    const wrongPdb = hugePdb + '\nREMARK modified\n';
+    decPreset!.nodes[0].params.pdbText = wrongPdb;
+    expect(validateGraph(decPreset!).join(' ')).toMatch(/does not match expected custom upload/i);
+
+    // Re-uploading the exact matching PDB unblocks validation
+    decPreset!.nodes[0].params.pdbText = hugePdb;
+    expect(validateGraph(decPreset!)).toEqual([]);
 
     // 2. Compressed-DAG (#g=) mode
     const customGraph: WorkflowGraph = {
@@ -174,19 +198,58 @@ describe('engine/share', () => {
     const encCustom = await encodeGraphToHash(customGraph);
     expect(encCustom.mode).toBe('compressed-dag');
     expect(encCustom.strippedPdb).toBe(true);
-    expect(encCustom.length).toBeLessThan(200);
+    expect(encCustom.length).toBeLessThan(260);
     const decCustom = await decodeHashToGraph(encCustom.hash);
-    expect(decCustom!.nodes[0].params.mode).toBe('demo-bundle');
-    expect(decCustom!.nodes[0].params.filename).toBe('demo_3helix_53aa.pdb');
+    expect(decCustom).not.toBeNull();
+    expect(decCustom!.nodes[0].params.mode).toBe('custom');
+    expect(decCustom!.nodes[0].params.filename).toBe('big.pdb');
+    expect(decCustom!.nodes[0].params.expectedFilename).toBe('big.pdb');
+    expect(decCustom!.nodes[0].params.missingUpload).toBe(true);
+    expect(decCustom!.nodes[0].params.expectedPdbSha256).toBe(expectedSha);
     expect(decCustom!.nodes[0].params.pdbText).toBe('');
+    expect(validateGraph(decCustom!).join(' ')).toMatch(/big\.pdb/);
 
-    // 3. Small PDB (<= 1500 chars) is preserved
+    // Re-encoding an already-stripped graph preserves missing upload metadata
+    const reEncoded = await encodeGraphToHash(decCustom!);
+    expect(reEncoded.strippedPdb).toBe(true);
+    const reDecoded = await decodeHashToGraph(reEncoded.hash);
+    expect(reDecoded!.nodes[0].params.mode).toBe('custom');
+    expect(reDecoded!.nodes[0].params.expectedPdbSha256).toBe(expectedSha);
+
+    // Re-sharing a graph with malformed expectedPdbSha256 must NOT silently repair the digest
+    // across #p=, #g=, or YAML even when a large upload is present
+    const malformedPreset = structuredClone(presetGraph);
+    malformedPreset.nodes[0].params.expectedPdbSha256 = 'not-a-valid-sha';
+    const encMalformedP = await encodeGraphToHash(malformedPreset);
+    const decMalformedP = await decodeHashToGraph(encMalformedP.hash);
+    expect(decMalformedP!.nodes[0].params.expectedPdbSha256).toBe('not-a-valid-sha');
+    decMalformedP!.nodes[0].params.pdbText = hugePdb;
+    expect(validateGraph(decMalformedP!).join(' ')).toMatch(/Invalid expectedPdbSha256/i);
+
+    const malformedCustom = structuredClone(customGraph);
+    malformedCustom.nodes[0].params.expectedPdbSha256 = 'not-a-valid-sha';
+    const encMalformedG = await encodeGraphToHash(malformedCustom);
+    const decMalformedG = await decodeHashToGraph(encMalformedG.hash);
+    expect(decMalformedG!.nodes[0].params.expectedPdbSha256).toBe('not-a-valid-sha');
+    decMalformedG!.nodes[0].params.pdbText = hugePdb;
+    expect(validateGraph(decMalformedG!).join(' ')).toMatch(/Invalid expectedPdbSha256/i);
+
+    const malformedYamlParsed = parseRecipeToGraph(graphToYamlRecipe(malformedCustom));
+    expect(malformedYamlParsed.nodes[0].params.expectedPdbSha256).toBe('not-a-valid-sha');
+    malformedYamlParsed.nodes[0].params.pdbText = hugePdb;
+    expect(validateGraph(malformedYamlParsed).join(' ')).toMatch(/Invalid expectedPdbSha256/i);
+
+    // 3. Small PDB (<= 1500 chars) is preserved directly without missingUpload markers
     const smallPdb = 'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C  \nEND\n';
     customGraph.nodes[0].params.pdbText = smallPdb;
     const encSmall = await encodeGraphToHash(customGraph);
     expect(encSmall.strippedPdb).toBe(false);
     const decSmall = await decodeHashToGraph(encSmall.hash);
+    expect(decSmall!.nodes[0].params.mode).toBe('custom');
     expect(decSmall!.nodes[0].params.pdbText).toBe(smallPdb);
+    expect(decSmall!.nodes[0].params.missingUpload).toBeUndefined();
+    expect(decSmall!.nodes[0].params.expectedPdbSha256).toBeUndefined();
+    expect(validateGraph(decSmall!)).toEqual([]);
   });
 
   it('decodeHashToGraph returns null for empty, unknown preset, or malformed prefixes', async () => {
@@ -396,8 +459,10 @@ describe('engine/share', () => {
     expect(typeof decCond!.nodes[0].params.customSpecYaml).toBe('string');
     expect(decCond!.nodes[0].params.customSpecYaml).toBe(jsonOverride);
 
-    // 3. YAML strips >1500-char pdbText cleanly and resets mode so standalone YAML stays runnable
+    // 3. YAML strips >1500-char pdbText cleanly while preserving mode:'custom' + digest metadata,
+    // and full-JSON round-trips embedded uploads untouched
     const hugePdb = generateSampleHelixBundlePdb();
+    const expectedSha = computeUploadDigest(hugePdb);
     const pdbGraph: WorkflowGraph = {
       id: 'pdb-yaml-strip',
       name: 'PDB Strip',
@@ -413,8 +478,23 @@ describe('engine/share', () => {
     const pdbYaml = graphToYamlRecipe(pdbGraph);
     expect(pdbYaml).toContain('oversized inline PDB');
     const pdbParsed = parseRecipeToGraph(pdbYaml);
-    expect(pdbParsed.nodes[0].params.mode).toBe('demo-bundle');
+    expect(pdbParsed.nodes[0].params.mode).toBe('custom');
+    expect(pdbParsed.nodes[0].params.filename).toBe('big.pdb');
+    expect(pdbParsed.nodes[0].params.expectedFilename).toBe('big.pdb');
+    expect(pdbParsed.nodes[0].params.missingUpload).toBe(true);
+    expect(pdbParsed.nodes[0].params.expectedPdbSha256).toBe(expectedSha);
     expect(pdbParsed.nodes[0].params.pdbText).toBe('');
+    expect(validateGraph(pdbParsed).join(' ')).toMatch(/big\.pdb/);
+
+    // Full-JSON export/import preserves embedded custom upload completely untouched
+    const fullJson = serializeWorkflowJson(pdbGraph);
+    const jsonParsed = parseRecipeToGraph(fullJson);
+    expect(jsonParsed.nodes[0].params.mode).toBe('custom');
+    expect(jsonParsed.nodes[0].params.filename).toBe('big.pdb');
+    expect(jsonParsed.nodes[0].params.pdbText).toBe(hugePdb);
+    expect(jsonParsed.nodes[0].params.missingUpload).toBeUndefined();
+    expect(jsonParsed.nodes[0].params.expectedPdbSha256).toBeUndefined();
+    expect(validateGraph(jsonParsed)).toEqual([]);
 
     // 4. Rejects malformed non-JSON prose, missing nodes: section, duplicate IDs, and dangling wires
     expect(() => parseRecipeToGraph('')).toThrow(/empty/i);
@@ -509,5 +589,265 @@ describe('engine/share', () => {
     expect(migratedContig.nodes.map((n) => n.adapterId)).toEqual(['pdb-input', 'rfd4-proteina']);
     expect(migratedContig.nodes[1].params.mode).toBe('conditioned');
     expect(migratedContig.nodes[1].params.contig).toBe('10-20,A16-35,10-20');
+  });
+
+  it('records unresolvedImportIssues and blocks execution when legacy conditioner settings are unsupported by Genie 3 (Issue #1)', async () => {
+    const unsupportedCases: Array<{
+      name: string;
+      condParams: Record<string, unknown>;
+      expectedPattern: RegExp;
+    }> = [
+      {
+        name: 'CATH fold code',
+        condParams: { cathCode: '3.40.50' },
+        expectedPattern: /CATH.*3\.40\.50/i,
+      },
+      {
+        name: 'H-bond constraints',
+        condParams: { hbondMode: 'ACCEPTOR', hbondSelection: 'A/SAM/*/O2' },
+        expectedPattern: /H-bond.*ACCEPTOR/i,
+      },
+      {
+        name: 'partial diffusion',
+        condParams: { mode: 'partial', partialFraction: 0.5 },
+        expectedPattern: /partial diffusion.*0\.5/i,
+      },
+      {
+        name: 'custom JSON/YAML override',
+        condParams: { rawJsonOverride: '{"contig":"70-70"}' },
+        expectedPattern: /custom spec override.*rawJsonOverride/i,
+      },
+      {
+        name: 'customSpecYaml override',
+        condParams: { customSpecYaml: 'contig: 70-70' },
+        expectedPattern: /custom spec override.*customSpecYaml/i,
+      },
+      {
+        name: 'RFD4 taskPreset',
+        condParams: { taskPreset: 'ppi_pdl1' },
+        expectedPattern: /taskPreset.*ppi_pdl1/i,
+      },
+      {
+        name: 'unindexed motif',
+        condParams: { motifSpan: 'A16-35', unindexedMotif: true },
+        expectedPattern: /unindexed motif/i,
+      },
+      {
+        name: 'non-bare contig without lockChain or motifSpan',
+        condParams: { contig: '10-20,A16-35,10-20' },
+        expectedPattern: /contig.*10-20,A16-35,10-20/i,
+      },
+      {
+        name: 'binder with unsupported H-bond setting',
+        condParams: { lockChain: 'A', hotspots: 'A54', hbondMode: 'BOTH' },
+        expectedPattern: /H-bond.*BOTH/i,
+      },
+      {
+        name: 'combined lockChain + motifSpan into Genie 3',
+        condParams: { lockChain: 'A', motifSpan: 'A16-35' },
+        expectedPattern: /combined binder.*motif/i,
+      },
+      {
+        name: 'whitespace-separated RFD4 secondary-structure contig with lockChain',
+        condParams: { lockChain: 'A', contig: 'h1:16-16P l1:4-4P' },
+        expectedPattern: /secondary-structure.*not supported/i,
+      },
+      {
+        name: 'variable-length bare contig range into unconditional Genie 3',
+        condParams: { contig: '50-90' },
+        expectedPattern: /contig.*50-90/i,
+      },
+      {
+        name: 'nucleic-acid bare contig into Genie 3',
+        condParams: { contig: '70-70D' },
+        expectedPattern: /polymer-suffix.*not supported/i,
+      },
+      {
+        name: 'P-suffixed binder contig into Genie 3',
+        condParams: { lockChain: 'A', contig: 'A1-53,/0,120-120P' },
+        expectedPattern: /polymer-suffix.*not supported/i,
+      },
+      {
+        name: 'P-suffixed motif contig into Genie 3',
+        condParams: { motifSpan: 'A16-35', contig: '10-10P,A16-35,10-10P' },
+        expectedPattern: /polymer-suffix.*not supported/i,
+      },
+      {
+        name: 'bare contig with wired template into Genie 3',
+        condParams: { contig: '120-120' },
+        expectedPattern: /wired template.*automatic binder mode/i,
+      },
+    ];
+
+    const scheduler = new ExecutionScheduler();
+
+    for (const tc of unsupportedCases) {
+      const legacyYaml = [
+        'denovo: v1',
+        `name: ${JSON.stringify(`Legacy Genie3 ${tc.name}`)}`,
+        'nodes:',
+        '  pdb: {"model":"pdb-input","mode":"pdb-id","pdbId":"1PRW"}',
+        `  cond: ${JSON.stringify({ model: 'rfd4-conditioner', ...tc.condParams })}`,
+        '  g3: {"model":"genie3"}',
+        'wires:',
+        '  - pdb.structure -> cond.template',
+        '  - cond.condition -> g3.condition',
+      ].join('\n');
+
+      const migrated = parseRecipeToGraph(legacyYaml);
+      const genieNode = migrated.nodes.find((n) => n.id === 'g3')!;
+      expect(genieNode, tc.name).toBeDefined();
+      const issues = genieNode.params.unresolvedImportIssues as string[];
+      expect(Array.isArray(issues), tc.name).toBe(true);
+      expect(issues.length, tc.name).toBeGreaterThan(0);
+      expect(issues.join(' '), tc.name).toMatch(tc.expectedPattern);
+
+      // Must block validateGraph and ExecutionScheduler.run until explicitly resolved
+      const errs = validateGraph(migrated);
+      expect(errs.length, tc.name).toBeGreaterThan(0);
+      expect(errs.join(' '), tc.name).toMatch(tc.expectedPattern);
+      await expect(scheduler.run(migrated, () => {})).rejects.toThrow(tc.expectedPattern);
+    }
+
+    // unresolvedImportIssues survive compact #g= and YAML re-encoding until cleared
+    const cathMigrated = parseRecipeToGraph(
+      [
+        'denovo: v1',
+        'name: "Legacy CATH to Genie3"',
+        'nodes:',
+        '  cond: {"model":"rfd4-conditioner","cathCode":"3.40.50"}',
+        '  g3: {"model":"genie3"}',
+        'wires:',
+        '  - cond.condition -> g3.condition',
+      ].join('\n'),
+    );
+    const enc = await encodeGraphToHash(cathMigrated);
+    const dec = await decodeHashToGraph(enc.hash);
+    expect(validateGraph(dec!).join(' ')).toMatch(/CATH.*3\.40\.50/i);
+
+    const yamlRoundTrip = parseRecipeToGraph(graphToYamlRecipe(cathMigrated));
+    expect(validateGraph(yamlRoundTrip).join(' ')).toMatch(/CATH.*3\.40\.50/i);
+
+    // Clearing unresolvedImportIssues unblocks execution
+    yamlRoundTrip.nodes[0].params.unresolvedImportIssues = [];
+    expect(validateGraph(yamlRoundTrip)).toEqual([]);
+
+    // Supported Genie 3 binder migration remains completely clean with 0 issues
+    const supportedBinder = parseRecipeToGraph(
+      [
+        'denovo: v1',
+        'name: "Supported Genie3 Binder"',
+        'nodes:',
+        '  pdb: {"model":"pdb-input","mode":"pdb-id","pdbId":"5O45"}',
+        '  cond: {"model":"rfd4-conditioner","contig":"A17-132,/0,70-70","lockChain":"A","hotspots":"A54, A56"}',
+        '  g3: {"model":"genie3"}',
+        'wires:',
+        '  - pdb.structure -> cond.template',
+        '  - cond.condition -> g3.condition',
+      ].join('\n'),
+    );
+    expect(supportedBinder.nodes[1].params.unresolvedImportIssues).toBeUndefined();
+    expect(validateGraph(supportedBinder)).toEqual([]);
+
+    // Fixed bare legacy contig ("120-120") translates to Genie 3's effective length parameter (120, not default 80)
+    const bareFixedContig = parseRecipeToGraph(
+      [
+        'denovo: v1',
+        'name: "Legacy Bare Length Contig"',
+        'nodes:',
+        '  cond: {"model":"rfd4-conditioner","contig":"120-120"}',
+        '  g3: {"model":"genie3"}',
+        'wires:',
+        '  - cond.condition -> g3.condition',
+      ].join('\n'),
+    );
+    expect(bareFixedContig.nodes[0].adapterId).toBe('genie3');
+    expect(bareFixedContig.nodes[0].params.taskMode).toBe('unconditional');
+    expect(bareFixedContig.nodes[0].params.length).toBe(120);
+    expect(bareFixedContig.nodes[0].params.unresolvedImportIssues).toBeUndefined();
+    expect(validateGraph(bareFixedContig)).toEqual([]);
+
+    // YAML schema version validation and dotted node IDs in wires
+    expect(() =>
+      parseRecipeToGraph('denovo: v99\nnodes:\n  g1: {"model":"genie3"}\nwires:\n'),
+    ).toThrow(/Unsupported recipe schema version/);
+
+    const dottedGraph: WorkflowGraph = {
+      id: 'dotted-ids',
+      name: 'Dotted IDs',
+      nodes: [
+        { id: 'step.1', adapterId: 'pdb-input', params: defaultParamsForAdapter('pdb-input') },
+        { id: 'step.2', adapterId: 'web-protein-mpnn', params: defaultParamsForAdapter('web-protein-mpnn') },
+      ],
+      edges: [{ fromNode: 'step.1', fromPort: 'structure', toNode: 'step.2', toPort: 'structure' }],
+    };
+    const dottedParsed = parseRecipeToGraph(graphToYamlRecipe(dottedGraph));
+    expect(dottedParsed.edges).toEqual(dottedGraph.edges);
+
+    // Malformed non-array unresolvedImportIssues (e.g. object) must NOT be erased by #p=, #g=, or YAML re-sharing
+    const malformedPreset = structuredClone(WORKFLOW_PRESETS.find((p) => p.id === 'genie3-mpnn-af2')!.graph);
+    malformedPreset.nodes[0].params.unresolvedImportIssues = { field: 'cathCode', value: '3.40.50' };
+    const encMalformedP = await encodeGraphToHash(malformedPreset);
+    expect(encMalformedP.mode).toBe('preset-diff');
+    const decMalformedP = await decodeHashToGraph(encMalformedP.hash);
+    expect(validateGraph(decMalformedP!).join(' ')).toMatch(/cathCode/);
+
+    const malformedDag: WorkflowGraph = {
+      id: 'malformed-issues',
+      name: 'Malformed Issues',
+      nodes: [
+        {
+          id: 'g1',
+          adapterId: 'genie3',
+          params: {
+            ...defaultParamsForAdapter('genie3'),
+            unresolvedImportIssues: { field: 'cathCode', value: '3.40.50' },
+          },
+        },
+      ],
+      edges: [],
+    };
+    const encMalformedG = await encodeGraphToHash(malformedDag);
+    expect(encMalformedG.mode).toBe('compressed-dag');
+    const decMalformedG = await decodeHashToGraph(encMalformedG.hash);
+    expect(validateGraph(decMalformedG!).join(' ')).toMatch(/cathCode/);
+
+    const decMalformedYaml = parseRecipeToGraph(graphToYamlRecipe(malformedDag));
+    expect(validateGraph(decMalformedYaml).join(' ')).toMatch(/cathCode/);
+
+    // Existing unresolvedImportIssues on a legacy rfd4-conditioner must propagate to surviving RFD4 and Genie 3 nodes
+    const legacyCondWithIssueRfd4 = parseRecipeToGraph(
+      [
+        'denovo: v1',
+        'name: "Legacy Conditioner Issues RFD4"',
+        'nodes:',
+        '  cond: {"model":"rfd4-conditioner","contig":"70-70","unresolvedImportIssues":["Prior unsupported constraint X"]}',
+        '  gen: {"model":"rfd4-proteina"}',
+        'wires:',
+        '  - cond.condition -> gen.condition',
+      ].join('\n'),
+    );
+    expect(legacyCondWithIssueRfd4.nodes[0].adapterId).toBe('rfd4-proteina');
+    expect(legacyCondWithIssueRfd4.nodes[0].params.unresolvedImportIssues).toEqual([
+      'Prior unsupported constraint X',
+    ]);
+    expect(validateGraph(legacyCondWithIssueRfd4).join(' ')).toMatch(/Prior unsupported constraint X/);
+
+    const legacyCondWithIssueGenie = parseRecipeToGraph(
+      [
+        'denovo: v1',
+        'name: "Legacy Conditioner Issues Genie3"',
+        'nodes:',
+        '  pdb: {"model":"pdb-input","mode":"pdb-id","pdbId":"5O45"}',
+        '  cond: {"model":"rfd4-conditioner","contig":"A17-132,/0,70-70","lockChain":"A","unresolvedImportIssues":["Prior unsupported constraint Y"]}',
+        '  g3: {"model":"genie3"}',
+        'wires:',
+        '  - pdb.structure -> cond.template',
+        '  - cond.condition -> g3.condition',
+      ].join('\n'),
+    );
+    const genieSurviving = legacyCondWithIssueGenie.nodes.find((n) => n.id === 'g3')!;
+    expect(genieSurviving.params.unresolvedImportIssues).toEqual(['Prior unsupported constraint Y']);
+    expect(validateGraph(legacyCondWithIssueGenie).join(' ')).toMatch(/Prior unsupported constraint Y/);
   });
 });

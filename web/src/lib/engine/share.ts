@@ -3,6 +3,7 @@
 
 import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
 import { autoLayoutGraph, defaultParamsForAdapter, validateGraph } from './graph-utils';
+import { computeUploadDigest, isValidSha256Hex } from './param-validation';
 import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 
 const ADAPTER_TO_SHORT: Record<string, string> = {
@@ -70,41 +71,161 @@ async function inflateRaw(bytes: Uint8Array): Promise<string> {
   return new TextDecoder().decode(buf);
 }
 
+const UPLOAD_META_KEYS = new Set(['missingUpload', 'expectedPdbSha256', 'expectedFilename']);
+const PARAM_TYPE_HINTS: Record<string, unknown> = {
+  expectedPdbSha256: '',
+  expectedFilename: '',
+  missingUpload: false,
+};
+
+function formatUnresolvedIssueEntry(raw: unknown): string {
+  if (typeof raw === 'string') return raw.trim();
+  if (raw === undefined || raw === null) return '';
+  if (typeof raw === 'object') {
+    try {
+      return JSON.stringify(raw);
+    } catch {
+      return String(raw).trim();
+    }
+  }
+  return String(raw).trim();
+}
+
+function normalizeUnresolvedIssues(raw: unknown): string[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    const single = formatUnresolvedIssueEntry(raw);
+    return single ? [single] : [];
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    const text = formatUnresolvedIssueEntry(item);
+    if (text && !seen.has(text)) {
+      seen.add(text);
+      out.push(text);
+    }
+  }
+  return out;
+}
+
+function parseFixedBareProteinContig(contig: string): number | null {
+  const m = /^(\d+)(?:-(\d+))?$/.exec(contig.trim());
+  if (!m) return null;
+  const lo = Number(m[1]);
+  const hi = m[2] !== undefined ? Number(m[2]) : lo;
+  if (!Number.isInteger(lo) || !Number.isInteger(hi) || lo !== hi) return null;
+  return lo;
+}
+
+function hasRfd4OnlyContigSyntax(contig: string): boolean {
+  for (const rawTok of contig.split(/[,\s;]+/)) {
+    const tok = rawTok.trim();
+    if (!tok) continue;
+    // Secondary-structure labeled contig segment like "h1:16-16P"
+    if (/^[A-Za-z0-9_]+:\d+(?:-\d+)?[PRDN]$/i.test(tok)) return true;
+    // RFD4 polymer-typed contig suffix like "120-120P", "70-70D", "20-20R", "12-12N"
+    if (/^\d+(?:-\d+)?[PRDN]$/i.test(tok)) return true;
+    // Explicit ligand selector like "A:SAM" or "A:ZN"
+    if (/^[A-Za-z]+:[A-Za-z][A-Za-z0-9]{0,4}$/.test(tok)) return true;
+  }
+  return false;
+}
+
 function diffParams(
   adapterId: string,
   params: Record<string, unknown>,
   base?: Record<string, unknown>,
-  resetModeOnStrip = false,
+  stripLargePdb = false,
 ): { diff: Record<string, unknown>; strippedPdb: boolean } {
   const defaults = base ?? defaultParamsForAdapter(adapterId);
   const diff: Record<string, unknown> = {};
   let strippedPdb = false;
+  let strippedPdbText: string | null = null;
+  const effectivePdbMode =
+    adapterId === 'pdb-input' ? String(params.mode ?? defaults.mode ?? 'demo-bundle') : '';
+
   for (const [k, v] of Object.entries(params)) {
     if (FORBIDDEN_KEYS.has(k)) continue;
-    if (adapterId === 'pdb-input' && params.mode === 'pdb-id' && k === 'pdbText') {
-      continue;
-    }
-    if (k === 'pdbText' && typeof v === 'string' && v.length > 1500) {
+    if (adapterId === 'pdb-input') {
+      if (k === 'fetchedPdbId') continue;
+      if (effectivePdbMode === 'pdb-id' || effectivePdbMode === 'demo-bundle') {
+        if (k === 'pdbText' || UPLOAD_META_KEYS.has(k)) continue;
+      } else if (effectivePdbMode === 'custom') {
+        if (UPLOAD_META_KEYS.has(k)) continue;
+        if (k === 'pdbText' && typeof v === 'string' && v.length > 1500 && stripLargePdb) {
+          strippedPdb = true;
+          strippedPdbText = v;
+          continue;
+        }
+      }
+    } else if (k === 'pdbText' && typeof v === 'string' && v.length > 1500 && stripLargePdb) {
       strippedPdb = true;
       continue;
     }
-    if (adapterId === 'pdb-input' && k === 'fetchedPdbId') {
+
+    if (k === 'unresolvedImportIssues') {
+      const normalized = normalizeUnresolvedIssues(v);
+      const defaultIssues = normalizeUnresolvedIssues(defaults[k]);
+      if (JSON.stringify(normalized) !== JSON.stringify(defaultIssues)) {
+        diff[k] = normalized;
+      }
       continue;
     }
+
     if (JSON.stringify(v) !== JSON.stringify(defaults[k])) {
       diff[k] = v;
     }
   }
-  if (strippedPdb && resetModeOnStrip && adapterId === 'pdb-input' && params.mode !== 'pdb-id') {
-    // Do not leave a broken mode:'custom' with an empty pdbText in shared links
-    if (defaults.mode === 'demo-bundle') {
-      delete diff.mode;
-      delete diff.filename;
+
+  if (adapterId === 'pdb-input' && effectivePdbMode === 'custom') {
+    const existingShaRaw = String(params.expectedPdbSha256 ?? '').trim().toLowerCase();
+    const existingExpName = String(params.expectedFilename ?? '').trim();
+    const curFilename = String(params.filename ?? '').trim();
+
+    if (strippedPdb && stripLargePdb && strippedPdbText !== null) {
+      // Preserve mode:'custom' and record a deterministic SHA-256 digest so recipients
+      // cannot silently execute on demo-bundle coordinates.
+      if (defaults.mode !== 'custom') {
+        diff.mode = 'custom';
+      }
+      if (typeof defaults.pdbText === 'string' && defaults.pdbText.length > 0) {
+        diff.pdbText = '';
+      }
+      const computedSha = computeUploadDigest(strippedPdbText);
+      // Preserve any existing non-empty expectation (even if malformed or mismatched)
+      // so re-sharing cannot silently repair or overwrite an unresolved digest check.
+      const expectedSha = existingShaRaw ? existingShaRaw : computedSha;
+      diff.missingUpload = true;
+      diff.expectedPdbSha256 = expectedSha;
+      const expName = existingExpName || curFilename;
+      if (expName) {
+        diff.expectedFilename = expName;
+      }
     } else {
-      diff.mode = 'demo-bundle';
-      delete diff.filename;
+      const rawPdb = typeof params.pdbText === 'string' ? params.pdbText : '';
+      const hasMissingFlag = Boolean(params.missingUpload);
+      if (!rawPdb.trim() && (hasMissingFlag || existingShaRaw)) {
+        strippedPdb = true;
+        if (defaults.mode !== 'custom') {
+          diff.mode = 'custom';
+        }
+        if (hasMissingFlag) diff.missingUpload = true;
+        if (existingShaRaw) diff.expectedPdbSha256 = existingShaRaw;
+        const expName = existingExpName || curFilename;
+        if (expName) diff.expectedFilename = expName;
+      } else if (rawPdb.trim() && existingShaRaw) {
+        // Keep mismatched digest metadata if a small inline upload does not match the recorded digest.
+        const actualSha = computeUploadDigest(rawPdb);
+        if (!isValidSha256Hex(existingShaRaw) || actualSha !== existingShaRaw) {
+          if (hasMissingFlag) diff.missingUpload = true;
+          diff.expectedPdbSha256 = existingShaRaw;
+          if (existingExpName) diff.expectedFilename = existingExpName;
+        }
+      }
     }
   }
+
   return { diff, strippedPdb };
 }
 
@@ -334,45 +455,150 @@ function migrateLegacyConditioningGraph(graph: WorkflowGraph): WorkflowGraph {
       const hotspots = String(cp.hotspots ?? '').trim();
       const contig = String(cp.contig ?? '').trim();
       const cathCode = String(cp.cathCode ?? '').trim();
-      const hbondMode = String(cp.hbondMode ?? 'none');
+      const hbondMode = String(cp.hbondMode ?? 'none').trim() || 'none';
       const hbondSelection = String(cp.hbondSelection ?? '').trim();
-      const rawOverride = String(cp.rawJsonOverride ?? '').trim();
+      const unindexedMotif = Boolean(cp.unindexedMotif);
+      const rawJsonOverride = String(cp.rawJsonOverride ?? '').trim();
+      const customSpecYaml = String(cp.customSpecYaml ?? '').trim();
+      const rawOverride = rawJsonOverride || customSpecYaml;
+      const legacyMode = String(cp.mode ?? '').trim();
+      const hasPartialFraction =
+        cp.partialFraction !== undefined &&
+        cp.partialFraction !== null &&
+        String(cp.partialFraction).trim() !== '';
+      const isPartial =
+        legacyMode === 'partial' || Boolean(cp.partialDiffusion) || hasPartialFraction;
+      const isInverseFolding =
+        legacyMode === 'inverse-folding' || Boolean(cp.inverseFolding);
+      const sourceCondIssues = normalizeUnresolvedIssues(cp.unresolvedImportIssues);
 
       if (dst.adapterId === 'rfd4-proteina') {
+        const mergedIssues = normalizeUnresolvedIssues(dst.params.unresolvedImportIssues);
+        for (const issue of sourceCondIssues) {
+          if (!mergedIssues.includes(issue)) mergedIssues.push(issue);
+        }
         const inferredMode =
           tp !== 'custom'
             ? 'preset'
-            : lockChain
-              ? 'binder'
-              : motifSpan
-                ? 'motif'
-                : hbondMode !== 'none' || cathCode || rawOverride || contig
-                  ? 'conditioned'
-                  : String(dst.params.mode ?? 'unconditional') === 'conditioned'
-                    ? 'conditioned'
-                    : String(dst.params.mode ?? 'unconditional');
+            : isPartial
+              ? 'partial'
+              : isInverseFolding
+                ? 'inverse-folding'
+                : lockChain
+                  ? 'binder'
+                  : motifSpan
+                    ? 'motif'
+                    : hbondMode !== 'none' || cathCode || rawOverride || contig
+                      ? 'conditioned'
+                      : String(dst.params.mode ?? 'unconditional') === 'conditioned'
+                        ? 'conditioned'
+                        : String(dst.params.mode ?? 'unconditional');
         dst.params = {
           ...dst.params,
           mode: inferredMode,
           ...(tp !== 'custom' ? { presetId: tp } : {}),
+          ...(hasPartialFraction ? { partialFraction: Number(cp.partialFraction) } : {}),
           ...(contig ? { contig } : {}),
           ...(lockChain ? { lockChain } : {}),
           ...(hotspots ? { hotspots } : {}),
           ...(motifSpan ? { motifSpan } : {}),
-          ...(cp.unindexedMotif ? { unindexedMotif: true } : {}),
+          ...(unindexedMotif ? { unindexedMotif: true } : {}),
           ...(hbondMode !== 'none' ? { hbondMode, hbondSelection } : {}),
           ...(cathCode ? { cathCode } : {}),
           ...(rawOverride ? { customSpecYaml: rawOverride } : {}),
+          ...(mergedIssues.length > 0 ? { unresolvedImportIssues: mergedIssues } : {}),
         };
       } else {
         const inferredTaskMode = lockChain ? 'binder' : motifSpan ? 'motif' : 'unconditional';
+        const importIssues = normalizeUnresolvedIssues(dst.params.unresolvedImportIssues);
+        const addIssue = (msg: string) => {
+          if (!importIssues.includes(msg)) importIssues.push(msg);
+        };
+        for (const issue of sourceCondIssues) {
+          addIssue(issue);
+        }
+
+        if (tp !== 'custom') {
+          addIssue(
+            `Legacy taskPreset "${tp}" is not supported by Genie 3 (switch to RFD4-Proteina or configure a Genie 3 binder/motif task).`,
+          );
+        }
+        if (lockChain && motifSpan) {
+          addIssue(
+            `Legacy combined binder (lockChain="${lockChain}") and motif (motifSpan="${motifSpan}") conditioning cannot be run simultaneously in Genie 3 (choose binder or motif mode, or use RFD4-Proteina).`,
+          );
+        }
+        if (cathCode) {
+          addIssue(`Legacy CATH fold conditioning (cathCode="${cathCode}") is not supported by Genie 3.`);
+        }
+        if (hbondMode !== 'none' || hbondSelection) {
+          const detail = [
+            hbondMode !== 'none' ? `hbondMode="${hbondMode}"` : '',
+            hbondSelection ? `hbondSelection="${hbondSelection}"` : '',
+          ]
+            .filter(Boolean)
+            .join(', ');
+          addIssue(`Legacy H-bond conditioning (${detail}) is not supported by Genie 3.`);
+        }
+        if (isPartial) {
+          const detail = hasPartialFraction
+            ? `partialFraction=${String(cp.partialFraction)}`
+            : 'partial diffusion';
+          addIssue(`Legacy partial diffusion (${detail}) is not supported by Genie 3.`);
+        }
+        if (isInverseFolding) {
+          addIssue('Legacy inverse folding setting is not supported by Genie 3.');
+        }
+        if (unindexedMotif) {
+          addIssue('Legacy unindexed motif placement (unindexedMotif=true) is not supported by Genie 3.');
+        }
+        if (rawOverride) {
+          const fieldName = rawJsonOverride ? 'rawJsonOverride' : 'customSpecYaml';
+          addIssue(`Legacy custom spec override (${fieldName}) is not supported by Genie 3.`);
+        }
+        if (hotspots && inferredTaskMode !== 'binder') {
+          addIssue(
+            `Legacy hotspots "${hotspots}" require binder mode (lockChain) in Genie 3 and cannot be represented in "${inferredTaskMode}" mode.`,
+          );
+        }
+
+        let translatedLength: number | undefined;
+        const hasTemplateContext =
+          Boolean(inTplEdge) || edges.some((e) => e.toNode === dst.id && e.toPort === 'structure');
+        if (contig) {
+          if (hasRfd4OnlyContigSyntax(contig)) {
+            addIssue(
+              `Legacy contig "${contig}" uses RFD4 polymer-suffix, secondary-structure, or ligand syntax not supported by Genie 3.`,
+            );
+          } else if (inferredTaskMode === 'unconditional') {
+            const fixedLen = parseFixedBareProteinContig(contig);
+            if (fixedLen !== null) {
+              if (hasTemplateContext) {
+                // Wiring a template into unconditional Genie 3 triggers automatic binder conditioning in genie3.worker.ts.
+                addIssue(
+                  `Legacy bare contig "${contig}" with a wired template structure would silently switch Genie 3 into automatic binder mode (disconnect the template for unconditional length ${fixedLen}, or set binder lockChain / motifSpan).`,
+                );
+              } else {
+                // Translate fixed bare monomer contigs (e.g. "120-120") into Genie 3's effective length parameter.
+                translatedLength = fixedLen;
+              }
+            } else {
+              addIssue(
+                `Legacy contig "${contig}" cannot be mapped automatically to an unconditional Genie 3 task (set binder lockChain or motifSpan, pick a fixed length, or use RFD4-Proteina).`,
+              );
+            }
+          }
+        }
+
         dst.params = {
           ...dst.params,
           taskMode: inferredTaskMode,
+          ...(translatedLength !== undefined ? { length: translatedLength } : {}),
           ...(contig ? { contig } : {}),
           ...(lockChain ? { lockChain } : {}),
           ...(hotspots ? { hotspots } : {}),
           ...(motifSpan ? { motifSpan } : {}),
+          ...(importIssues.length > 0 ? { unresolvedImportIssues: importIssues } : {}),
         };
       }
 
@@ -437,7 +663,12 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
         continue;
       }
       const defaults = defaultParamsForAdapter(node.adapterId);
-      const templateVal = node.params[paramKey] !== undefined ? node.params[paramKey] : defaults[paramKey];
+      const templateVal =
+        node.params[paramKey] !== undefined
+          ? node.params[paramKey]
+          : defaults[paramKey] !== undefined
+            ? defaults[paramKey]
+            : PARAM_TYPE_HINTS[paramKey];
       node.params[paramKey] = parseParamValue(v, templateVal);
     }
     return normalizeWorkflowGraph(g, preset.id, preset.name, false);
@@ -514,7 +745,9 @@ export function graphToYamlRecipe(graph: WorkflowGraph): string {
     nodeLines.push(`  ${n.id}: ${JSON.stringify(kv)}`);
   }
   if (anyStrippedPdb) {
-    lines.push(`# Note: oversized inline PDB (>1500 chars) omitted; use Full JSON or Export JSON to preserve it`);
+    lines.push(
+      `# Note: oversized inline PDB (>1500 chars) omitted; re-upload matching structure or use Full JSON to preserve it`,
+    );
   }
   lines.push(`nodes:`);
   lines.push(...nodeLines);
@@ -555,7 +788,13 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
       continue;
     }
     if (section === 'none') {
-      if (line.startsWith('denovo:')) continue;
+      if (line.startsWith('denovo:')) {
+        const ver = line.slice(7).trim().replace(/^['"]|['"]$/g, '');
+        if (ver !== 'v1') {
+          throw new Error(`Unsupported recipe schema version "${ver || '(empty)'}" (supported: v1)`);
+        }
+        continue;
+      }
       if (line.startsWith('name:')) {
         const val = line.slice(5).trim();
         try {
@@ -609,7 +848,7 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
       });
     } else if (section === 'wires') {
       const clean = line.replace(/^-\s*/, '').trim();
-      const m = /^([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)\s*->\s*([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)$/.exec(clean);
+      const m = /^([a-zA-Z0-9_.-]+)\.([a-zA-Z0-9_-]+)\s*->\s*([a-zA-Z0-9_.-]+)\.([a-zA-Z0-9_-]+)$/.exec(clean);
       if (!m) throw new Error(`Invalid wire syntax: "${line}" (expected "a.port -> b.port")`);
       edges.push({ fromNode: m[1], fromPort: m[2], toNode: m[3], toPort: m[4] });
     }
