@@ -203,7 +203,7 @@ describe('engine/catalog & biologist terminology', () => {
       label: lfSub.insert.label,
     });
     const boltzNode = rBoltz.graph.nodes.find((n) => n.id === rBoltz.nodeId)!;
-    expect(boltzNode.label).toBe('LocalFold (Boltz-2)');
+    expect(boltzNode.label).toBe('Boltz-2');
     expect(boltzNode.params.model).toBe('boltz2');
     expect(boltzNode.params.recycles).toBe(1);
     expect(boltzNode.params.diffusionSteps).toBe(25);
@@ -213,20 +213,20 @@ describe('engine/catalog & biologist terminology', () => {
     ]);
     expect(validateGraph(rBoltz.graph)).toEqual([]);
 
-    // 2. Label deduplication: second Boltz-2 gets #2, distinct RF3 stays unnumbered
+    // 2. Label deduplication: second Boltz-2 gets #2, distinct RoseTTAFold 3 stays unnumbered
     const rBoltz2 = insertBlockSmart(rBoltz.graph, 'localfold-af2', 'seq_1', undefined, {
       autoCommit: false,
       params: { model: 'boltz2' },
-      label: 'LocalFold (Boltz-2)',
+      label: 'Boltz-2',
     });
-    expect(rBoltz2.graph.nodes.find((n) => n.id === rBoltz2.nodeId)!.label).toBe('LocalFold (Boltz-2) #2');
+    expect(rBoltz2.graph.nodes.find((n) => n.id === rBoltz2.nodeId)!.label).toBe('Boltz-2 #2');
 
     const rRf3 = insertBlockSmart(rBoltz2.graph, 'localfold-af2', 'seq_1', undefined, {
       autoCommit: false,
       params: { model: 'rosettafold3' },
-      label: 'LocalFold (RF3)',
+      label: 'RoseTTAFold 3',
     });
-    expect(rRf3.graph.nodes.find((n) => n.id === rRf3.nodeId)!.label).toBe('LocalFold (RF3)');
+    expect(rRf3.graph.nodes.find((n) => n.id === rRf3.nodeId)!.label).toBe('RoseTTAFold 3');
 
     // 3. Insert ProteinMPNN variants (SolubleMPNN & CA-only)
     const rSol = insertBlockSmart(base, 'web-protein-mpnn', undefined, { x: 300, y: 200 }, {
@@ -306,5 +306,32 @@ describe('engine/catalog & biologist terminology', () => {
     for (const s of userFacingStrings) {
       expect(s, `Forbidden token found in user-facing string: "${s}"`).not.toMatch(FORBIDDEN);
     }
+  });
+
+  it('uses model-first labels for Structure Prediction blocks and qualifies SolubleMPNN recommendation', () => {
+    const predCat = CATALOG_CATEGORIES.find((c) => c.id === 'prediction')!;
+    const predItems = predCat.subGroups.flatMap((g) => g.items);
+    for (const item of predItems) {
+      expect(item.insert.label).toBeTruthy();
+      expect(item.insert.label).not.toMatch(/^LocalFold\b/);
+    }
+    expect(predItems.find((i) => i.key === 'monomer')?.insert.label).toBe('AF2 Model 1');
+    expect(predItems.find((i) => i.key === 'multimer')?.insert.label).toBe('AF2-Multimer 1');
+    expect(predItems.find((i) => i.key === 'rosettafold3')?.insert.label).toBe('RoseTTAFold 3');
+    expect(predItems.find((i) => i.key === 'boltz2')?.insert.label).toBe('Boltz-2');
+    expect(predItems.find((i) => i.key === 'af3')?.insert.label).toBe('AlphaFold 3');
+    expect(predItems.find((i) => i.key === 'openbind0')?.insert.label).toBe('OpenBind-0');
+
+    const branchPreset = WORKFLOW_PRESETS.find((p) => p.id === 'rfd4-branch-compare')!;
+    expect(branchPreset.graph.nodes.find((n) => n.id === 'fold_mpnn')?.label).toBe('AF2 Model 1 (MPNN)');
+    expect(branchPreset.graph.nodes.find((n) => n.id === 'fold_native')?.label).toBe('AF2 Model 1 (Native)');
+
+    const crossFoldPreset = WORKFLOW_PRESETS.find((p) => p.id === 'rfd4-af2-vs-rf3')!;
+    expect(crossFoldPreset.graph.nodes.find((n) => n.id === 'fold_af2')?.label).toBe('AF2 Model 1');
+    expect(crossFoldPreset.graph.nodes.find((n) => n.id === 'fold_rf3')?.label).toBe('RoseTTAFold 3');
+
+    const solOpt = MPNN_VARIANT_OPTIONS.find((v) => v.id === 'solublempnn')!;
+    expect(solOpt.description).toContain('recommended for soluble proteins');
+    expect(solOpt.description).not.toMatch(/\(recommended\)/);
   });
 });

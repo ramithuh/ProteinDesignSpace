@@ -88,7 +88,7 @@ function buildSubGroupsForAdapter(adapterId: string): {
       insert: {
         adapterId: 'localfold-af2',
         params: { model: opt.id },
-        label: `LocalFold (${opt.shortLabel})`,
+        label: opt.shortLabel,
       },
       searchBlob: [
         opt.id,
@@ -113,7 +113,7 @@ function buildSubGroupsForAdapter(adapterId: string): {
       insert: {
         adapterId: 'localfold-af2',
         params: { model: opt.id },
-        label: `LocalFold (${opt.shortLabel})`,
+        label: opt.shortLabel,
       },
       searchBlob: [
         opt.id,
@@ -141,7 +141,7 @@ function buildSubGroupsForAdapter(adapterId: string): {
       insert: {
         adapterId: 'localfold-af2',
         params: { model: opt.id },
-        label: `LocalFold (${opt.shortLabel})`,
+        label: opt.shortLabel,
       },
       searchBlob: [
         opt.id,

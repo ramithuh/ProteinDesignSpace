@@ -51,7 +51,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         seed: 42,
         presetId: 'custom_cath_monomer',
         partialFraction: 0.5,
-        contig: '70-70',
+        contig: '',
         lockChain: '',
         hotspots: '',
         motifSpan: '',

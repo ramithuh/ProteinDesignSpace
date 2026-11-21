@@ -105,6 +105,13 @@ describe('engine/registry & engine/graph-utils', () => {
     expect(validateGraph(optionalOnly)).toEqual([]);
   });
 
+  it('defaults rfd4-proteina contig to empty string (length: 70) so switching to binder/motif mode is not poisoned by 70-70', () => {
+    const rfd4Defaults = defaultParamsForAdapter('rfd4-proteina');
+    expect(rfd4Defaults.mode).toBe('unconditional');
+    expect(rfd4Defaults.length).toBe(70);
+    expect(rfd4Defaults.contig).toBe('');
+  });
+
   it('validateGraph rejects duplicate node IDs, cycles, self-loops, port mismatches, unknown ports, and duplicate target ports', () => {
     // 1. Duplicate node IDs
     const dupIds: WorkflowGraph = {

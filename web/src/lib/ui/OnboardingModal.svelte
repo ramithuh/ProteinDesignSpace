@@ -146,7 +146,7 @@
         const holeEls: RectBox[] = [box];
         if (addBtn) holeEls.push(toPaddedBox(addBtn, 4));
         const mainPane = catalogShell?.querySelector<HTMLElement>('.catalog-main');
-        const flyoutPane = catalogShell?.querySelector<HTMLElement>('.flyout');
+        const flyoutPane = catalogShell?.querySelector<HTMLElement>('.catalog-flyout');
         if (mainPane) holeEls.push(toPaddedBox(mainPane, 4));
         if (flyoutPane) holeEls.push(toPaddedBox(flyoutPane, 4));
         interactiveHole = unionRects(holeEls);
@@ -160,7 +160,7 @@
         const holeEls: RectBox[] = [box];
         if (addBtn) holeEls.push(toPaddedBox(addBtn, 4));
         const mainPane = catalogShell?.querySelector<HTMLElement>('.catalog-main');
-        const flyoutPane = catalogShell?.querySelector<HTMLElement>('.flyout');
+        const flyoutPane = catalogShell?.querySelector<HTMLElement>('.catalog-flyout');
         if (mainPane) holeEls.push(toPaddedBox(mainPane, 4));
         if (flyoutPane) holeEls.push(toPaddedBox(flyoutPane, 4));
         interactiveHole = unionRects(holeEls);

@@ -330,7 +330,7 @@ describe('engine/share', () => {
           {
             id: 'fold',
             adapterId: 'localfold-af2',
-            label: `LocalFold (${opt.shortLabel})`,
+            label: opt.shortLabel,
             params: { ...defaultParamsForAdapter('localfold-af2'), model: opt.id },
           },
         ],
@@ -340,7 +340,7 @@ describe('engine/share', () => {
       const parsed = parseRecipeToGraph(yaml);
       const foldNode = parsed.nodes.find((n) => n.id === 'fold')!;
       expect(foldNode.adapterId).toBe('localfold-af2');
-      expect(foldNode.label).toBe(`LocalFold (${opt.shortLabel})`);
+      expect(foldNode.label).toBe(opt.shortLabel);
       expect(foldNode.params.model).toBe(opt.id);
     }
 
@@ -449,5 +449,65 @@ describe('engine/share', () => {
     expect(decG!.nodes[0].adapterId).toBe('genie3');
     expect(decG!.nodes[0].params.length).toBe(96);
     expect(parseRecipeToGraph(serializeWorkflowJson(genieDag)).nodes[0].params.length).toBe(96);
+  });
+
+  it('parses unknown boolean params (userEditedTask=false), preserves custom labels in #p=, suppresses pdb-id strippedPdb warning, and migrates contig-only conditioner to conditioned mode', async () => {
+    // 1. Unknown boolean params in #p= decode to actual booleans, not truthy strings like "false"
+    const decodedBool = await decodeHashToGraph(
+      '#p=rfd4-refold-native&gen.userEditedTask=false&gen.customFlag=true',
+    );
+    expect(decodedBool).not.toBeNull();
+    expect(decodedBool!.nodes[0].params.userEditedTask).toBe(false);
+    expect(typeof decodedBool!.nodes[0].params.userEditedTask).toBe('boolean');
+    expect(decodedBool!.nodes[0].params.customFlag).toBe(true);
+    expect(typeof decodedBool!.nodes[0].params.customFlag).toBe('boolean');
+
+    // 2. Custom node.label is preserved across #p= roundtrip when changed from preset default
+    const renamed = structuredClone(WORKFLOW_PRESETS.find((p) => p.id === 'rfd4-refold-native')!.graph);
+    renamed.nodes[1].label = 'Boltz-2 (custom)';
+    renamed.nodes[1].params.model = 'boltz2';
+    const encRenamed = await encodeGraphToHash(renamed);
+    expect(encRenamed.mode).toBe('preset-diff');
+    expect(encRenamed.hash).toContain('fold._label=');
+    const decRenamed = await decodeHashToGraph(encRenamed.hash);
+    expect(decRenamed).not.toBeNull();
+    expect(decRenamed!.nodes[1].label).toBe('Boltz-2 (custom)');
+    expect(decRenamed!.nodes[1].params.model).toBe('boltz2');
+    expect(decRenamed!.nodes[1].params._label).toBeUndefined();
+
+    // 3. Cached >1500-char pdbText on mode === 'pdb-id' does NOT trigger strippedPdb warning in URL or YAML
+    const hugePdb = generateSampleHelixBundlePdb();
+    const pdbIdGraph = structuredClone(WORKFLOW_PRESETS.find((p) => p.id === 'pdb-refold-qc')!.graph);
+    pdbIdGraph.nodes[0].params.mode = 'pdb-id';
+    pdbIdGraph.nodes[0].params.pdbId = '1PRW';
+    pdbIdGraph.nodes[0].params.pdbText = hugePdb;
+
+    const encPdbId = await encodeGraphToHash(pdbIdGraph);
+    expect(encPdbId.strippedPdb).toBe(false);
+    const decPdbId = await decodeHashToGraph(encPdbId.hash);
+    expect(decPdbId!.nodes[0].params.mode).toBe('pdb-id');
+    expect(decPdbId!.nodes[0].params.pdbId).toBe('1PRW');
+
+    const yamlPdbId = graphToYamlRecipe(pdbIdGraph);
+    expect(yamlPdbId).not.toContain('oversized inline PDB');
+    expect(yamlPdbId).toContain('"mode":"pdb-id"');
+    expect(yamlPdbId).toContain('"pdbId":"1PRW"');
+
+    // 4. Legacy rfd4-conditioner with contig-only migrates into RFD4 mode: 'conditioned' (not 'unconditional')
+    const legacyContigOnly = [
+      'denovo: v1',
+      'name: "Legacy Contig Only"',
+      'nodes:',
+      '  pdb: {"model":"pdb-input","mode":"pdb-id","pdbId":"1PRW"}',
+      '  cond: {"model":"rfd4-conditioner","contig":"10-20,A16-35,10-20"}',
+      '  gen: {"model":"rfd4-proteina"}',
+      'wires:',
+      '  - pdb.structure -> cond.template',
+      '  - cond.condition -> gen.condition',
+    ].join('\n');
+    const migratedContig = parseRecipeToGraph(legacyContigOnly);
+    expect(migratedContig.nodes.map((n) => n.adapterId)).toEqual(['pdb-input', 'rfd4-proteina']);
+    expect(migratedContig.nodes[1].params.mode).toBe('conditioned');
+    expect(migratedContig.nodes[1].params.contig).toBe('10-20,A16-35,10-20');
   });
 });

@@ -263,8 +263,8 @@
   function handleCategoryClick(entry: FilteredCategoryEntry, flatIdx: number) {
     if (disabled) return;
     activeIdx = flatIdx;
-    // If single option (e.g. Evaluation -> scRMSD/scTM) or narrowed search -> insert directly!
-    if (entry.matchingSubItems.length === 1 || (query.trim() && entry.hasNarrowedSubMatch && entry.matchingSubItems.length > 0)) {
+    // Direct-insert only when there is a single unambiguous option; otherwise open & pin the flyout
+    if (entry.matchingSubItems.length === 1) {
       onInsert(entry.matchingSubItems[0].insert);
       return;
     }
@@ -497,7 +497,7 @@
               {@const subIdx = visibleFlyoutSubs.indexOf(sub)}
               {@const isSubActive =
                 (focusPane === 'flyout' && subIdx === activeSubIdx) ||
-                (focusPane === 'main' && Boolean(query.trim()) && flyoutEntry.hasNarrowedSubMatch && subIdx === 0)}
+                (focusPane === 'main' && Boolean(query.trim()) && flyoutEntry.matchingSubItems.length === 1 && subIdx === 0)}
               <button
                 id={`cat-sub-${flyoutEntry.category.id}-${sub.key}`}
                 type="button"

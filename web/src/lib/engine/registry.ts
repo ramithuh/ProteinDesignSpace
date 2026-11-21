@@ -186,7 +186,7 @@ export const MPNN_VARIANT_OPTIONS: MpnnVariantMeta[] = [
     modelName: 'v_48_020',
     label: 'SolubleMPNN',
     shortLabel: 'SolubleMPNN',
-    description: 'Soluble-surface optimized sequence design (recommended)',
+    description: 'Soluble-surface optimized sequence design (recommended for soluble proteins)',
     approxMB: 10,
     license: 'MIT',
   },
@@ -233,14 +233,14 @@ export const LOCALFOLD_MODEL_OPTIONS: LocalFoldModelMeta[] = [
   { id: 'multimer-3', label: 'AlphaFold2-Multimer v3 · Model 3', shortLabel: 'AF2-Multimer 3', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0' },
   { id: 'multimer-4', label: 'AlphaFold2-Multimer v3 · Model 4', shortLabel: 'AF2-Multimer 4', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0' },
   { id: 'multimer-5', label: 'AlphaFold2-Multimer v3 · Model 5', shortLabel: 'AF2-Multimer 5', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0' },
-  { id: 'rosettafold3', label: 'RoseTTAFold3 (RF3)', shortLabel: 'RF3', family: 'af3', approxMB: 266, license: 'BSD-3-Clause' },
+  { id: 'rosettafold3', label: 'RoseTTAFold3 (RF3)', shortLabel: 'RoseTTAFold 3', family: 'af3', approxMB: 266, license: 'BSD-3-Clause' },
   { id: 'boltz2', label: 'Boltz-2', shortLabel: 'Boltz-2', family: 'af3', approxMB: 364, license: 'MIT' },
   { id: 'openbind0', label: 'OpenBind-0 (OpenFold3 v0.5.0)', shortLabel: 'OpenBind-0', family: 'af3', approxMB: 265, license: 'Apache-2.0' },
   { id: 'protenix2', label: 'Protenix-v2', shortLabel: 'Protenix-v2', family: 'af3', approxMB: 334, license: 'Apache-2.0' },
   { id: 'opendde', label: 'OpenDDE', shortLabel: 'OpenDDE', family: 'af3', approxMB: 473, license: 'Apache-2.0' },
   { id: 'mol1', label: 'Mol-1', shortLabel: 'Mol-1', family: 'af3', approxMB: 510, license: 'Apache-2.0' },
   { id: 'intellifold2', label: 'IntelliFold-2', shortLabel: 'IntelliFold-2', family: 'af3', approxMB: 612, license: 'Apache-2.0' },
-  { id: 'af3', label: 'AlphaFold 3 (Non-Commercial)', shortLabel: 'AF3', family: 'af3', approxMB: 265, license: 'AF3 Non-Commercial', nonCommercial: true },
+  { id: 'af3', label: 'AlphaFold 3 (Non-Commercial)', shortLabel: 'AlphaFold 3', family: 'af3', approxMB: 265, license: 'AF3 Non-Commercial', nonCommercial: true },
 ];
 
 export interface PresetDefinition {
@@ -278,7 +278,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold',
           adapterId: 'localfold-af2',
-          label: 'LocalFold',
+          label: 'AF2 Model 1',
           params: { recycles: 1, maxSequences: 1, seed: 0 },
         },
         {
@@ -327,7 +327,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold',
           adapterId: 'localfold-af2',
-          label: 'LocalFold',
+          label: 'AF2 Model 1',
           params: { model: 'monomer', recycles: 1, maxSequences: 2, seed: 0 },
         },
         {
@@ -377,7 +377,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold',
           adapterId: 'localfold-af2',
-          label: 'LocalFold',
+          label: 'AF2 Model 1',
           params: { recycles: 1, maxSequences: 2, seed: 0 },
         },
         {
@@ -434,7 +434,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold',
           adapterId: 'localfold-af2',
-          label: 'LocalFold',
+          label: 'AF2 Model 1',
           params: { recycles: 1, maxSequences: 2, seed: 0 },
         },
         {
@@ -479,7 +479,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold_mpnn',
           adapterId: 'localfold-af2',
-          label: 'LocalFold (MPNN)',
+          label: 'AF2 Model 1 (MPNN)',
           params: { recycles: 1, maxSequences: 2, seed: 0 },
           position: { x: 640, y: 194 },
         },
@@ -493,7 +493,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold_native',
           adapterId: 'localfold-af2',
-          label: 'LocalFold (Native)',
+          label: 'AF2 Model 1 (Native)',
           params: { recycles: 1, maxSequences: 1, seed: 0 },
           position: { x: 340, y: 368 },
         },
@@ -554,7 +554,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold',
           adapterId: 'localfold-af2',
-          label: 'LocalFold',
+          label: 'AF2 Model 1',
           params: { recycles: 1, maxSequences: 1, seed: 0 },
           position: { x: 340, y: 194 },
         },
@@ -593,7 +593,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold_af2',
           adapterId: 'localfold-af2',
-          label: 'LocalFold (AF2)',
+          label: 'AF2 Model 1',
           params: { model: 'monomer', recycles: 1, diffusionSteps: 25, maxSequences: 1, seed: 0 },
           position: { x: 350, y: 24 },
         },
@@ -607,7 +607,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold_rf3',
           adapterId: 'localfold-af2',
-          label: 'LocalFold (RF3)',
+          label: 'RoseTTAFold 3',
           params: { model: 'rosettafold3', recycles: 1, diffusionSteps: 25, maxSequences: 1, seed: 0 },
           position: { x: 350, y: 230 },
         },

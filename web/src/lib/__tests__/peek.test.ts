@@ -128,6 +128,43 @@ describe('peek helpers', () => {
     expect(findContextStructure(mpnnPreset, 'mpnn', outputsByNode)).toBe(struct);
   });
 
+  it('findContextStructure prioritizes incoming structure edges over folds edges on auto-wired scorers', () => {
+    const designedBackbone: StructureArtifact = {
+      ...makeDummyStructure('gen-backbone'),
+      sourceModelId: 'rfd4-proteina',
+      trajectoryPdb: 'MODEL        1\nATOM      1  CA  MET A   1       0.000   0.000   0.000  1.00 90.00           C\nENDMDL\n',
+    };
+    const refoldedStruct: StructureArtifact = {
+      ...makeDummyStructure('lf-refold'),
+      sourceModelId: 'localfold-af2',
+    };
+
+    // Simulate auto-wired edge order where fold.folds -> score.folds precedes gen.structure -> score.structure
+    const autoWiredGraph = {
+      id: 'auto-wired-scorer',
+      name: 'Auto-Wired Scorer',
+      nodes: [
+        { id: 'gen', adapterId: 'rfd4-proteina', label: 'RFD4-Proteina', params: {} },
+        { id: 'fold', adapterId: 'localfold-af2', label: 'AF2 Model 1', params: {} },
+        { id: 'score', adapterId: 'designability-scorer', label: 'scRMSD / scTM', params: {} },
+      ],
+      edges: [
+        { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+      ],
+    };
+
+    const outputsByNode: Record<string, Record<string, CanonicalArtifact>> = {
+      gen: { structure: designedBackbone, sequences: makeDummySeqSet('q-gen') },
+      fold: { structure: refoldedStruct },
+    };
+
+    const resolved = findContextStructure(autoWiredGraph, 'score', outputsByNode);
+    expect(resolved).toBe(designedBackbone);
+    expect(resolved?.trajectoryPdb).toBeDefined();
+  });
+
   it('analyzeSequence flags poly-ALA collapse & unknown X and computes sequence recovery', () => {
     const polyAla = analyzeSequence('A'.repeat(50));
     expect(polyAla.uniqueAaCount).toBe(1);

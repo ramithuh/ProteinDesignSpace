@@ -34,15 +34,51 @@
     parseErr = null;
   }
 
+  function yamlNodeExplicitlySetsMode(yamlText: string, nodeId: string): boolean {
+    const trimmed = yamlText.trim();
+    if (!trimmed || trimmed.startsWith('{')) return true;
+    let inNodes = false;
+    for (const rawLine of trimmed.split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      if (line === 'nodes:') {
+        inNodes = true;
+        continue;
+      }
+      if (line === 'wires:') {
+        inNodes = false;
+        continue;
+      }
+      if (!inNodes) continue;
+      const colon = line.indexOf(':');
+      if (colon <= 0) continue;
+      if (line.slice(0, colon).trim() !== nodeId) continue;
+      try {
+        const obj = JSON.parse(line.slice(colon + 1).trim()) as Record<string, unknown>;
+        return Object.hasOwn(obj, 'mode');
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
   function applyEdits() {
     parseErr = null;
     try {
       const next = parseRecipeToGraph(editorText);
       // When applying a YAML recipe that omitted an oversized inline pdbText (>1500 chars),
-      // restore the canvas node's existing custom PDB so editing another param never wipes it.
+      // restore the canvas node's existing custom PDB ONLY if the parsed node is still in
+      // default 'demo-bundle' mode (not when the user switched to 'pdb-id' or explicitly set mode).
       const prevById = new Map(graph.nodes.map((n) => [n.id, n]));
       const mergedNodes = next.nodes.map((n) => {
-        if (format === 'yaml' && n.adapterId === 'pdb-input' && !String(n.params.pdbText ?? '').trim()) {
+        if (
+          format === 'yaml' &&
+          n.adapterId === 'pdb-input' &&
+          n.params.mode === 'demo-bundle' &&
+          !String(n.params.pdbText ?? '').trim() &&
+          !yamlNodeExplicitlySetsMode(editorText, n.id)
+        ) {
           const prev = prevById.get(n.id);
           if (
             prev?.adapterId === 'pdb-input' &&

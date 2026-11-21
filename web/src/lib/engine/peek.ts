@@ -6,6 +6,7 @@ import type {
   CanonicalArtifact,
   PortType,
   StructureArtifact,
+  WorkflowEdge,
   WorkflowGraph,
 } from './types';
 
@@ -163,8 +164,19 @@ export function findContextStructure(
         if (art.kind === 'StructureArtifact') return art;
       }
     }
-    for (const e of graph.edges) {
-      if (e.toNode === cur && !visited.has(e.fromNode)) {
+    const incoming = graph.edges.filter((e) => e.toNode === cur && !visited.has(e.fromNode));
+    // Prioritize incoming `structure` edges over `folds` edges so auto-wired Scorers
+    // (where `fold -> score` may precede `gen -> score`) resolve the designed backbone
+    // (preserving `trajectoryPdb`) rather than LocalFold's refolded StructureArtifact.
+    const edgePriority = (e: WorkflowEdge): number => {
+      if (e.toPort === 'structure') return 0;
+      if (e.fromPort === 'structure') return 1;
+      if (e.toPort === 'folds' || e.fromPort === 'folds') return 3;
+      return 2;
+    };
+    incoming.sort((a, b) => edgePriority(a) - edgePriority(b));
+    for (const e of incoming) {
+      if (!visited.has(e.fromNode)) {
         visited.add(e.fromNode);
         queue.push(e.fromNode);
       }

@@ -81,6 +81,9 @@ function diffParams(
   let strippedPdb = false;
   for (const [k, v] of Object.entries(params)) {
     if (FORBIDDEN_KEYS.has(k)) continue;
+    if (adapterId === 'pdb-input' && params.mode === 'pdb-id' && k === 'pdbText') {
+      continue;
+    }
     if (k === 'pdbText' && typeof v === 'string' && v.length > 1500) {
       strippedPdb = true;
       continue;
@@ -147,6 +150,11 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
       for (const [k, v] of Object.entries(diff)) {
         qs.set(`${n.id}.${k}`, typeof v === 'string' ? v : JSON.stringify(v));
       }
+      const baseLabel = baseN.label || ADAPTER_REGISTRY[baseN.adapterId]?.shortName || '';
+      const curLabel = n.label?.trim() ? n.label : baseLabel;
+      if (curLabel && curLabel !== baseLabel) {
+        qs.set(`${n.id}._label`, curLabel);
+      }
     }
     const hash = `#${qs.toString()}`;
     const candidate: EncodedHashResult = {
@@ -189,6 +197,8 @@ function parseParamValue(raw: string, templateVal: unknown): unknown {
   }
   if (typeof templateVal === 'boolean') return raw === 'true';
   if (typeof templateVal === 'string') return raw;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
   try {
     if (raw.startsWith('{') || raw.startsWith('[') || raw === 'null') return JSON.parse(raw);
   } catch {
@@ -336,7 +346,7 @@ function migrateLegacyConditioningGraph(graph: WorkflowGraph): WorkflowGraph {
               ? 'binder'
               : motifSpan
                 ? 'motif'
-                : hbondMode !== 'none' || cathCode || rawOverride
+                : hbondMode !== 'none' || cathCode || rawOverride || contig
                   ? 'conditioned'
                   : String(dst.params.mode ?? 'unconditional') === 'conditioned'
                     ? 'conditioned'
@@ -422,6 +432,10 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
       if (FORBIDDEN_KEYS.has(paramKey)) continue;
       const node = byId.get(nodeId);
       if (!node) continue;
+      if (paramKey === '_label') {
+        if (v.trim()) node.label = v;
+        continue;
+      }
       const defaults = defaultParamsForAdapter(node.adapterId);
       const templateVal = node.params[paramKey] !== undefined ? node.params[paramKey] : defaults[paramKey];
       node.params[paramKey] = parseParamValue(v, templateVal);
