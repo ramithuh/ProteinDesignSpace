@@ -64,22 +64,77 @@
     return LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
   });
 
+  let rfd4NeedsEncoder = $derived.by((): boolean => {
+    if (node.adapterId !== 'rfd4-proteina') return false;
+    const mode = String(node.params?.mode ?? 'unconditional');
+    return (
+      mode === 'partial' ||
+      mode === 'inverse-folding' ||
+      (mode === 'preset' &&
+        Boolean(
+          RFD4_BENCHMARK_OPTIONS.find((o) => o.id === String(node.params?.presetId ?? ''))
+            ?.needsEncoder,
+        ))
+    );
+  });
+
+  let titleDraft = $state('');
+  $effect(() => {
+    void node.id;
+    titleDraft = node.label ?? '';
+  });
+
+  function isAutoLocalFoldLabel(label: string | undefined): { auto: boolean; suffix: string } {
+    const raw = (label ?? '').trim();
+    if (!raw || raw === 'LocalFold') return { auto: true, suffix: '' };
+    const parenMatch = raw.match(/^(.*?)\s*(\((?:MPNN|Native|AF2|RF3)\))$/);
+    const base = parenMatch ? parenMatch[1].trim() : raw;
+    const suffix = parenMatch ? ` ${parenMatch[2]}` : '';
+    if (
+      base === 'LocalFold' ||
+      /^LocalFold\s*\([^)]+\)$/i.test(raw) ||
+      LOCALFOLD_MODEL_OPTIONS.some((m) => m.shortLabel === base || m.label === base)
+    ) {
+      return { auto: true, suffix: /^LocalFold\s*\(/i.test(raw) && !parenMatch ? '' : suffix };
+    }
+    return { auto: false, suffix: '' };
+  }
+
+  function isAutoMpnnLabel(label: string | undefined): boolean {
+    const raw = (label ?? '').trim();
+    if (!raw) return true;
+    return (
+      raw === 'ProteinMPNN' ||
+      MPNN_VARIANT_OPTIONS.some((v) => v.shortLabel === raw || v.label === raw)
+    );
+  }
+
+  function isAutoPdbLabel(label: string | undefined, prevFilename?: string): boolean {
+    const raw = (label ?? '').trim();
+    if (!raw) return true;
+    if (
+      raw === 'PDB Input' ||
+      raw === 'Load Structure (PDB / mmCIF)' ||
+      raw === 'Demo 3-Helix (53 aa)' ||
+      /^PDB:\s/i.test(raw) ||
+      /^RCSB\s+[A-Z0-9]{4}$/i.test(raw) ||
+      /^Custom:\s/i.test(raw)
+    ) {
+      return true;
+    }
+    if (prevFilename && raw === prevFilename.trim()) return true;
+    return false;
+  }
+
   let activeModelBadge = $derived.by((): string => {
     const p = node.params ?? {};
     switch (node.adapterId) {
       case 'localfold-af2':
         return `${selectedLocalFoldMeta?.label ?? LOCALFOLD_MODEL_OPTIONS[0].label} · Single-sequence (no MSA)`;
-      case 'rfd4-proteina': {
-        const mode = String(p.mode ?? 'unconditional');
-        const needsEnc =
-          mode === 'partial' ||
-          mode === 'inverse-folding' ||
-          (mode === 'preset' &&
-            Boolean(RFD4_BENCHMARK_OPTIONS.find((o) => o.id === String(p.presetId ?? ''))?.needsEncoder));
-        return needsEnc
+      case 'rfd4-proteina':
+        return rfd4NeedsEncoder
           ? 'RFD4-Proteina · Conditioned + structure encoder'
           : 'RFD4-Proteina · All-atom co-design';
-      }
       case 'genie3':
         return 'Genie 3 · Backbone diffusion';
       case 'web-protein-mpnn': {
@@ -148,6 +203,10 @@
     }
     const targetNodeId = node.id;
     const baseParams = { ...node.params };
+    const prevNormId = normalizePdbId(String(baseParams.pdbId ?? ''));
+    const shouldClearCrop = overrideId !== undefined || normId !== prevNormId;
+    const prevLabel = node.label;
+    const prevFilename = String(baseParams.filename ?? '');
     const nextBenchId =
       benchmarkIdOverride !== undefined
         ? benchmarkIdOverride
@@ -159,6 +218,13 @@
     pdbFetchSummary = null;
     try {
       const res = await fetchStructureByPdbId(normId);
+      if (isAutoPdbLabel(prevLabel, prevFilename)) {
+        const quickEx = QUICK_PDB_EXAMPLES.find((ex) => ex.id === res.pdbId);
+        onUpdateLabel?.(
+          targetNodeId,
+          quickEx ? `PDB: ${quickEx.name} (${res.pdbId})` : `RCSB ${res.pdbId}`,
+        );
+      }
       onUpdate(targetNodeId, {
         ...baseParams,
         mode: 'pdb-id',
@@ -167,6 +233,7 @@
         filename: res.filename,
         pdbText: res.text,
         benchmarkId: nextBenchId,
+        ...(shouldClearCrop ? { cropSegments: '' } : {}),
       });
       const extras = [
         res.ligandNames.length > 0 ? `ligands: ${res.ligandNames.join(', ')}` : '',
@@ -188,8 +255,13 @@
     if (!file) return;
     const targetNodeId = node.id;
     const baseParams = { ...node.params };
+    const prevLabel = node.label;
+    const prevFilename = String(baseParams.filename ?? '');
     try {
       const text = await file.text();
+      if (isAutoPdbLabel(prevLabel, prevFilename)) {
+        onUpdateLabel?.(targetNodeId, `PDB: ${file.name}`);
+      }
       onUpdate(targetNodeId, {
         ...baseParams,
         mode: 'custom',
@@ -206,7 +278,35 @@
   <div class="head">
     <div class="title-wrap">
       <span class="stage-dot" style="background: {stageColor}"></span>
-      <h3>{node.label || manifest?.displayName || node.adapterId}</h3>
+      {#if onUpdateLabel}
+        <input
+          type="text"
+          class="title-input"
+          aria-label="Block title"
+          title="Click to rename this block"
+          {disabled}
+          placeholder={manifest?.shortName || node.adapterId}
+          value={titleDraft}
+          oninput={(e) => {
+            titleDraft = e.currentTarget.value;
+            onUpdateLabel(node.id, titleDraft);
+          }}
+          onblur={() => {
+            const trimmed = titleDraft.trim();
+            if (trimmed !== titleDraft) {
+              titleDraft = trimmed;
+              onUpdateLabel(node.id, trimmed);
+            }
+          }}
+          onkeydown={(e) => {
+            if (e.key === 'Enter') {
+              e.currentTarget.blur();
+            }
+          }}
+        />
+      {:else}
+        <h3>{node.label || manifest?.displayName || node.adapterId}</h3>
+      {/if}
       <span class="sub-kind" title="Underlying model / engine">{activeModelBadge}</span>
     </div>
     {#if onRunUpTo}
@@ -231,9 +331,24 @@
           {disabled}
           value={String(node.params.mode ?? 'demo-bundle')}
           onchange={(e) => {
+            const nextMode = e.currentTarget.value;
             pdbFetchError = null;
             pdbFetchSummary = null;
-            setParam('mode', e.currentTarget.value);
+            if (isAutoPdbLabel(node.label, String(node.params.filename ?? ''))) {
+              if (nextMode === 'demo-bundle') {
+                onUpdateLabel?.(node.id, 'PDB Input');
+              } else if (nextMode === 'pdb-id') {
+                const norm = normalizePdbId(String(node.params.pdbId ?? ''));
+                onUpdateLabel?.(
+                  node.id,
+                  validatePdbId(norm).status === 'ok' ? `RCSB ${norm}` : 'PDB Input',
+                );
+              } else if (nextMode === 'custom') {
+                const fn = String(node.params.filename ?? '').trim();
+                onUpdateLabel?.(node.id, fn && fn !== 'demo_3helix_53aa.pdb' ? `PDB: ${fn}` : 'PDB Input');
+              }
+            }
+            setParam('mode', nextMode);
           }}
         >
           <option value="demo-bundle">Built-in 53 aa 3-helix bundle demo</option>
@@ -263,11 +378,19 @@
               maxlength="12"
               value={pdbIdVal}
               oninput={(e) => {
+                const nextPdbId = e.currentTarget.value.toUpperCase();
                 pdbFetchError = null;
                 pdbFetchSummary = null;
+                const norm = normalizePdbId(nextPdbId);
+                if (isAutoPdbLabel(node.label, String(node.params.filename ?? ''))) {
+                  onUpdateLabel?.(
+                    node.id,
+                    validatePdbId(norm).status === 'ok' ? `RCSB ${norm}` : 'PDB Input',
+                  );
+                }
                 onUpdate(node.id, {
                   ...node.params,
-                  pdbId: e.currentTarget.value.toUpperCase(),
+                  pdbId: nextPdbId,
                   benchmarkId: '',
                   cropSegments: '',
                 });
@@ -313,7 +436,9 @@
                 if (!bench) return;
                 pdbFetchError = null;
                 pdbFetchSummary = null;
-                onUpdateLabel?.(node.id, `PDB: ${bench.name} (${bench.pdbId})`);
+                if (isAutoPdbLabel(node.label, String(node.params.filename ?? ''))) {
+                  onUpdateLabel?.(node.id, `PDB: ${bench.name} (${bench.pdbId})`);
+                }
                 onUpdate(node.id, {
                   ...node.params,
                   mode: 'pdb-id',
@@ -709,7 +834,20 @@
         <select
           {disabled}
           value={rfdMode}
-          onchange={(e) => setParam('mode', e.currentTarget.value)}
+          onchange={(e) => {
+            const nextMode = e.currentTarget.value;
+            const prevContig = String(node.params.contig ?? '').trim();
+            if (nextMode === 'binder' && /^\d+(?:-\d+)?$/.test(prevContig)) {
+              onUpdate(node.id, {
+                ...node.params,
+                mode: nextMode,
+                contig: '',
+                userEditedTask: true,
+              });
+              return;
+            }
+            setParam('mode', nextMode);
+          }}
         >
           <option value="unconditional">Unconditional Monomer</option>
           <option value="motif">Motif Scaffolding (fixed residues)</option>
@@ -802,11 +940,11 @@
         </label>
       {:else if rfdMode === 'binder'}
         <label class="full">
-          Binder Contig (e.g. <code>A17-132,/0,70-70</code>)
+          Binder Contig (blank = auto from template, or e.g. <code>A17-132,/0,70-70</code>)
           <input
             type="text"
             {disabled}
-            placeholder="A17-132,/0,70-70"
+            placeholder="Auto from template (or e.g. A17-132,/0,70-70)"
             value={String(node.params.contig ?? '')}
             oninput={(e) => setParam('contig', e.currentTarget.value)}
           />
@@ -828,7 +966,24 @@
             ariaLabel="Binder Length (aa)"
             spec={NUMERIC_SPECS['rfd4-proteina'].length}
             value={Number(node.params.length ?? 70)}
-            onChange={(v) => setParam('length', v)}
+            onChange={(v) => {
+              const prevContig = String(node.params.contig ?? '').trim();
+              const nextContig = prevContig.includes('/0')
+                ? prevContig
+                    .split(/[,\s]+/)
+                    .filter(Boolean)
+                    .map((tok) => (/^\d+(?:-\d+)?$/.test(tok) ? `${v}-${v}` : tok))
+                    .join(',')
+                : /^\d+(?:-\d+)?$/.test(prevContig)
+                  ? ''
+                  : prevContig;
+              onUpdate(node.id, {
+                ...node.params,
+                length: v,
+                contig: nextContig,
+                userEditedTask: true,
+              });
+            }}
           />
         </label>
         <div class="chip-field full">
@@ -1188,7 +1343,14 @@
         <select
           {disabled}
           value={String(node.params.family ?? 'solublempnn')}
-          onchange={(e) => setParam('family', e.currentTarget.value)}
+          onchange={(e) => {
+            const nextFamily = e.currentTarget.value;
+            if (isAutoMpnnLabel(node.label)) {
+              const meta = MPNN_VARIANT_OPTIONS.find((v) => v.family === nextFamily);
+              if (meta) onUpdateLabel?.(node.id, meta.shortLabel);
+            }
+            setParam('family', nextFamily);
+          }}
         >
           {#each MPNN_VARIANT_OPTIONS as v (v.id)}
             <option value={v.family}>{v.label}</option>
@@ -1281,7 +1443,17 @@
         <select
           {disabled}
           value={lfModelId}
-          onchange={(e) => setParam('model', e.currentTarget.value)}
+          onchange={(e) => {
+            const nextModel = e.currentTarget.value;
+            const autoInfo = isAutoLocalFoldLabel(node.label);
+            if (autoInfo.auto) {
+              const nextMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === nextModel);
+              if (nextMeta) {
+                onUpdateLabel?.(node.id, `${nextMeta.shortLabel}${autoInfo.suffix}`);
+              }
+            }
+            setParam('model', nextModel);
+          }}
         >
           <optgroup label="AlphaFold2-Class (Monomer)">
             {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af2') as opt (opt.id)}
@@ -1387,6 +1559,11 @@
         {#if selectedLocalFoldMeta}
           <span>· ~{selectedLocalFoldMeta.approxMB} MB ({selectedLocalFoldMeta.shortLabel})</span>
           <span>· {selectedLocalFoldMeta.license}</span>
+        {:else if node.adapterId === 'rfd4-proteina' && rfd4NeedsEncoder}
+          <span>· ~{(manifest.approxWeightsMB || 330) + 138} MB (trunk + encoder)</span>
+          {#if manifest.licenseNote}
+            <span>· {manifest.licenseNote}</span>
+          {/if}
         {:else}
           {#if manifest.approxWeightsMB > 0}
             <span>· ~{manifest.approxWeightsMB} MB</span>
@@ -1443,6 +1620,29 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .title-input {
+    margin: 0;
+    padding: 2px 6px;
+    font-family: inherit;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    min-width: 90px;
+    max-width: 240px;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+  .title-input:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    background: var(--bg-surface-2);
+  }
+  .title-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: var(--bg-input);
   }
   .sub-kind {
     font-family: 'JetBrains Mono', ui-monospace, monospace;

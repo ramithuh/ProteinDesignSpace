@@ -99,6 +99,24 @@
   let wirePopoverEl: HTMLDivElement | null = $state(null);
   let catalogOpen = $state(false);
   let wireLegendOpen = $state(false);
+  let clearConfirmPending = $state(false);
+  let clearConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+  let modKeyLabel = $state('Ctrl/⌘');
+
+  function cancelClearConfirm() {
+    clearConfirmPending = false;
+    if (clearConfirmTimer) {
+      clearTimeout(clearConfirmTimer);
+      clearConfirmTimer = null;
+    }
+  }
+
+  $effect(() => {
+    if (typeof navigator !== 'undefined') {
+      const plat = navigator.platform || navigator.userAgent || '';
+      modKeyLabel = /Mac|iPhone|iPad|iPod/i.test(plat) ? '⌘' : 'Ctrl';
+    }
+  });
   // Ephemeral ghost auto-connection proposals (never committed until user accepts via Tab/Enter/click)
   let proposedEdges = $state<WorkflowEdge[]>([]);
   let proposedForNodeId = $state<string | null>(null);
@@ -225,6 +243,7 @@
   $effect(() => {
     return () => {
       if (toastTimer) clearTimeout(toastTimer);
+      if (clearConfirmTimer) clearTimeout(clearConfirmTimer);
       cancelPendingFit();
     };
   });
@@ -269,6 +288,10 @@
 
   function handleWindowKeydown(ev: KeyboardEvent) {
     if (ev.key === 'Escape') {
+      if (clearConfirmPending) {
+        cancelClearConfirm();
+        return;
+      }
       if (proposedEdges.length > 0) {
         clearProposals();
         return;
@@ -655,7 +678,17 @@
   }
 
   function handleClear() {
-    if (disabled) return;
+    if (disabled || graph.nodes.length === 0) return;
+    if (!clearConfirmPending) {
+      clearConfirmPending = true;
+      if (clearConfirmTimer) clearTimeout(clearConfirmTimer);
+      clearConfirmTimer = setTimeout(() => {
+        clearConfirmPending = false;
+        clearConfirmTimer = null;
+      }, 3500);
+      return;
+    }
+    cancelClearConfirm();
     clearProposals();
     catalogOpen = false;
     wireLegendOpen = false;
@@ -663,13 +696,23 @@
     onSelectNode('');
   }
 
-  const WIRE_LEGEND_ITEMS = [
-    PORT_COLORS.StructureArtifact,
-    PORT_COLORS.ConditionSpec,
-    PORT_COLORS.SequenceSet,
-    PORT_COLORS.FoldedStructure,
-    PORT_COLORS.DesignabilityMetrics,
-  ];
+  let wireLegendItems = $derived.by(() => {
+    const hasLegacyConditioner = graph.nodes.some((n) => n.adapterId === 'rfd4-conditioner');
+    return hasLegacyConditioner
+      ? [
+          PORT_COLORS.StructureArtifact,
+          PORT_COLORS.ConditionSpec,
+          PORT_COLORS.SequenceSet,
+          PORT_COLORS.FoldedStructure,
+          PORT_COLORS.DesignabilityMetrics,
+        ]
+      : [
+          PORT_COLORS.StructureArtifact,
+          PORT_COLORS.SequenceSet,
+          PORT_COLORS.FoldedStructure,
+          PORT_COLORS.DesignabilityMetrics,
+        ];
+  });
 </script>
 
 <svelte:window onkeydown={handleWindowKeydown} />
@@ -734,15 +777,22 @@
     >
       ?
     </button>
-    <button type="button" class="c-btn danger" {disabled} onclick={handleClear} title="Remove all blocks from canvas">
-      Clear
+    <button
+      type="button"
+      class="c-btn danger"
+      class:confirm-danger={clearConfirmPending}
+      disabled={disabled || graph.nodes.length === 0}
+      onclick={handleClear}
+      title={clearConfirmPending ? 'Click again to clear all blocks' : 'Remove all blocks from canvas'}
+    >
+      {clearConfirmPending ? 'Clear? Confirm' : 'Clear'}
     </button>
   </div>
 
   {#if wireLegendOpen}
     <div class="wire-popover canvas-overlay" bind:this={wirePopoverEl} role="dialog" aria-label="Typed wire colors">
       <div class="wire-pop-title">Typed Wire Colors</div>
-      {#each WIRE_LEGEND_ITEMS as item (item.label)}
+      {#each wireLegendItems as item (item.label)}
         <div class="wire-row">
           <span class="wire-dot" style="background: {item.bg}"></span>
           <span>{item.label}</span>
@@ -782,7 +832,7 @@
       <span class="dock-sep" aria-hidden="true">·</span>
       <span class="dock-tip">Click wire to peek</span>
       <span class="dock-sep" aria-hidden="true">·</span>
-      <span class="dock-tip"><kbd>⌘</kbd>-click to compare 3D</span>
+      <span class="dock-tip"><kbd>{modKeyLabel}</kbd>-click to compare 3D</span>
       {#if onOpenTour}
         <span class="dock-sep" aria-hidden="true">·</span>
         <button type="button" class="dock-action accent" onclick={onOpenTour}>
@@ -822,11 +872,13 @@
       ondelete={handleDelete}
       onpaneclick={() => {
         clearProposals();
+        cancelClearConfirm();
         catalogOpen = false;
         wireLegendOpen = false;
         onSelectNode('');
       }}
       onnodeclick={({ node, event }) => {
+        cancelClearConfirm();
         catalogOpen = false;
         wireLegendOpen = false;
         if (proposedForNodeId && node.id !== proposedForNodeId) {
@@ -1085,9 +1137,12 @@
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-weight: 700;
   }
-  .c-btn.danger:hover:not(:disabled) {
+  .c-btn.danger:hover:not(:disabled),
+  .c-btn.confirm-danger {
     border-color: var(--err-border);
     color: var(--err-strong);
+    background: var(--err-bg);
+    font-weight: 600;
   }
   .wire-popover {
     position: absolute;

@@ -103,7 +103,7 @@
 
   function handleSelectNodes(ids: string[]) {
     const valid = ids.filter((id) => graph.nodes.some((n) => n.id === id)).slice(0, COMPARE_PALETTE.length);
-    selectedNodeIds = valid.length > 0 ? valid : graph.nodes[0]?.id ? [graph.nodes[0].id] : [];
+    selectedNodeIds = valid;
     hiddenCompareModelIds = [];
     selectedPeekSlotId = null;
     selectedEdgeId = null;
@@ -122,15 +122,25 @@
 
   function soloCompareModel(modelId: string) {
     const allIds = comparisonState?.models.map((m) => m.id) ?? [];
+    const refWasHidden = hiddenCompareModelIds.includes('ref-designed');
+    if (modelId === 'ref-designed') {
+      const nonRef = allIds.filter((id) => id !== 'ref-designed');
+      const alreadySolo =
+        nonRef.length > 0 &&
+        nonRef.every((id) => hiddenCompareModelIds.includes(id)) &&
+        !refWasHidden;
+      hiddenCompareModelIds = alreadySolo ? [] : nonRef;
+      return;
+    }
     const others = allIds.filter((id) => id !== modelId && id !== 'ref-designed');
     const alreadySolo =
       others.length > 0 &&
       others.every((id) => hiddenCompareModelIds.includes(id)) &&
       !hiddenCompareModelIds.includes(modelId);
     if (alreadySolo) {
-      hiddenCompareModelIds = [];
+      hiddenCompareModelIds = refWasHidden ? ['ref-designed'] : [];
     } else {
-      hiddenCompareModelIds = others;
+      hiddenCompareModelIds = refWasHidden ? ['ref-designed', ...others] : others;
     }
   }
   let runTargetIds = $state<string[]>([]);
@@ -227,12 +237,16 @@
   }
 
   function handleWindowKeydown(ev: KeyboardEvent) {
-    if (pendingRun || (showOnboarding && !onboardingInteractive)) return;
     if (ev.key === 'Escape') {
+      if (showCredits) {
+        showCredits = false;
+        return;
+      }
       sysMenuOpen = false;
       moreMenuOpen = false;
       return;
     }
+    if (pendingRun || showCredits || (showOnboarding && !onboardingInteractive)) return;
 
     // Cmd/Ctrl + Enter runs workflow from anywhere (never hijacks Cmd+R browser reload)
     if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey) && !ev.altKey) {
@@ -308,17 +322,26 @@
     // Load shared workflow from URL hash (#p=... or #g=...) if present
     let loadedFromHash = false;
     if (window.location.hash.length > 2) {
+      const rawHash = window.location.hash;
+      const isSharedHash = rawHash.startsWith('#g=') || rawHash.startsWith('#p=');
       try {
-        const decoded = await decodeHashToGraph(window.location.hash);
+        const decoded = await decodeHashToGraph(rawHash);
         if (decoded) {
           graph = decoded;
           selectedPresetId = decoded.id;
           setSingleSelection(decoded.nodes[0]?.id ?? '');
           showToastMessage('Loaded shared workflow from URL', 3000);
           loadedFromHash = true;
+        } else if (isSharedHash) {
+          showToastMessage('Could not decode shared workflow link — loaded default workflow', 4200);
         }
-      } catch {
-        /* ignore malformed hash */
+      } catch (err) {
+        if (isSharedHash) {
+          showToastMessage(
+            `Invalid shared workflow URL: ${err instanceof Error ? err.message : 'decode failed'}`,
+            4500,
+          );
+        }
       }
     }
 
@@ -363,6 +386,8 @@
     rightPanelTab = 'params';
     nodeStates = {};
     outputsByNode = {};
+    previewedInputSigs.clear();
+    inFlightInputSigs.clear();
     runError = null;
     totalElapsedMs = null;
     selectedRowIdx = 0;
@@ -401,6 +426,8 @@
     setSingleSelection('genie3_1');
     nodeStates = {};
     outputsByNode = {};
+    previewedInputSigs.clear();
+    inFlightInputSigs.clear();
     runError = null;
     rightPanelTab = 'params';
   }
@@ -411,7 +438,7 @@
       adapterId === 'web-protein-mpnn'
         ? { autoCommit: true, params: { family: 'solublempnn', modelName: 'v_48_020' }, label: 'SolubleMPNN' }
         : adapterId === 'localfold-af2'
-          ? { autoCommit: true, params: { model: 'monomer' }, label: 'LocalFold (AF2 Model 1)' }
+          ? { autoCommit: true, params: { model: 'monomer' }, label: 'AF2 Model 1' }
           : { autoCommit: true, label: 'scRMSD / scTM' };
     const anchorId =
       adapterId === 'designability-scorer'
@@ -486,15 +513,86 @@
     selectedEdgeId = slot?.direction === 'in' ? (slot.edgeId ?? null) : null;
   }
 
+  function getDownstreamNodeIds(g: WorkflowGraph, seedIds: Iterable<string>): Set<string> {
+    const visited = new Set<string>(seedIds);
+    const queue = [...visited];
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const e of g.edges) {
+        if (e.fromNode === cur && !visited.has(e.toNode)) {
+          visited.add(e.toNode);
+          queue.push(e.toNode);
+        }
+      }
+    }
+    return visited;
+  }
+
+  function invalidateNodes(
+    idsToClear: Set<string>,
+    opts?: { keepSeedIds?: Set<string>; keepStateIds?: Set<string> },
+  ) {
+    if (idsToClear.size === 0) return;
+    let outChanged = false;
+    const nextOutputs: Record<string, Record<string, CanonicalArtifact>> = {};
+    for (const [id, outs] of Object.entries(outputsByNode)) {
+      if (idsToClear.has(id) && !opts?.keepSeedIds?.has(id)) {
+        outChanged = true;
+      } else {
+        nextOutputs[id] = outs;
+      }
+    }
+    if (outChanged) {
+      outputsByNode = nextOutputs;
+      totalElapsedMs = null;
+    }
+
+    let stChanged = false;
+    const nextStates: Record<string, NodeProgressEvent> = {};
+    for (const [id, st] of Object.entries(nodeStates)) {
+      if (idsToClear.has(id) && !opts?.keepSeedIds?.has(id) && !opts?.keepStateIds?.has(id)) {
+        stChanged = true;
+      } else {
+        nextStates[id] = st;
+      }
+    }
+    if (stChanged) nodeStates = nextStates;
+  }
+
   function handleGraphChange(next: WorkflowGraph) {
     const nextById = new Map(next.nodes.map((n) => [n.id, n]));
     const prevById = new Map(graph.nodes.map((n) => [n.id, n]));
+
+    const dirtySeeds = new Set<string>();
+    for (const [id, cur] of nextById.entries()) {
+      const prev = prevById.get(id);
+      if (!prev || cur.adapterId !== prev.adapterId) {
+        dirtySeeds.add(id);
+      } else if (JSON.stringify(cur.params) !== JSON.stringify(prev.params)) {
+        dirtySeeds.add(id);
+      }
+    }
+
+    const prevEdgeKeys = new Set(graph.edges.map((e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)));
+    const nextEdgeKeys = new Set(next.edges.map((e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)));
+    for (const e of next.edges) {
+      if (!prevEdgeKeys.has(makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort))) {
+        dirtySeeds.add(e.toNode);
+      }
+    }
+    for (const e of graph.edges) {
+      if (!nextEdgeKeys.has(makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)) && nextById.has(e.toNode)) {
+        dirtySeeds.add(e.toNode);
+      }
+    }
+
+    const staleIds = getDownstreamNodeIds(next, dirtySeeds);
 
     const nextOutputs: Record<string, Record<string, CanonicalArtifact>> = {};
     for (const [id, outs] of Object.entries(outputsByNode)) {
       const cur = nextById.get(id);
       const prev = prevById.get(id);
-      if (cur && prev && cur.adapterId === prev.adapterId) {
+      if (cur && prev && cur.adapterId === prev.adapterId && !staleIds.has(id)) {
         nextOutputs[id] = outs;
       }
     }
@@ -504,25 +602,35 @@
     for (const [id, st] of Object.entries(nodeStates)) {
       const cur = nextById.get(id);
       const prev = prevById.get(id);
-      if (cur && prev && cur.adapterId === prev.adapterId) {
+      if (cur && prev && cur.adapterId === prev.adapterId && !staleIds.has(id)) {
         nextStates[id] = st;
       }
     }
     nodeStates = nextStates;
+    if (staleIds.size > 0) {
+      totalElapsedMs = null;
+    }
 
     graph = next;
-    const kept = selectedNodeIds.filter((id) => nextById.has(id));
-    if (kept.length !== selectedNodeIds.length) {
-      selectedNodeIds = kept.length > 0 ? kept : next.nodes[0]?.id ? [next.nodes[0].id] : [];
+    if (selectedNodeIds.length > 0) {
+      const kept = selectedNodeIds.filter((id) => nextById.has(id));
+      if (kept.length !== selectedNodeIds.length) {
+        selectedNodeIds = kept.length > 0 ? kept : next.nodes[0]?.id ? [next.nodes[0].id] : [];
+      }
     }
     runError = null;
   }
 
   function updateNodeParams(nodeId: string, params: Record<string, unknown>) {
+    const prevNode = graph.nodes.find((n) => n.id === nodeId);
+    const paramsChanged = !prevNode || JSON.stringify(prevNode.params) !== JSON.stringify(params);
     graph = {
       ...graph,
       nodes: graph.nodes.map((n) => (n.id === nodeId ? { ...n, params } : n)),
     };
+    if (paramsChanged) {
+      invalidateNodes(getDownstreamNodeIds(graph, [nodeId]));
+    }
   }
 
   function updateNodeLabel(nodeId: string, label: string) {
@@ -533,7 +641,7 @@
   }
 
   let validationErrors = $derived(validateGraph(graph));
-  let bioIssues = $derived(validateBioCapabilities(graph));
+  let bioIssues = $derived(validateBioCapabilities(graph, outputsByNode));
 
   // Instant CPU/fetch preview for starting inputs (PDB Input & Sequence Input) so users can
   // inspect structures in 3D or compare PDBs immediately without needing to click Run.
@@ -564,6 +672,30 @@
       const raw = String(p.sequence ?? '').trim();
       if (raw.length < 5) return null;
       return `seq|${raw.length}|${raw.slice(0, 64)}|${String(p.label ?? '')}`;
+    }
+    return null;
+  }
+
+  function parseLengthFromContig(contig: string | undefined): number | null {
+    const raw = String(contig ?? '').trim();
+    if (!raw) return null;
+    if (raw.includes('/0')) {
+      const afterBreak = raw.split('/0').slice(1).join(',');
+      const tokens = afterBreak.split(/[,\s]+/).filter(Boolean);
+      for (const tok of tokens) {
+        const m = tok.match(/^(\d+)(?:-(\d+))?$/);
+        if (m) {
+          const lo = Number(m[1]);
+          const hi = m[2] ? Number(m[2]) : lo;
+          return Math.round((lo + hi) / 2);
+        }
+      }
+    }
+    const bare = raw.match(/^(\d+)(?:-(\d+))?$/);
+    if (bare) {
+      const lo = Number(bare[1]);
+      const hi = bare[2] ? Number(bare[2]) : lo;
+      return Math.round((lo + hi) / 2);
     }
     return null;
   }
@@ -630,6 +762,7 @@
         if (!isUntouched && !seededId) continue;
 
         const bp = bench.conditionParams;
+        const parsedLen = parseLengthFromContig(bp.contig);
         const nextMode =
           bp.taskPreset !== 'custom'
             ? 'preset'
@@ -641,6 +774,7 @@
           ...cp,
           mode: nextMode,
           ...(bp.taskPreset !== 'custom' ? { presetId: bp.taskPreset } : {}),
+          ...(parsedLen !== null ? { length: parsedLen } : {}),
           contig: bp.contig,
           lockChain: bp.lockChain ?? '',
           hotspots: bp.hotspots ?? '',
@@ -659,11 +793,13 @@
         if (!isUntouched && !seededId) continue;
 
         const bp = bench.conditionParams;
+        const parsedLen = parseLengthFromContig(bp.contig);
         const nextTaskMode = bench.category === 'binder' ? 'binder' : 'motif';
         patches ??= {};
         patches[node.id] = {
           ...cp,
           taskMode: nextTaskMode,
+          ...(parsedLen !== null ? { length: parsedLen } : {}),
           contig: bp.contig,
           lockChain: bp.lockChain ?? '',
           hotspots: bp.hotspots ?? '',
@@ -678,6 +814,7 @@
         ...graph,
         nodes: graph.nodes.map((n) => (map[n.id] ? { ...n, params: map[n.id] } : n)),
       };
+      invalidateNodes(getDownstreamNodeIds(graph, Object.keys(map)));
     }
   });
 
@@ -712,12 +849,16 @@
       src.adapterId === 'genie3'
         ? String(sp.taskMode ?? 'unconditional')
         : String(sp.mode ?? 'unconditional');
+    const parsedLen = parseLengthFromContig(String(sp.contig ?? ''));
+    const syncLen = Number(sp.length ?? parsedLen ?? (src.adapterId === 'genie3' ? 80 : 70));
+    const unsupportedGenie3Labels: string[] = [];
 
     graph = {
       ...graph,
       nodes: graph.nodes.map((n) => {
         if (!siblingIds.has(n.id)) return n;
         const shared = {
+          length: syncLen,
           contig: String(sp.contig ?? ''),
           lockChain: String(sp.lockChain ?? ''),
           hotspots: String(sp.hotspots ?? ''),
@@ -725,8 +866,39 @@
           userEditedTask: true,
         };
         if (n.adapterId === 'genie3') {
-          const gMode = srcMode === 'binder' || srcMode === 'motif' ? srcMode : 'unconditional';
-          return { ...n, params: { ...n.params, ...shared, taskMode: gMode } };
+          const isSupported = srcMode === 'binder' || srcMode === 'motif' || srcMode === 'unconditional';
+          if (!isSupported) {
+            unsupportedGenie3Labels.push(n.label ?? 'Genie 3');
+            return {
+              ...n,
+              params: {
+                ...n.params,
+                taskMode: 'unconditional',
+                length: syncLen,
+                contig: '',
+                lockChain: '',
+                hotspots: '',
+                motifSpan: '',
+                userEditedTask: true,
+              },
+            };
+          }
+          if (srcMode === 'unconditional') {
+            return {
+              ...n,
+              params: {
+                ...n.params,
+                taskMode: 'unconditional',
+                length: syncLen,
+                contig: '',
+                lockChain: '',
+                hotspots: '',
+                motifSpan: '',
+                userEditedTask: true,
+              },
+            };
+          }
+          return { ...n, params: { ...n.params, ...shared, taskMode: srcMode } };
         }
         return {
           ...n,
@@ -736,6 +908,8 @@
             mode: srcMode,
             ...(src.adapterId === 'rfd4-proteina'
               ? {
+                  presetId: String(sp.presetId ?? n.params.presetId ?? 'custom_cath_monomer'),
+                  partialFraction: Number(sp.partialFraction ?? n.params.partialFraction ?? 0.5),
                   unindexedMotif: Boolean(sp.unindexedMotif),
                   hbondMode: String(sp.hbondMode ?? 'none'),
                   hbondSelection: String(sp.hbondSelection ?? ''),
@@ -746,6 +920,15 @@
         };
       }),
     };
+    invalidateNodes(getDownstreamNodeIds(graph, siblingIds));
+    if (unsupportedGenie3Labels.length > 0) {
+      showToastMessage(
+        `${unsupportedGenie3Labels.join(', ')} does not support RFD4 "${srcMode}" mode — reset to unconditional (${syncLen} aa) and cleared incompatible constraints.`,
+        4500,
+      );
+    } else {
+      showToastMessage(`Synced task settings to ${siblingIds.size} sibling generator${siblingIds.size > 1 ? 's' : ''}.`, 2600);
+    }
   }
 
   $effect(() => {
@@ -762,24 +945,40 @@
     for (const node of nodes) {
       if (node.adapterId !== 'pdb-input' && node.adapterId !== 'sequence-input') continue;
       const sig = computeInputPreviewSig(node);
-      if (!sig) continue;
+      if (!sig) {
+        const hadTracked =
+          previewedInputSigs.has(node.id) ||
+          inFlightInputSigs.has(node.id) ||
+          Boolean(outputsByNode[node.id]) ||
+          Boolean(nodeStates[node.id]);
+        previewedInputSigs.delete(node.id);
+        inFlightInputSigs.delete(node.id);
+        if (hadTracked) {
+          invalidateNodes(getDownstreamNodeIds(graph, [node.id]));
+        }
+        continue;
+      }
       const hasOut = Boolean(outputsByNode[node.id] && Object.keys(outputsByNode[node.id]).length > 0);
       if (inFlightInputSigs.get(node.id) === sig) continue;
       if (previewedInputSigs.get(node.id) === sig && hasOut) continue;
 
+      const prevSig = previewedInputSigs.get(node.id);
       previewedInputSigs.set(node.id, sig);
       const nodeSnap = $state.snapshot(node);
 
       if (node.adapterId === 'sequence-input') {
         try {
           const seqSet = materializeSequenceInputNode(nodeSnap);
+          if (prevSig && prevSig !== sig) {
+            invalidateNodes(getDownstreamNodeIds(graph, [node.id]), { keepSeedIds: new Set([node.id]) });
+          }
           outputsByNode = { ...outputsByNode, [node.id]: { sequences: seqSet } };
           nodeStates = {
             ...nodeStates,
             [node.id]: { nodeId: node.id, status: 'done', detail: `${seqSet.candidates.length} sequence(s)` },
           };
         } catch {
-          // Wait quietly until user finishes typing a valid sequence
+          invalidateNodes(getDownstreamNodeIds(graph, [node.id]));
         }
         continue;
       }
@@ -813,6 +1012,9 @@
           if (inFlightInputSigs.get(node.id) === sig) inFlightInputSigs.delete(node.id);
           if (previewedInputSigs.get(node.id) !== sig) return;
           if (!graph.nodes.some((n) => n.id === node.id)) return;
+          if (prevSig && prevSig !== sig) {
+            invalidateNodes(getDownstreamNodeIds(graph, [node.id]), { keepSeedIds: new Set([node.id]) });
+          }
           outputsByNode = { ...outputsByNode, [node.id]: { structure } };
           nodeStates = {
             ...nodeStates,
@@ -827,6 +1029,7 @@
           if (inFlightInputSigs.get(node.id) === sig) inFlightInputSigs.delete(node.id);
           if (previewedInputSigs.get(node.id) !== sig) return;
           if (!graph.nodes.some((n) => n.id === node.id)) return;
+          invalidateNodes(getDownstreamNodeIds(graph, [node.id]), { keepStateIds: new Set([node.id]) });
           nodeStates = {
             ...nodeStates,
             [node.id]: {
@@ -854,6 +1057,7 @@
           : n,
       ),
     };
+    invalidateNodes(getDownstreamNodeIds(graph, [nodeId]));
     runError = null;
   }
 
@@ -903,11 +1107,8 @@
       outputsByNode = {};
     } else {
       const targetIds = new Set(targetGraph.nodes.map((n) => n.id));
-      const nextStates: Record<string, NodeProgressEvent> = {};
-      for (const [id, st] of Object.entries(nodeStates)) {
-        if (!targetIds.has(id)) nextStates[id] = st;
-      }
-      nodeStates = nextStates;
+      const downstreamOfTargets = getDownstreamNodeIds(plainGraph, targetIds);
+      invalidateNodes(downstreamOfTargets);
     }
 
     try {
@@ -918,6 +1119,14 @@
         },
       });
       outputsByNode = { ...outputsByNode, ...res.outputsByNode };
+      for (const n of targetGraph.nodes) {
+        if (n.adapterId === 'pdb-input' || n.adapterId === 'sequence-input') {
+          const sig = computeInputPreviewSig(n);
+          if (sig && res.outputsByNode[n.id]) {
+            previewedInputSigs.set(n.id, sig);
+          }
+        }
+      }
       if (!upToNodeId) {
         totalElapsedMs = res.totalElapsedMs;
       }
@@ -1003,14 +1212,29 @@
       const { hash, mode, strippedPdb } = await encodeGraphToHash(plain);
       const url = `${window.location.origin}${window.location.pathname}${hash}`;
       window.history.replaceState(null, '', hash);
-      await navigator.clipboard.writeText(url);
-      showToastMessage(
-        strippedPdb
-          ? `Copied ${url.length}-char link (${mode}; large PDB omitted)`
-          : `Copied ${url.length}-char link (${mode})`,
-      );
+      try {
+        if (!navigator.clipboard?.writeText) {
+          throw new Error('Clipboard API unavailable');
+        }
+        await navigator.clipboard.writeText(url);
+        showToastMessage(
+          strippedPdb
+            ? `Copied ${url.length}-char link (${mode}; large PDB omitted)`
+            : `Copied ${url.length}-char link (${mode})`,
+        );
+      } catch {
+        showToastMessage(
+          strippedPdb
+            ? `Share link updated in address bar (${mode}; large PDB omitted — copy from URL bar)`
+            : `Share link updated in address bar (${mode} — copy from URL bar)`,
+          4200,
+        );
+      }
     } catch (err) {
-      runError = err instanceof Error ? err.message : String(err);
+      showToastMessage(
+        `Could not create share link: ${err instanceof Error ? err.message : String(err)}`,
+        4200,
+      );
     }
   }
 
@@ -1027,6 +1251,8 @@
     if (opts?.clearOutputs !== false) {
       nodeStates = {};
       outputsByNode = {};
+      previewedInputSigs.clear();
+      inFlightInputSigs.clear();
       runError = null;
       totalElapsedMs = null;
       selectedRowIdx = 0;
@@ -1062,7 +1288,7 @@
       loadFullWorkflowGraph(normalized, { clearOutputs: true });
       showToastMessage(`Imported ${file.name}`);
     } catch (err) {
-      runError = err instanceof Error ? err.message : 'Failed to parse workflow JSON';
+      runError = err instanceof Error ? err.message : 'Failed to parse workflow JSON / YAML';
     } finally {
       input.value = '';
     }
@@ -1086,7 +1312,160 @@
     return parts.join(', ');
   }
 
-  function handleResidueClick(info: { chain: string; seqId: number; compId: string }) {
+  function isConditionedGenerator(n: { adapterId: string; params: Record<string, unknown> }): boolean {
+    if (n.adapterId === 'rfd4-conditioner') return true;
+    if (n.adapterId === 'rfd4-proteina') {
+      const m = String(n.params?.mode ?? 'unconditional');
+      return m === 'binder' || m === 'motif' || m === 'conditioned';
+    }
+    if (n.adapterId === 'genie3') {
+      const tm = String(n.params?.taskMode ?? 'unconditional');
+      return tm === 'binder' || tm === 'motif';
+    }
+    return false;
+  }
+
+  // Resolve the explicit target block & field for 3D residue picking (so the toolbar
+  // displays exactly which block will be edited and auto mode never mutates unselected branches).
+  let pickTargetInfo = $derived.by(
+    (): {
+      node: WorkflowGraph['nodes'][number];
+      nodeName: string;
+      fieldKey: 'hotspots' | 'motifSpan' | 'fixedPositions';
+      fieldLabel: string;
+      switchMode?: 'binder' | 'motif';
+    } | null => {
+      if (isCompareMode || molPickMode === 'off') return null;
+
+      const labelOf = (n: WorkflowGraph['nodes'][number]) =>
+        n.label || ADAPTER_REGISTRY[n.adapterId]?.shortName || n.adapterId;
+
+      if (molPickMode === 'mpnn') {
+        const allMpnn = graph.nodes.filter((n) => n.adapterId === 'web-protein-mpnn');
+        const target =
+          selectedNode?.adapterId === 'web-protein-mpnn'
+            ? selectedNode
+            : allMpnn.length === 1
+              ? allMpnn[0]
+              : null;
+        if (!target) return null;
+        return {
+          node: target,
+          nodeName: labelOf(target),
+          fieldKey: 'fixedPositions',
+          fieldLabel: 'Fix Positions',
+        };
+      }
+
+      if (molPickMode === 'hotspots' || molPickMode === 'motif') {
+        const isCondOrGen = (n: WorkflowGraph['nodes'][number]) =>
+          n.adapterId === 'rfd4-proteina' ||
+          n.adapterId === 'genie3' ||
+          n.adapterId === 'rfd4-conditioner';
+        const candidates = graph.nodes.filter(isCondOrGen);
+        const conditionedOnly = candidates.filter(isConditionedGenerator);
+        const target =
+          selectedNode && isCondOrGen(selectedNode)
+            ? selectedNode
+            : candidates.length === 1
+              ? candidates[0]
+              : conditionedOnly.length === 1
+                ? conditionedOnly[0]
+                : null;
+        if (!target) return null;
+        return {
+          node: target,
+          nodeName: labelOf(target),
+          fieldKey: molPickMode === 'motif' ? 'motifSpan' : 'hotspots',
+          fieldLabel: molPickMode === 'motif' ? 'Motif' : 'Hotspots',
+          switchMode: molPickMode === 'motif' ? 'motif' : 'binder',
+        };
+      }
+
+      // Auto mode: ONLY edit the selected block (if MPNN or already-conditioned generator/conditioner),
+      // OR a single unambiguous conditioned generator when viewing an input structure.
+      // Never silently flip an unconditional generator to binder, and never mutate an unselected branch.
+      if (selectedNode?.adapterId === 'web-protein-mpnn') {
+        return {
+          node: selectedNode,
+          nodeName: labelOf(selectedNode),
+          fieldKey: 'fixedPositions',
+          fieldLabel: 'Fix Positions',
+        };
+      }
+      if (selectedNode?.adapterId === 'rfd4-conditioner') {
+        const brush = String(selectedNode.params.paintBrush ?? 'hotspots');
+        const key = brush === 'motifSpan' ? 'motifSpan' : 'hotspots';
+        return {
+          node: selectedNode,
+          nodeName: labelOf(selectedNode),
+          fieldKey: key,
+          fieldLabel: key === 'motifSpan' ? 'Motif' : 'Hotspots',
+        };
+      }
+      if (selectedNode?.adapterId === 'rfd4-proteina' || selectedNode?.adapterId === 'genie3') {
+        if (!isConditionedGenerator(selectedNode)) return null;
+        const m = String(
+          selectedNode.adapterId === 'genie3'
+            ? (selectedNode.params.taskMode ?? 'unconditional')
+            : (selectedNode.params.mode ?? 'unconditional'),
+        );
+        const key = m === 'motif' ? 'motifSpan' : 'hotspots';
+        return {
+          node: selectedNode,
+          nodeName: labelOf(selectedNode),
+          fieldKey: key,
+          fieldLabel: key === 'motifSpan' ? 'Motif' : 'Hotspots',
+        };
+      }
+
+      const conditionedNodes = graph.nodes.filter(isConditionedGenerator);
+      if (conditionedNodes.length === 1) {
+        const target = conditionedNodes[0];
+        if (target.adapterId === 'rfd4-conditioner') {
+          const brush = String(target.params.paintBrush ?? 'hotspots');
+          const key = brush === 'motifSpan' ? 'motifSpan' : 'hotspots';
+          return {
+            node: target,
+            nodeName: labelOf(target),
+            fieldKey: key,
+            fieldLabel: key === 'motifSpan' ? 'Motif' : 'Hotspots',
+          };
+        }
+        const m = String(
+          target.adapterId === 'genie3'
+            ? (target.params.taskMode ?? 'unconditional')
+            : (target.params.mode ?? 'unconditional'),
+        );
+        const key = m === 'motif' ? 'motifSpan' : 'hotspots';
+        return {
+          node: target,
+          nodeName: labelOf(target),
+          fieldKey: key,
+          fieldLabel: key === 'motifSpan' ? 'Motif' : 'Hotspots',
+        };
+      }
+
+      return null;
+    },
+  );
+
+  function handleResidueClick(info: {
+    chain: string;
+    seqId: number;
+    compId: string;
+    isNonPolymer?: boolean;
+  }) {
+    if (isCompareMode) return;
+    if (info.isNonPolymer) {
+      lastPickedResidue = `${info.chain}:${info.compId} (non-polymer)`;
+      showToastMessage(
+        `Clicked non-polymer ${info.compId} (${info.chain}) — only protein residues can be added to hotspots, motifs, or fixed positions.`,
+        3400,
+      );
+      return;
+    }
+
     const tag = `${info.chain}${info.seqId}`;
     const baseLabel = `${tag} (${info.compId})`;
 
@@ -1095,110 +1474,59 @@
       return;
     }
 
-    const condTarget =
-      (selectedNode &&
-      (selectedNode.adapterId === 'genie3' ||
-        selectedNode.adapterId === 'rfd4-proteina' ||
-        selectedNode.adapterId === 'rfd4-conditioner')
-        ? selectedNode
-        : null) ??
-      graph.nodes.find(
-        (n) =>
-          n.adapterId === 'rfd4-proteina' ||
-          n.adapterId === 'genie3' ||
-          n.adapterId === 'rfd4-conditioner',
-      ) ??
-      null;
-    const mpnnTarget =
-      (selectedNode?.adapterId === 'web-protein-mpnn' ? selectedNode : null) ??
-      graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn') ??
-      null;
-
-    if (molPickMode === 'hotspots' || molPickMode === 'motif') {
-      if (!condTarget) {
-        lastPickedResidue = baseLabel;
-        return;
+    const target = pickTargetInfo;
+    if (!target) {
+      lastPickedResidue = baseLabel;
+      if (molPickMode !== 'auto') {
+        showToastMessage('Multiple target blocks exist — click a block on the canvas first to pick residues into it.', 3400);
+      } else if (
+        selectedNode &&
+        (selectedNode.adapterId === 'rfd4-proteina' || selectedNode.adapterId === 'genie3')
+      ) {
+        showToastMessage(
+          'Auto pick only edits Binder/Motif tasks — switch Design Task or choose Pick: Hotspots / Motif.',
+          3400,
+        );
       }
-      const key = molPickMode === 'motif' ? 'motifSpan' : 'hotspots';
-      const updated = appendToken(condTarget.params[key], tag);
-      if (updated !== null) {
-        updateNodeParams(condTarget.id, {
-          ...condTarget.params,
-          ...(condTarget.adapterId === 'rfd4-conditioner' ? { taskPreset: 'custom' } : {}),
-          ...(condTarget.adapterId === 'genie3' ? { taskMode: molPickMode === 'motif' ? 'motif' : 'binder', userEditedTask: true } : {}),
-          ...(condTarget.adapterId === 'rfd4-proteina' ? { mode: molPickMode === 'motif' ? 'motif' : 'binder', userEditedTask: true } : {}),
-          [key]: updated,
-        });
-      }
-      lastPickedResidue = `${baseLabel} → ${molPickMode === 'motif' ? 'Motif' : 'Hotspots'}`;
       return;
     }
 
-    if (molPickMode === 'mpnn') {
-      if (!mpnnTarget) {
-        lastPickedResidue = baseLabel;
-        return;
+    const updated = appendToken(target.node.params[target.fieldKey], tag);
+    if (updated !== null) {
+      const nextParams: Record<string, unknown> = {
+        ...target.node.params,
+        [target.fieldKey]: updated,
+      };
+      if (target.node.adapterId === 'rfd4-conditioner') {
+        nextParams.taskPreset = 'custom';
+      } else if (target.node.adapterId === 'genie3') {
+        if (target.switchMode) nextParams.taskMode = target.switchMode;
+        nextParams.userEditedTask = true;
+      } else if (target.node.adapterId === 'rfd4-proteina') {
+        if (target.switchMode) {
+          nextParams.mode = target.switchMode;
+          const prevContig = String(target.node.params.contig ?? '').trim();
+          if (target.switchMode === 'binder' && /^\d+(?:-\d+)?$/.test(prevContig)) {
+            nextParams.contig = '';
+          }
+        }
+        nextParams.userEditedTask = true;
       }
-      const updated = appendToken(mpnnTarget.params.fixedPositions, tag);
-      if (updated !== null) {
-        updateNodeParams(mpnnTarget.id, { ...mpnnTarget.params, fixedPositions: updated });
-      }
-      lastPickedResidue = `${baseLabel} → Fix Positions (MPNN)`;
-      return;
+      updateNodeParams(target.node.id, nextParams);
     }
-
-    // Auto mode: target the selected generator, conditioner, or MPNN block explicitly
-    if (selectedNode?.adapterId === 'genie3' || selectedNode?.adapterId === 'rfd4-proteina') {
-      const m = String(
-        selectedNode.adapterId === 'genie3'
-          ? (selectedNode.params.taskMode ?? 'unconditional')
-          : (selectedNode.params.mode ?? 'unconditional'),
-      );
-      const key = m === 'motif' ? 'motifSpan' : 'hotspots';
-      const updated = appendToken(selectedNode.params[key], tag);
-      if (updated !== null) {
-        updateNodeParams(selectedNode.id, {
-          ...selectedNode.params,
-          ...(selectedNode.adapterId === 'genie3' && m === 'unconditional' ? { taskMode: 'binder' } : {}),
-          ...(selectedNode.adapterId === 'rfd4-proteina' && m === 'unconditional' ? { mode: 'binder' } : {}),
-          userEditedTask: true,
-          [key]: updated,
-        });
-      }
-      lastPickedResidue = `${baseLabel} → ${key === 'motifSpan' ? 'Motif' : 'Hotspots'}`;
-      return;
-    }
-
-    if (selectedNode?.adapterId === 'rfd4-conditioner') {
-      const brush = String(selectedNode.params.paintBrush ?? 'hotspots');
-      const key = brush === 'motifSpan' ? 'motifSpan' : 'hotspots';
-      const updated = appendToken(selectedNode.params[key], tag);
-      if (updated !== null) {
-        updateNodeParams(selectedNode.id, {
-          ...selectedNode.params,
-          taskPreset: 'custom',
-          [key]: updated,
-        });
-      }
-      lastPickedResidue = `${baseLabel} → ${key === 'motifSpan' ? 'Motif' : 'Hotspots'}`;
-      return;
-    }
-
-    if (selectedNode?.adapterId === 'web-protein-mpnn') {
-      const updated = appendToken(selectedNode.params.fixedPositions, tag);
-      if (updated !== null) {
-        updateNodeParams(selectedNode.id, { ...selectedNode.params, fixedPositions: updated });
-      }
-      lastPickedResidue = `${baseLabel} → Fix Positions (MPNN)`;
-      return;
-    }
-
-    lastPickedResidue = baseLabel;
+    lastPickedResidue = `${baseLabel} → ${target.fieldLabel} (${target.nodeName})`;
   }
 
   // Preset & pick-target helpers
   let activePreset = $derived(WORKFLOW_PRESETS.find((p) => p.id === selectedPresetId) ?? null);
-  let hasConditionerNode = $derived(graph.nodes.some((n) => n.adapterId === 'rfd4-conditioner'));
+  let hasConditionerNode = $derived(
+    graph.nodes.some(
+      (n) =>
+        n.adapterId === 'rfd4-conditioner' ||
+        n.adapterId === 'rfd4-proteina' ||
+        n.adapterId === 'genie3',
+    ),
+  );
   let hasMpnnNode = $derived(graph.nodes.some((n) => n.adapterId === 'web-protein-mpnn'));
 
   $effect(() => {
@@ -1209,8 +1537,10 @@
     }
   });
 
-  // Node- and port-scoped intermediate peek state
-  let selectedNode = $derived(graph.nodes.find((n) => n.id === selectedNodeId) ?? graph.nodes[0] ?? null);
+  // Node- and port-scoped intermediate peek state (do not fall back to graph.nodes[0] when deselected)
+  let selectedNode = $derived(
+    selectedNodeId ? (graph.nodes.find((n) => n.id === selectedNodeId) ?? null) : null,
+  );
 
   let peekSlots = $derived.by(() =>
     selectedNode ? getNodePeekSlots(graph, selectedNode.id, outputsByNode) : [],
@@ -1601,10 +1931,10 @@
             <span>Export JSON</span>
           </button>
           <label class="menu-item" class:disabled={isRunning}>
-            <span>Import JSON</span>
+            <span>Import JSON / YAML</span>
             <input
               type="file"
-              accept=".json"
+              accept=".json,.yaml,.yml"
               hidden
               disabled={isRunning}
               onchange={importGraphJson}
@@ -1711,7 +2041,11 @@
 
       {#if showRecipe}
         <div class="drawer-scroll">
-          <RecipeDrawer {graph} disabled={isRunning} onApplyGraph={handleGraphChange} />
+          <RecipeDrawer
+            {graph}
+            disabled={isRunning}
+            onApplyGraph={(next) => loadFullWorkflowGraph(next, { clearOutputs: true })}
+          />
         </div>
       {/if}
 
@@ -1810,10 +2144,17 @@
                 pLDDT
               </button>
             </div>
-            <label title="Superpose models with Kabsch alignment (supports motif/substructure alignment for different lengths)">
+            {@const sharedPreAligned = Boolean(comparisonState.sharedReferenceLabel) && comparisonState.effectiveLayout === 'overlay'}
+            <label
+              class:disabled-opt={sharedPreAligned}
+              title={sharedPreAligned
+                ? 'Branches share a designed backbone and are pre-aligned to it in Overlay mode'
+                : 'Superpose models with Kabsch alignment (supports motif/substructure alignment for different lengths)'}
+            >
               <input
                 type="checkbox"
-                checked={compareAlignKabsch && comparisonState.effectiveLayout === 'overlay'}
+                disabled={sharedPreAligned}
+                checked={sharedPreAligned || (compareAlignKabsch && comparisonState.effectiveLayout === 'overlay')}
                 onchange={(e) => {
                   const checked = e.currentTarget.checked;
                   compareAlignKabsch = checked;
@@ -1822,7 +2163,7 @@
                   }
                 }}
               />
-              Kabsch align
+              {sharedPreAligned ? 'Kabsch align (shared)' : 'Kabsch align'}
             </label>
             <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
             <label title="Slowly rotate the 3D view (pauses while dragging)"><input type="checkbox" bind:checked={viewerSpin} /> Spin</label>
@@ -1854,7 +2195,7 @@
             {/if}
 
             {#if hasConditionerNode || hasMpnnNode}
-              <label class="pick-mode" title="Choose what clicking a 3D residue modifies">
+              <label class="pick-mode" title="Choose what clicking a 3D protein residue modifies">
                 Pick:
                 <select class="pick-select" bind:value={molPickMode}>
                   <option value="auto">Auto</option>
@@ -1867,6 +2208,15 @@
                     <option value="mpnn">Fix Positions (MPNN)</option>
                   {/if}
                 </select>
+                {#if pickTargetInfo}
+                  <span class="pick-target-tag" title={`3D clicks append to ${pickTargetInfo.fieldLabel} on ${pickTargetInfo.nodeName}`}>
+                    → {pickTargetInfo.nodeName}
+                  </span>
+                {:else if molPickMode !== 'off'}
+                  <span class="pick-target-tag muted" title="Click a conditioned block on the canvas to target 3D picking">
+                    → inspect
+                  </span>
+                {/if}
               </label>
             {/if}
 
@@ -1905,13 +2255,16 @@
             ? 'Preview parent backbone'
             : undefined}
           onEmptyAction={() => (showSeqParentBackbone = true)}
-          onResidueClick={handleResidueClick}
+          onResidueClick={isCompareMode ? undefined : handleResidueClick}
           onToggleModelVisibility={toggleCompareModelVisibility}
           onSoloModel={soloCompareModel}
         />
 
         {#if !isCompareMode && viewerStructureMeta}
           <div class="geom-strip">
+            <span class="geom-lbl">
+              {viewerStructureMeta.sourceModelId === 'pdb-input' && !peekMetrics ? 'Input:' : 'Designed:'}
+            </span>
             <span>L = <b>{viewerStructureMeta.length} aa</b></span>
             <span>R<sub>g</sub> = <b>{viewerStructureMeta.geometry.rg.toFixed(1)} Å</b></span>
             <span>α <b>{viewerStructureMeta.geometry.helixPct.toFixed(0)}%</b> · β <b>{viewerStructureMeta.geometry.sheetPct.toFixed(0)}%</b></span>
@@ -1953,14 +2306,14 @@
             <button
               type="button"
               class="cmp-launch-btn"
-              title="Compare branches in 3D (or ⌘-click / Shift-click blocks on the canvas)"
+              title="Compare branches in 3D (or Ctrl/⌘-click / Shift-click blocks on the canvas)"
               onclick={() => handleSelectNodes(comparableBranchIds)}
             >
               Compare branches ({comparableBranchIds.length})
             </button>
-          {:else if selectedNode && !isCompareMode}
+          {:else if selectedNode && (!isCompareMode || rightPanelTab === 'params')}
             <span class="tab-node-ctx" title={selectedNode.label ?? selectedNode.adapterId}>
-              {selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
+              {isCompareMode ? 'Editing: ' : ''}{selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
             </span>
           {/if}
         </div>
@@ -2686,6 +3039,26 @@
     font-size: 11px;
     color: var(--text-muted);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  .viewer-bar label.disabled-opt {
+    opacity: 0.7;
+    cursor: default;
+  }
+  .pick-target-tag {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    color: var(--accent-soft);
+    max-width: 130px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pick-target-tag.muted {
+    color: var(--text-dim);
+  }
+  .geom-lbl {
+    font-weight: 700;
+    color: var(--text-secondary);
   }
   .geom-strip b {
     color: var(--text-primary);

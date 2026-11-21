@@ -47,6 +47,18 @@
       const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
       return meta.approxMB;
     }
+    if (data.adapterId === 'rfd4-proteina') {
+      const mode = String(data.params?.mode ?? 'unconditional');
+      const needsEnc =
+        mode === 'partial' ||
+        mode === 'inverse-folding' ||
+        (mode === 'preset' &&
+          Boolean(
+            RFD4_BENCHMARK_OPTIONS.find((o) => o.id === String(data.params?.presetId ?? ''))
+              ?.needsEncoder,
+          ));
+      return (manifest?.approxWeightsMB ?? 330) + (needsEnc ? 138 : 0);
+    }
     return manifest?.approxWeightsMB ?? 0;
   });
   let st = $derived(data.state);
@@ -160,9 +172,9 @@
         const rec = Number(p.recycles ?? 1);
         if (meta.family === 'af3') {
           const steps = Number(p.diffusionSteps ?? 25);
-          return `${meta.shortLabel} · single-seq · ${steps} steps`;
+          return `LocalFold · single-seq · ${steps} steps · ${rec} rec`;
         }
-        return `${meta.shortLabel} · single-seq · ${rec} rec`;
+        return `LocalFold · single-seq · ${rec} rec`;
       }
       case 'designability-scorer': {
         return `scRMSD < ${Number(p.scRmsdThreshold ?? 2.0).toFixed(1)} Å · pLDDT ≥ ${Number(p.plddtThreshold ?? 70)}`;
@@ -199,23 +211,34 @@
         return `${art.candidates.length} seq${art.candidates.length > 1 ? 's' : ''} (${art.candidates[0]?.sequence.length ?? 0} aa)`;
       }
       if (art.kind === 'StructureArtifact') {
+        const ligNames = art.diagnostics?.ligandNames ?? [];
+        const naChains = art.diagnostics?.nucleicAcidChains ?? [];
         if (art.length === 0) {
-          if (art.diagnostics?.ligandNames?.length) return `Ligand: ${art.diagnostics.ligandNames.join(', ')}`;
-          if (art.diagnostics?.nucleicAcidChains?.length) {
-            return `dsDNA (${art.diagnostics.nucleicAcidChains.join(', ')})`;
-          }
-          return art.label;
+          const parts: string[] = [];
+          if (ligNames.length > 0) parts.push(`Ligand: ${ligNames.join(', ')}`);
+          if (naChains.length > 0) parts.push(`NA (${naChains.join(', ')})`);
+          return parts.length > 0 ? parts.join(' + ') : art.label;
         }
-        const ligTag = art.diagnostics?.ligandNames?.length
-          ? ` + ${art.diagnostics.ligandNames.join(',')}`
-          : '';
-        return `L=${art.length} aa${ligTag} · Rg ${art.geometry.rg.toFixed(1)} Å`;
+        const extras: string[] = [];
+        if (ligNames.length > 0) extras.push(ligNames.join(','));
+        if (naChains.length > 0) extras.push(`NA:${naChains.join(',')}`);
+        const extraTag = extras.length > 0 ? ` + ${extras.join(' + ')}` : '';
+        return `L=${art.length} aa${extraTag} · Rg ${art.geometry.rg.toFixed(1)} Å`;
       }
       if (art.kind === 'ConditionSpec') {
         return art.summary;
       }
     }
     return null;
+  });
+  let displayTitle = $derived.by((): string => {
+    if (data.label) return data.label;
+    if (data.adapterId === 'localfold-af2') {
+      const modelId = String(data.params?.model ?? 'monomer');
+      const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
+      return meta.shortLabel;
+    }
+    return manifest?.shortName || data.adapterId;
   });
 </script>
 
@@ -265,7 +288,7 @@
     <span class="rt">{runtimeLabel}</span>
   </div>
 
-  <div class="title">{data.label || manifest?.shortName || data.adapterId}</div>
+  <div class="title">{displayTitle}</div>
 
   {#if paramSummary}
     <div class="param-chip" title={paramSummary}>{paramSummary}</div>

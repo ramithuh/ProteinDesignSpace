@@ -59,19 +59,34 @@
   }: Props = $props();
 
   let copiedKey = $state<string | null>(null);
+  let copyFailedKey = $state<string | null>(null);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function copyText(text: string, key: string) {
+    if (copyTimer) clearTimeout(copyTimer);
     try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('Clipboard API unavailable');
+      }
       await navigator.clipboard.writeText(text);
+      copyFailedKey = null;
       copiedKey = key;
-      if (copyTimer) clearTimeout(copyTimer);
       copyTimer = setTimeout(() => {
         copiedKey = null;
       }, 1600);
     } catch {
-      /* clipboard unavailable */
+      copiedKey = null;
+      copyFailedKey = key;
+      copyTimer = setTimeout(() => {
+        copyFailedKey = null;
+      }, 2000);
     }
+  }
+
+  function copyBtnLabel(key: string, idleLabel: string, copiedLabel = '✓ Copied'): string {
+    if (copiedKey === key) return copiedLabel;
+    if (copyFailedKey === key) return 'Copy failed';
+    return idleLabel;
   }
 
   let inSlots = $derived(slots.filter((s) => s.direction === 'in'));
@@ -86,6 +101,23 @@
 
   let activeRow = $derived(metricsArt?.rows[selectedRowIdx] ?? metricsArt?.best ?? null);
   let activeFold = $derived(foldArt?.folds[selectedFoldIdx] ?? foldArt?.folds[0] ?? null);
+  let hasBinderMetrics = $derived(
+    Boolean(
+      metricsArt?.rows.some(
+        (r) =>
+          r.ipae !== undefined ||
+          r.binderScRmsd !== undefined ||
+          r.targetAlignedBinderRmsd !== undefined,
+      ),
+    ),
+  );
+  let hasMotifMetrics = $derived(
+    Boolean(
+      metricsArt?.rows.some(
+        (r) => r.refoldMotifRmsd !== undefined || r.genMotifRmsd !== undefined,
+      ),
+    ),
+  );
 
   function formatAdapterName(sourceModelId: string): string {
     return ADAPTER_REGISTRY[sourceModelId]?.shortName ?? sourceModelId;
@@ -171,7 +203,7 @@
               onclick={() => onSelectSlot(slot.id)}
               title={slot.wired
                 ? `Inspect input "${slot.portName}" (${typeLabel}) from ${slot.peerNodeLabel ?? slot.peerNodeId}`
-                : `Optional input "${slot.portName}" (${typeLabel}) is not connected`}
+                : `${slot.required ? 'Required' : 'Optional'} input "${slot.portName}" (${typeLabel}) is not connected`}
             >
               <span class="pdot" style="background: {col}"></span>
               <span>{slot.portName}</span>
@@ -217,17 +249,38 @@
           <th>scTM</th>
           <th>pLDDT</th>
           <th>pTM</th>
+          {#if hasBinderMetrics}
+            <th title="Mean interface PAE (Å)">iPAE</th>
+            <th title="Target-aligned or independent binder Cα RMSD (Å)">Binder RMSD</th>
+          {/if}
+          {#if hasMotifMetrics}
+            <th title="Refolded motif Cα RMSD vs native template (Å)">Motif RMSD</th>
+          {/if}
           <th>Status</th>
         </tr>
       </thead>
       <tbody>
         {#each metricsArt.rows as row, i (`${row.sequenceId}_${i}`)}
+          {@const bRmsd = row.targetAlignedBinderRmsd ?? row.binderScRmsd}
           <tr class:selected={i === selectedRowIdx} onclick={() => onSelectRow(i)}>
             <td><code>{row.sequenceId}</code></td>
             <td class:good-val={row.scRmsd < scRmsdThreshold}>{row.scRmsd.toFixed(2)} Å</td>
             <td>{row.scTm.toFixed(3)}</td>
             <td class:good-val={row.meanPlddt >= plddtThreshold}>{row.meanPlddt.toFixed(1)}</td>
             <td>{row.ptm !== null ? row.ptm.toFixed(2) : '—'}</td>
+            {#if hasBinderMetrics}
+              <td class:good-val={row.ipae !== undefined && row.ipae < 10}>
+                {row.ipae !== undefined ? `${row.ipae.toFixed(1)} Å` : '—'}
+              </td>
+              <td class:good-val={bRmsd !== undefined && bRmsd < scRmsdThreshold}>
+                {bRmsd !== undefined ? `${bRmsd.toFixed(2)} Å` : '—'}
+              </td>
+            {/if}
+            {#if hasMotifMetrics}
+              <td class:good-val={row.refoldMotifRmsd !== undefined && row.refoldMotifRmsd < 1.0}>
+                {row.refoldMotifRmsd !== undefined ? `${row.refoldMotifRmsd.toFixed(2)} Å` : '—'}
+              </td>
+            {/if}
             <td>
               <span class="verdict" class:pass={row.designable}>
                 {row.designable ? 'PASS' : 'FAIL'}
@@ -240,19 +293,26 @@
 
     {#if activeRow}
       {@const seqStats = analyzeSequence(activeRow.sequence)}
+      {@const designedIsCif = activeRow.designedPdb.trimStart().startsWith('data_')}
       <div class="seq-box">
         <div class="seq-head">
           <span>Selected Sequence ({activeRow.sequence.length} aa · {seqStats.uniqueAaCount} unique AAs)</span>
           <div class="dl-links">
             <button class="link-btn" onclick={() => copyText(activeRow.sequence, 'metric-seq')}>
-              {copiedKey === 'metric-seq' ? '✓ Copied' : 'Copy seq'}
+              {copyBtnLabel('metric-seq', 'Copy seq')}
             </button>
-            <button
-              class="link-btn"
-              onclick={() => onDownloadText(activeRow.designedPdb, `${activeRow.structureId}_designed.pdb`)}
-            >
-              ↓ Designed PDB
-            </button>
+            {#if activeRow.designedPdb.trim().length > 0}
+              <button
+                class="link-btn"
+                onclick={() =>
+                  onDownloadText(
+                    activeRow.designedPdb,
+                    `${activeRow.structureId}_designed.${designedIsCif ? 'cif' : 'pdb'}`,
+                  )}
+              >
+                {designedIsCif ? '↓ Designed mmCIF' : '↓ Designed PDB'}
+              </button>
+            {/if}
             <button
               class="link-btn"
               onclick={() => onDownloadText(activeRow.alignedFoldPdb, `${activeRow.sequenceId}_refold_aligned.pdb`)}
@@ -277,6 +337,29 @@
           <div><b>Fold time:</b> {(activeRow.foldElapsedMs / 1000).toFixed(1)} s</div>
           {#if activeRow.iptm !== null && activeRow.iptm !== undefined}
             <div><b>ipTM:</b> {activeRow.iptm.toFixed(3)}</div>
+          {/if}
+          {#if activeRow.ipae !== undefined}
+            <div><b>iPAE:</b> {activeRow.ipae.toFixed(2)} Å</div>
+          {/if}
+          {#if activeRow.binderScRmsd !== undefined}
+            <div><b>Binder scRMSD:</b> {activeRow.binderScRmsd.toFixed(2)} Å</div>
+          {/if}
+          {#if activeRow.targetAlignedBinderRmsd !== undefined}
+            <div><b>Target-aligned Binder RMSD:</b> {activeRow.targetAlignedBinderRmsd.toFixed(2)} Å</div>
+          {/if}
+          {#if activeRow.binderPlddt !== undefined || activeRow.targetPlddt !== undefined}
+            <div>
+              <b>Chain pLDDT:</b>
+              {activeRow.binderPlddt !== undefined ? `Binder ${activeRow.binderPlddt.toFixed(1)}` : ''}
+              {activeRow.binderPlddt !== undefined && activeRow.targetPlddt !== undefined ? ' · ' : ''}
+              {activeRow.targetPlddt !== undefined ? `Target ${activeRow.targetPlddt.toFixed(1)}` : ''}
+            </div>
+          {/if}
+          {#if activeRow.genMotifRmsd !== undefined}
+            <div><b>Gen Motif RMSD:</b> {activeRow.genMotifRmsd.toFixed(2)} Å</div>
+          {/if}
+          {#if activeRow.refoldMotifRmsd !== undefined}
+            <div><b>Refold Motif RMSD:</b> {activeRow.refoldMotifRmsd.toFixed(2)} Å</div>
           {/if}
           <div><b>Refold R<sub>g</sub>:</b> {activeRow.geometry.rg.toFixed(1)} Å</div>
           <div><b>Refold α/β:</b> {activeRow.geometry.helixPct.toFixed(0)}% / {activeRow.geometry.sheetPct.toFixed(0)}%</div>
@@ -317,7 +400,7 @@
           <span>{activeFold.sequenceId} · {formatFoldModelName(activeFold.foldModelId)}</span>
           <div class="dl-links">
             <button class="link-btn" onclick={() => copyText(activeFold.sequence, 'fold-seq')}>
-              {copiedKey === 'fold-seq' ? '✓ Copied' : 'Copy seq'}
+              {copyBtnLabel('fold-seq', 'Copy seq')}
             </button>
             <button
               class="link-btn"
@@ -342,7 +425,9 @@
             <div><b>pTM:</b> {activeFold.ptm.toFixed(3)}</div>
           {/if}
           {#if activeFold.iptm !== null && activeFold.iptm !== undefined}
-            <div><b>ipTM:</b> {activeFold.iptm.toFixed(3)}</div>
+            <div>
+              <b>ipTM:</b> {activeFold.iptm.toFixed(3)}{activeFold.iptmIsMonomerApprox ? ' (monomer approx)' : ''}
+            </div>
           {/if}
           <div><b>MSA:</b> Single-sequence (no MSA)</div>
           <div><b>Fold time:</b> {(activeFold.elapsedMs / 1000).toFixed(1)} s</div>
@@ -350,11 +435,16 @@
       </div>
     {/if}
   {:else if seqArt}
+    {@const skipSelfRecovery =
+      (activeSlot?.direction === 'out' &&
+        (node?.adapterId === 'rfd4-proteina' || node?.adapterId === 'genie3')) ||
+      (contextStructure?.id === seqArt.parentStructureId &&
+        (seqArt.sourceModelId === 'rfd4-proteina' || seqArt.sourceModelId === 'genie3'))}
     <div class="meta-bar">
       <span><b>{seqArt.candidates.length}</b> sequence{seqArt.candidates.length === 1 ? '' : 's'} · <span>{formatAdapterName(seqArt.sourceModelId)}</span></span>
       <div class="dl-links">
         <button class="link-btn" onclick={() => copyText(formatFasta(seqArt), 'all-fasta')}>
-          {copiedKey === 'all-fasta' ? '✓ Copied FASTA' : 'Copy FASTA'}
+          {copyBtnLabel('all-fasta', 'Copy FASTA', '✓ Copied FASTA')}
         </button>
         <button
           class="link-btn"
@@ -367,7 +457,7 @@
 
     <div class="seq-list">
       {#each seqArt.candidates as c, i (`${c.id}_${i}`)}
-        {@const st = analyzeSequence(c.sequence, contextStructure?.sequence)}
+        {@const st = analyzeSequence(c.sequence, skipSelfRecovery ? undefined : contextStructure?.sequence)}
         <div class="seq-box">
           <div class="seq-head">
             <span class="cand-title">
@@ -383,7 +473,7 @@
               {/if}
             </span>
             <button class="link-btn" onclick={() => copyText(c.sequence, `cand-${i}`)}>
-              {copiedKey === `cand-${i}` ? '✓ Copied' : 'Copy'}
+              {copyBtnLabel(`cand-${i}`, 'Copy')}
             </button>
           </div>
           <div class="stat-chips">
@@ -408,15 +498,27 @@
     </div>
   {:else if structArt}
     {@const st = analyzeSequence(structArt.sequence)}
-    {@const rawPrev = previewTextLines(structArt.pdbText, 36)}
+    {@const hasValidPdb = Boolean(
+      structArt.pdbText &&
+        structArt.pdbText.trim().length > 0 &&
+        !structArt.pdbText.trimStart().startsWith('data_'),
+    )}
+    {@const rawStructText = structArt.cifText ?? structArt.pdbText}
+    {@const isCifPreview = Boolean(structArt.cifText) || rawStructText.trimStart().startsWith('data_')}
+    {@const rawPrev = previewTextLines(rawStructText, 36)}
     <div class="meta-bar">
       <span><b>{structArt.label}</b> · <span>{formatAdapterName(structArt.sourceModelId)}</span></span>
       <div class="dl-links">
-        <button class="link-btn" onclick={() => onDownloadText(structArt.pdbText, `${structArt.id}.pdb`)}>
-          ↓ PDB
-        </button>
-        {#if structArt.cifText}
-          <button class="link-btn" onclick={() => onDownloadText(structArt.cifText!, `${structArt.id}.cif`)}>
+        {#if hasValidPdb}
+          <button class="link-btn" onclick={() => onDownloadText(structArt.pdbText, `${structArt.id}.pdb`)}>
+            ↓ PDB
+          </button>
+        {/if}
+        {#if structArt.cifText || (!hasValidPdb && structArt.pdbText.trimStart().startsWith('data_'))}
+          <button
+            class="link-btn"
+            onclick={() => onDownloadText(structArt.cifText ?? structArt.pdbText, `${structArt.id}.cif`)}
+          >
             ↓ mmCIF
           </button>
         {/if}
@@ -433,10 +535,19 @@
 
     <div class="stat-chips">
       <span class="stat-chip">L = {structArt.length} aa</span>
+      {#if structArt.diagnostics?.chainCount && structArt.diagnostics.chainCount > 1}
+        <span class="stat-chip">{structArt.diagnostics.chainCount} chains</span>
+      {/if}
       <span class="stat-chip">R<sub>g</sub> = {structArt.geometry.rg.toFixed(1)} Å</span>
       <span class="stat-chip">α {structArt.geometry.helixPct.toFixed(0)}% · β {structArt.geometry.sheetPct.toFixed(0)}%</span>
       <span class="stat-chip">breaks: {structArt.geometry.chainBreaks}</span>
       <span class="stat-chip">clashes: {structArt.geometry.clashes}</span>
+      {#if structArt.diagnostics?.ligandNames?.length}
+        <span class="stat-chip cond-key">Ligands: {structArt.diagnostics.ligandNames.join(', ')}</span>
+      {/if}
+      {#if structArt.diagnostics?.nucleicAcidChains?.length}
+        <span class="stat-chip cond-key">Nucleic acid: {structArt.diagnostics.nucleicAcidChains.join(', ')}</span>
+      {/if}
       {#if structArt.trajectoryFrameCount}
         <span class="stat-chip">{structArt.trajectoryFrameCount} traj frames</span>
       {/if}
@@ -446,7 +557,7 @@
       <div class="seq-head">
         <span>Backbone residue sequence ({structArt.sequence.length} aa · {st.uniqueAaCount} unique AAs)</span>
         <button class="link-btn" onclick={() => copyText(structArt.sequence, 'struct-seq')}>
-          {copiedKey === 'struct-seq' ? '✓ Copied' : 'Copy seq'}
+          {copyBtnLabel('struct-seq', 'Copy seq')}
         </button>
       </div>
       {#if st.warnings.length > 0}
@@ -460,7 +571,7 @@
     </div>
 
     <details class="raw-details">
-      <summary>Raw PDB preview ({rawPrev.totalLines} lines)</summary>
+      <summary>Raw {isCifPreview ? 'mmCIF' : 'PDB'} preview ({rawPrev.totalLines} lines)</summary>
       <pre class="raw-pre">{rawPrev.preview}{rawPrev.truncated ? `\n… (${rawPrev.totalLines - 36} more lines)` : ''}</pre>
     </details>
   {:else if condArt}
@@ -480,7 +591,7 @@
     <div class="meta-bar">
       <span><b>{condArt.label}</b></span>
       <button class="link-btn" onclick={() => copyText(condJson, 'cond-json')}>
-        {copiedKey === 'cond-json' ? '✓ Copied JSON' : 'Copy spec JSON'}
+        {copyBtnLabel('cond-json', 'Copy spec JSON', '✓ Copied JSON')}
       </button>
     </div>
 
@@ -507,7 +618,7 @@
     <div class="placeholder-box">
       {#if activeSlot && !activeSlot.wired}
         <p class="placeholder-msg">
-          Optional input <code>{activeSlot.portName}</code> ({PORT_COLORS[activeSlot.portType]?.label ?? activeSlot.portType}) is not connected.
+          {activeSlot.required ? 'Required' : 'Optional'} input <code>{activeSlot.portName}</code> ({PORT_COLORS[activeSlot.portType]?.label ?? activeSlot.portType}) is not connected.
           Drag a matching colored wire into this port on the canvas to pass data in.
         </p>
       {:else if activeSlot}
