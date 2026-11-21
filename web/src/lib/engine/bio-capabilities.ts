@@ -694,10 +694,10 @@ export function validateBioCapabilities(
         if (family !== 'ca' && (up.isCaOnly || (up.missingBackboneCount ?? 0) > 0)) {
           const mpnnName = node.label ?? 'ProteinMPNN';
           const msg = up.fromGenie3
-            ? `Genie 3 outputs Cα-only coordinates (no N/C/O backbone atoms), which ${mpnnName} requires. Switch to Cα-ProteinMPNN for faithful sequence design.`
+            ? `Genie 3 outputs Cα-only coordinates, whereas ${mpnnName} requires full backbone coordinates. Switch to Cα-ProteinMPNN.`
             : up.isCaOnly
-              ? `Upstream structure is Cα-only (missing N/C/O backbone atoms), which ${mpnnName} requires. Switch to Cα-ProteinMPNN.`
-              : `Upstream structure has ${up.missingBackboneCount} residue(s) missing N/C backbone atoms — ${mpnnName} requires complete backbone atoms. Switch to Cα-ProteinMPNN.`;
+              ? `Upstream structure is Cα-only, whereas ${mpnnName} requires full backbone coordinates. Switch to Cα-ProteinMPNN.`
+              : `Upstream structure has ${up.missingBackboneCount} residue(s) with incomplete backbone coordinates — ${mpnnName} requires full backbone coordinates. Switch to Cα-ProteinMPNN.`;
           issues.push({
             severity: 'warning',
             code: 'mpnn-ca-only-backbone',

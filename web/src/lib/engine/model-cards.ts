@@ -261,7 +261,7 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     citation:
       'Lin et al., Genie 3 (AlQuraishi Lab, Columbia University; weights yeqinglin/genie3 step=600000); WebGPU port ramithuh/genie3-webgpu.',
     limitations: [
-      'Cα-only protein backbone diffusion model (23.3M params); emits honest Cα coordinates without fabricating N/C/O backbone atoms or sidechains.',
+      'Cα-only protein backbone diffusion model (23.3M params); pair with Cα-ProteinMPNN for sequence design.',
       'Cannot condition on small-molecule ligands, metals, or nucleic acids (use RFD4-Proteina for all-atom conditioning).',
       '1-step SequenceNet head is fast but lower recovery than iterative inverse folding; chain into Cα-ProteinMPNN before refolding.',
       'Oracle parity is verified on L=16 V1Denoiser/DDIM traces; multi-step stochastic trajectories diverge across different RNG implementations.',
