@@ -132,10 +132,9 @@
         const rec = Number(p.recycles ?? 1);
         if (meta.family === 'af3') {
           const steps = Number(p.diffusionSteps ?? 25);
-          return `${meta.shortLabel} · ${steps} steps · ${rec} rec`;
+          return `${meta.shortLabel} · single-seq · ${steps} steps`;
         }
-        const maxSeq = Number(p.maxSequences ?? 2);
-        return `${meta.shortLabel} · ${rec} rec · ${maxSeq} seq`;
+        return `${meta.shortLabel} · single-seq · ${rec} rec`;
       }
       case 'designability-scorer': {
         return `scRMSD < ${Number(p.scRmsdThreshold ?? 2.0).toFixed(1)} Å · pLDDT ≥ ${Number(p.plddtThreshold ?? 70)}`;

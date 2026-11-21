@@ -51,7 +51,7 @@
     const p = node.params ?? {};
     switch (node.adapterId) {
       case 'localfold-af2':
-        return selectedLocalFoldMeta?.label ?? LOCALFOLD_MODEL_OPTIONS[0].label;
+        return `${selectedLocalFoldMeta?.label ?? LOCALFOLD_MODEL_OPTIONS[0].label} · Single-sequence (no MSA)`;
       case 'rfd4-proteina': {
         const mode = String(p.mode ?? 'unconditional');
         const needsEnc =
@@ -822,7 +822,7 @@
             {/each}
           </optgroup>
         </select>
-        <span class="field-hint">Weights: ~{lfMeta.approxMB} MB · License: {lfMeta.license}</span>
+        <span class="field-hint">Single-sequence (no MSA) · Weights: ~{lfMeta.approxMB} MB · License: {lfMeta.license}</span>
       </label>
       <label>
         Recycles

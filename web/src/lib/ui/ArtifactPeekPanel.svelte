@@ -344,6 +344,7 @@
           {#if activeFold.iptm !== null && activeFold.iptm !== undefined}
             <div><b>ipTM:</b> {activeFold.iptm.toFixed(3)}</div>
           {/if}
+          <div><b>MSA:</b> Single-sequence (no MSA)</div>
           <div><b>Fold time:</b> {(activeFold.elapsedMs / 1000).toFixed(1)} s</div>
         </div>
       </div>
