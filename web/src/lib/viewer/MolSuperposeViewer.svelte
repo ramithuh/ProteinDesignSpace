@@ -111,6 +111,7 @@
     | 'auto'
     | 'chain-id'
     | 'plddt-confidence'
+    | 'uncertainty'
     | 'secondary-structure'
     | 'hydrophobicity'
     | 'sequence-id'
@@ -125,9 +126,71 @@
   let cameraMode = $state<'perspective' | 'orthographic'>('perspective');
   let localSpinSpeed = $state<number | null>(null);
   let effectiveSpinSpeed = $derived(localSpinSpeed ?? spinSpeed);
-  let plddtAllowed = $derived(bfactorSemantics !== 'none' && bfactorSemantics !== 'crystal-b');
+  let isSemanticBfactor = $derived(
+    bfactorSemantics === 'dynamics-prob' || bfactorSemantics === 'ddg-stability',
+  );
+  let plddtAllowed = $derived(
+    bfactorSemantics !== 'none' &&
+      bfactorSemantics !== 'crystal-b' &&
+      !isSemanticBfactor,
+  );
   let lastStructureKey = '';
   let lastRenderedKey = '';
+
+  /**
+   * Build a Mol* `'uncertainty'` (B-factor continuous ramp) color argument, adapting the
+   * numeric domain to the observed polymer B-factors so both raw (`0..1` dynamics prob,
+   * signed `ΔΔG` kcal/mol) and `0..100`-scaled structures display full blue↔white↔red contrast.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function resolveUncertaintyColorArg(
+    struct: any,
+    semantics?: BfactorSemantics,
+  ): Record<string, unknown> {
+    try {
+      const units = struct?.data?.units;
+      let min = Infinity;
+      let max = -Infinity;
+      if (Array.isArray(units)) {
+        for (const u of units) {
+          const bCol = u?.model?.atomicConformation?.B_iso_or_equiv;
+          const elems = u?.elements;
+          if (!bCol || !elems || typeof bCol.value !== 'function') continue;
+          const n = elems.length;
+          for (let i = 0; i < n; i++) {
+            const v = bCol.value(elems[i]);
+            if (typeof v === 'number' && Number.isFinite(v)) {
+              if (v < min) min = v;
+              if (v > max) max = v;
+            }
+          }
+        }
+      }
+      if (Number.isFinite(min) && Number.isFinite(max)) {
+        if (semantics === 'dynamics-prob') {
+          if (min >= -0.05 && max <= 1.05) {
+            return { color: 'uncertainty', colorParams: { domain: [0, 1] } };
+          }
+          return { color: 'uncertainty', colorParams: { domain: [0, 100] } };
+        }
+        if (semantics === 'ddg-stability') {
+          if (min < 0) {
+            const lim = Math.max(1.5, Math.min(6, Math.max(Math.abs(min), Math.abs(max))));
+            return { color: 'uncertainty', colorParams: { domain: [-lim, lim] } };
+          }
+          if (max <= 100.5 && min >= 0) {
+            return { color: 'uncertainty', colorParams: { domain: [0, 100] } };
+          }
+          if (max > min) {
+            return { color: 'uncertainty', colorParams: { domain: [min, max] } };
+          }
+        }
+      }
+    } catch {
+      /* fallback to default Mol* uncertainty ramp */
+    }
+    return { color: 'uncertainty' };
+  }
 
   function hasMultiplePdbChains(pdbText: string): boolean {
     let firstChain = '';
@@ -470,6 +533,7 @@
       surfaceOverlay: boolean;
       ligands: boolean;
       plddtAllowed: boolean;
+      bfactorSemantics?: BfactorSemantics;
       preserveCamera: boolean;
       structureKey: string;
       fullKey: string;
@@ -501,6 +565,9 @@
       const { Color } = await import('molstar/lib/mol-util/color');
       if (destroyed || mySeq !== loadSeq) return;
       const hasOverlay = Boolean(sDesigned && dPdb && sRefold && rPdb && !useTraj);
+      const useSemanticUncertainty =
+        styleOpts.bfactorSemantics === 'dynamics-prob' ||
+        styleOpts.bfactorSemantics === 'ddg-stability';
 
       // 1. Designed structure (or multi-model trajectory)
       if (sDesigned && (useTraj && tPdb ? tPdb : dPdb)) {
@@ -548,13 +615,17 @@
             ? 'auto'
             : styleOpts.color;
         const designedColorArg =
-          effectiveDesignedColor !== 'auto'
-            ? { color: effectiveDesignedColor }
-            : hasOverlay
-              ? { color: 'uniform', colorParams: { value: Color(0x94a3b8) } }
-              : isMultiChain
-                ? { color: 'chain-id' }
-                : { color: 'uniform', colorParams: { value: Color(0x60a5fa) } };
+          effectiveDesignedColor === 'uncertainty'
+            ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+            : effectiveDesignedColor !== 'auto'
+              ? { color: effectiveDesignedColor }
+              : hasOverlay
+                ? { color: 'uniform', colorParams: { value: Color(0x94a3b8) } }
+                : useSemanticUncertainty
+                  ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+                  : isMultiChain
+                    ? { color: 'chain-id' }
+                    : { color: 'uniform', colorParams: { value: Color(0x60a5fa) } };
         const designedAlpha = hasOverlay ? 0.45 : 1.0;
         await ctx.builders.structure.representation.addRepresentation(struct, {
           type: styleOpts.rep,
@@ -573,7 +644,7 @@
 
       if (destroyed || mySeq !== loadSeq) return;
 
-      // 2. Kabsch-aligned refolded structure colored by pLDDT (B-factor)
+      // 2. Kabsch-aligned refolded structure colored by pLDDT or semantic B-factor
       if (sRefold && rPdb && !useTraj) {
         const rFmt = /^\s*(data_|loop_|_atom_site\.)/m.test(rPdb) ? 'mmcif' : 'pdb';
         const data = await ctx.builders.data.rawData({
@@ -587,13 +658,17 @@
           params: {},
         });
         const refoldColorArg =
-          styleOpts.color !== 'auto'
-            ? styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
-              ? { color: 'secondary-structure' }
-              : { color: styleOpts.color }
-            : styleOpts.plddtAllowed
-              ? { color: 'plddt-confidence' }
-              : { color: 'uniform', colorParams: { value: Color(0x60a5fa) } };
+          styleOpts.color === 'uncertainty'
+            ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+            : styleOpts.color !== 'auto'
+              ? styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
+                ? { color: 'secondary-structure' }
+                : { color: styleOpts.color }
+              : useSemanticUncertainty
+                ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+                : styleOpts.plddtAllowed
+                  ? { color: 'plddt-confidence' }
+                  : { color: 'uniform', colorParams: { value: Color(0x60a5fa) } };
         await ctx.builders.structure.representation.addRepresentation(struct, {
           type: styleOpts.rep,
           ...refoldColorArg,
@@ -711,6 +786,11 @@
   let hasAnyStructure = $derived(
     Boolean((models && models.length > 0) || designedPdb || refoldPdb),
   );
+  let showSemanticBfactorLegend = $derived(
+    hasAnyStructure &&
+      isSemanticBfactor &&
+      (colorScheme === 'auto' || colorScheme === 'uncertainty'),
+  );
 
   function applySpin(on: boolean, speed: number) {
     if (!plugin?.canvas3d) return;
@@ -733,6 +813,7 @@
       surfaceOverlay: boolean;
       ligands: boolean;
       plddtAllowed: boolean;
+      bfactorSemantics?: BfactorSemantics;
       preserveCamera: boolean;
       structureKey: string;
       fullKey: string;
@@ -767,6 +848,10 @@
       ]);
       if (destroyed || mySeq !== loadSeq) return;
 
+      const useSemanticUncertainty =
+        styleOpts.bfactorSemantics === 'dynamics-prob' ||
+        styleOpts.bfactorSemantics === 'ddg-stability';
+
       const nextRefs = new Map<string, string[]>();
       for (const m of specs) {
         const fmt = /^\s*(data_|loop_|_atom_site\.)/m.test(m.pdbText) ? 'mmcif' : 'pdb';
@@ -786,11 +871,15 @@
             ? 'auto'
             : styleOpts.color;
         const modelColorArg =
-          effectiveColor !== 'auto'
-            ? { color: effectiveColor }
-            : m.colorByPlddt && styleOpts.plddtAllowed
-              ? { color: 'plddt-confidence' }
-              : { color: 'uniform', colorParams: { value: Color(m.colorHex) } };
+          effectiveColor === 'uncertainty'
+            ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+            : effectiveColor !== 'auto'
+              ? { color: effectiveColor }
+              : useSemanticUncertainty && (m.colorByPlddt || specs.length === 1)
+                ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+                : m.colorByPlddt && styleOpts.plddtAllowed
+                  ? { color: 'plddt-confidence' }
+                  : { color: 'uniform', colorParams: { value: Color(m.colorHex) } };
         const repr = await ctx.builders.structure.representation.addRepresentation(struct, {
           type: styleOpts.rep,
           ...modelColorArg,
@@ -875,8 +964,9 @@
       surfaceOverlay: showSurfaceOverlay,
       ligands: showLigands,
       plddtAllowed,
+      bfactorSemantics,
     };
-    const styleKey = `${styleOpts.rep}|${styleOpts.color}|${styleOpts.sidechains ? 1 : 0}|${styleOpts.surfaceOverlay ? 1 : 0}|${styleOpts.ligands ? 1 : 0}|${styleOpts.plddtAllowed ? 1 : 0}`;
+    const styleKey = `${styleOpts.rep}|${styleOpts.color}|${styleOpts.sidechains ? 1 : 0}|${styleOpts.surfaceOverlay ? 1 : 0}|${styleOpts.ligands ? 1 : 0}|${styleOpts.plddtAllowed ? 1 : 0}|${styleOpts.bfactorSemantics ?? ''}`;
     if (multiRenderKey !== null) {
       const mKey = `multi:${multiRenderKey}`;
       const fullKey = `${mKey}##${styleKey}`;
@@ -1022,7 +1112,7 @@
 </script>
 
 <div class="mol-card" style="height: {typeof height === 'number' ? `${height}px` : height}">
-  {#if label || (atomGranularity === 'ca-only' && hasAnyStructure)}
+  {#if label || (atomGranularity === 'ca-only' && hasAnyStructure) || (showSemanticBfactorLegend && models && models.length > 0)}
     <div class="hud-top-left" class:has-style-menu={expanded && hasAnyStructure}>
       {#if label}
         <div class="badge" title={label}>{label}</div>
@@ -1033,6 +1123,24 @@
           title="Only Cα backbone coordinates are present; Mol* renders an inferred smooth ribbon."
         >
           Cα-only (inferred ribbon)
+        </div>
+      {/if}
+      {#if showSemanticBfactorLegend && models && models.length > 0}
+        <div
+          class="bfactor-pill"
+          aria-label={bfactorSemantics === 'dynamics-prob'
+            ? 'Dynamics probability B-factor scale: Rigid 0.0 to Flexible 1.0'
+            : 'Stability B-factor scale: Stabilizing to Destabilizing (ΔΔG)'}
+        >
+          {#if bfactorSemantics === 'dynamics-prob'}
+            <span>Rigid 0.0</span>
+            <span class="bfactor-grad" aria-hidden="true"></span>
+            <span>Flexible 1.0</span>
+          {:else}
+            <span>Stabilizing</span>
+            <span class="bfactor-grad" aria-hidden="true"></span>
+            <span>Destabilizing (ΔΔG)</span>
+          {/if}
         </div>
       {/if}
     </div>
@@ -1070,6 +1178,7 @@
               <option value="plddt-confidence" disabled={!plddtAllowed}>
                 {plddtAllowed ? 'pLDDT Confidence' : 'pLDDT Confidence (unavailable)'}
               </option>
+              <option value="uncertainty">B-factor / Uncertainty</option>
               <option value="secondary-structure">Secondary Structure</option>
               <option value="hydrophobicity">Hydrophobicity</option>
               <option value="sequence-id">Rainbow (N → C)</option>
@@ -1168,6 +1277,23 @@
           {/if}
         </div>
       {/each}
+    </div>
+  {:else if showSemanticBfactorLegend}
+    <div
+      class="legend bfactor-legend"
+      aria-label={bfactorSemantics === 'dynamics-prob'
+        ? 'Dynamics probability B-factor scale: Rigid 0.0 to Flexible 1.0'
+        : 'Stability B-factor scale: Stabilizing to Destabilizing (ΔΔG)'}
+    >
+      {#if bfactorSemantics === 'dynamics-prob'}
+        <span>Rigid 0.0</span>
+        <span class="bfactor-grad" aria-hidden="true"></span>
+        <span>Flexible 1.0</span>
+      {:else}
+        <span>Stabilizing</span>
+        <span class="bfactor-grad" aria-hidden="true"></span>
+        <span>Destabilizing (ΔΔG)</span>
+      {/if}
     </div>
   {:else if designedPdb && refoldPdb && showDesigned && showRefold && !showTrajectory}
     <div class="legend">
@@ -1358,6 +1484,28 @@
   }
   .swatch.plddt {
     background: linear-gradient(90deg, #ff7d45, #ffdb13, #65cbf3, #0053d6);
+  }
+  .bfactor-legend,
+  .bfactor-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--bg-surface) 92%, transparent);
+    border: 1px solid var(--border-strong);
+    padding: 3px 9px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .bfactor-grad {
+    width: 48px;
+    height: 6px;
+    border-radius: 999px;
+    border: 1px solid var(--border-subtle);
+    background: linear-gradient(90deg, #2563eb 0%, #f8fafc 50%, #dc2626 100%);
+    flex-shrink: 0;
   }
   .empty {
     position: absolute;

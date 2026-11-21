@@ -15,12 +15,17 @@
     DesignabilityMetrics,
     FoldedStructure,
     MsaMode,
+    MutationMatrixArtifact,
     ReferenceRelation,
+    ResidueTrackArtifact,
+    SequenceEmbeddingArtifact,
     SequenceSet,
     StructureArtifact,
     WorkflowNode,
   } from '$lib/engine/types';
+  import MutationHeatmap from '$lib/viewer/MutationHeatmap.svelte';
   import PaePlot from '$lib/viewer/PaePlot.svelte';
+  import ResidueTrackPlot from '$lib/viewer/ResidueTrackPlot.svelte';
 
   interface Props {
     node: WorkflowNode | null;
@@ -231,6 +236,10 @@
   let seqArt = $derived(artifact?.kind === 'SequenceSet' ? (artifact as SequenceSet) : null);
   let structArt = $derived(artifact?.kind === 'StructureArtifact' ? (artifact as StructureArtifact) : null);
   let condArt = $derived(artifact?.kind === 'ConditionSpec' ? (artifact as ConditionSpecArtifact) : null);
+  let mutArt = $derived(artifact?.kind === 'MutationMatrix' ? (artifact as MutationMatrixArtifact) : null);
+  let trackArt = $derived(artifact?.kind === 'ResidueTrack' ? (artifact as ResidueTrackArtifact) : null);
+  let embArt = $derived(artifact?.kind === 'SequenceEmbedding' ? (artifact as SequenceEmbeddingArtifact) : null);
+  let embStats = $derived(embArt ? embeddingSummary(embArt.pooled) : null);
 
   $effect(() => {
     void structArt?.id;
@@ -371,6 +380,85 @@
       mean: sum / count,
       ge70Pct: (ge70 / count) * 100,
     };
+  }
+
+  function embeddingSummary(arr: Float32Array) {
+    if (!arr || arr.length === 0) return null;
+    let sumSq = 0;
+    let sum = 0;
+    let min = Infinity;
+    let max = -Infinity;
+    let count = 0;
+    for (let i = 0; i < arr.length; i++) {
+      const v = arr[i];
+      if (!Number.isFinite(v)) continue;
+      count++;
+      sumSq += v * v;
+      sum += v;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    if (count === 0) return null;
+    const mean = sum / count;
+    const l2Norm = Math.sqrt(sumSq);
+    const preview: number[] = [];
+    for (let i = 0; i < Math.min(8, arr.length); i++) {
+      preview.push(arr[i]);
+    }
+    return { count, l2Norm, mean, min, max, preview };
+  }
+
+  function formatEmbeddingJson(emb: SequenceEmbeddingArtifact): string {
+    const stats = embeddingSummary(emb.pooled);
+    const perResNorms =
+      emb.perResidue && emb.dim > 0
+        ? (() => {
+            const L = Math.floor(emb.perResidue.length / emb.dim);
+            const norms: number[] = new Array(L);
+            for (let i = 0; i < L; i++) {
+              let sq = 0;
+              const off = i * emb.dim;
+              for (let d = 0; d < emb.dim; d++) {
+                const v = emb.perResidue[off + d];
+                if (Number.isFinite(v)) sq += v * v;
+              }
+              norms[i] = Number(Math.sqrt(sq).toFixed(6));
+            }
+            return norms;
+          })()
+        : undefined;
+    return (
+      JSON.stringify(
+        {
+          id: emb.id,
+          ...(emb.label ? { label: emb.label } : {}),
+          sourceModelId: emb.sourceModelId,
+          ...(emb.parentStructureId ? { parentStructureId: emb.parentStructureId } : {}),
+          ...(emb.sequenceId ? { sequenceId: emb.sequenceId } : {}),
+          sequence: emb.sequence,
+          length: emb.sequence.length,
+          dim: emb.dim,
+          ...(isFiniteNum(emb.pseudoPerplexity) ? { pseudoPerplexity: emb.pseudoPerplexity } : {}),
+          ...(stats
+            ? {
+                pooledNorm: Number(stats.l2Norm.toFixed(6)),
+                pooledMean: Number(stats.mean.toFixed(6)),
+                pooledRange: [Number(stats.min.toFixed(6)), Number(stats.max.toFixed(6))],
+              }
+            : {}),
+          pooled: Array.from(emb.pooled, (v) => (Number.isFinite(v) ? Number(v.toFixed(6)) : null)),
+          ...(perResNorms
+            ? {
+                perResidueShape: [perResNorms.length, emb.dim],
+                perResidueL2Norms: perResNorms,
+              }
+            : {}),
+          ...(emb.provenance ? { provenance: emb.provenance } : {}),
+        },
+        null,
+        2,
+      ) + '\n'
+    );
   }
 </script>
 
@@ -1056,6 +1144,115 @@
       <summary>Raw constraint spec JSON</summary>
       <pre class="raw-pre">{condJson}</pre>
     </details>
+  {:else if mutArt}
+    <div class="meta-bar">
+      <span>
+        <b>{mutArt.label ?? 'Mutation Matrix'}</b> · <span>{formatAdapterName(mutArt.sourceModelId)}</span>
+      </span>
+      <span class="stat-chip">{mutArt.metric}</span>
+    </div>
+    {#if mutArt.provenance?.quantization || mutArt.provenance?.degradedFallback || mutArt.provenance?.warnings?.length}
+      <div class="stat-chips">
+        {#if mutArt.provenance?.quantization}
+          <span class="stat-chip">{mutArt.provenance.quantization.toUpperCase()}</span>
+        {/if}
+        {#if mutArt.provenance?.degradedFallback}
+          <span class="warn-chip">⚠ {mutArt.provenance.degradedFallback}</span>
+        {/if}
+        {#if mutArt.provenance?.warnings?.length}
+          {#each mutArt.provenance.warnings as pw (pw)}
+            <span class="warn-chip">⚠ {pw}</span>
+          {/each}
+        {/if}
+      </div>
+    {/if}
+    <MutationHeatmap matrix={mutArt} {onDownloadText} />
+  {:else if trackArt}
+    <div class="meta-bar">
+      <span>
+        <b>{trackArt.label ?? trackArt.quantity}</b> · <span>{formatAdapterName(trackArt.sourceModelId)}</span>
+      </span>
+      {#if trackArt.unit}
+        <span class="stat-chip">{trackArt.unit}</span>
+      {/if}
+    </div>
+    <ResidueTrackPlot track={trackArt} {onDownloadText} />
+  {:else if embArt}
+    <div class="meta-bar">
+      <span>
+        <b>{embArt.label ?? 'Sequence Embedding'}</b> · <span>{formatAdapterName(embArt.sourceModelId)}</span>
+      </span>
+      <div class="dl-links">
+        <button class="link-btn" onclick={() => copyText(embArt.sequence, 'emb-seq')}>
+          {copyBtnLabel('emb-seq', 'Copy seq')}
+        </button>
+        <button
+          class="link-btn"
+          onclick={() =>
+            onDownloadText(
+              formatEmbeddingJson(embArt),
+              safeFilename(`${embArt.id}.embedding.json`),
+            )}
+        >
+          ↓ JSON
+        </button>
+      </div>
+    </div>
+
+    <div class="stat-chips">
+      <span class="stat-chip cond-key">dim = {embArt.dim}</span>
+      <span class="stat-chip">L = {embArt.sequence.length} aa</span>
+      {#if isFiniteNum(embArt.pseudoPerplexity)}
+        <span class="stat-chip cond-key" title="Sequence pseudo-perplexity (lower = more natural)">
+          pseudo-PPL = {embArt.pseudoPerplexity.toFixed(2)}
+        </span>
+      {/if}
+      {#if embStats}
+        <span class="stat-chip" title="L2 norm of mean-pooled embedding vector">
+          ‖pooled‖₂ = {embStats.l2Norm.toFixed(3)}
+        </span>
+        <span class="stat-chip">mean = {embStats.mean.toFixed(4)}</span>
+        <span class="stat-chip">range [{embStats.min.toFixed(3)}, {embStats.max.toFixed(3)}]</span>
+      {/if}
+      {#if embArt.perResidue}
+        <span class="stat-chip">per-residue [{embArt.sequence.length}×{embArt.dim}]</span>
+      {/if}
+      {#if embArt.provenance?.quantization}
+        <span class="stat-chip">{embArt.provenance.quantization.toUpperCase()}</span>
+      {/if}
+      {#if embArt.provenance?.degradedFallback}
+        <span class="warn-chip">⚠ {embArt.provenance.degradedFallback}</span>
+      {/if}
+      {#if embArt.provenance?.warnings?.length}
+        {#each embArt.provenance.warnings as pw (pw)}
+          <span class="warn-chip">⚠ {pw}</span>
+        {/each}
+      {/if}
+    </div>
+
+    {#if embStats && embStats.preview.length > 0}
+      <div class="seq-box">
+        <div class="seq-head">
+          <span>Pooled embedding vector preview (first {embStats.preview.length} of {embArt.dim} dims)</span>
+          {#if embArt.sequenceId}
+            <code>{embArt.sequenceId}</code>
+          {/if}
+        </div>
+        <div class="seq-text">
+          [{embStats.preview.map((v) => (Number.isFinite(v) ? v.toFixed(4) : 'NaN')).join(', ')}{embArt.dim > embStats.preview.length ? ', …' : ''}]
+        </div>
+      </div>
+    {/if}
+
+    <div class="seq-box">
+      <div class="seq-head">
+        <span>Embedded sequence ({embArt.sequence.length} aa)</span>
+        <button class="link-btn" onclick={() => copyText(embArt.sequence, 'emb-seq-box')}>
+          {copyBtnLabel('emb-seq-box', 'Copy seq')}
+        </button>
+      </div>
+      <div class="seq-text">{embArt.sequence}</div>
+    </div>
   {:else}
     <div class="placeholder-box">
       {#if activeSlot && !activeSlot.wired}
