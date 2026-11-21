@@ -14,6 +14,9 @@
     showRefold?: boolean;
     showTrajectory?: boolean;
     illustrative?: boolean;
+    spin?: boolean;
+    /** Rotations per second when `spin` is enabled (Mol* default is 0.1; 0.02 ≈ 1 turn / 50s). */
+    spinSpeed?: number;
     theme?: 'dark' | 'light';
     height?: number;
     label?: string;
@@ -35,6 +38,8 @@
     showRefold = true,
     showTrajectory = false,
     illustrative = false,
+    spin = true,
+    spinSpeed = 0.02,
     theme = 'dark',
     height = 420,
     label = undefined,
@@ -111,6 +116,11 @@
         renderer: { backgroundColor: (theme === 'light' ? 0xf8fafc : 0x0d0e11) as unknown as never },
         cameraFog: { name: 'off', params: {} },
         cameraClipping: { far: false, radius: 0, minNear: 0.1 },
+        trackball: {
+          animate: spin && hasAnyStructure
+            ? { name: 'spin', params: { speed: spinSpeed, axis: [0, -1, 0] as unknown as never } }
+            : { name: 'off', params: {} },
+        },
       });
 
       // Click picking -> emit residue info for MPNN fixed-position / conditioning selection
@@ -335,6 +345,21 @@
     });
   }
 
+  let hasAnyStructure = $derived(
+    Boolean((models && models.length > 0) || designedPdb || refoldPdb),
+  );
+
+  function applySpin(on: boolean, speed: number) {
+    if (!plugin?.canvas3d) return;
+    plugin.canvas3d.setProps({
+      trackball: {
+        animate: on
+          ? { name: 'spin', params: { speed, axis: [0, -1, 0] as unknown as never } }
+          : { name: 'off', params: {} },
+      },
+    });
+  }
+
   async function renderMultiModels(specs: ViewerModelSpec[]) {
     const mySeq = ++loadSeq;
     initError = null;
@@ -465,6 +490,12 @@
   $effect(() => {
     const on = illustrative;
     if (plugin) applyIllustrative(on);
+  });
+
+  $effect(() => {
+    const on = spin && hasAnyStructure;
+    const speed = spinSpeed;
+    if (plugin) applySpin(on, speed);
   });
 
   $effect(() => {

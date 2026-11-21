@@ -767,7 +767,9 @@
     background: transparent;
     border: none;
     cursor: pointer;
-    font: inherit;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    line-height: 1.3;
     text-align: left;
   }
   .probe-badge-text {

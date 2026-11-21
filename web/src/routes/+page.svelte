@@ -44,6 +44,7 @@
   import MolSuperposeViewer from '$lib/viewer/MolSuperposeViewer.svelte';
   import ArtifactPeekPanel from '$lib/ui/ArtifactPeekPanel.svelte';
   import ComparePeekPanel from '$lib/ui/ComparePeekPanel.svelte';
+  import CreditsModal from '$lib/ui/CreditsModal.svelte';
   import FirstRunModal from '$lib/ui/FirstRunModal.svelte';
   import OnboardingModal from '$lib/ui/OnboardingModal.svelte';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
@@ -134,6 +135,7 @@
   }
   let runTargetIds = $state<string[]>([]);
   let showRecipe = $state(false);
+  let showCredits = $state(false);
   let shareToast = $state<string | null>(null);
   let shareToastTimer: ReturnType<typeof setTimeout> | null = null;
   let runError = $state<string | null>(null);
@@ -151,6 +153,7 @@
   let showRefold = $state(true);
   let showTrajectory = $state(false);
   let illustrative = $state(false);
+  let viewerSpin = $state(true);
   let trajFrame = $state(0);
   let molPickMode = $state<'auto' | 'off' | 'hotspots' | 'motif' | 'mpnn'>('auto');
   let lastPickedResidue = $state<string | null>(null);
@@ -1618,6 +1621,17 @@
           >
             <span>Quick Tour</span>
           </button>
+          <button
+            type="button"
+            class="menu-item"
+            role="menuitem"
+            onclick={() => {
+              moreMenuOpen = false;
+              showCredits = true;
+            }}
+          >
+            <span>Credits &amp; Licenses</span>
+          </button>
           <div class="menu-sep"></div>
           <button
             type="button"
@@ -1811,6 +1825,7 @@
               Kabsch align
             </label>
             <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
+            <label title="Slowly rotate the 3D view (pauses while dragging)"><input type="checkbox" bind:checked={viewerSpin} /> Spin</label>
             <button
               type="button"
               class="cmp-exit-mini"
@@ -1823,6 +1838,7 @@
             <label><input type="checkbox" bind:checked={showDesigned} /> Designed</label>
             <label><input type="checkbox" bind:checked={showRefold} /> Refold (pLDDT)</label>
             <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
+            <label title="Slowly rotate the 3D view (pauses while dragging)"><input type="checkbox" bind:checked={viewerSpin} /> Spin</label>
             {#if viewerStructureMeta?.trajectoryPdb}
               <label><input type="checkbox" bind:checked={showTrajectory} /> Trajectory</label>
               {#if showTrajectory}
@@ -1880,6 +1896,7 @@
           {showRefold}
           {showTrajectory}
           {illustrative}
+          spin={viewerSpin}
           {theme}
           height={splitMode === 'horizontal' ? 350 : 460}
           label={isCompareMode ? compareViewerLabel : viewerLabel}
@@ -2041,6 +2058,10 @@
     onAutoStepBlock={autoStepTourBlock}
     onInteractiveChange={(active) => (onboardingInteractive = active)}
   />
+{/if}
+
+{#if showCredits}
+  <CreditsModal onClose={() => (showCredits = false)} />
 {/if}
 
 <style>
