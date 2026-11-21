@@ -563,6 +563,82 @@
     return refs;
   }
 
+  /**
+   * Strip Mol*'s geometric distance-heuristic `cyclicPolymerMap` entries (`atomic-ranges.js:56-63`,
+   * which closes any chain with `d(CA_1, CA_L) < 10 Å` on Cα-only / O-less models or
+   * `d(N_1, C_L) < 3 Å` on all-atom models) unless head-to-tail cyclization is explicitly annotated
+   * via `_entity_poly.type = 'cyclic-pseudo-peptide'`, `_struct_conn` (`covale`, non-disulfide) /
+   * PDB `CONECT` on terminal `N`↔`C`, or a PDB `LINK` record.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function pruneFalseCyclicPolymers(trajSel: any, modelSel: any, rawText: string, StructConn?: any) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const models = new Set<any>();
+    const frames = trajSel?.data?.frames ?? trajSel?.cell?.obj?.data?.frames;
+    if (Array.isArray(frames)) {
+      for (const f of frames) if (f) models.add(f);
+    }
+    const activeModel = modelSel?.data ?? modelSel?.cell?.obj?.data;
+    if (activeModel) models.add(activeModel);
+    if (models.size === 0) return;
+
+    const isCif = /^\s*(data_|loop_|_atom_site\.)/m.test(rawText);
+    const hasPdbBackboneLink =
+      !isCif && /^LINK\s+.{6}\s*(?:N|C)\s+.{24}\s*(?:N|C)\s+/m.test(rawText);
+    if (hasPdbBackboneLink) return;
+
+    for (const m of models) {
+      const cyclicMap: Map<number, number> | undefined = m?.atomicRanges?.cyclicPolymerMap;
+      if (!cyclicMap || cyclicMap.size === 0) continue;
+
+      const hierarchy = m.atomicHierarchy;
+      const entities = m.entities;
+      const structConn = StructConn?.Provider?.get?.(m);
+      const atomNames = hierarchy?.atoms?.label_atom_id;
+
+      for (const [riA, riB] of [...cyclicMap.entries()]) {
+        if (riA > riB) continue;
+        let explicitlyCyclic = false;
+
+        // 1. mmCIF _entity_poly.type === 'cyclic-pseudo-peptide'
+        try {
+          const firstAtom = hierarchy.residueAtomSegments.offsets[riA];
+          const cI = hierarchy.chainAtomSegments.index[firstAtom];
+          const entityId = hierarchy.chains.label_entity_id.value(cI);
+          const eI = entities.getEntityIndex(entityId);
+          if (entities.subtype?.value?.(eI) === 'cyclic-pseudo-peptide') {
+            explicitlyCyclic = true;
+          }
+        } catch {
+          /* ignore */
+        }
+
+        // 2. Explicit _struct_conn (covale) or PDB CONECT bonding terminal N <-> C
+        if (!explicitlyCyclic && structConn?.entries?.length) {
+          for (const e of structConn.entries) {
+            // BondType.Flag.Covalent = 1, BondType.Flag.Disulfide = 8 (exclude Cys-Cys disulfides)
+            if ((e.flags & 1) === 0 || (e.flags & 8) !== 0) continue;
+            const r1 = e.partnerA?.residueIndex;
+            const r2 = e.partnerB?.residueIndex;
+            if ((r1 === riA && r2 === riB) || (r1 === riB && r2 === riA)) {
+              const a1 = String(atomNames?.value?.(e.partnerA.atomIndex) ?? '').trim();
+              const a2 = String(atomNames?.value?.(e.partnerB.atomIndex) ?? '').trim();
+              if ((a1 === 'N' && a2 === 'C') || (a1 === 'C' && a2 === 'N')) {
+                explicitlyCyclic = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (!explicitlyCyclic) {
+          cyclicMap.delete(riA);
+          cyclicMap.delete(riB);
+        }
+      }
+    }
+  }
+
   async function renderScene(
     dPdb: string | null,
     rPdb: string | null,
@@ -607,7 +683,10 @@
       trajModelRef = null;
       if (destroyed || mySeq !== loadSeq) return;
 
-      const { Color } = await import('molstar/lib/mol-util/color');
+      const [{ Color }, { StructConn }] = await Promise.all([
+        import('molstar/lib/mol-util/color'),
+        import('molstar/lib/mol-model-formats/structure/property/bonds/struct_conn'),
+      ]);
       if (destroyed || mySeq !== loadSeq) return;
       const hasOverlay = Boolean(sDesigned && dPdb && sRefold && rPdb && !useTraj);
       const useSemanticUncertainty =
@@ -627,6 +706,7 @@
         const targetIdx = useTraj && fIdx !== undefined ? fIdx + 1 : 0;
         const model = await ctx.builders.structure.createModel(traj, { modelIndex: targetIdx });
         if (destroyed || mySeq !== loadSeq) return;
+        pruneFalseCyclicPolymers(traj, model, text, StructConn);
         if (useTraj) trajModelRef = model.ref;
         const struct = await ctx.builders.structure.createStructure(model, {
           name: 'model',
@@ -698,6 +778,7 @@
         });
         const traj = await ctx.builders.structure.parseTrajectory(data, rFmt);
         const model = await ctx.builders.structure.createModel(traj, { modelIndex: 0 });
+        pruneFalseCyclicPolymers(traj, model, rPdb, StructConn);
         const struct = await ctx.builders.structure.createStructure(model, {
           name: 'model',
           params: {},
@@ -889,9 +970,10 @@
       await ctx.clear();
       if (destroyed || mySeq !== loadSeq) return;
 
-      const [{ Color }, { setSubtreeVisibility }] = await Promise.all([
+      const [{ Color }, { setSubtreeVisibility }, { StructConn }] = await Promise.all([
         import('molstar/lib/mol-util/color'),
         import('molstar/lib/mol-plugin/behavior/static/state'),
+        import('molstar/lib/mol-model-formats/structure/property/bonds/struct_conn'),
       ]);
       if (destroyed || mySeq !== loadSeq) return;
 
@@ -909,6 +991,7 @@
         const traj = await ctx.builders.structure.parseTrajectory(data, fmt);
         const model = await ctx.builders.structure.createModel(traj, { modelIndex: 0 });
         if (destroyed || mySeq !== loadSeq) return;
+        pruneFalseCyclicPolymers(traj, model, m.pdbText, StructConn);
         const struct = await ctx.builders.structure.createStructure(model, {
           name: 'model',
           params: {},
