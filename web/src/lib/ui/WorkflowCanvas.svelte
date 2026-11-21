@@ -1102,7 +1102,7 @@
   }
   .canvas-action-dock {
     position: absolute;
-    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(28px + env(safe-area-inset-bottom, 0px));
     left: 50%;
     transform: translateX(-50%);
     z-index: 25;
@@ -1170,6 +1170,9 @@
     cursor: not-allowed;
   }
   @media (max-width: 640px), (hover: none) {
+    .canvas-action-dock {
+      bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    }
     .add-block-btn .kbd-hint {
       display: none;
     }
@@ -1291,7 +1294,7 @@
   }
   .ghost-bar {
     position: absolute;
-    bottom: 62px;
+    bottom: 78px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 24;
