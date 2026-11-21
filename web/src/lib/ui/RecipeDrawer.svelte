@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
+  import { computeUploadDigest } from '$lib/engine/param-validation';
   import {
     encodeGraphToHash,
     graphToYamlRecipe,
@@ -21,8 +23,30 @@
   let parseErr = $state<string | null>(null);
   let shareStatus = $state<string | null>(null);
   let lastUrlLen = $state<number | null>(null);
+  let textareaEl: HTMLTextAreaElement | null = $state(null);
+  let statusTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastGraphId = '';
+
+  function flashStatus(msg: string, ms = 3000) {
+    shareStatus = msg;
+    if (statusTimer) clearTimeout(statusTimer);
+    statusTimer = setTimeout(() => {
+      shareStatus = null;
+      statusTimer = null;
+    }, ms);
+  }
+
+  onDestroy(() => {
+    if (statusTimer) clearTimeout(statusTimer);
+  });
 
   $effect(() => {
+    const gid = graph.id;
+    if (gid !== lastGraphId) {
+      lastGraphId = gid;
+      dirty = false;
+      parseErr = null;
+    }
     if (dirty) return;
     const plain = $state.snapshot(graph) as WorkflowGraph;
     editorText = format === 'yaml' ? graphToYamlRecipe(plain) : serializeWorkflowJson(plain);
@@ -68,70 +92,112 @@
     try {
       const next = parseRecipeToGraph(editorText);
       // When applying a YAML recipe that omitted an oversized inline pdbText (>1500 chars),
-      // restore the canvas node's existing custom PDB ONLY if the parsed node is still in
-      // default 'demo-bundle' mode (not when the user switched to 'pdb-id' or explicitly set mode).
+      // restore the canvas node's existing custom PDB for both:
+      // 1) Issue #1 missing-upload markers (`mode: 'custom', missingUpload: true`, verifying digest when present)
+      // 2) Legacy YAML recipes without an explicit `mode` field (`mode: 'demo-bundle'`).
       const prevById = new Map(graph.nodes.map((n) => [n.id, n]));
       const mergedNodes = next.nodes.map((n) => {
         if (
           format === 'yaml' &&
           n.adapterId === 'pdb-input' &&
-          n.params.mode === 'demo-bundle' &&
-          !String(n.params.pdbText ?? '').trim() &&
-          !yamlNodeExplicitlySetsMode(editorText, n.id)
+          !String(n.params.pdbText ?? '').trim()
         ) {
           const prev = prevById.get(n.id);
-          if (
+          const prevHasLargeCustom =
             prev?.adapterId === 'pdb-input' &&
             prev.params.mode === 'custom' &&
             typeof prev.params.pdbText === 'string' &&
-            prev.params.pdbText.length > 1500
-          ) {
-            return {
-              ...n,
-              params: {
-                ...n.params,
-                mode: 'custom',
-                filename: prev.params.filename,
-                pdbText: prev.params.pdbText,
-              },
-            };
+            prev.params.pdbText.length > 1500;
+
+          if (prevHasLargeCustom && prev) {
+            const isMissingUploadMarker =
+              n.params.mode === 'custom' && Boolean(n.params.missingUpload);
+            const isImplicitLegacyOmission =
+              n.params.mode === 'demo-bundle' && !yamlNodeExplicitlySetsMode(editorText, n.id);
+
+            if (isMissingUploadMarker || isImplicitLegacyOmission) {
+              const expectedSha = String(n.params.expectedPdbSha256 ?? '')
+                .trim()
+                .toLowerCase();
+              const prevPdbText = prev.params.pdbText as string;
+              const digestMatches =
+                !expectedSha || computeUploadDigest(prevPdbText) === expectedSha;
+
+              if (digestMatches) {
+                const nextParams: Record<string, unknown> = {
+                  ...n.params,
+                  mode: 'custom',
+                  filename: String(n.params.filename ?? '').trim() || prev.params.filename,
+                  pdbText: prevPdbText,
+                };
+                delete nextParams.missingUpload;
+                delete nextParams.expectedPdbSha256;
+                delete nextParams.expectedFilename;
+                return {
+                  ...n,
+                  params: nextParams,
+                };
+              }
+            }
           }
         }
         return n;
       });
       dirty = false;
       onApplyGraph({ ...next, nodes: mergedNodes });
-      shareStatus = 'Applied recipe to canvas';
-      setTimeout(() => (shareStatus = null), 2000);
+      flashStatus('Applied recipe to canvas', 2000);
     } catch (err) {
       parseErr = err instanceof Error ? err.message : String(err);
     }
   }
 
   async function copyShareUrl() {
+    parseErr = null;
     try {
       const plain = $state.snapshot(graph) as WorkflowGraph;
       const { hash, length, mode, strippedPdb } = await encodeGraphToHash(plain);
       const url = `${window.location.origin}${window.location.pathname}${hash}`;
       window.history.replaceState(null, '', hash);
-      await navigator.clipboard.writeText(url);
       lastUrlLen = url.length;
-      shareStatus = strippedPdb
-        ? `Copied ${url.length}-char link (${mode}; large inline PDB omitted)`
-        : `Copied ${url.length}-char link (${mode}, hash ${length} chars)`;
-      setTimeout(() => (shareStatus = null), 3500);
+      try {
+        if (!navigator.clipboard?.writeText) {
+          throw new Error('Clipboard API unavailable');
+        }
+        await navigator.clipboard.writeText(url);
+        flashStatus(
+          strippedPdb
+            ? `Copied ${url.length}-char link (${mode}; large inline PDB omitted)`
+            : `Copied ${url.length}-char link (${mode}, hash ${length} chars)`,
+          3500,
+        );
+      } catch {
+        flashStatus(
+          strippedPdb
+            ? `Share link updated in address bar (${mode}; large PDB omitted — copy from URL bar)`
+            : `Share link updated in address bar (${mode} — copy from URL bar)`,
+          4200,
+        );
+      }
     } catch (err) {
       parseErr = err instanceof Error ? err.message : String(err);
     }
   }
 
   async function copyText() {
+    parseErr = null;
     try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('Clipboard API unavailable');
+      }
       await navigator.clipboard.writeText(editorText);
-      shareStatus = `Copied ${format.toUpperCase()} recipe`;
-      setTimeout(() => (shareStatus = null), 2000);
+      flashStatus(`Copied ${format.toUpperCase()} recipe`, 2000);
     } catch {
-      /* ignore */
+      textareaEl?.focus();
+      textareaEl?.select();
+      flashStatus(
+        `Clipboard unavailable — ${format.toUpperCase()} selected, copy with Ctrl/⌘+C`,
+        3800,
+      );
     }
   }
 </script>
@@ -160,6 +226,7 @@
   </div>
 
   <textarea
+    bind:this={textareaEl}
     rows="9"
     spellcheck="false"
     value={editorText}

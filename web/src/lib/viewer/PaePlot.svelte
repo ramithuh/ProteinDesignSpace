@@ -1,4 +1,18 @@
 <script lang="ts">
+  // Precomputed 256-entry RGBA color LUT (0 Å = deep green #004d25 -> 30 Å = near-white #f2f9fa)
+  const PAE_LUT = (() => {
+    const lut = new Uint32Array(256);
+    const bytes = new Uint8ClampedArray(lut.buffer);
+    for (let i = 0; i < 256; i++) {
+      const t = i / 255;
+      bytes[i * 4 + 0] = Math.round(0 + t * 242);
+      bytes[i * 4 + 1] = Math.round(77 + t * 172);
+      bytes[i * 4 + 2] = Math.round(37 + t * 213);
+      bytes[i * 4 + 3] = 255;
+    }
+    return lut;
+  })();
+
   interface Props {
     pae: Float32Array | number[] | undefined;
     size?: number;
@@ -7,9 +21,31 @@
   let { pae, size = 210 }: Props = $props();
   let canvas: HTMLCanvasElement | null = $state(null);
   let hoverInfo = $state<string | null>(null);
+  let cachedRect: DOMRect | null = null;
 
   let L = $derived(pae ? Math.floor(Math.sqrt(pae.length)) : 0);
   let compact = $derived(size < 180);
+
+  function refreshRect() {
+    cachedRect = canvas ? canvas.getBoundingClientRect() : null;
+  }
+
+  function invalidateRect() {
+    cachedRect = null;
+  }
+
+  $effect(() => {
+    void canvas;
+    void size;
+    cachedRect = null;
+    if (typeof window === 'undefined') return;
+    window.addEventListener('resize', invalidateRect);
+    window.addEventListener('scroll', invalidateRect, true);
+    return () => {
+      window.removeEventListener('resize', invalidateRect);
+      window.removeEventListener('scroll', invalidateRect, true);
+    };
+  });
 
   $effect(() => {
     if (!canvas || !pae || L <= 0) return;
@@ -18,25 +54,26 @@
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const img = ctx.createImageData(L, L);
-    const data = img.data;
-    for (let i = 0; i < L * L; i++) {
-      // Standard AlphaFold PAE color ramp: 0 Å = deep green (#004d25), 30 Å = near-white (#f8fafc)
+    const pixels = new Uint32Array(img.data.buffer);
+    const total = L * L;
+    const scale = 255 / 30;
+    for (let i = 0; i < total; i++) {
       const val = pae[i];
-      const t = Number.isFinite(val) ? Math.max(0, Math.min(1, val / 30)) : 1;
-      const r = Math.round(0 + t * 242);
-      const g = Math.round(77 + t * 172);
-      const b = Math.round(37 + t * 213);
-      data[i * 4 + 0] = r;
-      data[i * 4 + 1] = g;
-      data[i * 4 + 2] = b;
-      data[i * 4 + 3] = 255;
+      const idx = Number.isFinite(val)
+        ? val <= 0
+          ? 0
+          : val >= 30
+            ? 255
+            : (val * scale + 0.5) | 0
+        : 255;
+      pixels[i] = PAE_LUT[idx];
     }
     ctx.putImageData(img, 0, 0);
   });
 
   function onMove(ev: MouseEvent) {
     if (!canvas || !pae || L <= 0) return;
-    const rect = canvas.getBoundingClientRect();
+    const rect = cachedRect ?? (cachedRect = canvas.getBoundingClientRect());
     if (rect.width <= 0 || rect.height <= 0) return;
     const x = Math.min(L - 1, Math.max(0, Math.floor(((ev.clientX - rect.left) / rect.width) * L)));
     const y = Math.min(L - 1, Math.max(0, Math.floor(((ev.clientY - rect.top) / rect.height) * L)));
@@ -61,8 +98,12 @@
       bind:this={canvas}
       class="pae-canvas"
       style="width: {size}px; height: {size}px"
+      onmouseenter={refreshRect}
       onmousemove={onMove}
-      onmouseleave={() => (hoverInfo = null)}
+      onmouseleave={() => {
+        hoverInfo = null;
+        cachedRect = null;
+      }}
     ></canvas>
   {:else}
     <div class="pae-empty" style="width: {size}px; height: {size}px">No PAE data</div>

@@ -108,7 +108,7 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div
-  class="modal-backdrop"
+  class="modal-backdrop cr-backdrop"
   role="presentation"
   onclick={(ev) => {
     if (ev.target === ev.currentTarget) onClose();
@@ -224,17 +224,20 @@
     inset: 0;
     z-index: 200;
     background: rgba(10, 14, 24, 0.62);
+    -webkit-backdrop-filter: blur(4px);
     backdrop-filter: blur(4px);
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 16px;
+    box-sizing: border-box;
   }
 
   .modal-card {
     width: 100%;
-    max-width: 560px;
+    max-width: min(560px, calc(100vw - 24px));
     max-height: min(86vh, 720px);
+    box-sizing: border-box;
     background: var(--bg-surface);
     border: 1px solid var(--border-strong);
     border-radius: 12px;

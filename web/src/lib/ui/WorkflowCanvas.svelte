@@ -248,10 +248,22 @@
     };
   });
 
-  // Fit the entire workflow whenever switching presets/graphs or toggling split layout
+  let lastGraphId = '';
+  let lastFillHeight: boolean | undefined;
+
+  // Fit the entire workflow & clear stale proposals ONLY when switching presets/graphs
+  // or toggling split layout — never on ordinary param edits, drags, or block additions.
   $effect(() => {
-    void graph.id;
-    void fillHeight;
+    const gid = graph.id;
+    const fh = fillHeight;
+    const graphChanged = gid !== lastGraphId;
+    const layoutChanged = fh !== lastFillHeight;
+    if (!graphChanged && !layoutChanged) return;
+    lastGraphId = gid;
+    lastFillHeight = fh;
+    if (graphChanged) {
+      clearProposals();
+    }
     scheduleFitView(220);
   });
 
@@ -276,18 +288,24 @@
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
   }
 
-  // Clear stale ghost proposals when switching workflows or starting a run
+  function isModalOrOverlayOpen(): boolean {
+    if (typeof document === 'undefined') return false;
+    return Boolean(
+      document.querySelector(
+        '.onb-backdrop, .fr-backdrop, .cr-backdrop, .modal-backdrop, .expand-backdrop, .expanded-pane, .drawer-backdrop',
+      ),
+    );
+  }
+
+  // Clear stale ghost proposals when starting a run
   $effect(() => {
-    void graph.id;
     if (isRunning) clearProposals();
-  });
-  $effect(() => {
-    void graph.id;
-    clearProposals();
   });
 
   function handleWindowKeydown(ev: KeyboardEvent) {
+    if (isModalOrOverlayOpen()) return;
     if (ev.key === 'Escape') {
+      if (ev.defaultPrevented) return;
       if (clearConfirmPending) {
         cancelClearConfirm();
         return;
@@ -349,6 +367,13 @@
 
   $effect(() => {
     const laid = graph.nodes.some((n) => !n.position) ? autoLayoutGraph(graph) : graph;
+    const activeSelectedEdgeId =
+      selectedEdgeId &&
+      laid.edges.some(
+        (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === selectedEdgeId,
+      )
+        ? selectedEdgeId
+        : null;
     const selSet = new Set(selectedNodeIds.length > 0 ? selectedNodeIds : selectedNodeId ? [selectedNodeId] : []);
     flowNodes = laid.nodes.map((n) => {
       const inputPortsConnected: Record<string, boolean> = {};
@@ -391,7 +416,7 @@
         id: n.id,
         type: 'protein',
         position: n.position ?? { x: 40, y: 80 },
-        selected: selSet.has(n.id),
+        selected: activeSelectedEdgeId ? false : selSet.has(n.id),
         data: {
           adapterId: n.adapterId,
           label: n.label ?? ADAPTER_REGISTRY[n.adapterId]?.shortName ?? n.adapterId,
@@ -433,9 +458,9 @@
 
       let style: string;
       if (isSel) {
-        style = `stroke: ${col}; stroke-width: 3.5px; opacity: 1; filter: drop-shadow(0 0 4px ${col}); cursor: pointer;`;
+        style = `stroke: ${col}; stroke-width: 3.5px; opacity: 1; cursor: pointer;`;
       } else if (activeFeed) {
-        style = `stroke: ${col}; stroke-width: 2.5px; opacity: 1; filter: drop-shadow(0 0 4px ${col}); cursor: pointer;`;
+        style = `stroke: ${col}; stroke-width: 2.5px; opacity: 1; cursor: pointer;`;
       } else if (completedEdge) {
         style = `stroke: ${col}; stroke-width: 2px; opacity: 0.78; cursor: pointer;`;
       } else if (unreachedEdge) {
@@ -564,11 +589,20 @@
   function handleDelete({ nodes: delNodes, edges: delEdges }: { nodes: Node[]; edges: Edge[] }) {
     if (disabled) return;
     clearProposals();
-    const rmNodeIds = new Set(delNodes.map((n) => n.id));
+    const hasSelectedEdge =
+      Boolean(selectedEdgeId) &&
+      graph.edges.some(
+        (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === selectedEdgeId,
+      );
+    // Restrict delete to edges whenever an edge is actively selected so Backspace/Delete
+    // never destroys the downstream node being peeked through that wire.
+    const effectiveDelNodes = hasSelectedEdge ? [] : delNodes;
+    const rmNodeIds = new Set(effectiveDelNodes.map((n) => n.id));
     const rmEdgeIds = new Set(delEdges.map((e) => e.id));
+    if (rmNodeIds.size === 0 && rmEdgeIds.size === 0) return;
     const nextNodes = graph.nodes.filter((n) => !rmNodeIds.has(n.id));
     const nextEdges = graph.edges.filter((e) => {
-      const eid = `${e.fromNode}:${e.fromPort}->${e.toNode}:${e.toPort}`;
+      const eid = makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort);
       return !rmEdgeIds.has(eid) && !rmNodeIds.has(e.fromNode) && !rmNodeIds.has(e.toNode);
     });
     onGraphChange({ ...graph, nodes: nextNodes, edges: nextEdges });
@@ -965,6 +999,7 @@
     padding: 5px 10px 5px 11px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--bg-surface) 84%, transparent);
+    -webkit-backdrop-filter: blur(10px);
     backdrop-filter: blur(10px);
     border: 1px solid var(--border-strong);
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
@@ -1118,6 +1153,7 @@
     font-size: 11px;
     cursor: pointer;
     font-family: inherit;
+    -webkit-backdrop-filter: blur(6px);
     backdrop-filter: blur(6px);
   }
   .c-btn:hover:not(:disabled),

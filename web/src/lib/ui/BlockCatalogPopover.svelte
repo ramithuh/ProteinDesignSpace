@@ -87,6 +87,11 @@
     return activeEntry ? `cat-item-${activeEntry.category.id}` : undefined;
   });
 
+  function supportsHover(): boolean {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true;
+    return window.matchMedia('(hover: hover)').matches;
+  }
+
   function clearCloseTimer() {
     if (closeGraceTimer !== null) {
       clearTimeout(closeGraceTimer);
@@ -95,6 +100,7 @@
   }
 
   function scheduleFlyoutClose() {
+    if (!supportsHover()) return;
     clearCloseTimer();
     closeGraceTimer = setTimeout(() => {
       closeGraceTimer = null;
@@ -105,6 +111,7 @@
   }
 
   function handleShellMouseLeave() {
+    if (!supportsHover()) return;
     if (!flyoutFromKeyboard) {
       focusPane = 'main';
     }
@@ -215,9 +222,11 @@
     };
   });
 
-  // Autofocus search input on mount
+  // Autofocus search input on mount (skip on touch/coarse pointers so soft keyboard stays closed)
   $effect(() => {
-    searchInputEl?.focus();
+    if (supportsHover()) {
+      searchInputEl?.focus();
+    }
   });
 
   // Close on click-outside
@@ -250,6 +259,7 @@
   }
 
   function handleCategoryHover(entry: FilteredCategoryEntry, flatIdx: number) {
+    if (!supportsHover()) return;
     activeIdx = flatIdx;
     focusPane = 'main';
     flyoutFromKeyboard = false;
@@ -268,7 +278,7 @@
       onInsert(entry.matchingSubItems[0].insert);
       return;
     }
-    // Otherwise open & focus its right-hand flyout so touch/click users can pick cleanly
+    // Otherwise open & focus its flyout so touch/click users can pick cleanly
     clearCloseTimer();
     flyoutCategoryId = entry.category.id;
     focusPane = 'flyout';
@@ -426,7 +436,7 @@
               onDragStart?.(e, singleSub.insert);
             }}
             onclick={() => {
-              searchInputEl?.focus();
+              if (supportsHover()) searchInputEl?.focus();
               handleCategoryClick(entry, flatIdx);
             }}
           >
@@ -466,6 +476,20 @@
       onmouseenter={clearCloseTimer}
     >
       <div class="flyout-hdr">
+        {#if flyoutSide === 'overlay'}
+          <button
+            type="button"
+            class="flyout-back"
+            onclick={() => {
+              flyoutCategoryId = null;
+              focusPane = 'main';
+              flyoutFromKeyboard = false;
+            }}
+            aria-label="Back to categories"
+          >
+            ← Back
+          </button>
+        {/if}
         <span class="stage-dot" style="background: {stageColor}"></span>
         <span class="flyout-title">{flyoutEntry.category.title}</span>
         <span class="flyout-sub">{flatSubs.length} option{flatSubs.length === 1 ? '' : 's'}</span>
@@ -511,6 +535,7 @@
                 draggable={!disabled}
                 {disabled}
                 onmouseenter={() => {
+                  if (!supportsHover()) return;
                   clearCloseTimer();
                   flyoutFromKeyboard = false;
                   focusPane = 'flyout';
@@ -521,7 +546,7 @@
                   onDragStart?.(e, sub.insert);
                 }}
                 onclick={() => {
-                  searchInputEl?.focus();
+                  if (supportsHover()) searchInputEl?.focus();
                   handleInsertSubItem(sub);
                 }}
               >
@@ -805,6 +830,25 @@
     border-bottom: 1px solid var(--border);
     background: var(--bg-surface-2);
     border-radius: 9px 9px 0 0;
+  }
+  .flyout-back {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .flyout-back:hover {
+    background: var(--bg-surface-hover);
+    border-color: var(--accent);
   }
   .flyout-title {
     font-size: 12px;

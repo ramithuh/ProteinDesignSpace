@@ -442,8 +442,20 @@
     --node-border-w: 1.5px;
     --node-border-color: #f59e0b;
     box-shadow:
-      0 0 0 3px rgba(245, 158, 11, 0.22),
-      0 8px 22px rgba(245, 158, 11, 0.16);
+      0 0 0 3px rgba(245, 158, 11, 0.2),
+      0 6px 18px rgba(245, 158, 11, 0.14);
+  }
+  .p-node.running::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    z-index: 0;
+    box-shadow:
+      0 0 0 4.5px rgba(245, 158, 11, 0.34),
+      0 10px 26px rgba(245, 158, 11, 0.24);
+    will-change: opacity;
     animation: runner-breathe 2s ease-in-out infinite;
   }
   .p-node.done {
@@ -575,14 +587,10 @@
   @keyframes runner-breathe {
     0%,
     100% {
-      box-shadow:
-        0 0 0 3px rgba(245, 158, 11, 0.2),
-        0 6px 18px rgba(245, 158, 11, 0.14);
+      opacity: 0.35;
     }
     50% {
-      box-shadow:
-        0 0 0 4.5px rgba(245, 158, 11, 0.34),
-        0 10px 26px rgba(245, 158, 11, 0.24);
+      opacity: 1;
     }
   }
   @keyframes stripe-sheen {
@@ -594,8 +602,9 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    .p-node.running {
+    .p-node.running::before {
       animation: none;
+      opacity: 0.65;
     }
     .p-node.loading .stripe::after,
     .p-node.running .stripe::after {

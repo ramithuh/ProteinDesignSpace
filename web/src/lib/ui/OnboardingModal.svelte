@@ -53,8 +53,8 @@
     'add-mpnn': {
       categoryId: 'sequence-design',
       categoryLabel: 'Sequence Design',
-      subKey: 'solublempnn',
-      subLabel: 'SolubleMPNN',
+      subKey: 'ca',
+      subLabel: 'Cα-ProteinMPNN',
     },
     'add-fold': {
       categoryId: 'prediction',
@@ -77,6 +77,8 @@
   let interactiveHole = $state<RectBox | null>(null);
   let viewportW = $state(1280);
   let viewportH = $state(800);
+  let firstRunModalOpen = $state(false);
+  let lastScrolledStep: TourStepId | null = null;
 
   let interactiveIdx = $derived(INTERACTIVE_STEPS.indexOf(step));
   let isInteractive = $derived(interactiveIdx >= 0);
@@ -123,6 +125,17 @@
     if (typeof window === 'undefined') return;
     viewportW = window.innerWidth;
     viewportH = window.innerHeight;
+
+    const hasFirstRun = Boolean(document.querySelector('.fr-backdrop'));
+    firstRunModalOpen = hasFirstRun;
+    if (hasFirstRun) {
+      targetRect = null;
+      interactiveHole = null;
+      if (step === 'run-workflow') {
+        onDismiss();
+      }
+      return;
+    }
 
     if (step === 'welcome') {
       targetRect = null;
@@ -217,13 +230,27 @@
     }
   });
 
-  // Re-measure spotlight whenever step or graph changes
+  // Re-measure spotlight whenever step or graph changes; scroll target into view on Step 4
   $effect(() => {
-    void step;
+    const curStep = step;
     void graph.nodes.length;
     if (typeof window === 'undefined') return;
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
+    if (curStep === 'inspect-params' && lastScrolledStep !== 'inspect-params') {
+      lastScrolledStep = curStep;
+      const el = document.querySelector<HTMLElement>('[data-tour="inspector-panel"]');
+      if (el) {
+        el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        settleTimer = setTimeout(measureTarget, 320);
+      }
+    } else {
+      lastScrolledStep = curStep;
+    }
     const raf = requestAnimationFrame(measureTarget);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      if (settleTimer) clearTimeout(settleTimer);
+    };
   });
 
   // Position the coachmark popover RIGHT NEXT TO the spotlighted element (where the cursor should go!)
@@ -366,6 +393,9 @@
 
   function handleKeydown(ev: KeyboardEvent) {
     if (ev.key === 'Escape') {
+      if (firstRunModalOpen || document.querySelector('.fr-backdrop')) {
+        return;
+      }
       if (isInteractive && document.querySelector('.catalog-shell')) {
         return;
       }
@@ -450,7 +480,7 @@
       <div class="reopen-foot">Reopen anytime from <b>Quick Tour</b></div>
     </div>
   </div>
-{:else}
+{:else if !firstRunModalOpen}
   <!-- Click-constraining transparent scrim outside the active interactive hole -->
   {#if shieldRects}
     <div
@@ -513,19 +543,19 @@
 
     {#if step === 'add-mpnn'}
       {#if subStage === 'item'}
-        <div class="coach-title">Click <b>SolubleMPNN</b></div>
+        <div class="coach-title">Click <b>ProteinMPNN (Cα-only)</b></div>
         <p class="coach-body">
-          Click to design sequences for your de novo <b>Genie 3</b> backbone — it connects automatically.
+          Click <b>Cα-ProteinMPNN</b> to design sequences directly from Genie 3's Cα backbone trace — it connects automatically.
         </p>
       {:else if subStage === 'category'}
         <div class="coach-title">Hover <b>Sequence Design ›</b></div>
         <p class="coach-body">
-          Move your cursor onto the highlighted <b>Sequence Design</b> category to open its model variants.
+          Open the highlighted <b>Sequence Design</b> category to select <b>Cα-ProteinMPNN</b> for Genie 3's Cα trace.
         </p>
       {:else}
         <div class="coach-title">1. Click <b>+ Add Block</b></div>
         <p class="coach-body">
-          We placed <b>Genie 3</b> on the canvas to generate a de novo backbone. Click <b>+ Add Block</b> (or press <kbd>/</kbd>) to add sequence design next.
+          We placed <b>Genie 3</b> on the canvas to generate a de novo Cα backbone trace. Click <b>+ Add Block</b> (or press <kbd>/</kbd>) to add <b>Cα-ProteinMPNN</b> next.
         </p>
       {/if}
       <div class="coach-actions">
@@ -536,11 +566,11 @@
       </div>
 
     {:else if step === 'add-fold'}
-      <div class="coach-ok">✓ SolubleMPNN connected</div>
+      <div class="coach-ok">✓ Cα-ProteinMPNN connected</div>
       {#if subStage === 'item'}
         <div class="coach-title">Click <b>AlphaFold2 · Model 1</b></div>
         <p class="coach-body">
-          Click to refold SolubleMPNN's designed sequences and check whether they adopt the Genie 3 backbone.
+          Click to refold Cα-ProteinMPNN's designed sequences and check whether they adopt the Genie 3 backbone.
         </p>
       {:else if subStage === 'category'}
         <div class="coach-title">Hover <b>Structure Prediction ›</b></div>
@@ -616,16 +646,21 @@
     inset: 0;
     z-index: 210;
     background: rgba(10, 14, 24, 0.64);
+    -webkit-backdrop-filter: blur(5px);
     backdrop-filter: blur(5px);
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 16px;
+    box-sizing: border-box;
   }
 
   .onb-card {
     width: 100%;
-    max-width: 590px;
+    max-width: min(590px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
+    box-sizing: border-box;
     background: var(--bg-surface);
     border: 1px solid var(--border-strong);
     border-radius: 14px;
@@ -730,8 +765,28 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    flex-wrap: wrap;
+    gap: 10px 12px;
     padding-top: 2px;
+  }
+
+  @media (max-width: 480px) {
+    .onb-backdrop {
+      padding: 12px;
+    }
+    .onb-card {
+      padding: 18px 16px 14px;
+      gap: 12px;
+    }
+    .onb-footer {
+      justify-content: stretch;
+    }
+    .btn-skip,
+    .btn-start {
+      flex: 1 1 auto;
+      text-align: center;
+      white-space: normal;
+    }
   }
 
   .btn-skip {

@@ -28,6 +28,8 @@
     onResidueClick?: (info: {
       chain: string;
       seqId: number;
+      insCode?: string;
+      residueToken?: string;
       compId: string;
       isNonPolymer?: boolean;
     }) => void;
@@ -70,6 +72,23 @@
   let modelRefs = new Map<string, string[]>();
   let loadSeq = 0;
   let initError = $state<string | null>(null);
+  let webglFailed = false;
+  let webglFailReason = '';
+
+  const NUCLEIC_COMP_IDS = new Set([
+    'DA',
+    'DT',
+    'DG',
+    'DC',
+    'DU',
+    'DI',
+    'A',
+    'U',
+    'G',
+    'C',
+    'I',
+    'T',
+  ]);
 
   let scrubPending = false;
   let queuedFrame: number | null = null;
@@ -92,7 +111,7 @@
     | 'sequence-id'
     | 'element-symbol';
 
-  let styleMenuOpen = $state(true);
+  let styleMenuOpen = $state(typeof window !== 'undefined' ? window.innerWidth >= 640 : true);
   let repType = $state<PolymerRepType>('cartoon');
   let colorScheme = $state<ColorSchemeOption>('auto');
   let showSidechains = $state(false);
@@ -102,6 +121,27 @@
   let localSpinSpeed = $state<number | null>(null);
   let effectiveSpinSpeed = $derived(localSpinSpeed ?? spinSpeed);
   let lastStructureKey = '';
+  let lastRenderedKey = '';
+
+  function hasMultiplePdbChains(pdbText: string): boolean {
+    let firstChain = '';
+    let start = 0;
+    const len = pdbText.length;
+    while (start < len) {
+      let end = pdbText.indexOf('\n', start);
+      if (end === -1) end = len;
+      if (end - start >= 22 && pdbText.startsWith('ATOM  ', start)) {
+        const ch = pdbText[start + 21];
+        if (!firstChain) {
+          firstChain = ch;
+        } else if (ch !== firstChain) {
+          return true;
+        }
+      }
+      start = end + 1;
+    }
+    return false;
+  }
 
   function resetStyleControls() {
     repType = 'cartoon';
@@ -117,11 +157,24 @@
     plugin?.canvas3d?.requestCameraReset();
   }
 
-  function handleSavePng() {
-    if (!canvasEl) return;
+  async function handleSavePng() {
+    if (!canvasEl || !plugin || initError || webglFailed) return;
     try {
-      plugin?.canvas3d?.commit(true);
-      const url = canvasEl.toDataURL('image/png');
+      let url: string | null = null;
+      if (plugin.helpers?.viewportScreenshot?.getImageDataUri) {
+        try {
+          url = await plugin.helpers.viewportScreenshot.getImageDataUri();
+        } catch {
+          url = null;
+        }
+      }
+      if (!url) {
+        plugin.canvas3d?.requestDraw?.();
+        plugin.canvas3d?.commit?.(true);
+        plugin.canvas3d?.tick?.(performance.now(), { isSynchronous: true, manualDraw: true });
+        url = canvasEl.toDataURL('image/png');
+      }
+      if (!url) return;
       const a = document.createElement('a');
       a.href = url;
       a.download = `${(label || 'structure').replace(/[^a-z0-9._-]+/gi, '_').slice(0, 48)}.png`;
@@ -132,94 +185,168 @@
   }
 
   async function ensurePlugin() {
-    if (destroyed) return null;
+    if (destroyed || webglFailed) return null;
     if (plugin) return plugin;
     if (pluginPromise) return pluginPromise;
     if (!containerEl || !canvasEl) return null;
+
+    if (typeof WebGL2RenderingContext === 'undefined') {
+      webglFailed = true;
+      webglFailReason = 'WebGL2 is unavailable in this browser';
+      initError = webglFailReason;
+      return null;
+    }
 
     const cEl = containerEl;
     const cvEl = canvasEl;
 
     pluginPromise = (async () => {
-      const [{ PluginContext }, { DefaultPluginSpec, PluginSpec }, { MAQualityAssessment }] = await Promise.all([
-        import('molstar/lib/mol-plugin/context'),
-        import('molstar/lib/mol-plugin/spec'),
-        import('molstar/lib/extensions/model-archive/quality-assessment/behavior'),
-      ]);
-      if (destroyed) return null;
+      try {
+        const [
+          { PluginContext },
+          { DefaultPluginSpec, PluginSpec },
+          { PluginConfig },
+          { MAQualityAssessment },
+        ] = await Promise.all([
+          import('molstar/lib/mol-plugin/context'),
+          import('molstar/lib/mol-plugin/spec'),
+          import('molstar/lib/mol-plugin/config'),
+          import('molstar/lib/extensions/model-archive/quality-assessment/behavior'),
+        ]);
+        if (destroyed) return null;
 
-      const spec = DefaultPluginSpec();
-      spec.behaviors.push(PluginSpec.Behavior(MAQualityAssessment));
-      const ctx = new PluginContext(spec);
-      await ctx.init();
-      if (destroyed) {
-        try {
-          ctx.dispose();
-        } catch {
-          /* ignore */
+        const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+        const pixelScale = Math.min(1, 1.5 / dpr);
+
+        const spec = DefaultPluginSpec();
+        spec.behaviors.push(PluginSpec.Behavior(MAQualityAssessment));
+        spec.config = [
+          ...(spec.config ?? []),
+          [PluginConfig.General.DisablePreserveDrawingBuffer, true],
+          [PluginConfig.General.PixelScale, pixelScale],
+        ];
+        const ctx = new PluginContext(spec);
+        await ctx.init();
+        if (destroyed) {
+          try {
+            ctx.dispose();
+          } catch {
+            /* ignore */
+          }
+          return null;
+        }
+
+        const ok = await ctx.initViewerAsync(cvEl, cEl);
+        if (destroyed) {
+          try {
+            ctx.dispose();
+          } catch {
+            /* ignore */
+          }
+          return null;
+        }
+        if (!ok) {
+          try {
+            ctx.dispose();
+          } catch {
+            /* ignore */
+          }
+          webglFailed = true;
+          webglFailReason = 'Failed to initialize Mol* WebGL2 canvas';
+          initError = webglFailReason;
+          return null;
+        }
+
+        ctx.canvas3dContext?.setProps?.({ pixelScale });
+        ctx.canvas3d?.setProps({
+          renderer: { backgroundColor: (theme === 'light' ? 0xf8fafc : 0x0d0e11) as unknown as never },
+          cameraFog: { name: 'off', params: {} },
+          cameraClipping: { far: false, radius: 0, minNear: 0.1 },
+          postprocessing: buildPostprocessingProps(illustrative, spin && hasAnyStructure),
+          trackball: {
+            animate: spin && hasAnyStructure
+              ? { name: 'spin', params: { speed: effectiveSpinSpeed, axis: [0, -1, 0] as unknown as never } }
+              : { name: 'off', params: {} },
+          },
+        });
+
+        // Click picking -> emit protein residue info (including insertion code, ignoring DNA/RNA & ligands)
+        const { StructureElement, StructureProperties } = await import('molstar/lib/mol-model/structure');
+        if (destroyed) {
+          try {
+            ctx.dispose();
+          } catch {
+            /* ignore */
+          }
+          return null;
+        }
+        ctx.behaviors.interaction.click.subscribe((ev) => {
+          if (!onResidueClick) return;
+          const loci = ev.current.loci;
+          if (!StructureElement.Loci.is(loci) || loci.elements.length === 0) return;
+          const loc = StructureElement.Loci.getFirstLocation(loci);
+          if (!loc) return;
+
+          // Ignore non-polymers (ligands, ions, waters, carbohydrates) and DNA/RNA nucleic polymers
+          let entityType = 'polymer';
+          let entitySubtype = '';
+          try {
+            entityType = String(StructureProperties.entity.type(loc) ?? '');
+          } catch {
+            entityType = 'polymer';
+          }
+          if (entityType !== 'polymer') return;
+
+          try {
+            entitySubtype = String(StructureProperties.entity.subtype(loc) ?? '').toLowerCase();
+          } catch {
+            entitySubtype = '';
+          }
+          if (
+            entitySubtype.includes('ribonucleotide') ||
+            entitySubtype.includes('nucleic') ||
+            (entitySubtype &&
+              !entitySubtype.includes('polypeptide') &&
+              !entitySubtype.includes('peptide') &&
+              entitySubtype !== 'other')
+          ) {
+            return;
+          }
+
+          const compId = StructureProperties.atom.label_comp_id(loc) || 'UNK';
+          if (NUCLEIC_COMP_IDS.has(compId.toUpperCase())) return;
+
+          const chain = StructureProperties.chain.auth_asym_id(loc) || 'A';
+          const seqId = StructureProperties.residue.auth_seq_id(loc);
+          let insCode = '';
+          try {
+            const rawIns = String(StructureProperties.residue.pdbx_PDB_ins_code(loc) ?? '').trim();
+            if (rawIns && rawIns !== '?' && rawIns !== '.') {
+              insCode = rawIns;
+            }
+          } catch {
+            insCode = '';
+          }
+          onResidueClick({
+            chain,
+            seqId,
+            ...(insCode ? { insCode } : {}),
+            residueToken: `${chain}${seqId}${insCode}`,
+            compId,
+            isNonPolymer: false,
+          });
+        });
+
+        plugin = ctx;
+        return ctx;
+      } catch (err) {
+        webglFailed = true;
+        webglFailReason = err instanceof Error ? err.message : String(err);
+        if (!destroyed) {
+          initError = webglFailReason;
         }
         return null;
       }
-
-      const ok = await ctx.initViewerAsync(cvEl, cEl);
-      if (destroyed) {
-        try {
-          ctx.dispose();
-        } catch {
-          /* ignore */
-        }
-        return null;
-      }
-      if (!ok) {
-        try {
-          ctx.dispose();
-        } catch {
-          /* ignore */
-        }
-        throw new Error('Failed to initialize Mol* WebGL2 canvas');
-      }
-
-      ctx.canvas3d?.setProps({
-        renderer: { backgroundColor: (theme === 'light' ? 0xf8fafc : 0x0d0e11) as unknown as never },
-        cameraFog: { name: 'off', params: {} },
-        cameraClipping: { far: false, radius: 0, minNear: 0.1 },
-        trackball: {
-          animate: spin && hasAnyStructure
-            ? { name: 'spin', params: { speed: spinSpeed, axis: [0, -1, 0] as unknown as never } }
-            : { name: 'off', params: {} },
-        },
-      });
-
-      // Click picking -> emit residue info for MPNN fixed-position / conditioning selection
-      const { StructureElement, StructureProperties } = await import('molstar/lib/mol-model/structure');
-      if (destroyed) {
-        try {
-          ctx.dispose();
-        } catch {
-          /* ignore */
-        }
-        return null;
-      }
-      ctx.behaviors.interaction.click.subscribe((ev) => {
-        if (!onResidueClick) return;
-        const loci = ev.current.loci;
-        if (!StructureElement.Loci.is(loci) || loci.elements.length === 0) return;
-        const loc = StructureElement.Loci.getFirstLocation(loci);
-        if (!loc) return;
-        const chain = StructureProperties.chain.auth_asym_id(loc) || 'A';
-        const seqId = StructureProperties.residue.auth_seq_id(loc);
-        const compId = StructureProperties.atom.label_comp_id(loc) || 'UNK';
-        let isNonPolymer = false;
-        try {
-          isNonPolymer = StructureProperties.entity.type(loc) !== 'polymer';
-        } catch {
-          isNonPolymer = false;
-        }
-        onResidueClick({ chain, seqId, compId, isNonPolymer });
-      });
-
-      plugin = ctx;
-      return ctx;
     })();
 
     try {
@@ -336,14 +463,20 @@
       ligands: boolean;
       preserveCamera: boolean;
       structureKey: string;
+      fullKey: string;
     },
   ) {
+    if (webglFailed) {
+      initError = webglFailReason || 'WebGL2 is unavailable in this browser';
+      return;
+    }
     const mySeq = ++loadSeq;
     initError = null;
     if (!dPdb && !rPdb) {
       if (plugin) await plugin.clear();
       trajModelRef = null;
       lastStructureKey = '';
+      lastRenderedKey = styleOpts.fullKey;
       return;
     }
 
@@ -383,16 +516,7 @@
         let isMultiChain = false;
         if (!hasOverlay) {
           if (fmt === 'pdb') {
-            const chains = new Set<string>();
-            for (const line of text.split('\n')) {
-              if (line.startsWith('ATOM  ') && line.length >= 22) {
-                chains.add(line[21]);
-                if (chains.size >= 2) {
-                  isMultiChain = true;
-                  break;
-                }
-              }
-            }
+            isMultiChain = hasMultiplePdbChains(text);
           } else {
             // mmCIF: count distinct polymer units in the asymmetric/cropped model
             const sData = struct.data;
@@ -465,15 +589,17 @@
       }
 
       if (destroyed || mySeq !== loadSeq) return;
-      applyIllustrative(illustrative);
+      applyPostprocessing(illustrative, spin && hasAnyStructure);
       if (savedCam) {
         ctx.canvas3d?.camera?.setState(savedCam, 0);
       } else {
         ctx.canvas3d?.requestCameraReset();
       }
       lastStructureKey = styleOpts.structureKey;
+      lastRenderedKey = styleOpts.fullKey;
     } catch (err) {
       if (!destroyed && mySeq === loadSeq) {
+        lastRenderedKey = '';
         initError = err instanceof Error ? err.message : String(err);
       }
     }
@@ -510,18 +636,58 @@
     }
   }
 
-  function applyIllustrative(on: boolean) {
+  function buildPostprocessingProps(illustrativeOn: boolean, spinning: boolean) {
+    return {
+      bloom: { name: 'off' as const, params: {} },
+      shadow: { name: 'off' as const, params: {} },
+      occlusion: spinning
+        ? { name: 'off' as const, params: {} }
+        : {
+            name: 'on' as const,
+            params: {
+              samples: 16,
+              multiScale: { name: 'off' as const, params: {} },
+              radius: 5,
+              bias: 0.8,
+              blurKernelSize: 11,
+              blurDepthBias: 0.5,
+              resolutionScale: 0.5,
+              color: 0x000000 as unknown as never,
+              transparentThreshold: 0.4,
+            },
+          },
+      antialiasing: spinning
+        ? { name: 'off' as const, params: {} }
+        : {
+            name: 'fxaa' as const,
+            params: {
+              edgeThresholdMin: 0.0312,
+              edgeThresholdMax: 0.063,
+              iterations: 12,
+              subpixelQuality: 0.3,
+            },
+          },
+      outline: illustrativeOn
+        ? {
+            name: 'on' as const,
+            params: {
+              scale: 1,
+              threshold: 0.33,
+              color: 0x000000 as unknown as never,
+              includeTransparent: true,
+            },
+          }
+        : { name: 'off' as const, params: {} },
+      illustrative: illustrativeOn
+        ? { name: 'on' as const, params: {} }
+        : { name: 'off' as const, params: {} },
+    };
+  }
+
+  function applyPostprocessing(illustrativeOn: boolean, spinning: boolean) {
     if (!plugin?.canvas3d) return;
     plugin.canvas3d.setProps({
-      postprocessing: {
-        outline: on
-          ? {
-              name: 'on',
-              params: { scale: 1, threshold: 0.33, color: 0x000000, includeTransparent: true },
-            }
-          : { name: 'off', params: {} },
-        illustrative: on ? { name: 'on', params: {} } : { name: 'off', params: {} },
-      },
+      postprocessing: buildPostprocessingProps(illustrativeOn, spinning),
     });
   }
 
@@ -532,6 +698,7 @@
   function applySpin(on: boolean, speed: number) {
     if (!plugin?.canvas3d) return;
     plugin.canvas3d.setProps({
+      postprocessing: buildPostprocessingProps(illustrative, on),
       trackball: {
         animate: on
           ? { name: 'spin', params: { speed, axis: [0, -1, 0] as unknown as never } }
@@ -550,8 +717,13 @@
       ligands: boolean;
       preserveCamera: boolean;
       structureKey: string;
+      fullKey: string;
     },
   ) {
+    if (webglFailed) {
+      initError = webglFailReason || 'WebGL2 is unavailable in this browser';
+      return;
+    }
     const mySeq = ++loadSeq;
     initError = null;
     modelRefs = new Map();
@@ -559,6 +731,7 @@
     if (specs.length === 0) {
       if (plugin) await plugin.clear();
       lastStructureKey = '';
+      lastRenderedKey = styleOpts.fullKey;
       return;
     }
 
@@ -624,15 +797,17 @@
 
       if (destroyed || mySeq !== loadSeq) return;
       modelRefs = nextRefs;
-      applyIllustrative(illustrative);
+      applyPostprocessing(illustrative, spin && hasAnyStructure);
       if (savedCam) {
         ctx.canvas3d?.camera?.setState(savedCam, 0);
       } else {
         ctx.canvas3d?.requestCameraReset();
       }
       lastStructureKey = styleOpts.structureKey;
+      lastRenderedKey = styleOpts.fullKey;
     } catch (err) {
       if (!destroyed && mySeq === loadSeq) {
+        lastRenderedKey = '';
         initError = err instanceof Error ? err.message : String(err);
       }
     }
@@ -669,7 +844,7 @@
       .join('||');
   });
 
-  // Re-render full scene when structures, compare inputs, or representation style change
+  // Re-render full scene ONLY when (structureKey + styleKey) actually changes
   $effect(() => {
     const styleOpts = {
       rep: repType,
@@ -678,11 +853,19 @@
       surfaceOverlay: showSurfaceOverlay,
       ligands: showLigands,
     };
+    const styleKey = `${styleOpts.rep}|${styleOpts.color}|${styleOpts.sidechains ? 1 : 0}|${styleOpts.surfaceOverlay ? 1 : 0}|${styleOpts.ligands ? 1 : 0}`;
     if (multiRenderKey !== null) {
       const mKey = `multi:${multiRenderKey}`;
+      const fullKey = `${mKey}##${styleKey}`;
+      if (fullKey === lastRenderedKey && !initError) return;
       const sameStructure = lastStructureKey === mKey;
       const snapshot = untrack(() => models ?? []);
-      void renderMultiModels(snapshot, { ...styleOpts, preserveCamera: sameStructure, structureKey: mKey });
+      void renderMultiModels(snapshot, {
+        ...styleOpts,
+        preserveCamera: sameStructure,
+        structureKey: mKey,
+        fullKey,
+      });
       return;
     }
     const d = designedPdb;
@@ -692,11 +875,14 @@
     const sd = showDesigned;
     const sr = showRefold;
     const sKey = `single:${sd ? d?.length ?? 0 : -1}:${d?.slice(0, 48) ?? ''}:${d?.slice(-48) ?? ''}|${sr ? r?.length ?? 0 : -1}:${r?.slice(0, 48) ?? ''}:${r?.slice(-48) ?? ''}|${useT ? `${t?.length ?? 0}:${t?.slice(-48) ?? ''}` : 0}`;
+    const fullKey = `${sKey}##${styleKey}`;
+    if (fullKey === lastRenderedKey && !initError) return;
     const sameStructure = lastStructureKey === sKey;
     void renderScene(d, r, t, useT, sd, sr, untrack(() => frameIndex), {
       ...styleOpts,
       preserveCamera: sameStructure,
       structureKey: sKey,
+      fullKey,
     });
   });
 
@@ -717,7 +903,8 @@
 
   $effect(() => {
     const on = illustrative;
-    if (plugin) applyIllustrative(on);
+    const spinning = spin && hasAnyStructure;
+    if (plugin) applyPostprocessing(on, spinning);
   });
 
   $effect(() => {
@@ -748,15 +935,26 @@
     const el = containerEl;
     const ctx = plugin;
     if (!el || !ctx?.canvas3d || typeof ResizeObserver === 'undefined') return;
+    let resizeRaf: number | null = null;
     const ro = new ResizeObserver(() => {
-      try {
-        ctx.canvas3d?.handleResize();
-      } catch {
-        /* ignore resize during teardown */
-      }
+      if (resizeRaf !== null) return;
+      resizeRaf = requestAnimationFrame(() => {
+        resizeRaf = null;
+        try {
+          ctx.canvas3d?.handleResize();
+        } catch {
+          /* ignore resize during teardown */
+        }
+      });
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      if (resizeRaf !== null) {
+        cancelAnimationFrame(resizeRaf);
+        resizeRaf = null;
+      }
+      ro.disconnect();
+    };
   });
 
   $effect(() => {
@@ -802,7 +1000,7 @@
 
 <div class="mol-card" style="height: {typeof height === 'number' ? `${height}px` : height}">
   {#if label}
-    <div class="badge">{label}</div>
+    <div class="badge" class:has-style-menu={expanded && hasAnyStructure} title={label}>{label}</div>
   {/if}
   {#if expanded && hasAnyStructure}
     <div class="style-menu-wrap">
@@ -882,7 +1080,12 @@
             <button type="button" onclick={handleResetCamera} title="Reset camera framing">
               ⟲ Reset view
             </button>
-            <button type="button" onclick={handleSavePng} title="Download PNG screenshot">
+            <button
+              type="button"
+              disabled={!plugin || Boolean(initError)}
+              onclick={handleSavePng}
+              title={!plugin || initError ? '3D viewer unavailable' : 'Download PNG screenshot'}
+            >
               📷 PNG
             </button>
             <button type="button" onclick={resetStyleControls} title="Restore default style">
@@ -977,14 +1180,22 @@
     top: 10px;
     left: 10px;
     z-index: 10;
+    max-width: calc(100% - 20px);
+    box-sizing: border-box;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
     color: var(--text-secondary);
-    background: var(--overlay-bg);
+    background: color-mix(in srgb, var(--bg-surface) 92%, transparent);
     border: 1px solid var(--border);
     padding: 3px 8px;
     border-radius: 4px;
     pointer-events: none;
+  }
+  .badge.has-style-menu {
+    max-width: calc(100% - 175px);
   }
   .legend {
     position: absolute;
@@ -1017,11 +1228,10 @@
     pointer-events: auto;
     display: inline-flex;
     align-items: center;
-    background: var(--overlay-bg);
+    background: color-mix(in srgb, var(--bg-surface) 92%, transparent);
     border: 1px solid var(--border-strong);
     border-radius: 999px;
     overflow: hidden;
-    backdrop-filter: blur(4px);
     transition: opacity 120ms ease;
   }
   .cmp-chip.is-hidden {
@@ -1138,14 +1348,18 @@
     position: absolute;
     top: 10px;
     right: 10px;
+    max-height: calc(100% - 20px);
     z-index: 15;
     display: flex;
     flex-direction: column;
     align-items: flex-end;
     gap: 6px;
+    pointer-events: none;
   }
   .style-toggle-btn {
-    background: var(--overlay-bg);
+    pointer-events: auto;
+    flex-shrink: 0;
+    background: color-mix(in srgb, var(--bg-surface) 92%, transparent);
     color: var(--text-primary);
     border: 1px solid var(--border-strong);
     border-radius: 6px;
@@ -1154,7 +1368,6 @@
     font-size: 11px;
     font-weight: 600;
     cursor: pointer;
-    backdrop-filter: blur(6px);
   }
   .style-toggle-btn:hover,
   .style-toggle-btn.active {
@@ -1162,12 +1375,16 @@
     color: var(--accent-bright);
   }
   .style-panel {
+    pointer-events: auto;
     width: 230px;
-    background: var(--overlay-bg);
+    max-height: min(420px, calc(100vh - 120px));
+    min-height: 0;
+    overflow-y: auto;
+    box-sizing: border-box;
+    background: color-mix(in srgb, var(--bg-surface) 95%, transparent);
     border: 1px solid var(--border-strong);
     border-radius: 8px;
     padding: 10px 11px;
-    backdrop-filter: blur(8px);
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
     display: flex;
     flex-direction: column;
@@ -1255,8 +1472,25 @@
     cursor: pointer;
     white-space: nowrap;
   }
-  .sp-actions button:hover {
+  .sp-actions button:hover:not(:disabled) {
     border-color: var(--accent);
     color: var(--text-primary);
+  }
+  .sp-actions button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  @media (max-width: 640px) {
+    .badge.has-style-menu {
+      max-width: calc(100% - 155px);
+      font-size: 10px;
+    }
+    .style-toggle-btn {
+      font-size: 10px;
+      padding: 3px 8px;
+    }
+    .style-panel {
+      width: min(230px, calc(100vw - 32px));
+    }
   }
 </style>

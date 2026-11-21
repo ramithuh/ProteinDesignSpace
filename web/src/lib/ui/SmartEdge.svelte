@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import {
     BaseEdge,
     EdgeLabel,
@@ -32,6 +33,7 @@
   let isProposed = $derived(Boolean(data?.proposed));
   let proposedCount = $derived(typeof data?.proposedCount === 'number' ? data.proposedCount : 1);
   let targetPortLabel = $derived(typeof data?.toPort === 'string' ? data.toPort : '');
+  let laneStagger = $derived(typeof data?.laneStagger === 'number' ? data.laneStagger : 0);
   let onAccept = $derived(
     typeof data?.onAccept === 'function' ? (data.onAccept as () => void) : undefined,
   );
@@ -39,18 +41,30 @@
     typeof data?.onDismiss === 'function' ? (data.onDismiss as () => void) : undefined,
   );
 
+  // Memoize obstacle rects strictly by node geometry so progress/data ticks never re-route edges
+  let geomKey = $derived(
+    nodes.current
+      .map(
+        (n) =>
+          `${n.id}:${Math.round(n.position.x)},${Math.round(n.position.y)},${Math.round(n.measured?.width ?? n.width ?? 230)},${Math.round(n.measured?.height ?? n.height ?? 160)}`,
+      )
+      .join('|'),
+  );
+
+  let obstacleRects = $derived.by((): ObstacleRect[] => {
+    void geomKey;
+    return untrack(() =>
+      nodes.current.map((n) => ({
+        id: n.id,
+        x: n.position.x,
+        y: n.position.y,
+        width: n.measured?.width ?? n.width ?? 230,
+        height: n.measured?.height ?? n.height ?? 160,
+      })),
+    );
+  });
+
   let routed = $derived.by(() => {
-    const rects: ObstacleRect[] = nodes.current.map((n) => ({
-      id: n.id,
-      x: n.position.x,
-      y: n.position.y,
-      width: n.measured?.width ?? n.width ?? 230,
-      height: n.measured?.height ?? n.height ?? 160,
-    }));
-
-    const laneStagger =
-      typeof data?.laneStagger === 'number' ? data.laneStagger : 0;
-
     const smart = computeSmartEdgePath({
       sourceX,
       sourceY,
@@ -58,7 +72,7 @@
       targetY,
       sourceId: source,
       targetId: target,
-      nodes: rects,
+      nodes: obstacleRects,
       stub: 24,
       padding: 18,
       borderRadius: 12,
