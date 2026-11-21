@@ -325,10 +325,10 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     biology: 'De novo pocket around S-adenosylmethionine (SAM) with H-bonds',
     cropSegments: 'A:SAM',
     conditionParams: {
-      taskPreset: 'sm_sam',
+      taskPreset: 'custom',
       contig: '110-110',
       hbondMode: 'ACCEPTOR',
-      hbondSelection: 'B/SAM/*/*',
+      hbondSelection: 'A/SAM/*/*',
     },
   },
   {
@@ -345,7 +345,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     biology: 'Sequence-specific dsDNA groove recognition (TGAATGAA)',
     cropSegments: 'B, C',
     conditionParams: {
-      taskPreset: 'dna_7m5w',
+      taskPreset: 'custom',
       contig: '90-90',
     },
   },

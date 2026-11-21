@@ -50,8 +50,26 @@ function rfd4NeedsEncoder(graph: WorkflowGraph, nodeId: string): boolean {
   return false;
 }
 
+const AF2_DELTA_BASE: Record<string, { baseId: string; baseMB: number }> = {
+  'monomer-2': { baseId: 'monomer', baseMB: 97 },
+  'monomer-3': { baseId: 'monomer', baseMB: 97 },
+  'monomer-4': { baseId: 'monomer', baseMB: 97 },
+  'monomer-5': { baseId: 'monomer', baseMB: 97 },
+  'multimer-2': { baseId: 'multimer', baseMB: 74 },
+  'multimer-3': { baseId: 'multimer', baseMB: 74 },
+  'multimer-4': { baseId: 'multimer', baseMB: 74 },
+  'multimer-5': { baseId: 'multimer', baseMB: 74 },
+};
+
 export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSummary {
   const byKey = new Map<string, PreflightModelItem>();
+  const af2ModelsInGraph = new Set<string>();
+  for (const node of graph.nodes) {
+    if (node.adapterId === 'localfold-af2') {
+      af2ModelsInGraph.add(String(node.params.model ?? 'monomer'));
+    }
+  }
+  const countedAf2Bases = new Set<string>();
 
   for (const node of graph.nodes) {
     const manifest = ADAPTER_REGISTRY[node.adapterId];
@@ -64,10 +82,24 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
         LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
       const key = `localfold:${meta.id}`;
       if (!byKey.has(key)) {
+        let approxMB = meta.approxMB;
+        const deltaInfo = AF2_DELTA_BASE[meta.id];
+        if (deltaInfo) {
+          // Delta checkpoints share their base weights (monomer = 97 MB, multimer = 74 MB).
+          // If the base checkpoint itself is in the graph, or another delta already counted the base,
+          // only count the marginal delta bytes here.
+          if (af2ModelsInGraph.has(deltaInfo.baseId) || countedAf2Bases.has(deltaInfo.baseId)) {
+            approxMB = Math.max(0, meta.approxMB - deltaInfo.baseMB);
+          } else {
+            countedAf2Bases.add(deltaInfo.baseId);
+          }
+        } else if (meta.id === 'monomer' || meta.id === 'multimer') {
+          countedAf2Bases.add(meta.id);
+        }
         byKey.set(key, {
           key,
           label: meta.label,
-          approxMB: meta.approxMB,
+          approxMB,
           estimatedVramMB:
             meta.family === 'af3'
               ? 1800
@@ -140,7 +172,13 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
 
   const models = [...byKey.values()];
   const totalDownloadMB = models.reduce((sum, m) => sum + m.approxMB, 0);
-  const peakVramMB = models.reduce((mx, m) => Math.max(mx, m.estimatedVramMB), 0);
+  let peakVramMB = models.reduce((mx, m) => Math.max(mx, m.estimatedVramMB), 0);
+  // RFD4 trunk/decoder (900 MB) and autoencoder encoder (400 MB) are co-resident in the same GPU worker.
+  const rfd4Item = byKey.get('rfd4-proteina');
+  const rfd4EncItem = byKey.get('rfd4-proteina:encoder');
+  if (rfd4Item && rfd4EncItem) {
+    peakVramMB = Math.max(peakVramMB, rfd4Item.estimatedVramMB + rfd4EncItem.estimatedVramMB);
+  }
   const usesWebGpu = models.some((m) => m.runtime !== 'cpu-ts');
   const hasNonCommercialModel = models.some((m) => m.nonCommercial);
 

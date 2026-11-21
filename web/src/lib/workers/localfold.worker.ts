@@ -6,6 +6,8 @@
 
 import { atom37ToPdb, chainIdsFromLengths, parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
+import { normalizeLocalFoldChainScores } from '$lib/engine/conditioning';
+import { fetchCachedBytes } from '$lib/engine/opfs-cache';
 import type {
   FoldedCandidate,
   FoldedStructure,
@@ -90,6 +92,7 @@ async function ensureCoreModules(id: number) {
   lfCore = {
     AlphaFoldMonomerGpu: monomerMod.AlphaFoldMonomerGpu,
     AlphaFoldUnifiedGpu: unifiedMod.AlphaFoldUnifiedGpu,
+    mergeChainA3ms: chainsMod.mergeChainA3ms,
     mergeUnpairedChainA3ms: chainsMod.mergeUnpairedChainA3ms,
     AlphaFoldFixture: fixtureMod.AlphaFoldFixture,
     HttpTensorStore: storeMod.HttpTensorStore,
@@ -110,14 +113,16 @@ async function ensureAf3Modules(id: number) {
     progress: 0.04,
     detail: 'Loading LocalFold AF3 / RF3 / Boltz-2 WebGPU kernels...',
   });
-  const [foldMod, diffWeightsMod, weightsMod, featuriseMod, dialectMod, residentMod] = await Promise.all([
-    importVendor('webgpu/af3/fold.js'),
-    importVendor('shared/af3/weights/diffusion-weights.js'),
-    importVendor('shared/af3/weights/weights.js'),
-    importVendor('shared/af3/featurise/featurise.js'),
-    importVendor('shared/af3/dialect.js'),
-    importVendor('webgpu/runtime/resident.js'),
-  ]);
+  const [foldMod, diffWeightsMod, weightsMod, featuriseMod, dialectMod, residentMod, ccdMod] =
+    await Promise.all([
+      importVendor('webgpu/af3/fold.js'),
+      importVendor('shared/af3/weights/diffusion-weights.js'),
+      importVendor('shared/af3/weights/weights.js'),
+      importVendor('shared/af3/featurise/featurise.js'),
+      importVendor('shared/af3/dialect.js'),
+      importVendor('webgpu/runtime/resident.js'),
+      importVendor('shared/af3/featurise/ccd-component.js'),
+    ]);
   lfAf3 = {
     foldBatch: foldMod.foldBatch,
     foldWeights: diffWeightsMod.foldWeights,
@@ -125,6 +130,8 @@ async function ensureAf3Modules(id: number) {
     featuriseProtein: featuriseMod.featuriseProtein,
     featuriserDialect: dialectMod.featuriserDialect,
     releaseResidentWeights: residentMod.releaseResidentWeights,
+    ccdUrl: ccdMod.ccdUrl,
+    parseCcdComponent: ccdMod.parseCcdComponent,
   };
 }
 
@@ -320,10 +327,6 @@ function splitChainSequences(cleanSeq: string, chainLengths: number[]): string[]
   return parts;
 }
 
-function splitIntoColonChains(cleanSeq: string, chainLengths: number[]): string {
-  return splitChainSequences(cleanSeq, chainLengths).join(':');
-}
-
 self.onmessage = async (ev: MessageEvent) => {
   const msg = ev.data;
   try {
@@ -350,10 +353,29 @@ self.onmessage = async (ev: MessageEvent) => {
       if (!isAf2Mono && !isAf2Multi && !isAf3) {
         throw new Error(`Unsupported LocalFold model "${modelKey}"`);
       }
-      const recycles = Math.max(0, Math.min(6, Number(p.recycles ?? 1)));
-      const diffusionSteps = Math.max(10, Math.min(200, Number(p.diffusionSteps ?? 25)));
-      const maxSeqs = Math.max(1, Math.min(8, Number(p.maxSequences ?? 2)));
+      const recycles = Math.max(0, Math.min(4, Math.round(Number(p.recycles ?? 1))));
+      const tolerance = Math.max(0, Math.min(5, Number(p.tolerance ?? 0.5)));
+      const diffusionSteps = Math.max(10, Math.min(200, Math.round(Number(p.diffusionSteps ?? 25))));
+      const maxSeqs = Math.max(1, Math.min(8, Math.round(Number(p.maxSequences ?? 2))));
       const seed = Number(p.seed ?? 0);
+      const ligandCcdCodes: string[] = Array.isArray(p.ligandCcdCodes)
+        ? (p.ligandCcdCodes as string[]).map((s) => String(s).trim().toUpperCase()).filter(Boolean)
+        : String(p.ligandCcdCodes ?? '')
+            .split(/[,\s]+/)
+            .map((s) => s.trim().toUpperCase())
+            .filter(Boolean);
+      const dnaSeqs: string[] = Array.isArray(p.dnaSequences)
+        ? (p.dnaSequences as string[]).map((s) => String(s).replace(/[^ACGT]/gi, '').toUpperCase()).filter(Boolean)
+        : String(p.dnaSequences ?? '')
+            .split(/[:,;\s]+/)
+            .map((s) => s.replace(/[^ACGT]/gi, '').toUpperCase())
+            .filter(Boolean);
+      const rnaSeqs: string[] = Array.isArray(p.rnaSequences)
+        ? (p.rnaSequences as string[]).map((s) => String(s).replace(/[^ACGU]/gi, '').toUpperCase()).filter(Boolean)
+        : String(p.rnaSequences ?? '')
+            .split(/[:,;\s]+/)
+            .map((s) => s.replace(/[^ACGU]/gi, '').toUpperCase())
+            .filter(Boolean);
 
       await ensureModelLoaded(msg.id, modelKey);
       const targets = seqSet.candidates.slice(0, maxSeqs);
@@ -387,7 +409,9 @@ self.onmessage = async (ev: MessageEvent) => {
           const chainSeqs = splitChainSequences(cleanSeq, chainLengths);
           const a3m =
             chainSeqs.length > 1
-              ? lfCore.mergeUnpairedChainA3ms(chainSeqs.map((s) => `>q\n${s}\n`))
+              ? isAf2Multi
+                ? lfCore.mergeChainA3ms(chainSeqs.map((s) => `>q\n${s}\n`))
+                : lfCore.mergeUnpairedChainA3ms(chainSeqs.map((s) => `>q\n${s}\n`))
               : `>query\n${cleanSeq}\n`;
           const foldStart = performance.now();
 
@@ -411,7 +435,7 @@ self.onmessage = async (ev: MessageEvent) => {
                 chainAware: true,
                 outerProductMeanFirst: true,
                 positionScale: 20,
-                tolerance: 0.5,
+                tolerance,
               }
             : {
                 recycles,
@@ -420,7 +444,7 @@ self.onmessage = async (ev: MessageEvent) => {
                 maxExtraSequences: 1,
                 maskFraction: 0,
                 chainLengths,
-                tolerance: 0.5,
+                tolerance,
               };
 
           const prediction = await runner.predictA3m(
@@ -449,6 +473,7 @@ self.onmessage = async (ev: MessageEvent) => {
           const meanPlddt = plddt.length ? sumPlddt / plddt.length : 0;
 
           const chainIds = chainIdsFromLengths(chainLengths);
+          const uniqueChains = [...new Set(chainIds)];
           const { pdbText, caCoords } = atom37ToPdb(
             fin.structure.atom37 as Float32Array,
             fin.structure.atom37Mask as Float32Array,
@@ -468,6 +493,19 @@ self.onmessage = async (ev: MessageEvent) => {
             typeof fin.confidence.iptm === 'number' && Number.isFinite(fin.confidence.iptm)
               ? fin.confidence.iptm
               : null;
+          const chainScores = normalizeLocalFoldChainScores(
+            {
+              ptm: ptmVal,
+              iptm: iptmVal,
+              multimerScore: fin.confidence.multimerScore,
+              chainPtm: fin.confidence.chainPtm,
+              chainIptm: fin.confidence.chainIptm,
+              chainPairIptm: fin.confidence.chainPairIptm,
+            },
+            uniqueChains,
+            0,
+          );
+          const iptmIsMonomerApprox = isAf2Mono && chainLengths.length > 1 && iptmVal !== null;
 
           folds.push({
             sequenceId: cand.id,
@@ -479,6 +517,8 @@ self.onmessage = async (ev: MessageEvent) => {
             meanPlddt,
             ptm: ptmVal,
             iptm: iptmVal,
+            ...chainScores,
+            ...(iptmIsMonomerApprox ? { iptmIsMonomerApprox: true } : {}),
             chainLengths,
             chainIds,
             pae: paeRaw ? new Float32Array(paeRaw) : undefined,
@@ -489,6 +529,21 @@ self.onmessage = async (ev: MessageEvent) => {
         // AF3-lineage unified driver (RF3, Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, AF3)
         const dialect = loadedAf3.weights.trunk.dialect;
         const featOpts = lfAf3.featuriserDialect(dialect);
+
+        // Optional ligand CCD passthrough for AF3-lineage holo refolding
+        const parsedLigands: unknown[] = [];
+        if (ligandCcdCodes.length > 0 && lfAf3.ccdUrl && lfAf3.parseCcdComponent) {
+          const textDec = new TextDecoder();
+          for (const code of ligandCcdCodes) {
+            try {
+              const url = lfAf3.ccdUrl(code);
+              const bytes = await fetchCachedBytes(`lf-ccd-${code}`, url);
+              parsedLigands.push(lfAf3.parseCcdComponent(textDec.decode(bytes)));
+            } catch (err) {
+              console.warn(`[localfold] Failed to fetch/parse CCD ligand "${code}":`, err);
+            }
+          }
+        }
 
         for (let i = 0; i < targets.length; i++) {
           const cand = targets[i];
@@ -510,7 +565,15 @@ self.onmessage = async (ev: MessageEvent) => {
             cand.chainLengths.reduce((a, b) => a + b, 0) === cleanSeq.length
               ? cand.chainLengths
               : [cleanSeq.length];
-          const colonSeq = splitIntoColonChains(cleanSeq, chainLengths);
+          const proteinChainSeqs = splitChainSequences(cleanSeq, chainLengths);
+          const allPolymerSeqs = [...proteinChainSeqs, ...dnaSeqs, ...rnaSeqs];
+          const chainKinds: Array<'protein' | 'dna' | 'rna'> = [
+            ...proteinChainSeqs.map(() => 'protein' as const),
+            ...dnaSeqs.map(() => 'dna' as const),
+            ...rnaSeqs.map(() => 'rna' as const),
+          ];
+          const colonSeq = allPolymerSeqs.join(':');
+          const hasExtraContext = dnaSeqs.length > 0 || rnaSeqs.length > 0 || parsedLigands.length > 0;
           const foldStart = performance.now();
 
           self.postMessage({
@@ -518,10 +581,19 @@ self.onmessage = async (ev: MessageEvent) => {
             type: 'progress',
             phase: 'fold',
             progress: i / targets.length,
-            detail: `Folding ${cand.id} with ${modelKey} (${cleanSeq.length} aa, ${recycles} rec, ${diffusionSteps} steps)...`,
+            detail: `Folding ${cand.id} with ${modelKey} (${cleanSeq.length} aa${parsedLigands.length ? ` + ${ligandCcdCodes.join(',')}` : ''}${dnaSeqs.length ? ` + ${dnaSeqs.length} DNA` : ''}, ${recycles} rec, ${diffusionSteps} steps)...`,
           });
 
-          const batch = lfAf3.featuriseProtein(colonSeq, featOpts);
+          const batch = lfAf3.featuriseProtein(
+            colonSeq,
+            hasExtraContext
+              ? {
+                  ...featOpts,
+                  chainKinds,
+                  ...(parsedLigands.length > 0 ? { ligands: parsedLigands } : {}),
+                }
+              : featOpts,
+          );
           const result = await lfAf3.foldBatch(gpuDevice, batch, loadedAf3.weights, {
             mode: 'diffusion',
             steps: diffusionSteps,
@@ -594,6 +666,18 @@ self.onmessage = async (ev: MessageEvent) => {
             parsed.chainIds.length === cleanSeq.length
               ? parsed.chainIds
               : chainIdsFromLengths(chainLengths);
+          const uniqueChains = [...new Set(chainIds)];
+          const chainScores = normalizeLocalFoldChainScores(
+            {
+              ptm: ptmVal,
+              iptm: iptmVal,
+              chainPtm: result.chainPtm,
+              chainIptm: result.chainIptm,
+              chainPairIptm: result.chainPairIptm,
+            },
+            uniqueChains,
+            1,
+          );
 
           folds.push({
             sequenceId: cand.id,
@@ -605,6 +689,7 @@ self.onmessage = async (ev: MessageEvent) => {
             meanPlddt,
             ptm: ptmVal,
             iptm: iptmVal,
+            ...chainScores,
             chainLengths,
             chainIds,
             pae: paeRaw ? new Float32Array(paeRaw) : undefined,
@@ -618,9 +703,13 @@ self.onmessage = async (ev: MessageEvent) => {
           seqSetId: seqSet.id,
           modelKey,
           recycles,
+          tolerance: isAf3 ? null : tolerance,
           diffusionSteps: isAf3 ? diffusionSteps : null,
           maxSequences: maxSeqs,
           seed,
+          ligandCcdCodes: isAf3 ? ligandCcdCodes : [],
+          dnaSeqs: isAf3 ? dnaSeqs : [],
+          rnaSeqs: isAf3 ? rnaSeqs : [],
         }),
       );
 

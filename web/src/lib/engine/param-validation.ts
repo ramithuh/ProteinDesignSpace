@@ -3,6 +3,29 @@
 
 import type { WorkflowNode } from './types';
 import { isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
+import { LOCALFOLD_MODEL_OPTIONS, RFD4_BENCHMARK_OPTIONS } from './registry';
+
+const VALID_RFD4_MODES = new Set([
+  'unconditional',
+  'binder',
+  'motif',
+  'conditioned',
+  'preset',
+  'partial',
+  'inverse-folding',
+]);
+const VALID_RFD4_PRESET_IDS = new Set([
+  ...RFD4_BENCHMARK_OPTIONS.map((b) => b.id),
+  'yaml_5o45_binder',
+]);
+const VALID_RFD4_RECYCLE_SCHEDULES = new Set(['none', 'low', 'medium']);
+const VALID_GENIE3_TASK_MODES = new Set(['unconditional', 'binder', 'motif']);
+const VALID_LOCALFOLD_MODELS = new Set(LOCALFOLD_MODEL_OPTIONS.map((m) => m.id));
+const VALID_MPNN_CATALOG: Record<string, ReadonlySet<string>> = {
+  proteinmpnn: new Set(['v_48_002', 'v_48_010', 'v_48_020', 'v_48_030']),
+  solublempnn: new Set(['v_48_010', 'v_48_020']),
+  ca: new Set(['v_48_002', 'v_48_010', 'v_48_020']),
+};
 
 export interface NumericFieldSpec {
   min: number;
@@ -326,7 +349,7 @@ export function validateNodeParams(node: WorkflowNode): string[] {
       // Skip mode-irrelevant params
       if (node.adapterId === 'rfd4-proteina') {
         const mode = String(p.mode ?? 'unconditional');
-        if (key === 'length' && mode !== 'unconditional') continue;
+        if (key === 'length' && mode !== 'unconditional' && mode !== 'binder') continue;
         if (key === 'partialFraction' && mode !== 'partial') continue;
       }
       const val = Number(p[key]);
@@ -336,6 +359,52 @@ export function validateNodeParams(node: WorkflowNode): string[] {
       } else if (spec.integer && !Number.isInteger(val)) {
         errs.push(`"${label}": ${key} must be an integer.`);
       }
+    }
+  }
+
+  // Enum parameter validation (prevents invalid recipes from crashing mid-run)
+  if (node.adapterId === 'rfd4-proteina') {
+    const mode = p.mode !== undefined ? String(p.mode) : 'unconditional';
+    if (!VALID_RFD4_MODES.has(mode)) {
+      errs.push(`"${label}": Unknown RFD4 mode "${mode}".`);
+    }
+    if (mode === 'preset' && p.presetId !== undefined) {
+      const presetId = String(p.presetId);
+      if (!VALID_RFD4_PRESET_IDS.has(presetId)) {
+        errs.push(`"${label}": Unknown RFD4 preset "${presetId}".`);
+      }
+    }
+    if (p.recycleSchedule !== undefined && !VALID_RFD4_RECYCLE_SCHEDULES.has(String(p.recycleSchedule))) {
+      errs.push(`"${label}": Invalid recycleSchedule "${String(p.recycleSchedule)}" (expected none, low, or medium).`);
+    }
+  }
+
+  if (node.adapterId === 'genie3' && p.taskMode !== undefined) {
+    const taskMode = String(p.taskMode);
+    if (!VALID_GENIE3_TASK_MODES.has(taskMode)) {
+      errs.push(`"${label}": Unknown Genie 3 taskMode "${taskMode}" (expected unconditional, binder, or motif).`);
+    }
+  }
+
+  if (node.adapterId === 'web-protein-mpnn') {
+    const family = p.family !== undefined ? String(p.family) : 'solublempnn';
+    const allowedModels = VALID_MPNN_CATALOG[family];
+    if (!allowedModels) {
+      errs.push(`"${label}": Unknown ProteinMPNN family "${family}" (expected solublempnn, proteinmpnn, or ca).`);
+    } else if (p.modelName !== undefined) {
+      const modelName = String(p.modelName);
+      if (!allowedModels.has(modelName)) {
+        errs.push(
+          `"${label}": Unknown ${family} modelName "${modelName}" (expected ${[...allowedModels].join(', ')}).`,
+        );
+      }
+    }
+  }
+
+  if (node.adapterId === 'localfold-af2' && p.model !== undefined) {
+    const modelId = String(p.model);
+    if (!VALID_LOCALFOLD_MODELS.has(modelId)) {
+      errs.push(`"${label}": Unknown LocalFold model "${modelId}".`);
     }
   }
 

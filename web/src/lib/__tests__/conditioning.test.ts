@@ -7,8 +7,13 @@ import {
   checkGenie3ConditionCompatibility,
   compileConditionToGenie3Spec,
   compileConditionToRfd4,
+  effectiveGenie3DdimSteps,
+  extractRfd4TemplateContext,
+  isBareLengthContig,
+  pdbTextToSplitCifText,
+  resolveGenie3PolyAlaSequence,
 } from '$lib/engine/conditioning';
-import { BENCHMARK_TARGETS } from '$lib/engine/benchmarks';
+import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
 import { isValidPdbId } from '$lib/protein-ops/rcsb';
 import {
   cropParsedStructure,
@@ -271,5 +276,136 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
     expect(parsedAllAtom.resNums).toEqual([10, 11, 12]);
     expect(parsedAllAtom.diagnostics.hasLigands).toBe(true);
     expect(parsedAllAtom.diagnostics.ligandNames).toEqual(['ZN', 'DHZ']);
+  });
+
+  it('injects motif spans & template ligands/DNA into RFD4 contig and C_CRDGRP/C_CRD, and remaps auth_* -> label_* IDs', () => {
+    // 1. Bare length AME enzyme intent (1CTT) with shifted auth_seq_id + RCSB ligand chains
+    const cttCif = [
+      'data_1ctt',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.type_symbol',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_alt_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.label_asym_id',
+      '_atom_site.label_entity_id',
+      '_atom_site.label_seq_id',
+      '_atom_site.pdbx_PDB_ins_code',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      '_atom_site.occupancy',
+      '_atom_site.B_iso_or_equiv',
+      '_atom_site.auth_seq_id',
+      '_atom_site.auth_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_atom_id',
+      '_atom_site.pdbx_PDB_model_num',
+      'ATOM 1 C CA . HIS A 1 98 ? 0.0 0.0 0.0 1.0 10.0 102 HIS A CA 1',
+      'ATOM 2 C CA . GLU A 1 100 ? 3.8 0.0 0.0 1.0 10.0 104 GLU A CA 1',
+      'ATOM 3 C CA . CYS A 1 125 ? 0.0 3.8 0.0 1.0 10.0 129 CYS A CA 1',
+      'ATOM 4 C CA . CYS A 1 128 ? 3.8 3.8 0.0 1.0 10.0 132 CYS A CA 1',
+      'HETATM 5 ZN ZN . ZN B 2 . ? 1.9 1.9 1.0 1.0 10.0 296 ZN A ZN 1',
+      'HETATM 6 C C1 . DHZ C 3 . ? 2.5 2.5 2.0 1.0 10.0 295 DHZ A C1 1',
+      '#',
+    ].join('\n');
+
+    const cttCtx = extractRfd4TemplateContext(cttCif);
+    const cttBench = getBenchmarkById('ame_1ctt_cda')!;
+    const cttIntent = buildCanonicalConditionIntent(cttBench.conditionParams);
+    const cttCompiled = compileConditionToRfd4(cttIntent, cttCtx);
+
+    // Remapped label_seq_ids (98, 100, 125, 128) + ligand chains B296, C295 injected into contig!
+    expect(cttCompiled.contig).toBe('150-150,A98,A100,A125,A128,/0,B296,/0,C295');
+    expect(cttCompiled.conditions.C_CRDGRP).toEqual({
+      1: [{ select: "sel('A/*/[98,100,125,128]/*') | sel('B/*/*/*') | sel('C/*/*/*')" }],
+    });
+    expect(cttCompiled.conditions.C_IDX).toEqual({
+      false: [{ select: "sel('A/*/[98,100,125,128]/*')", group: 'motif' }],
+    });
+
+    // 2. 7C7M (SAM) and 7M5W (B-DNA) benchmarks now use wired-template custom mode instead of remote preset
+    const samBench = getBenchmarkById('sm_7c7m_sam')!;
+    const dnaBench = getBenchmarkById('rfd4_7m5w_bdna')!;
+    expect(samBench.conditionParams.taskPreset).toBe('custom');
+    expect(dnaBench.conditionParams.taskPreset).toBe('custom');
+
+    const samCif = [
+      'data_7c7m',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.type_symbol',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_alt_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.label_asym_id',
+      '_atom_site.label_entity_id',
+      '_atom_site.label_seq_id',
+      '_atom_site.pdbx_PDB_ins_code',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      '_atom_site.occupancy',
+      '_atom_site.B_iso_or_equiv',
+      '_atom_site.auth_seq_id',
+      '_atom_site.auth_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_atom_id',
+      '_atom_site.pdbx_PDB_model_num',
+      'HETATM 1 C C1 . SAM D 2 . ? 1.0 2.0 3.0 1.0 10.0 301 SAM A C1 1',
+      '#',
+    ].join('\n');
+    const samCompiled = compileConditionToRfd4(
+      buildCanonicalConditionIntent(samBench.conditionParams),
+      extractRfd4TemplateContext(samCif),
+    );
+    expect(samCompiled.contig).toBe('110-110,/0,D301');
+    expect(samCompiled.conditions.C_CRD).toEqual({ true: [{ select: "sel('D/*/*/*')" }] });
+    expect(samCompiled.conditions.C_HB).toEqual({ ACCEPTOR: [{ select: "sel('D/SAM/*/*')" }] });
+
+    // 3. Binder contig synthesis for blank / bare-monomer contigs
+    expect(isBareLengthContig('')).toBe(true);
+    expect(isBareLengthContig('70-70')).toBe(true);
+    expect(isBareLengthContig('A17-132,/0,70-70')).toBe(false);
+    expect(cttCtx.synthesizeBinderContig('A', 65)).toBe('A98-128,/0,65-65');
+  });
+
+  it('pdbTextToSplitCifText splits HETATM ligands/ions onto distinct label_asym_id and label_entity_id', () => {
+    const rawPdb =
+      generateSampleHelixBundlePdb().replace('END\n', '') +
+      'HETATM  900 ZN    ZN A 296       1.000   2.000   3.000  1.00 10.00          ZN\n' +
+      'HETATM  901 C1   SAM A 301       2.000   3.000   4.000  1.00 10.00           C\n' +
+      'HETATM  902 O    HOH A 500       9.000   9.000   9.000  1.00 10.00           O\n' +
+      'END\n';
+    const cif = pdbTextToSplitCifText(rawPdb);
+    expect(cif).toContain('_entity.type');
+    expect(cif).toContain('non-polymer');
+    expect(cif).not.toContain('HOH');
+    const ctx = extractRfd4TemplateContext(cif);
+    expect(ctx.polymerByAuthChain.get('A')?.labelChain).toBe('A');
+    expect(ctx.ligands).toHaveLength(2);
+    expect(ctx.ligands[0].labelChain).not.toBe('A');
+    expect(ctx.ligands[1].labelChain).not.toBe('A');
+    expect(ctx.ligands[0].labelChain).not.toBe(ctx.ligands[1].labelChain);
+    expect(ctx.ligands.map((l) => l.compId)).toEqual(['ZN', 'SAM']);
+  });
+
+  it('unifies Genie 3 binder length cap at 256, resolves poly-ALA + fixed sequence cleanly, and computes effective DDIM steps', () => {
+    const tpl = makeSampleTemplate();
+    const auto240 = buildDefaultGenie3ConditionFromTemplate(tpl, 240);
+    const spec240 = compileConditionToGenie3Spec(auto240, tpl, 240);
+    expect(spec240.chainLengths).toEqual([240, tpl.length]);
+
+    // When predictSequence=false, unconditioned binder positions become 'A' while locked target preserves gtRestype
+    const polySeq = resolveGenie3PolyAlaSequence(spec240.length, spec240);
+    expect(polySeq.slice(0, 240)).toBe('A'.repeat(240));
+    expect(polySeq.slice(240)).toBe(tpl.sequence);
+
+    expect(effectiveGenie3DdimSteps(100)).toBe(100);
+    expect(effectiveGenie3DdimSteps(60)).toBe(63);
+    expect(effectiveGenie3DdimSteps(150)).toBe(167);
   });
 });

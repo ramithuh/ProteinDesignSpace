@@ -111,4 +111,52 @@ describe('estimateRunRequirements (first-run preflight)', () => {
     expect(formatApproxSize(427)).toBe('~427 MB');
     expect(formatApproxSize(1126)).toBe('~1.1 GB');
   });
+
+  it('sums co-resident RFD4 + encoder VRAM (1300 MB) and deduplicates shared AF2 delta base weights', () => {
+    const encGraph: WorkflowGraph = {
+      id: 'enc-vram',
+      name: 'Encoder VRAM',
+      nodes: [{ id: 'g', adapterId: 'rfd4-proteina', params: { mode: 'partial' } }],
+      edges: [],
+    };
+    const encSummary = estimateRunRequirements(encGraph);
+    expect(encSummary.peakVramMB).toBe(1300);
+
+    // monomer (97 MB) + monomer-2 (43 MB delta) = 140 MB (base not double-counted)
+    const af2MonoCombo: WorkflowGraph = {
+      id: 'af2-mono-combo',
+      name: 'AF2 Mono Combo',
+      nodes: [
+        { id: 'f1', adapterId: 'localfold-af2', params: { model: 'monomer' } },
+        { id: 'f2', adapterId: 'localfold-af2', params: { model: 'monomer-2' } },
+        { id: 'f3', adapterId: 'localfold-af2', params: { model: 'monomer-3' } },
+      ],
+      edges: [],
+    };
+    expect(estimateRunRequirements(af2MonoCombo).totalDownloadMB).toBe(97 + 43 + 43);
+
+    // monomer-2 + monomer-3 without monomer: counts 97 MB base once + two 43 MB deltas = 183 MB
+    const af2DeltaOnly: WorkflowGraph = {
+      id: 'af2-delta-only',
+      name: 'AF2 Delta Only',
+      nodes: [
+        { id: 'f2', adapterId: 'localfold-af2', params: { model: 'monomer-2' } },
+        { id: 'f3', adapterId: 'localfold-af2', params: { model: 'monomer-3' } },
+      ],
+      edges: [],
+    };
+    expect(estimateRunRequirements(af2DeltaOnly).totalDownloadMB).toBe(140 + 43);
+
+    // multimer (74 MB) + multimer-2 (44 MB delta) = 118 MB
+    const af2MultiCombo: WorkflowGraph = {
+      id: 'af2-multi-combo',
+      name: 'AF2 Multimer Combo',
+      nodes: [
+        { id: 'm2', adapterId: 'localfold-af2', params: { model: 'multimer-2' } },
+        { id: 'm1', adapterId: 'localfold-af2', params: { model: 'multimer' } },
+      ],
+      edges: [],
+    };
+    expect(estimateRunRequirements(af2MultiCombo).totalDownloadMB).toBe(74 + 44);
+  });
 });

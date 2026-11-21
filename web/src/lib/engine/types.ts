@@ -59,6 +59,16 @@ export interface StructureArtifact {
   /** Optional multi-model PDB when trajectory frames are available. */
   trajectoryPdb?: string;
   trajectoryFrameCount?: number;
+  /** Chain IDs whose sequence/backbone must remain locked during inverse folding (e.g. binder targets). */
+  lockedChains?: string[];
+  /** 1-based flat residue indices in the output structure to keep fixed in ProteinMPNN (e.g. scaffolded motifs). */
+  fixedResidueIndices?: number[];
+  /** Semantic role per output protein chain ID (e.g. target vs binder vs scaffold). */
+  chainRoles?: Record<string, 'target' | 'binder' | 'scaffold'>;
+  /** 0-based residue indices into `caCoords` corresponding to `nativeMotifCoords`. */
+  motifIndices?: number[];
+  /** Native template Cα [x, y, z] coordinates (Å) for each residue in `motifIndices`. */
+  nativeMotifCoords?: number[][];
   geometry: GeometryStats;
 }
 
@@ -91,6 +101,16 @@ export interface FoldedCandidate {
   meanPlddt: number;
   ptm: number | null;
   iptm?: number | null;
+  /** Per-chain pTM keyed by chain ID (e.g. { A: 0.85, B: 0.72 }). */
+  chainPtm?: Record<string, number>;
+  /** Per-chain mean interface pTM keyed by chain ID. */
+  chainIptm?: Record<string, number>;
+  /** Symmetric C×C chain-pair ipTM matrix (diagonal = chain pTM, off-diagonal = pairwise ipTM). */
+  chainPairIptm?: number[][];
+  /** Composite multimer confidence (0.8 * ipTM + 0.2 * pTM) for multi-chain predictions. */
+  multimerScore?: number;
+  /** True when `iptm` was estimated using AF2-Monomer weights rather than AF2-Multimer/AF3. */
+  iptmIsMonomerApprox?: boolean;
   chainLengths?: number[];
   chainIds?: string[];
   pae?: Float32Array;
@@ -113,6 +133,20 @@ export interface DesignabilityRow {
   meanPlddt: number;
   ptm: number | null;
   iptm?: number | null;
+  /** Mean interface PAE (Å) across cross-chain residue pairs for multi-chain complexes. */
+  ipae?: number;
+  /** Mean pLDDT on the designed binder chain(s). */
+  binderPlddt?: number;
+  /** Mean pLDDT on the locked target chain(s). */
+  targetPlddt?: number;
+  /** Self-consistency Cα RMSD (Å) of the binder chain aligned independently. */
+  binderScRmsd?: number;
+  /** Cα RMSD (Å) of the binder chain after superimposing the target chain. */
+  targetAlignedBinderRmsd?: number;
+  /** Generated motif Cα RMSD (Å) against native template motif coordinates. */
+  genMotifRmsd?: number;
+  /** Refolded motif Cα RMSD (Å) against native template motif coordinates. */
+  refoldMotifRmsd?: number;
   designable: boolean; // scRMSD < 2.0 Å && meanPlddt >= 70
   alignedFoldPdb: string;
   designedPdb: string;

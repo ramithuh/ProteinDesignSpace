@@ -39,5 +39,11 @@ describe('Genie 3 WebGPU integration', () => {
     const workerSrc = readFileSync(WORKER_PATH, 'utf8');
     expect(workerSrc).toContain('https://huggingface.co/ramithuh/genie3-webgpu/resolve/main/fp16');
     expect(workerSrc).toContain('VITE_GENIE3_WEIGHTS_URL');
+    // Finding #11 & #23 & #7/#9/#10: worker guards ligand/DNA templates, fixes predictSequence=false, emits design metadata
+    expect(workerSrc).toContain('resolveGenie3PolyAlaSequence');
+    expect(workerSrc).toContain('hasLigands');
+    expect(workerSrc).toContain('lockedChains');
+    expect(workerSrc).toContain('chainRoles');
+    expect(workerSrc).toContain('nativeMotifCoords');
   });
 });

@@ -5,10 +5,14 @@
 
 import { parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
+import { getBenchmarkById } from '$lib/engine/benchmarks';
 import {
   buildCanonicalConditionIntent,
   buildDefaultGenie3ConditionFromTemplate,
   compileConditionToGenie3Spec,
+  effectiveGenie3DdimSteps,
+  resolveGenie3PolyAlaSequence,
+  type Genie3CompiledSpec,
 } from '$lib/engine/conditioning';
 import type { ConditionSpecArtifact, SequenceSet, StructureArtifact } from '$lib/engine/types';
 
@@ -140,9 +144,31 @@ self.onmessage = async (ev: MessageEvent) => {
       const inlineHotspots = String(p.hotspots ?? '').trim();
       const inlineMotif = String(p.motifSpan ?? '').trim();
 
+      // Guard against non-protein/enzyme/DNA templates across ALL Genie 3 modes (including inline motif/binder)
+      if (template && (taskMode !== 'unconditional' || !condArtifact)) {
+        if (template.benchmarkId) {
+          const bench = getBenchmarkById(template.benchmarkId);
+          if (bench && !bench.supportsGenie3) {
+            throw new Error(
+              `${bench.shortLabel} requires all-atom enzyme/ligand/DNA conditioning, which is supported by RFD4-Proteina rather than Genie 3.`,
+            );
+          }
+        }
+        if (template.diagnostics?.hasLigands || template.diagnostics?.hasNucleicAcids) {
+          const extras = [
+            ...(template.diagnostics.hasLigands ? [`ligands (${template.diagnostics.ligandNames.join(', ')})`] : []),
+            ...(template.diagnostics.hasNucleicAcids ? [`nucleic acid chains (${template.diagnostics.nucleicAcidChains.join(', ')})`] : []),
+          ];
+          throw new Error(
+            `Genie 3 is a protein-only Cα backbone diffusion model and cannot condition on ${extras.join(' and ')}. Use RFD4-Proteina for all-atom ligand/DNA conditioning.`,
+          );
+        }
+      }
+
       await ensureLoaded(msg.id);
 
       let batch: Record<string, unknown> | undefined;
+      let compiledSpec: Genie3CompiledSpec | undefined;
       let compiledSummary = '';
       let expectedChainLengths: number[] | undefined;
 
@@ -176,23 +202,27 @@ self.onmessage = async (ev: MessageEvent) => {
       }
 
       if (effectiveCond) {
-        const compiled = compileConditionToGenie3Spec(effectiveCond, template, length);
+        compiledSpec = compileConditionToGenie3Spec(effectiveCond, template, length);
         batch = genie3Mod.createFeaturesFromSpec({
-          length: compiled.length,
-          asymId: compiled.asymId,
-          symId: compiled.symId,
-          entityId: compiled.entityId,
-          residueIndex: compiled.residueIndex,
-          condGroup: compiled.condGroup,
-          condSeqMask: compiled.condSeqMask,
-          condStructMask: compiled.condStructMask,
-          condInterfaceMask: compiled.condInterfaceMask,
-          gtRestype: compiled.gtRestype,
-          gtAtomPositions: compiled.gtAtomPositions,
+          length: compiledSpec.length,
+          asymId: compiledSpec.asymId,
+          symId: compiledSpec.symId,
+          entityId: compiledSpec.entityId,
+          residueIndex: compiledSpec.residueIndex,
+          condGroup: compiledSpec.condGroup,
+          condSeqMask: compiledSpec.condSeqMask,
+          condStructMask: compiledSpec.condStructMask,
+          condInterfaceMask: compiledSpec.condInterfaceMask,
+          gtRestype: compiledSpec.gtRestype,
+          gtAtomPositions: compiledSpec.gtAtomPositions,
         });
-        compiledSummary = compiled.summary;
-        expectedChainLengths = compiled.chainLengths;
+        compiledSummary = compiledSpec.summary;
+        expectedChainLengths = compiledSpec.chainLengths;
       }
+
+      const effectiveSteps = effectiveGenie3DdimSteps(nSampleStep);
+      const stepNote =
+        effectiveSteps !== nSampleStep ? ` (requested ${nSampleStep}, effective ${effectiveSteps})` : '';
 
       const res = await generator.generate({
         ...(batch ? { batch } : { length }),
@@ -210,19 +240,45 @@ self.onmessage = async (ev: MessageEvent) => {
             type: 'progress',
             phase: 'sampling',
             progress: (info.stepIndex + 1) / Math.max(1, info.totalSteps),
-            detail: `Genie 3 DDIM step ${info.stepIndex + 1}/${info.totalSteps} (t=${info.timestep})`,
+            detail: `Genie 3 DDIM step ${info.stepIndex + 1}/${info.totalSteps}${stepNote} (t=${info.timestep})`,
           });
         },
       });
 
-      const pdbText: string = res.pdb;
-      const cifText: string = res.cif;
-      const parsed = parsePdbBackbone(pdbText);
-      const finalSeq: string =
-        typeof res.sequence === 'string' && res.sequence.length === parsed.nResidues
-          ? res.sequence
-          : parsed.sequence;
+      let pdbText: string = res.pdb;
+      let cifText: string = res.cif;
+      let finalSeq: string;
 
+      if (!predictSequence) {
+        // Upstream generate.js falls back to unmasked ddimRes.seqLogits when predictSequence=false,
+        // corrupting locked target/motif residues. Emit 'A' for unconditioned residues and preserve
+        // gtRestype wherever condSeqMask > 0.5, then re-serialize PDB/mmCIF cleanly.
+        const outLen = Number(res.length ?? compiledSpec?.length ?? length);
+        finalSeq = resolveGenie3PolyAlaSequence(outLen, compiledSpec);
+        if (res.backbone4 && typeof genie3Mod.backboneToPdb === 'function') {
+          const serializeOpts = {
+            sequence: finalSeq,
+            chainId: 'A',
+            chainIds: (batch as { asym_id?: ArrayLike<number> } | undefined)?.asym_id ?? null,
+            residueIndices: (batch as { residue_index?: ArrayLike<number> } | undefined)?.residue_index ?? null,
+          };
+          pdbText = genie3Mod.backboneToPdb(res.backbone4, outLen, serializeOpts);
+          if (typeof genie3Mod.backboneToMmcif === 'function') {
+            cifText = genie3Mod.backboneToMmcif(res.backbone4, outLen, {
+              entryId: 'GENIE3',
+              ...serializeOpts,
+            });
+          }
+        }
+      } else {
+        const parsedRaw = parsePdbBackbone(pdbText);
+        finalSeq =
+          typeof res.sequence === 'string' && res.sequence.length === parsedRaw.nResidues
+            ? res.sequence
+            : parsedRaw.sequence;
+      }
+
+      const parsed = parsePdbBackbone(pdbText);
       const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
       const candChainLengths =
         expectedChainLengths && expectedChainLengths.length > 1 &&
@@ -231,6 +287,45 @@ self.onmessage = async (ev: MessageEvent) => {
           : parsed.diagnostics.chainLengths.length > 1
             ? parsed.diagnostics.chainLengths
             : undefined;
+
+      // Emit lockedChains, fixedResidueIndices, chainRoles, motifIndices, and nativeMotifCoords
+      let lockedChains: string[] | undefined;
+      let fixedResidueIndices: number[] | undefined;
+      let chainRoles: Record<string, 'target' | 'binder' | 'scaffold'> | undefined;
+      let motifIndices: number[] | undefined;
+      let nativeMotifCoords: number[][] | undefined;
+
+      if (compiledSpec?.mode === 'binder') {
+        // Genie 3 binder-first convention: chain A (asym 0) = binder, chain B (asym 1) = fixed target
+        lockedChains = ['B'];
+        chainRoles = { A: 'binder', B: 'target' };
+      } else if (compiledSpec?.mode === 'motif') {
+        chainRoles = { A: 'scaffold' };
+        const fixed1Based: number[] = [];
+        const motif0Based: number[] = [];
+        const nativeCoords: number[][] = [];
+        for (let i = 0; i < compiledSpec.length; i++) {
+          if (compiledSpec.condStructMask[i] > 0.5 || compiledSpec.condSeqMask[i] > 0.5) {
+            fixed1Based.push(i + 1);
+            if (compiledSpec.condStructMask[i] > 0.5) {
+              motif0Based.push(i);
+              nativeCoords.push([
+                compiledSpec.gtAtomPositions[i * 3 + 0],
+                compiledSpec.gtAtomPositions[i * 3 + 1],
+                compiledSpec.gtAtomPositions[i * 3 + 2],
+              ]);
+            }
+          }
+        }
+        if (fixed1Based.length > 0) fixedResidueIndices = fixed1Based;
+        if (motif0Based.length > 0) {
+          motifIndices = motif0Based;
+          nativeMotifCoords = nativeCoords;
+        }
+      } else {
+        chainRoles = { A: 'scaffold' };
+      }
+
       const runHash = fnv1a(
         JSON.stringify({
           length,
@@ -265,6 +360,10 @@ self.onmessage = async (ev: MessageEvent) => {
         chainIds: parsed.chainIds,
         chainLengths: candChainLengths ?? parsed.diagnostics.chainLengths,
         diagnostics: parsed.diagnostics,
+        ...(lockedChains ? { lockedChains } : {}),
+        ...(fixedResidueIndices ? { fixedResidueIndices } : {}),
+        ...(chainRoles ? { chainRoles } : {}),
+        ...(motifIndices ? { motifIndices, nativeMotifCoords } : {}),
         geometry,
       };
 

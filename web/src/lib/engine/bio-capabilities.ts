@@ -5,7 +5,7 @@
 
 import { LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { getBenchmarkById } from './benchmarks';
-import { cropParsedStructure, parseStructureText } from '$lib/protein-ops/pdb';
+import { cropRawAllAtomStructure, parseStructureText } from '$lib/protein-ops/pdb';
 import { checkGenie3ConditionCompatibility } from './conditioning';
 import type {
   BioCompatibilityIssue,
@@ -24,6 +24,8 @@ export interface NodeBioProfile {
   chainCount: number;
   estimatedTokens: number;
   looksLikeDnaSequence?: boolean;
+  /** Upstream non-protein entities stripped by an intermediate protein-only stage (e.g. ProteinMPNN). */
+  strippedNonProtein?: BioEntityKind[];
 }
 
 const MULTICHAIN_RFD4_PRESETS = new Set(['ppi_pdl1', 'yaml_5o45_binder']);
@@ -89,6 +91,7 @@ function inferNodeOutputProfile(
   graph: WorkflowGraph,
   cache: Map<string, NodeBioProfile>,
   visiting: Set<string>,
+  outputsByNode?: Record<string, Record<string, CanonicalArtifact>>,
 ): NodeBioProfile {
   const cached = cache.get(node.id);
   if (cached) return cached;
@@ -102,7 +105,7 @@ function inferNodeOutputProfile(
     if (!edge) return null;
     const src = graph.nodes.find((n) => n.id === edge.fromNode);
     if (!src) return null;
-    return inferNodeOutputProfile(src, graph, cache, visiting);
+    return inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
   };
 
   let profile: NodeBioProfile = {
@@ -117,35 +120,77 @@ function inferNodeOutputProfile(
     const pdbText = String(node.params.pdbText ?? '').trim();
     const benchId = String(node.params.benchmarkId ?? '').trim();
     const bench = benchId ? getBenchmarkById(benchId) : undefined;
-    if ((mode === 'custom' || mode === 'pdb-id') && pdbText.length > 0) {
+    const liveStruct = outputsByNode?.[node.id]?.structure as StructureArtifact | undefined;
+
+    if (liveStruct && liveStruct.kind === 'StructureArtifact' && liveStruct.diagnostics) {
+      const diag = liveStruct.diagnostics;
+      const entities = new Set<BioEntityKind>();
+      if (liveStruct.length > 0 || (!diag.hasLigands && !diag.hasNucleicAcids)) {
+        entities.add('protein');
+      }
+      if (diag.hasLigands) entities.add('ligand');
+      if (diag.hasNucleicAcids) entities.add('dna');
+      if (bench) {
+        for (const e of bench.entities) entities.add(e);
+      }
+      const totalChains = Math.max(
+        1,
+        diag.chainCount + (diag.hasNucleicAcids ? diag.nucleicAcidChains.length : 0),
+      );
+      profile = {
+        entities,
+        stoichiometry: totalChains > 1 ? 'multimer' : 'monomer',
+        chainCount: totalChains,
+        estimatedTokens: liveStruct.length > 0 ? liveStruct.length : (bench?.approxTokens ?? 80),
+      };
+    } else if ((mode === 'custom' || mode === 'pdb-id') && pdbText.length > 0) {
       try {
-        let parsed = parseStructureText(pdbText);
         const cropSpec = String(node.params.cropSegments ?? '').trim();
-        if (cropSpec) {
-          parsed = cropParsedStructure(parsed, cropSpec);
+        const rawText = cropSpec ? cropRawAllAtomStructure(pdbText, cropSpec).text : pdbText;
+        const parsed = parseStructureText(rawText);
+        const entities = new Set<BioEntityKind>();
+        if (parsed.nResidues > 0 || (!parsed.diagnostics.hasLigands && !parsed.diagnostics.hasNucleicAcids)) {
+          entities.add('protein');
         }
-        const entities = new Set<BioEntityKind>(['protein']);
+        if (parsed.diagnostics.hasLigands) entities.add('ligand');
+        if (parsed.diagnostics.hasNucleicAcids) entities.add('dna');
         if (bench) {
           for (const e of bench.entities) entities.add(e);
-        } else {
-          if (parsed.diagnostics.hasLigands) entities.add('ligand');
-          if (parsed.diagnostics.hasNucleicAcids) entities.add('dna');
         }
-        const chainCount = Math.max(1, parsed.diagnostics.chainCount);
+        const totalChains = Math.max(
+          1,
+          parsed.diagnostics.chainCount +
+            (parsed.diagnostics.hasNucleicAcids ? parsed.diagnostics.nucleicAcidChains.length : 0),
+        );
         profile = {
           entities,
-          stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
-          chainCount,
-          estimatedTokens: parsed.nResidues,
+          stoichiometry: totalChains > 1 ? 'multimer' : 'monomer',
+          chainCount: totalChains,
+          estimatedTokens: parsed.nResidues > 0 ? parsed.nResidues : (bench?.approxTokens ?? 80),
         };
       } catch {
         profile.estimatedTokens = bench?.approxTokens ?? 80;
+        if (bench) {
+          profile.entities = new Set<BioEntityKind>(bench.entities);
+        }
       }
     } else if (bench) {
+      const contigChains = bench.conditionParams.contig.includes('/0')
+        ? bench.conditionParams.contig.split('/0').filter((s) => s.trim().length > 0).length
+        : 1;
+      const cropChains = bench.cropSegments
+        ? new Set(
+            bench.cropSegments
+              .split(/[,\s]+/)
+              .map((tok) => /^([A-Za-z])(?:$|\d)/.exec(tok.trim())?.[1]?.toUpperCase())
+              .filter(Boolean),
+          ).size
+        : 1;
+      const chainCount = Math.max(1, contigChains, cropChains);
       profile = {
         entities: new Set<BioEntityKind>(bench.entities),
-        stoichiometry: 'monomer',
-        chainCount: 1,
+        stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
+        chainCount,
         estimatedTokens: bench.approxTokens,
       };
     } else {
@@ -218,6 +263,13 @@ function inferNodeOutputProfile(
       chainCount = Math.max(chainCount, tpl.chainCount);
       estimatedTokens = Math.max(estimatedTokens, tpl.estimatedTokens);
     }
+    const liveStruct = outputsByNode?.[node.id]?.structure as StructureArtifact | undefined;
+    if (liveStruct && liveStruct.kind === 'StructureArtifact' && liveStruct.diagnostics) {
+      if (liveStruct.diagnostics.hasLigands) entities.add('ligand');
+      if (liveStruct.diagnostics.hasNucleicAcids) entities.add('dna');
+      chainCount = Math.max(chainCount, liveStruct.diagnostics.chainCount);
+      if (liveStruct.length > 0) estimatedTokens = liveStruct.length;
+    }
     profile = {
       entities,
       stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
@@ -258,12 +310,20 @@ function inferNodeOutputProfile(
     };
   } else if (node.adapterId === 'web-protein-mpnn') {
     const st = upstreamProfileForPort('structure');
+    const strippedSet = new Set<BioEntityKind>(st?.strippedNonProtein ?? []);
+    if (st) {
+      for (const e of st.entities) {
+        if (e !== 'protein') strippedSet.add(e);
+      }
+    }
+    const strippedNonProtein = strippedSet.size > 0 ? [...strippedSet] : undefined;
     profile = {
-      // ProteinMPNN emits protein sequences only (strips ligands/DNA)
+      // ProteinMPNN emits protein sequences only (strips ligands/DNA), but records stripped context for downstream apo warnings
       entities: new Set<BioEntityKind>(['protein']),
       stoichiometry: st?.stoichiometry ?? 'monomer',
       chainCount: st?.chainCount ?? 1,
       estimatedTokens: st?.estimatedTokens ?? 80,
+      ...(strippedNonProtein ? { strippedNonProtein } : {}),
     };
   } else if (node.adapterId === 'localfold-af2') {
     const seq = upstreamProfileForPort('sequences');
@@ -272,6 +332,7 @@ function inferNodeOutputProfile(
       stoichiometry: seq?.stoichiometry ?? 'monomer',
       chainCount: seq?.chainCount ?? 1,
       estimatedTokens: seq?.estimatedTokens ?? 80,
+      ...(seq?.strippedNonProtein ? { strippedNonProtein: seq.strippedNonProtein } : {}),
     };
   }
 
@@ -282,15 +343,19 @@ function inferNodeOutputProfile(
 
 /**
  * Layer 1: Static biological capability validation across the workflow graph.
+ * Accepts optional materialized `outputsByNode` to inspect live `StructureArtifact.diagnostics`.
  * Returns actionable warnings/errors with 1-click fixes for biological modality mismatches.
  */
-export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityIssue[] {
+export function validateBioCapabilities(
+  graph: WorkflowGraph,
+  outputsByNode?: Record<string, Record<string, CanonicalArtifact>>,
+): BioCompatibilityIssue[] {
   const issues: BioCompatibilityIssue[] = [];
   const cache = new Map<string, NodeBioProfile>();
   const visiting = new Set<string>();
 
   for (const node of graph.nodes) {
-    const ownProfile = inferNodeOutputProfile(node, graph, cache, visiting);
+    const ownProfile = inferNodeOutputProfile(node, graph, cache, visiting, outputsByNode);
 
     if (node.adapterId === 'sequence-input' && ownProfile.looksLikeDnaSequence) {
       issues.push({
@@ -309,15 +374,25 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
       );
       const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
 
-      if (!condNode && tplNode?.adapterId === 'pdb-input') {
-        const benchId = String(tplNode.params.benchmarkId ?? '').trim();
+      if (!condNode && tplNode) {
+        const benchId =
+          tplNode.adapterId === 'pdb-input' ? String(tplNode.params.benchmarkId ?? '').trim() : '';
         const bench = benchId ? getBenchmarkById(benchId) : undefined;
+        const tplProfile = inferNodeOutputProfile(tplNode, graph, cache, visiting, outputsByNode);
         if (bench && !bench.supportsGenie3) {
           issues.push({
             severity: 'warning',
             code: 'genie3-unsupported-benchmark',
             nodeId: node.id,
             message: `${bench.shortLabel} requires all-atom enzyme/ligand/DNA conditioning, which is supported by RFD4-Proteina rather than ${node.label ?? 'Genie 3'}.`,
+          });
+        } else if (tplProfile.entities.has('ligand') || tplProfile.entities.has('dna') || tplProfile.entities.has('rna')) {
+          const nonProt = [...tplProfile.entities].filter((e) => e !== 'protein').join('/');
+          issues.push({
+            severity: 'warning',
+            code: 'genie3-unsupported-entities',
+            nodeId: node.id,
+            message: `Upstream template contains ${nonProt.toUpperCase()} entities, which ${node.label ?? 'Genie 3'} (protein-only Cα diffusion) does not support. Use RFD4-Proteina for all-atom ligand/DNA conditioning.`,
           });
         }
       }
@@ -327,7 +402,7 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
         const hbond = String(condNode.params.hbondMode ?? 'none');
         const cath = String(condNode.params.cathCode ?? '').trim();
         const unidx = Boolean(condNode.params.unindexedMotif);
-        const upCond = inferNodeOutputProfile(condNode, graph, cache, visiting);
+        const upCond = inferNodeOutputProfile(condNode, graph, cache, visiting, outputsByNode);
         const reasons: string[] = [];
         if (tp !== 'custom') reasons.push(`RFD4 preset "${tp}"`);
         if (upCond.entities.has('ligand') || upCond.entities.has('dna')) reasons.push('ligand/DNA targets');
@@ -364,6 +439,18 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
             paramsPatch: { mode: 'partial' },
           },
         });
+      } else if (hasTpl && mode === 'preset') {
+        issues.push({
+          severity: 'warning',
+          code: 'rfd4-preset-ignores-template',
+          nodeId: node.id,
+          message: `${node.label ?? 'RFD4-Proteina'} is set to built-in Preset mode ("${String(node.params.presetId ?? 'custom_cath_monomer')}"), which loads a remote example archive and ignores the wired input structure. Switch to Motif / Binder / Partial mode to condition on your wired template.`,
+          fix: {
+            label: 'Switch to Motif / Context Mode',
+            nodeId: node.id,
+            paramsPatch: { mode: 'motif' },
+          },
+        });
       }
     }
 
@@ -371,7 +458,7 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
       const edge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
       const src = edge ? graph.nodes.find((n) => n.id === edge.fromNode) : null;
       if (src) {
-        const up = inferNodeOutputProfile(src, graph, cache, visiting);
+        const up = inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
         if (up.entities.has('ligand') || up.entities.has('dna')) {
           const nonProt = [...up.entities].filter((e) => e !== 'protein').join('/');
           issues.push({
@@ -388,19 +475,28 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
       const edge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'sequences');
       const src = edge ? graph.nodes.find((n) => n.id === edge.fromNode) : null;
       if (!src) continue;
-      const up = inferNodeOutputProfile(src, graph, cache, visiting);
+      const up = inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
       const modelId = String(node.params.model ?? 'monomer');
       const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
       const nodeName = node.label ?? 'LocalFold';
+      const hasExplicitAf3NonProt =
+        meta.family === 'af3' &&
+        (String(node.params.ligandCcdCodes ?? '').trim().length > 0 ||
+          String(node.params.dnaSequences ?? '').trim().length > 0 ||
+          String(node.params.rnaSequences ?? '').trim().length > 0);
+      const nonProtEntities = new Set<BioEntityKind>([
+        ...[...up.entities].filter((e) => e !== 'protein'),
+        ...(up.strippedNonProtein ?? []),
+      ]);
 
-      if (up.entities.has('ligand') || up.entities.has('dna')) {
-        const nonProt = [...up.entities].filter((e) => e !== 'protein').join('/');
+      if (nonProtEntities.size > 0 && !hasExplicitAf3NonProt) {
+        const nonProt = [...nonProtEntities].join('/');
         if (meta.family !== 'af3') {
           issues.push({
             severity: 'warning',
             code: 'af2-non-protein-entity',
             nodeId: node.id,
-            message: `${nodeName} (${meta.shortLabel}) is protein-only, while upstream emits ${nonProt.toUpperCase()}. Switch to RoseTTAFold3 or Boltz-2 (note: current browser refolding folds the protein chain apo).`,
+            message: `${nodeName} (${meta.shortLabel}) is protein-only, while upstream involves ${nonProt.toUpperCase()}. Switch to RoseTTAFold3 or Boltz-2 (note: current browser refolding folds the protein chain apo unless ligand/DNA context is configured).`,
             fix: {
               label: 'Switch to RoseTTAFold3',
               nodeId: node.id,
@@ -413,7 +509,7 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
             severity: 'warning',
             code: 'af3-apo-refold-note',
             nodeId: node.id,
-            message: `${nodeName} (${meta.shortLabel}) currently receives protein sequences only — upstream ${nonProt.toUpperCase()} coordinates are not yet forwarded into structure prediction (apo protein refold).`,
+            message: `${nodeName} (${meta.shortLabel}) currently receives protein sequences only — upstream ${nonProt.toUpperCase()} coordinates were not forwarded into structure prediction (apo protein refold).`,
           });
         }
       } else if (up.stoichiometry === 'multimer' && meta.family === 'af2') {
@@ -491,12 +587,37 @@ export function validateRuntimeNodeInputs(
         throw new Error(compat.reason ?? 'Conditioning spec is not supported by Genie 3.');
       }
     }
+    const tpl = (inputs.structure ?? inputs.template) as StructureArtifact | undefined;
+    if (tpl) {
+      if (tpl.benchmarkId) {
+        const bench = getBenchmarkById(tpl.benchmarkId);
+        if (bench && !bench.supportsGenie3) {
+          throw new Error(
+            `${bench.shortLabel} requires all-atom enzyme/ligand/DNA conditioning, which is supported by RFD4-Proteina rather than Genie 3.`,
+          );
+        }
+      }
+      if (tpl.diagnostics?.hasLigands || tpl.diagnostics?.hasNucleicAcids) {
+        const extras = [
+          ...(tpl.diagnostics.hasLigands ? [`ligands (${tpl.diagnostics.ligandNames.join(', ')})`] : []),
+          ...(tpl.diagnostics.hasNucleicAcids ? [`nucleic acid chains (${tpl.diagnostics.nucleicAcidChains.join(', ')})`] : []),
+        ];
+        throw new Error(
+          `Genie 3 is a protein-only Cα backbone diffusion model and cannot condition on ${extras.join(' and ')}. Use RFD4-Proteina for all-atom ligand/DNA conditioning.`,
+        );
+      }
+    }
   }
 
   if (node.adapterId === 'web-protein-mpnn') {
     const struct = inputs.structure as StructureArtifact | undefined;
     if (!struct?.pdbText) {
       throw new Error('ProteinMPNN requires an upstream 3D structure.');
+    }
+    if (struct.length < 3) {
+      throw new Error(
+        `ProteinMPNN requires at least 3 protein residues (received ${struct.length}). Upstream non-protein ligand/DNA-only structures cannot be inverse-folded directly.`,
+      );
     }
     if (struct.diagnostics?.hasLigands || struct.diagnostics?.hasNucleicAcids) {
       const extras = [

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   NUMERIC_SPECS,
   commitNumericDraft,
@@ -111,5 +113,83 @@ describe('parameter validation & numeric sanitization', () => {
         params: { taskPreset: 'custom', contig: '70-70', rawJsonOverride: '{bad' },
       }),
     ).toHaveLength(1);
+  });
+
+  it('validates RFD4 binder length and enum params across all model blocks', () => {
+    // Finding #2: validate length in binder mode
+    expect(
+      validateNodeParams({
+        id: 'b1',
+        adapterId: 'rfd4-proteina',
+        label: 'RFD4 Binder',
+        params: { mode: 'binder', length: 5 },
+      }),
+    ).toHaveLength(1);
+    expect(
+      validateNodeParams({
+        id: 'b2',
+        adapterId: 'rfd4-proteina',
+        label: 'RFD4 Binder',
+        params: { mode: 'binder', length: 70 },
+      }),
+    ).toEqual([]);
+
+    // Finding #29: enum parameter validation
+    expect(
+      validateNodeParams({
+        id: 'e1',
+        adapterId: 'rfd4-proteina',
+        params: { mode: 'bogus_mode' },
+      }).join(' '),
+    ).toMatch(/Unknown RFD4 mode/);
+    expect(
+      validateNodeParams({
+        id: 'e2',
+        adapterId: 'rfd4-proteina',
+        params: { mode: 'preset', presetId: 'nonexistent_preset' },
+      }).join(' '),
+    ).toMatch(/Unknown RFD4 preset/);
+    expect(
+      validateNodeParams({
+        id: 'e3',
+        adapterId: 'genie3',
+        params: { taskMode: 'ligand' },
+      }).join(' '),
+    ).toMatch(/Unknown Genie 3 taskMode/);
+    expect(
+      validateNodeParams({
+        id: 'e4',
+        adapterId: 'web-protein-mpnn',
+        params: { family: 'unknown_mpnn' },
+      }).join(' '),
+    ).toMatch(/Unknown ProteinMPNN family/);
+    expect(
+      validateNodeParams({
+        id: 'e5',
+        adapterId: 'web-protein-mpnn',
+        params: { family: 'solublempnn', modelName: 'v_48_030' },
+      }).join(' '),
+    ).toMatch(/Unknown solublempnn modelName/);
+    expect(
+      validateNodeParams({
+        id: 'e6',
+        adapterId: 'localfold-af2',
+        params: { model: 'af4_turbo' },
+      }).join(' '),
+    ).toMatch(/Unknown LocalFold model/);
+  });
+
+  it('mpnn.worker.ts supports whole-chain locking, designChains, inherited locks, omitAminoAcids, tiedPositions, and aligned bounds', () => {
+    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    expect(mpnnSrc).toContain('parseFixedPositionsAndChains');
+    expect(mpnnSrc).toContain('structure.lockedChains');
+    expect(mpnnSrc).toContain('structure.fixedResidueIndices');
+    expect(mpnnSrc).toContain('designChains');
+    expect(mpnnSrc).toContain('omitAminoAcids');
+    expect(mpnnSrc).toContain('tiedPositions');
+    expect(mpnnSrc).toContain('buildGapAwareResidueIndices');
+    // Bounds aligned with NUMERIC_SPECS['web-protein-mpnn'] (1..8, 0.01..1.5)
+    expect(mpnnSrc).toContain('Math.min(8,');
+    expect(mpnnSrc).toContain('Math.min(1.5,');
   });
 });
