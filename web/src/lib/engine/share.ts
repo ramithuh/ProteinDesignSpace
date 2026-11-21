@@ -132,23 +132,34 @@ export interface EncodedHashResult {
 export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHashResult> {
   let strippedPdb = false;
 
-  // 1. Check for exact preset topology match -> ultra-short human-readable hash!
+  // 1. Check for exact preset topology match -> pick the preset with the shortest diff hash!
+  let bestPresetMatch: EncodedHashResult | null = null;
   for (const preset of WORKFLOW_PRESETS) {
     if (!sameTopology(graph, preset.graph)) continue;
     const qs = new URLSearchParams();
     qs.set('p', preset.id);
+    let presetStripped = false;
     for (let i = 0; i < graph.nodes.length; i++) {
       const n = graph.nodes[i];
       const baseN = preset.graph.nodes[i];
       const { diff, strippedPdb: s } = diffParams(n.adapterId, n.params, baseN.params, true);
-      if (s) strippedPdb = true;
+      if (s) presetStripped = true;
       for (const [k, v] of Object.entries(diff)) {
         qs.set(`${n.id}.${k}`, typeof v === 'string' ? v : JSON.stringify(v));
       }
     }
     const hash = `#${qs.toString()}`;
-    return { hash, length: hash.length, mode: 'preset-diff', strippedPdb };
+    const candidate: EncodedHashResult = {
+      hash,
+      length: hash.length,
+      mode: 'preset-diff',
+      strippedPdb: presetStripped,
+    };
+    if (!bestPresetMatch || candidate.length < bestPresetMatch.length) {
+      bestPresetMatch = candidate;
+    }
   }
+  if (bestPresetMatch) return bestPresetMatch;
 
   // 2. General DAG -> short-alias tuple representation -> deflate-raw -> base64url
   const compactNodes = graph.nodes.map((n) => {
@@ -258,7 +269,7 @@ export function normalizeWorkflowGraph(
     return { fromNode, fromPort, toNode, toPort };
   });
 
-  const normalized: WorkflowGraph = {
+  const normalizedRaw: WorkflowGraph = {
     id: typeof parsed.id === 'string' && parsed.id.trim() ? parsed.id.trim() : fallbackId,
     name: typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : fallbackName,
     ...(typeof parsed.description === 'string' ? { description: parsed.description } : {}),
@@ -266,10 +277,123 @@ export function normalizeWorkflowGraph(
     edges: validatedEdges,
   };
 
+  // Transparently migrate legacy graphs:
+  // 1) Remap legacy `template` input port on genie3/rfd4-proteina -> unified `structure` port.
+  // 2) Fold legacy `rfd4-conditioner` nodes wired into genie3/rfd4-proteina into inline task fields.
+  const normalized = migrateLegacyConditioningGraph(normalizedRaw);
+
   // Recipes may be unfinished, but their existing wires must be valid before layout/rendering.
   const errors = validateGraph(normalized, { requireRunnable: false });
   if (errors.length) throw new Error(errors.join('\n'));
   return normalized.nodes.some((n) => !n.position) ? autoLayoutGraph(normalized) : normalized;
+}
+
+function migrateLegacyConditioningGraph(graph: WorkflowGraph): WorkflowGraph {
+  const nodeById = new Map(graph.nodes.map((n) => [n.id, { ...n, params: { ...n.params } }]));
+  let edges = graph.edges.map((e) => {
+    const dst = nodeById.get(e.toNode);
+    if (
+      dst &&
+      (dst.adapterId === 'genie3' || dst.adapterId === 'rfd4-proteina') &&
+      e.toPort === 'template'
+    ) {
+      return { ...e, toPort: 'structure' };
+    }
+    return { ...e };
+  });
+
+  const condNodesToDrop = new Set<string>();
+  for (const node of [...nodeById.values()]) {
+    if (node.adapterId !== 'rfd4-conditioner') continue;
+    const outCondEdges = edges.filter((e) => e.fromNode === node.id && e.fromPort === 'condition');
+    if (outCondEdges.length === 0) continue;
+
+    const inTplEdge = edges.find((e) => e.toNode === node.id && (e.toPort === 'template' || e.toPort === 'structure'));
+    const cp = node.params ?? {};
+    const tp = String(cp.taskPreset ?? 'custom');
+    let allFolded = true;
+
+    for (const ce of outCondEdges) {
+      const dst = nodeById.get(ce.toNode);
+      if (!dst || (dst.adapterId !== 'rfd4-proteina' && dst.adapterId !== 'genie3')) {
+        allFolded = false;
+        continue;
+      }
+      const lockChain = String(cp.lockChain ?? '').trim();
+      const motifSpan = String(cp.motifSpan ?? '').trim();
+      const hotspots = String(cp.hotspots ?? '').trim();
+      const contig = String(cp.contig ?? '').trim();
+      const cathCode = String(cp.cathCode ?? '').trim();
+      const hbondMode = String(cp.hbondMode ?? 'none');
+      const hbondSelection = String(cp.hbondSelection ?? '').trim();
+      const rawOverride = String(cp.rawJsonOverride ?? '').trim();
+
+      if (dst.adapterId === 'rfd4-proteina') {
+        const inferredMode =
+          tp !== 'custom'
+            ? 'preset'
+            : lockChain
+              ? 'binder'
+              : motifSpan
+                ? 'motif'
+                : hbondMode !== 'none' || cathCode || rawOverride
+                  ? 'conditioned'
+                  : String(dst.params.mode ?? 'unconditional') === 'conditioned'
+                    ? 'conditioned'
+                    : String(dst.params.mode ?? 'unconditional');
+        dst.params = {
+          ...dst.params,
+          mode: inferredMode,
+          ...(tp !== 'custom' ? { presetId: tp } : {}),
+          ...(contig ? { contig } : {}),
+          ...(lockChain ? { lockChain } : {}),
+          ...(hotspots ? { hotspots } : {}),
+          ...(motifSpan ? { motifSpan } : {}),
+          ...(cp.unindexedMotif ? { unindexedMotif: true } : {}),
+          ...(hbondMode !== 'none' ? { hbondMode, hbondSelection } : {}),
+          ...(cathCode ? { cathCode } : {}),
+          ...(rawOverride ? { customSpecYaml: rawOverride } : {}),
+        };
+      } else {
+        const inferredTaskMode = lockChain ? 'binder' : motifSpan ? 'motif' : 'unconditional';
+        dst.params = {
+          ...dst.params,
+          taskMode: inferredTaskMode,
+          ...(contig ? { contig } : {}),
+          ...(lockChain ? { lockChain } : {}),
+          ...(hotspots ? { hotspots } : {}),
+          ...(motifSpan ? { motifSpan } : {}),
+        };
+      }
+
+      if (inTplEdge) {
+        const alreadyHasStruct = edges.some((e) => e.toNode === dst.id && e.toPort === 'structure');
+        if (!alreadyHasStruct) {
+          edges.push({
+            fromNode: inTplEdge.fromNode,
+            fromPort: inTplEdge.fromPort,
+            toNode: dst.id,
+            toPort: 'structure',
+          });
+        }
+      }
+    }
+
+    if (allFolded) {
+      condNodesToDrop.add(node.id);
+    }
+  }
+
+  if (condNodesToDrop.size > 0) {
+    edges = edges.filter((e) => !condNodesToDrop.has(e.fromNode) && !condNodesToDrop.has(e.toNode));
+    for (const id of condNodesToDrop) nodeById.delete(id);
+  }
+
+  return {
+    ...graph,
+    nodes: [...nodeById.values()],
+    edges,
+  };
 }
 
 /** Serialize a WorkflowGraph cleanly as pretty-printed canonical JSON. */

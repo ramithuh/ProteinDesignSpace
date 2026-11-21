@@ -10,7 +10,12 @@ import {
 } from '$lib/engine/conditioning';
 import { BENCHMARK_TARGETS } from '$lib/engine/benchmarks';
 import { isValidPdbId } from '$lib/protein-ops/rcsb';
-import { cropParsedStructure, generateSampleHelixBundlePdb, parseStructureText } from '$lib/protein-ops/pdb';
+import {
+  cropParsedStructure,
+  cropRawAllAtomStructure,
+  generateSampleHelixBundlePdb,
+  parseStructureText,
+} from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
 import { validateConnection } from '$lib/engine/graph-utils';
@@ -151,17 +156,17 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
       name: 'Genie3 Warn',
       nodes: [
         {
-          id: 'cond',
-          adapterId: 'rfd4-conditioner',
-          params: { taskPreset: 'custom', contig: '80-80', cathCode: '3.40.50' },
+          id: 'pdb',
+          adapterId: 'pdb-input',
+          params: { mode: 'pdb-id', pdbId: '1CTT', benchmarkId: 'ame_1ctt_cda' },
         },
         { id: 'g3', adapterId: 'genie3', params: { length: 80 } },
       ],
-      edges: [{ fromNode: 'cond', fromPort: 'condition', toNode: 'g3', toPort: 'condition' }],
+      edges: [{ fromNode: 'pdb', fromPort: 'structure', toNode: 'g3', toPort: 'structure' }],
     };
-    expect(validateConnection(graph, 'cond', 'condition', 'g3', 'condition').valid).toBe(true);
+    expect(validateConnection(graph, 'pdb', 'structure', 'g3', 'structure').valid).toBe(true);
     const issues = validateBioCapabilities(graph);
-    expect(issues.some((i) => i.code === 'genie3-unsupported-condition' && i.nodeId === 'g3')).toBe(true);
+    expect(issues.some((i) => i.code === 'genie3-unsupported-benchmark' && i.nodeId === 'g3')).toBe(true);
   });
 
   it('curated BENCHMARK_TARGETS all have unique IDs, valid RCSB PDB IDs, and valid WebGPU token budgets', () => {
@@ -247,11 +252,24 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
     expect(reparsed.resNums).toEqual(cropped.resNums);
     expect(reparsed.chainIds.every((c) => c === 'A')).toBe(true);
 
-    // Every motif & PPI binder benchmark defines explicit cropSegments
-    const croppedBenchmarks = BENCHMARK_TARGETS.filter((b) => b.category !== 'enzyme-ligand');
-    expect(croppedBenchmarks.length).toBe(12);
-    for (const b of croppedBenchmarks) {
+    // Every single curated benchmark (all 16: motifs, PPI binders, AME enzymes, SAM, B-DNA) defines explicit cropSegments
+    expect(BENCHMARK_TARGETS.length).toBe(16);
+    for (const b of BENCHMARK_TARGETS) {
       expect(b.cropSegments && b.cropSegments.length > 0, `Missing cropSegments on ${b.id}`).toBe(true);
     }
+
+    // All-atom cropper keeps both selected catalytic residues AND matching HETATM ligands/metals
+    const hetPdb =
+      rawPdb.replace('END\n', '') +
+      'HETATM  900 ZN    ZN A 296       1.000   2.000   3.000  1.00 10.00          ZN\n' +
+      'HETATM  901 C1   DHZ A 295       2.000   3.000   4.000  1.00 10.00           C\n' +
+      'HETATM  902 O    HOH A 500       9.000   9.000   9.000  1.00 10.00           O\n' +
+      'END\n';
+    const rawCropped = cropRawAllAtomStructure(hetPdb, 'A10-12, A:ZN, A:DHZ');
+    const parsedAllAtom = parseStructureText(rawCropped.text);
+    expect(parsedAllAtom.nResidues).toBe(3);
+    expect(parsedAllAtom.resNums).toEqual([10, 11, 12]);
+    expect(parsedAllAtom.diagnostics.hasLigands).toBe(true);
+    expect(parsedAllAtom.diagnostics.ligandNames).toEqual(['ZN', 'DHZ']);
   });
 });

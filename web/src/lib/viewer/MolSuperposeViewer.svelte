@@ -221,6 +221,45 @@
             : {}),
           typeParams: { alpha: hasOverlay ? 0.45 : 1.0 },
         });
+        // Also render ligands/metals/ions and sparse catalytic theozymes (e.g. AME 4-residue motifs,
+        // Trypsin triad, SAM pocket, B-DNA) as ball-and-stick so isolated residues & cofactors are clearly visible!
+        if (!hasOverlay) {
+          const sData = struct.data;
+          const totalAtoms = sData?.elementCount ?? 0;
+          const isSparseTheozyme = totalAtoms > 0 && totalAtoms <= 280;
+          try {
+            const ligComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ligand');
+            if (ligComp) {
+              await ctx.builders.structure.representation.addRepresentation(ligComp, {
+                type: 'ball-and-stick',
+                color: 'element-symbol',
+              });
+            }
+          } catch {
+            /* ignore if no ligand component */
+          }
+          try {
+            const ionComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ion');
+            if (ionComp) {
+              await ctx.builders.structure.representation.addRepresentation(ionComp, {
+                type: 'spacefill',
+                color: 'element-symbol',
+              });
+            }
+          } catch {
+            /* ignore if no ion component */
+          }
+          if (isSparseTheozyme) {
+            try {
+              await ctx.builders.structure.representation.addRepresentation(struct, {
+                type: 'ball-and-stick',
+                color: 'element-symbol',
+              });
+            } catch {
+              /* ignore */
+            }
+          }
+        }
       }
 
       if (destroyed || mySeq !== loadSeq) return;

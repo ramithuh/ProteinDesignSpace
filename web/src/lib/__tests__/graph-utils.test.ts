@@ -206,7 +206,7 @@ describe('engine/registry & engine/graph-utils', () => {
 
     // Valid compatible connections
     expect(validateConnection(graph, 'src', 'structure', 'mpnn', 'structure').valid).toBe(true);
-    expect(validateConnection(graph, 'cond', 'condition', 'rfd4', 'condition').valid).toBe(true);
+    expect(validateConnection(graph, 'src', 'structure', 'rfd4', 'structure').valid).toBe(true);
     expect(validateConnection(graph, 'rfd4', 'sequences', 'fold', 'sequences').valid).toBe(true);
     expect(validateConnection(graph, 'fold', 'folds', 'score', 'folds').valid).toBe(true);
 
@@ -237,30 +237,30 @@ describe('engine/registry & engine/graph-utils', () => {
       { id: 'd', adapterId: 'designability-scorer', params: {} },
     ];
     const edges = [
-      { fromNode: 'a', fromPort: 'structure', toNode: 'b', toPort: 'template' },
-      { fromNode: 'b', fromPort: 'structure', toNode: 'c', toPort: 'template' },
+      { fromNode: 'a', fromPort: 'structure', toNode: 'b', toPort: 'structure' },
+      { fromNode: 'b', fromPort: 'structure', toNode: 'c', toPort: 'structure' },
     ];
     const g: WorkflowGraph = { id: 'cyc', name: 'Cycle', nodes, edges };
 
     // Self-loop
     expect(wouldCreateCycle(nodes, edges, 'a', 'a')).toBe(true);
-    expect(validateConnection(g, 'a', 'structure', 'a', 'template').valid).toBe(false);
+    expect(validateConnection(g, 'a', 'structure', 'a', 'structure').valid).toBe(false);
 
     // 2-node cycle b -> a
     expect(wouldCreateCycle(nodes, edges, 'b', 'a')).toBe(true);
-    const cyc2 = validateConnection(g, 'b', 'structure', 'a', 'template');
+    const cyc2 = validateConnection(g, 'b', 'structure', 'a', 'structure');
     expect(cyc2.valid).toBe(false);
     expect(cyc2.reason).toContain('cycle');
 
     // Transitive 3-node cycle c -> a
     expect(wouldCreateCycle(nodes, edges, 'c', 'a')).toBe(true);
-    const cyc3 = validateConnection(g, 'c', 'structure', 'a', 'template');
+    const cyc3 = validateConnection(g, 'c', 'structure', 'a', 'structure');
     expect(cyc3.valid).toBe(false);
     expect(cyc3.reason).toContain('cycle');
 
     // Diamond (a -> c while a -> b -> c exists) is NOT a cycle
     expect(wouldCreateCycle(nodes, edges, 'a', 'c')).toBe(false);
-    expect(validateConnection(g, 'a', 'structure', 'c', 'template').valid).toBe(true);
+    expect(validateConnection(g, 'a', 'structure', 'c', 'structure').valid).toBe(true);
   });
 
   it('autoLayoutGraph is deterministic, left-to-right monotonic, and non-overlapping for all presets', () => {
@@ -383,7 +383,7 @@ describe('engine/registry & engine/graph-utils', () => {
       toPort: 'structure',
     });
 
-    // Upstream conditioner auto-wire: inserting rfd4-conditioner when rfd4-proteina is selected
+    // Upstream structure auto-wire: inserting pdb-input when rfd4-proteina is selected
     const rfd4Only: WorkflowGraph = {
       id: 'rfd4-only',
       name: 'RFD4',
@@ -392,18 +392,18 @@ describe('engine/registry & engine/graph-utils', () => {
       ],
       edges: [],
     };
-    const rCond = insertBlockSmart(rfd4Only, 'rfd4-conditioner', 'gen');
-    expect(rCond.wiredEdge).toEqual({
-      fromNode: rCond.nodeId,
-      fromPort: 'condition',
+    const rPdb = insertBlockSmart(rfd4Only, 'pdb-input', 'gen');
+    expect(rPdb.wiredEdge).toEqual({
+      fromNode: rPdb.nodeId,
+      fromPort: 'structure',
       toNode: 'gen',
-      toPort: 'condition',
+      toPort: 'structure',
     });
 
-    // Inserting a second conditioner while gen is selected must NOT overwrite gen.condition
-    const rCond2 = insertBlockSmart(rCond.graph, 'rfd4-conditioner', 'gen');
-    expect(rCond2.wiredEdge).toBeUndefined();
-    expect(rCond2.graph.edges).toHaveLength(1);
+    // Inserting a second pdb-input while gen is selected must NOT overwrite gen.structure
+    const rPdb2 = insertBlockSmart(rPdb.graph, 'pdb-input', 'gen');
+    expect(rPdb2.wiredEdge).toBeUndefined();
+    expect(rPdb2.graph.edges).toHaveLength(1);
   });
 
   it('insertBlockSmart generates collision-free IDs and numbered labels', () => {

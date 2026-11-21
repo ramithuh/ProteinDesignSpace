@@ -51,16 +51,29 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         seed: 42,
         presetId: 'custom_cath_monomer',
         partialFraction: 0.5,
+        contig: '70-70',
+        lockChain: '',
+        hotspots: '',
+        motifSpan: '',
+        unindexedMotif: false,
+        hbondMode: 'none',
+        hbondSelection: '',
+        cathCode: '',
         customSpecYaml: '',
       };
     case 'genie3':
       return {
+        taskMode: 'unconditional',
         length: 80,
         nSampleStep: 100,
         directionScale: 0.8,
         noiseScale: 1.0,
         predictSequence: true,
         seed: 42,
+        contig: '',
+        lockChain: '',
+        hotspots: '',
+        motifSpan: '',
       };
     case 'rfd4-conditioner':
       return {

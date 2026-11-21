@@ -155,10 +155,9 @@ describe('engine/catalog & biologist terminology', () => {
     expect(multiRes.matchingSubItems).toHaveLength(5);
   });
 
-  it('exposes 6 compact top-level workflow categories with direct model flyouts and LocalFold footnote', () => {
+  it('exposes 5 compact top-level workflow categories with direct model flyouts and LocalFold footnote', () => {
     expect(CATALOG_CATEGORIES.map((c) => c.title)).toEqual([
       'Inputs',
-      'Conditioning',
       'Structure Generation',
       'Sequence Design',
       'Structure Prediction',

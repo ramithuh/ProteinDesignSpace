@@ -63,10 +63,9 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 330,
     licenseNote: 'MIT code (sokrypton/rfd4-proteina-webgpu); NVIDIA RFD4-Proteina weights',
     description:
-      'All-atom backbone and sequence co-design via flow matching (Baker Lab / NVIDIA). Supports unconditional monomers, conditioned design, partial diffusion, and inverse folding.',
+      'All-atom backbone and sequence co-design via flow matching (Baker Lab / NVIDIA). Supports unconditional monomers, motif scaffolding, PPI binders, H-bonds, CATH folds, partial diffusion, and inverse folding.',
     inputs: {
-      template: { type: 'StructureArtifact', required: false },
-      condition: { type: 'ConditionSpec', required: false },
+      structure: { type: 'StructureArtifact', required: false },
     },
     outputs: {
       structure: { type: 'StructureArtifact' },
@@ -85,8 +84,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     description:
       'Fast de novo protein backbone diffusion (AlQuraishi Lab · 23.3M parameters). Supports unconditional generation, motif scaffolding, and PPI binder design with ideal N/Cα/C/O backbones and optional single-step sequence prediction.',
     inputs: {
-      template: { type: 'StructureArtifact', required: false },
-      condition: { type: 'ConditionSpec', required: false },
+      structure: { type: 'StructureArtifact', required: false },
     },
     outputs: {
       structure: { type: 'StructureArtifact' },
@@ -520,20 +518,27 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
   },
   {
     id: 'rfd4-conditioned-cath',
-    name: 'Conditioned RFD4 (CATH / Motif / Hotspots) → LocalFold',
-    badge: 'Conditioning Block',
+    name: 'Conditioned RFD4 (CATH Fold) → LocalFold',
+    badge: 'Fold Conditioning',
     summary:
-      'Compose RFD4 design constraints (CATH fold topology, binding hotspots, fixed motifs, or H-bond targets) into RFD4-Proteina and fold with LocalFold.',
+      'Design a CATH 3.40.50 Rossmann α/β fold directly with inline RFD4 conditioning fields, fold with LocalFold, and score scRMSD.',
     graph: {
       id: 'rfd4-conditioned-cath',
       name: 'Conditioned RFD4 → LocalFold',
       nodes: [
         {
-          id: 'cond',
-          adapterId: 'rfd4-conditioner',
-          label: 'RFD4 Condition',
+          id: 'gen',
+          adapterId: 'rfd4-proteina',
+          label: 'RFD4-Proteina',
           params: {
-            taskPreset: 'custom_cath_monomer',
+            mode: 'preset',
+            length: 70,
+            nsteps: 60,
+            recycleSchedule: 'low',
+            earlyStop: true,
+            seed: 42,
+            presetId: 'custom_cath_monomer',
+            partialFraction: 0.5,
             contig: 'h1:16-16P,l1:4-4P,s1:8-8P,l2:4-4P,h2:14-14P,s2:8-8P',
             lockChain: '',
             hotspots: '',
@@ -542,45 +547,26 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
             hbondMode: 'none',
             hbondSelection: '',
             cathCode: '3.40.50',
-            paintBrush: 'hotspots',
-            rawJsonOverride: '',
-          },
-          position: { x: 40, y: 48 },
-        },
-        {
-          id: 'gen',
-          adapterId: 'rfd4-proteina',
-          label: 'RFD4-Proteina',
-          params: {
-            mode: 'conditioned',
-            length: 70,
-            nsteps: 60,
-            recycleSchedule: 'low',
-            earlyStop: true,
-            seed: 42,
-            presetId: 'custom_cath_monomer',
-            partialFraction: 0.5,
             customSpecYaml: '',
           },
-          position: { x: 340, y: 24 },
+          position: { x: 40, y: 24 },
         },
         {
           id: 'fold',
           adapterId: 'localfold-af2',
           label: 'LocalFold',
           params: { recycles: 1, maxSequences: 1, seed: 0 },
-          position: { x: 640, y: 194 },
+          position: { x: 340, y: 194 },
         },
         {
           id: 'score',
           adapterId: 'designability-scorer',
           label: 'scRMSD / scTM',
           params: { scRmsdThreshold: 2.0, plddtThreshold: 70 },
-          position: { x: 940, y: 24 },
+          position: { x: 640, y: 24 },
         },
       ],
       edges: [
-        { fromNode: 'cond', fromPort: 'condition', toNode: 'gen', toPort: 'condition' },
         { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
         { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
         { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },

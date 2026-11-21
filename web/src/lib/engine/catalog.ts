@@ -400,23 +400,6 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
     };
   })(),
   (() => {
-    const cond = buildSubGroupsForAdapter('rfd4-conditioner');
-    const total = cond.subGroups.reduce((a, g) => a + g.items.length, 0);
-    const identityBlob = 'conditioning condition rfd4 hotspots motif binder cath';
-    const searchBlob = `${identityBlob} ${cond.subGroups.flatMap((g) => [g.title.toLowerCase(), ...g.items.map((i) => i.searchBlob)]).join(' ')}`;
-    return {
-      id: 'conditioning',
-      title: 'Conditioning',
-      stage: 'condition',
-      subtitle: 'Binding hotspots, motifs, H-bonds & CATH folds',
-      countLabel: `${total}`,
-      footnote: 'Works with RFD4-Proteina & Genie 3 (motif / binder)',
-      subGroups: cond.subGroups,
-      identityBlob,
-      searchBlob,
-    };
-  })(),
-  (() => {
     const rfd4 = ADAPTER_REGISTRY['rfd4-proteina'];
     const g3 = ADAPTER_REGISTRY.genie3;
     const items: CatalogSubItem[] = [

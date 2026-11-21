@@ -283,6 +283,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: false,
     entities: ['protein', 'ligand'],
     biology: 'Unindexed 4-residue catalytic Zn²⁺ + transition-state analog (DHZ)',
+    cropSegments: 'A102, A104, A129, A132, A:ZN, A:DHZ',
     conditionParams: {
       taskPreset: 'custom',
       contig: '150-150',
@@ -302,6 +303,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: false,
     entities: ['protein', 'ligand'],
     biology: '2-His-1-carboxylate facial triad coordinating Fe²⁺ + α-ketoglutarate',
+    cropSegments: 'A99, A101, A255, A270, A:FE2, A:AKG, A:TAU',
     conditionParams: {
       taskPreset: 'custom',
       contig: '165-165',
@@ -321,6 +323,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: false,
     entities: ['protein', 'ligand'],
     biology: 'De novo pocket around S-adenosylmethionine (SAM) with H-bonds',
+    cropSegments: 'A:SAM',
     conditionParams: {
       taskPreset: 'sm_sam',
       contig: '110-110',
@@ -340,6 +343,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: false,
     entities: ['protein', 'dna'],
     biology: 'Sequence-specific dsDNA groove recognition (TGAATGAA)',
+    cropSegments: 'B, C',
     conditionParams: {
       taskPreset: 'dna_7m5w',
       contig: '90-90',

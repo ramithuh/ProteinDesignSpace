@@ -564,51 +564,109 @@
     return null;
   }
 
-  // Auto-populate untouched (or previously auto-synced) Conditioning blocks when wired to a
-  // curated benchmark PDB Input so contig, motif spans, lockChain, and hotspots stay in sync.
+  // Auto-seed unconfigured (or previously auto-seeded) Genie 3 & RFD4-Proteina blocks when wired
+  // to a curated benchmark PDB Input on their unified `structure` port — fixes forked workflows
+  // like 1PRW -> Genie 3 + RFD4 so both immediately pick up the exact motif/binder/enzyme task!
   $effect(() => {
     if (isRunning) return;
     let patches: Record<string, Record<string, unknown>> | null = null;
-    for (const condNode of graph.nodes) {
-      if (condNode.adapterId !== 'rfd4-conditioner') continue;
-      const tplEdge = graph.edges.find((e) => e.toNode === condNode.id && e.toPort === 'template');
-      if (!tplEdge) continue;
-      const srcNode = graph.nodes.find((n) => n.id === tplEdge.fromNode);
+    for (const node of graph.nodes) {
+      if (node.adapterId !== 'genie3' && node.adapterId !== 'rfd4-proteina' && node.adapterId !== 'rfd4-conditioner') {
+        continue;
+      }
+      const structEdge = graph.edges.find(
+        (e) => e.toNode === node.id && (e.toPort === 'structure' || e.toPort === 'template'),
+      );
+      if (!structEdge) continue;
+      const srcNode = graph.nodes.find((n) => n.id === structEdge.fromNode);
       if (!srcNode || srcNode.adapterId !== 'pdb-input') continue;
       const benchId = String(srcNode.params.benchmarkId ?? '').trim();
       if (!benchId) continue;
       const bench = getBenchmarkById(benchId);
       if (!bench) continue;
 
-      const cp = condNode.params ?? {};
-      const syncedId = String(cp.autoSyncedBenchmarkId ?? '').trim();
-      if (syncedId === bench.id) continue;
+      const cp = node.params ?? {};
+      if (node.adapterId === 'rfd4-conditioner') {
+        const syncedId = String(cp.autoSyncedBenchmarkId ?? '').trim();
+        if (syncedId === bench.id) continue;
+        const isUntouched =
+          String(cp.taskPreset ?? 'custom') === 'custom' &&
+          (String(cp.contig ?? '70-70').trim() === '' || String(cp.contig ?? '70-70').trim() === '70-70') &&
+          !String(cp.lockChain ?? '').trim() &&
+          !String(cp.hotspots ?? '').trim() &&
+          !String(cp.motifSpan ?? '').trim();
+        if (!isUntouched && !syncedId) continue;
+        patches ??= {};
+        patches[node.id] = {
+          ...cp,
+          taskPreset: bench.conditionParams.taskPreset,
+          contig: bench.conditionParams.contig,
+          lockChain: bench.conditionParams.lockChain ?? '',
+          hotspots: bench.conditionParams.hotspots ?? '',
+          motifSpan: bench.conditionParams.motifSpan ?? '',
+          unindexedMotif: Boolean(bench.conditionParams.unindexedMotif),
+          hbondMode: bench.conditionParams.hbondMode ?? 'none',
+          hbondSelection: bench.conditionParams.hbondSelection ?? '',
+          autoSyncedBenchmarkId: bench.id,
+        };
+        continue;
+      }
 
-      const isUntouchedDefault =
-        String(cp.taskPreset ?? 'custom') === 'custom' &&
-        (String(cp.contig ?? '70-70').trim() === '' || String(cp.contig ?? '70-70').trim() === '70-70') &&
-        !String(cp.lockChain ?? '').trim() &&
-        !String(cp.hotspots ?? '').trim() &&
-        !String(cp.motifSpan ?? '').trim() &&
-        !String(cp.cathCode ?? '').trim() &&
-        String(cp.hbondMode ?? 'none') === 'none' &&
-        !String(cp.rawJsonOverride ?? '').trim();
+      if (Boolean(cp.userEditedTask)) continue;
+      const seededId = String(cp.autoSeededBenchmarkId ?? '').trim();
+      if (seededId === bench.id) continue;
 
-      if (!isUntouchedDefault && !syncedId) continue;
+      if (node.adapterId === 'rfd4-proteina') {
+        const isUntouched =
+          String(cp.mode ?? 'unconditional') === 'unconditional' &&
+          !String(cp.hotspots ?? '').trim() &&
+          !String(cp.motifSpan ?? '').trim() &&
+          !String(cp.lockChain ?? '').trim() &&
+          !String(cp.customSpecYaml ?? '').trim();
+        if (!isUntouched && !seededId) continue;
 
-      patches ??= {};
-      patches[condNode.id] = {
-        ...cp,
-        taskPreset: bench.conditionParams.taskPreset,
-        contig: bench.conditionParams.contig,
-        lockChain: bench.conditionParams.lockChain ?? '',
-        hotspots: bench.conditionParams.hotspots ?? '',
-        motifSpan: bench.conditionParams.motifSpan ?? '',
-        unindexedMotif: Boolean(bench.conditionParams.unindexedMotif),
-        hbondMode: bench.conditionParams.hbondMode ?? 'none',
-        hbondSelection: bench.conditionParams.hbondSelection ?? '',
-        autoSyncedBenchmarkId: bench.id,
-      };
+        const bp = bench.conditionParams;
+        const nextMode =
+          bp.taskPreset !== 'custom'
+            ? 'preset'
+            : bench.category === 'binder'
+              ? 'binder'
+              : 'motif';
+        patches ??= {};
+        patches[node.id] = {
+          ...cp,
+          mode: nextMode,
+          ...(bp.taskPreset !== 'custom' ? { presetId: bp.taskPreset } : {}),
+          contig: bp.contig,
+          lockChain: bp.lockChain ?? '',
+          hotspots: bp.hotspots ?? '',
+          motifSpan: bp.motifSpan ?? '',
+          unindexedMotif: Boolean(bp.unindexedMotif),
+          hbondMode: bp.hbondMode ?? 'none',
+          hbondSelection: bp.hbondSelection ?? '',
+          autoSeededBenchmarkId: bench.id,
+        };
+      } else if (node.adapterId === 'genie3' && bench.supportsGenie3) {
+        const isUntouched =
+          String(cp.taskMode ?? 'unconditional') === 'unconditional' &&
+          !String(cp.hotspots ?? '').trim() &&
+          !String(cp.motifSpan ?? '').trim() &&
+          !String(cp.lockChain ?? '').trim();
+        if (!isUntouched && !seededId) continue;
+
+        const bp = bench.conditionParams;
+        const nextTaskMode = bench.category === 'binder' ? 'binder' : 'motif';
+        patches ??= {};
+        patches[node.id] = {
+          ...cp,
+          taskMode: nextTaskMode,
+          contig: bp.contig,
+          lockChain: bp.lockChain ?? '',
+          hotspots: bp.hotspots ?? '',
+          motifSpan: bp.motifSpan ?? '',
+          autoSeededBenchmarkId: bench.id,
+        };
+      }
     }
     if (patches) {
       const map = patches;
@@ -618,6 +676,73 @@
       };
     }
   });
+
+  function getSiblingGeneratorIds(nodeId: string): string[] {
+    const structEdge = graph.edges.find(
+      (e) => e.toNode === nodeId && (e.toPort === 'structure' || e.toPort === 'template'),
+    );
+    if (!structEdge) return [];
+    return graph.nodes
+      .filter(
+        (n) =>
+          n.id !== nodeId &&
+          (n.adapterId === 'genie3' || n.adapterId === 'rfd4-proteina') &&
+          graph.edges.some(
+            (e) =>
+              e.fromNode === structEdge.fromNode &&
+              e.toNode === n.id &&
+              (e.toPort === 'structure' || e.toPort === 'template'),
+          ),
+      )
+      .map((n) => n.id);
+  }
+
+  function handleSyncTaskToSiblings(sourceNodeId: string) {
+    const src = graph.nodes.find((n) => n.id === sourceNodeId);
+    if (!src) return;
+    const siblingIds = new Set(getSiblingGeneratorIds(sourceNodeId));
+    if (siblingIds.size === 0) return;
+
+    const sp = src.params ?? {};
+    const srcMode =
+      src.adapterId === 'genie3'
+        ? String(sp.taskMode ?? 'unconditional')
+        : String(sp.mode ?? 'unconditional');
+
+    graph = {
+      ...graph,
+      nodes: graph.nodes.map((n) => {
+        if (!siblingIds.has(n.id)) return n;
+        const shared = {
+          contig: String(sp.contig ?? ''),
+          lockChain: String(sp.lockChain ?? ''),
+          hotspots: String(sp.hotspots ?? ''),
+          motifSpan: String(sp.motifSpan ?? ''),
+          userEditedTask: true,
+        };
+        if (n.adapterId === 'genie3') {
+          const gMode = srcMode === 'binder' || srcMode === 'motif' ? srcMode : 'unconditional';
+          return { ...n, params: { ...n.params, ...shared, taskMode: gMode } };
+        }
+        return {
+          ...n,
+          params: {
+            ...n.params,
+            ...shared,
+            mode: srcMode,
+            ...(src.adapterId === 'rfd4-proteina'
+              ? {
+                  unindexedMotif: Boolean(sp.unindexedMotif),
+                  hbondMode: String(sp.hbondMode ?? 'none'),
+                  hbondSelection: String(sp.hbondSelection ?? ''),
+                  cathCode: String(sp.cathCode ?? ''),
+                }
+              : {}),
+          },
+        };
+      }),
+    };
+  }
 
   $effect(() => {
     if (isRunning) return;
@@ -802,12 +927,23 @@
         selectedPeekSlotId = null;
         selectedEdgeId = null;
       } else {
-        // Auto-focus a scorer or fold node if present so results appear immediately
+        // Auto-focus the terminal output block (scorer -> fold -> generator -> last executed node)
+        // so its 3D structure appears in the viewport immediately without needing an scRMSD block.
         const scorersWithData = graph.nodes.filter(
           (n) => n.adapterId === 'designability-scorer' && outputsByNode[n.id],
         );
         const lastScorer = [...graph.nodes].reverse().find((n) => n.adapterId === 'designability-scorer');
         const lastFold = [...graph.nodes].reverse().find((n) => n.adapterId === 'localfold-af2');
+        const last3DGenerator = [...graph.nodes]
+          .reverse()
+          .find(
+            (n) =>
+              (n.adapterId === 'genie3' || n.adapterId === 'rfd4-proteina') &&
+              outputsByNode[n.id]?.structure,
+          );
+        const lastWithOutput = [...graph.nodes]
+          .reverse()
+          .find((n) => outputsByNode[n.id] && Object.keys(outputsByNode[n.id]).length > 0);
         if (scorersWithData.length >= 2) {
           // Forked benchmark (e.g. AF2 vs RoseTTAFold3): auto-open multi-branch 3D comparison!
           handleSelectNodes(scorersWithData.slice(0, COMPARE_PALETTE.length).map((n) => n.id));
@@ -817,6 +953,14 @@
           selectedEdgeId = null;
         } else if (lastFold) {
           setSingleSelection(lastFold.id);
+          selectedPeekSlotId = null;
+          selectedEdgeId = null;
+        } else if (last3DGenerator) {
+          setSingleSelection(last3DGenerator.id);
+          selectedPeekSlotId = null;
+          selectedEdgeId = null;
+        } else if (lastWithOutput) {
+          setSingleSelection(lastWithOutput.id);
           selectedPeekSlotId = null;
           selectedEdgeId = null;
         }
@@ -948,8 +1092,18 @@
     }
 
     const condTarget =
-      (selectedNode?.adapterId === 'rfd4-conditioner' ? selectedNode : null) ??
-      graph.nodes.find((n) => n.adapterId === 'rfd4-conditioner') ??
+      (selectedNode &&
+      (selectedNode.adapterId === 'genie3' ||
+        selectedNode.adapterId === 'rfd4-proteina' ||
+        selectedNode.adapterId === 'rfd4-conditioner')
+        ? selectedNode
+        : null) ??
+      graph.nodes.find(
+        (n) =>
+          n.adapterId === 'rfd4-proteina' ||
+          n.adapterId === 'genie3' ||
+          n.adapterId === 'rfd4-conditioner',
+      ) ??
       null;
     const mpnnTarget =
       (selectedNode?.adapterId === 'web-protein-mpnn' ? selectedNode : null) ??
@@ -966,7 +1120,9 @@
       if (updated !== null) {
         updateNodeParams(condTarget.id, {
           ...condTarget.params,
-          taskPreset: 'custom',
+          ...(condTarget.adapterId === 'rfd4-conditioner' ? { taskPreset: 'custom' } : {}),
+          ...(condTarget.adapterId === 'genie3' ? { taskMode: molPickMode === 'motif' ? 'motif' : 'binder', userEditedTask: true } : {}),
+          ...(condTarget.adapterId === 'rfd4-proteina' ? { mode: molPickMode === 'motif' ? 'motif' : 'binder', userEditedTask: true } : {}),
           [key]: updated,
         });
       }
@@ -987,7 +1143,28 @@
       return;
     }
 
-    // Auto mode: target the selected conditioner or MPNN block explicitly (never silently mutate an unrelated block)
+    // Auto mode: target the selected generator, conditioner, or MPNN block explicitly
+    if (selectedNode?.adapterId === 'genie3' || selectedNode?.adapterId === 'rfd4-proteina') {
+      const m = String(
+        selectedNode.adapterId === 'genie3'
+          ? (selectedNode.params.taskMode ?? 'unconditional')
+          : (selectedNode.params.mode ?? 'unconditional'),
+      );
+      const key = m === 'motif' ? 'motifSpan' : 'hotspots';
+      const updated = appendToken(selectedNode.params[key], tag);
+      if (updated !== null) {
+        updateNodeParams(selectedNode.id, {
+          ...selectedNode.params,
+          ...(selectedNode.adapterId === 'genie3' && m === 'unconditional' ? { taskMode: 'binder' } : {}),
+          ...(selectedNode.adapterId === 'rfd4-proteina' && m === 'unconditional' ? { mode: 'binder' } : {}),
+          userEditedTask: true,
+          [key]: updated,
+        });
+      }
+      lastPickedResidue = `${baseLabel} → ${key === 'motifSpan' ? 'Motif' : 'Hotspots'}`;
+      return;
+    }
+
     if (selectedNode?.adapterId === 'rfd4-conditioner') {
       const brush = String(selectedNode.params.paintBrush ?? 'hotspots');
       const key = brush === 'motifSpan' ? 'motifSpan' : 'hotspots';
@@ -1099,14 +1276,14 @@
 
   // 3D Mol* viewport bindings derived strictly from the active peek modality
   let viewerDesignedPdb = $derived.by((): string | null => {
-    if (peekMetrics) return activeRow?.designedPdb ?? contextStructure?.pdbText ?? null;
-    if (peekStructure) return peekStructure.pdbText;
-    if (peekCondition) return peekCondition.inputCif ?? contextStructure?.pdbText ?? null;
+    if (peekMetrics) return activeRow?.designedPdb ?? contextStructure?.cifText ?? contextStructure?.pdbText ?? null;
+    if (peekStructure) return peekStructure.cifText ?? peekStructure.pdbText;
+    if (peekCondition) return peekCondition.inputCif ?? contextStructure?.cifText ?? contextStructure?.pdbText ?? null;
     if (peekSequences) {
       // Clear 3D viewport when peeking a sequence-only wire/port unless user explicitly
       // previews the parent backbone (keeps Parameters-tab 3D residue picking intact).
       if (rightPanelTab === 'peek' && !showSeqParentBackbone) return null;
-      return contextStructure?.pdbText ?? null;
+      return contextStructure?.cifText ?? contextStructure?.pdbText ?? null;
     }
     // Standalone folds are not Kabsch-aligned to the designed backbone, so keep designedPdb null
     return null;
@@ -1483,6 +1660,11 @@
           {selectedNodeIds}
           {compareColors}
           {selectedEdgeId}
+          activePeekPort={
+            rightPanelTab === 'peek' && !isCompareMode && selectedNode && resolvedPeekSlotId
+              ? { nodeId: selectedNode.id, slotId: resolvedPeekSlotId }
+              : null
+          }
           {nodeStates}
           {outputsByNode}
           {theme}
@@ -1752,8 +1934,17 @@
                 disabled={isRunning}
                 nodeOutput={outputsByNode[selectedNode.id]}
                 nodeState={nodeStates[selectedNode.id]}
+                hasStructureInput={graph.edges.some(
+                  (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
+                )}
+                siblingGeneratorIds={
+                  selectedNode.adapterId === 'genie3' || selectedNode.adapterId === 'rfd4-proteina'
+                    ? getSiblingGeneratorIds(selectedNode.id)
+                    : []
+                }
                 onUpdate={updateNodeParams}
                 onUpdateLabel={updateNodeLabel}
+                onSyncTaskToSiblings={handleSyncTaskToSiblings}
                 onRunUpTo={(id) => runWorkflow(false, id)}
               />
             {:else}

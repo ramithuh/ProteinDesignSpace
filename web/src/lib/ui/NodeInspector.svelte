@@ -29,8 +29,11 @@
     embedded?: boolean;
     nodeOutput?: Record<string, CanonicalArtifact>;
     nodeState?: NodeProgressEvent;
+    hasStructureInput?: boolean;
+    siblingGeneratorIds?: string[];
     onUpdate: (nodeId: string, params: Record<string, unknown>) => void;
     onUpdateLabel?: (nodeId: string, label: string) => void;
+    onSyncTaskToSiblings?: (nodeId: string) => void;
     onRunUpTo?: (nodeId: string) => void;
   }
 
@@ -40,8 +43,11 @@
     embedded = false,
     nodeOutput = undefined,
     nodeState = undefined,
+    hasStructureInput = false,
+    siblingGeneratorIds = [],
     onUpdate,
     onUpdateLabel = undefined,
+    onSyncTaskToSiblings = undefined,
     onRunUpTo = undefined,
   }: Props = $props();
 
@@ -99,6 +105,12 @@
     const next: Record<string, unknown> = { ...node.params, [key]: value };
     if (node.adapterId === 'rfd4-conditioner' && 'autoSyncedBenchmarkId' in next) {
       next.autoSyncedBenchmarkId = '';
+    }
+    if (
+      (node.adapterId === 'rfd4-proteina' || node.adapterId === 'genie3') &&
+      ['mode', 'taskMode', 'contig', 'lockChain', 'hotspots', 'motifSpan', 'unindexedMotif', 'hbondMode', 'hbondSelection', 'cathCode', 'presetId'].includes(key)
+    ) {
+      next.userEditedTask = true;
     }
     onUpdate(node.id, next);
   }
@@ -690,20 +702,41 @@
 
     {:else if node.adapterId === 'rfd4-proteina'}
       {@const rfdMode = String(node.params.mode ?? 'unconditional')}
-      <label class="wide">
-        Mode
+      {@const hotspotTokens = parseResidueTokens(node.params.hotspots)}
+      {@const motifTokens = parseResidueTokens(node.params.motifSpan)}
+      <label class="full">
+        Design Task
         <select
           {disabled}
           value={rfdMode}
           onchange={(e) => setParam('mode', e.currentTarget.value)}
         >
           <option value="unconditional">Unconditional Monomer</option>
-          <option value="conditioned">Conditioned (upstream block)</option>
-          <option value="preset">Preset Design Task</option>
-          <option value="partial">Partial Diffusion (refine input structure)</option>
-          <option value="inverse-folding">Inverse Folding (design sequence for backbone)</option>
+          <option value="motif">Motif Scaffolding (fixed residues)</option>
+          <option value="binder">PPI Binder (target + hotspots)</option>
+          <option value="partial">Partial Diffusion (refine structure)</option>
+          <option value="inverse-folding">Inverse Folding (design sequence)</option>
+          <option value="preset">All-Atom / Built-In Task Preset</option>
+          {#if rfdMode === 'conditioned'}
+            <option value="conditioned">Custom Conditioned Spec</option>
+          {/if}
         </select>
       </label>
+
+      {#if siblingGeneratorIds.length > 0 && onSyncTaskToSiblings}
+        <div class="full">
+          <button
+            type="button"
+            class="sync-sib-btn"
+            {disabled}
+            onclick={() => onSyncTaskToSiblings(node.id)}
+            title="Copy shared task settings (mode, contig, hotspots, motifs) to sibling generator(s) on the same structure"
+          >
+            ⇄ Apply task to sibling generator{siblingGeneratorIds.length > 1 ? 's' : ''} ({siblingGeneratorIds.length})
+          </button>
+        </div>
+      {/if}
+
       {#if rfdMode === 'unconditional'}
         <label>
           Length (aa)
@@ -715,9 +748,115 @@
             onChange={(v) => setParam('length', v)}
           />
         </label>
+        <label>
+          CATH Fold (optional)
+          <input
+            type="text"
+            {disabled}
+            placeholder="e.g. 3.40.50"
+            value={String(node.params.cathCode ?? '')}
+            oninput={(e) => setParam('cathCode', e.currentTarget.value)}
+          />
+        </label>
+      {:else if rfdMode === 'motif'}
+        <label class="full">
+          Contig (e.g. <code>10-10,A16-35,16-16,A52-71,10-10</code> or <code>150-150</code>)
+          <input
+            type="text"
+            {disabled}
+            value={String(node.params.contig ?? '100-100')}
+            oninput={(e) => setParam('contig', e.currentTarget.value)}
+          />
+        </label>
+        <div class="chip-field full">
+          <label>
+            Fixed Motif Spans (click 3D residues or enter e.g. A16-35, A52-71)
+            <input
+              type="text"
+              {disabled}
+              placeholder="A16-35, A52-71"
+              value={String(node.params.motifSpan ?? '')}
+              oninput={(e) => setParam('motifSpan', e.currentTarget.value)}
+            />
+          </label>
+          {#if motifTokens.length > 0}
+            <div class="res-chips">
+              {#each motifTokens as tok, i (`rfd_motif_${tok}_${i}`)}
+                {@const badTok = !isValidResidueToken(tok)}
+                <span class="res-chip" class:invalid-chip={badTok}>
+                  {tok}
+                  <button type="button" class="chip-x" {disabled} aria-label={`Remove motif ${tok}`} onclick={() => removeResidueTokenAt('motifSpan', i)}>×</button>
+                </span>
+              {/each}
+            </div>
+          {/if}
+        </div>
+        <label class="inline-check full">
+          <input
+            type="checkbox"
+            {disabled}
+            checked={Boolean(node.params.unindexedMotif)}
+            onchange={(e) => setParam('unindexedMotif', e.currentTarget.checked)}
+          />
+          Unindexed motif (auto-place catalytic residues, e.g. AME enzymes)
+        </label>
+      {:else if rfdMode === 'binder'}
+        <label class="full">
+          Binder Contig (e.g. <code>A17-132,/0,70-70</code>)
+          <input
+            type="text"
+            {disabled}
+            placeholder="A17-132,/0,70-70"
+            value={String(node.params.contig ?? '')}
+            oninput={(e) => setParam('contig', e.currentTarget.value)}
+          />
+        </label>
+        <label>
+          Target Chain
+          <input
+            type="text"
+            {disabled}
+            placeholder="A"
+            value={String(node.params.lockChain ?? 'A')}
+            oninput={(e) => setParam('lockChain', e.currentTarget.value.toUpperCase())}
+          />
+        </label>
+        <label>
+          Binder Length (aa)
+          <NumericInput
+            {disabled}
+            ariaLabel="Binder Length (aa)"
+            spec={NUMERIC_SPECS['rfd4-proteina'].length}
+            value={Number(node.params.length ?? 70)}
+            onChange={(v) => setParam('length', v)}
+          />
+        </label>
+        <div class="chip-field full">
+          <label>
+            Binding Hotspots (click 3D residues or enter e.g. A54, A56, A115)
+            <input
+              type="text"
+              {disabled}
+              placeholder="A54, A56, A66, A115"
+              value={String(node.params.hotspots ?? '')}
+              oninput={(e) => setParam('hotspots', e.currentTarget.value)}
+            />
+          </label>
+          {#if hotspotTokens.length > 0}
+            <div class="res-chips">
+              {#each hotspotTokens as tok, i (`rfd_hot_${tok}_${i}`)}
+                {@const badTok = !isValidResidueToken(tok)}
+                <span class="res-chip" class:invalid-chip={badTok}>
+                  {tok}
+                  <button type="button" class="chip-x" {disabled} aria-label={`Remove hotspot ${tok}`} onclick={() => removeResidueTokenAt('hotspots', i)}>×</button>
+                </span>
+              {/each}
+            </div>
+          {/if}
+        </div>
       {:else if rfdMode === 'preset'}
         <label class="full">
-          Preset Design Task
+          Built-In All-Atom Task Preset
           <select
             {disabled}
             value={String(node.params.presetId ?? 'custom_cath_monomer')}
@@ -729,8 +868,8 @@
           </select>
         </label>
       {:else if rfdMode === 'partial'}
-        <label>
-          Partial diffusion fraction
+        <label class="full">
+          Partial diffusion noise fraction
           <NumericInput
             {disabled}
             ariaLabel="Partial diffusion fraction"
@@ -739,6 +878,26 @@
             onChange={(v) => setParam('partialFraction', v)}
           />
         </label>
+      {:else if rfdMode === 'inverse-folding'}
+        <span class="field-hint full">
+          Redesigns sequence for the wired input backbone using RFD4's structure encoder (~138 MB lazy load).
+        </span>
+      {:else if rfdMode === 'conditioned'}
+        <label class="full">
+          Contig
+          <input
+            type="text"
+            {disabled}
+            value={String(node.params.contig ?? '70-70')}
+            oninput={(e) => setParam('contig', e.currentTarget.value)}
+          />
+        </label>
+      {/if}
+
+      {#if !hasStructureInput && (rfdMode === 'motif' || rfdMode === 'binder' || rfdMode === 'partial' || rfdMode === 'inverse-folding')}
+        <span class="field-hint err full">
+          Wire a PDB Input (or upstream structure) into RFD4's <code>structure</code> port for {rfdMode} mode.
+        </span>
       {/if}
 
       <details class="adv-details full">
@@ -785,32 +944,187 @@
             />
             Early stop on convergence
           </label>
-          {#if rfdMode === 'unconditional'}
+          <label>
+            H-Bond Constraint
+            <select
+              {disabled}
+              value={String(node.params.hbondMode ?? 'none')}
+              onchange={(e) => setParam('hbondMode', e.currentTarget.value)}
+            >
+              <option value="none">None</option>
+              <option value="ACCEPTOR">Acceptor</option>
+              <option value="DONOR">Donor</option>
+              <option value="BOTH">Both</option>
+            </select>
+          </label>
+          {#if String(node.params.hbondMode ?? 'none') !== 'none'}
             <label class="full">
-              Custom constraint spec (YAML / JSON)
-              <textarea
-                rows="3"
+              H-Bond Target Atoms (e.g. <code>B/SAM/*/*</code>)
+              <input
+                type="text"
                 {disabled}
-                placeholder="Leave blank for pure monomer, or wire an RFD4 Condition block into the condition port."
-                value={String(node.params.customSpecYaml ?? '')}
-                oninput={(e) => setParam('customSpecYaml', e.currentTarget.value)}
-              ></textarea>
+                placeholder="B/SAM/*/*"
+                value={String(node.params.hbondSelection ?? '')}
+                oninput={(e) => setParam('hbondSelection', e.currentTarget.value)}
+              />
             </label>
           {/if}
+          <label class="full">
+            Custom constraint spec (YAML / JSON)
+            <textarea
+              rows="3"
+              {disabled}
+              placeholder="Optional raw RFD4 YAML or JSON spec override."
+              value={String(node.params.customSpecYaml ?? '')}
+              oninput={(e) => setParam('customSpecYaml', e.currentTarget.value)}
+            ></textarea>
+          </label>
         </div>
       </details>
 
     {:else if node.adapterId === 'genie3'}
-      <label>
-        Length (aa)
-        <NumericInput
+      {@const g3Mode = String(node.params.taskMode ?? 'unconditional')}
+      {@const g3Hotspots = parseResidueTokens(node.params.hotspots)}
+      {@const g3Motifs = parseResidueTokens(node.params.motifSpan)}
+      <label class="full">
+        Design Task
+        <select
           {disabled}
-          ariaLabel="Length (aa)"
-          spec={NUMERIC_SPECS.genie3.length}
-          value={Number(node.params.length ?? 80)}
-          onChange={(v) => setParam('length', v)}
-        />
+          value={g3Mode}
+          onchange={(e) => setParam('taskMode', e.currentTarget.value)}
+        >
+          <option value="unconditional">Unconditional Monomer</option>
+          <option value="motif">Motif Scaffolding (fixed residues)</option>
+          <option value="binder">PPI Binder (target + hotspots)</option>
+        </select>
       </label>
+
+      {#if siblingGeneratorIds.length > 0 && onSyncTaskToSiblings}
+        <div class="full">
+          <button
+            type="button"
+            class="sync-sib-btn"
+            {disabled}
+            onclick={() => onSyncTaskToSiblings(node.id)}
+            title="Copy shared task settings (mode, contig, hotspots, motifs) to sibling generator(s) on the same structure"
+          >
+            ⇄ Apply task to sibling generator{siblingGeneratorIds.length > 1 ? 's' : ''} ({siblingGeneratorIds.length})
+          </button>
+        </div>
+      {/if}
+
+      {#if g3Mode === 'unconditional'}
+        <label>
+          Length (aa)
+          <NumericInput
+            {disabled}
+            ariaLabel="Length (aa)"
+            spec={NUMERIC_SPECS.genie3.length}
+            value={Number(node.params.length ?? 80)}
+            onChange={(v) => setParam('length', v)}
+          />
+        </label>
+      {:else if g3Mode === 'motif'}
+        <label class="full">
+          Contig (e.g. <code>10-10,A16-35,16-16,A52-71,10-10</code>)
+          <input
+            type="text"
+            {disabled}
+            placeholder="25-25,A163-181,30-30"
+            value={String(node.params.contig ?? '')}
+            oninput={(e) => setParam('contig', e.currentTarget.value)}
+          />
+        </label>
+        <div class="chip-field full">
+          <label>
+            Fixed Motif Spans (click 3D residues or enter e.g. A16-35, A52-71)
+            <input
+              type="text"
+              {disabled}
+              placeholder="A16-35, A52-71"
+              value={String(node.params.motifSpan ?? '')}
+              oninput={(e) => setParam('motifSpan', e.currentTarget.value)}
+            />
+          </label>
+          {#if g3Motifs.length > 0}
+            <div class="res-chips">
+              {#each g3Motifs as tok, i (`g3_motif_${tok}_${i}`)}
+                {@const badTok = !isValidResidueToken(tok)}
+                <span class="res-chip" class:invalid-chip={badTok}>
+                  {tok}
+                  <button type="button" class="chip-x" {disabled} aria-label={`Remove motif ${tok}`} onclick={() => removeResidueTokenAt('motifSpan', i)}>×</button>
+                </span>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {:else if g3Mode === 'binder'}
+        <label>
+          Binder Length (aa)
+          <NumericInput
+            {disabled}
+            ariaLabel="Binder Length (aa)"
+            spec={NUMERIC_SPECS.genie3.length}
+            value={Number(node.params.length ?? 80)}
+            onChange={(v) => {
+              const prevContig = String(node.params.contig ?? '').trim();
+              const nextContig = prevContig.includes('/0')
+                ? prevContig
+                    .split(/[,\s]+/)
+                    .filter(Boolean)
+                    .map((tok) => (/^\d+(?:-\d+)?$/.test(tok) ? `${v}-${v}` : tok))
+                    .join(',')
+                : prevContig;
+              onUpdate(node.id, {
+                ...node.params,
+                length: v,
+                contig: nextContig,
+                userEditedTask: true,
+              });
+            }}
+          />
+        </label>
+        <label>
+          Target Chain
+          <input
+            type="text"
+            {disabled}
+            placeholder="A"
+            value={String(node.params.lockChain ?? 'A')}
+            oninput={(e) => setParam('lockChain', e.currentTarget.value.toUpperCase())}
+          />
+        </label>
+        <div class="chip-field full">
+          <label>
+            Binding Hotspots (click 3D residues or enter e.g. A54, A56, A115)
+            <input
+              type="text"
+              {disabled}
+              placeholder="A54, A56, A66, A115"
+              value={String(node.params.hotspots ?? '')}
+              oninput={(e) => setParam('hotspots', e.currentTarget.value)}
+            />
+          </label>
+          {#if g3Hotspots.length > 0}
+            <div class="res-chips">
+              {#each g3Hotspots as tok, i (`g3_hot_${tok}_${i}`)}
+                {@const badTok = !isValidResidueToken(tok)}
+                <span class="res-chip" class:invalid-chip={badTok}>
+                  {tok}
+                  <button type="button" class="chip-x" {disabled} aria-label={`Remove hotspot ${tok}`} onclick={() => removeResidueTokenAt('hotspots', i)}>×</button>
+                </span>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      {#if !hasStructureInput && (g3Mode === 'motif' || g3Mode === 'binder')}
+        <span class="field-hint err full">
+          Wire a PDB Input into Genie 3's <code>structure</code> port for {g3Mode} design.
+        </span>
+      {/if}
+
       <label>
         Diffusion steps
         <NumericInput
@@ -1391,5 +1705,26 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+  }
+  .sync-sib-btn {
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+  }
+  .sync-sib-btn:hover:not(:disabled) {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .sync-sib-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>

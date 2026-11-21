@@ -757,6 +757,192 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
   };
 }
 
+interface RawCropRule {
+  kind: 'chain' | 'range' | 'ligand';
+  chain?: string;
+  start?: number;
+  end?: number;
+  compId?: string;
+}
+
+function parseRawCropRules(segmentSpec: string): RawCropRule[] {
+  const tokens = segmentSpec
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const rules: RawCropRule[] = [];
+  for (const tok of tokens) {
+    // Chain + ligand comp_id e.g. "A:ZN", "A:DHZ", "A:SAM", "A:FE2"
+    const chainLig = /^([A-Za-z]):([A-Za-z0-9]{2,5})$/.exec(tok);
+    if (chainLig && !/^\d+$/.test(chainLig[2])) {
+      rules.push({ kind: 'ligand', chain: chainLig[1].toUpperCase(), compId: chainLig[2].toUpperCase() });
+      continue;
+    }
+    // Single chain letter e.g. "A", "B", "C"
+    const chainOnly = /^([A-Za-z])$/.exec(tok);
+    if (chainOnly) {
+      rules.push({ kind: 'chain', chain: chainOnly[1].toUpperCase() });
+      continue;
+    }
+    // Residue or range e.g. "A102", "A163-181", "B19-27"
+    const rangeMatch = /^([A-Za-z])?:?(\d+)(?:-(\d+))?$/.exec(tok);
+    if (rangeMatch) {
+      const chain = (rangeMatch[1] || 'A').toUpperCase();
+      const start = parseInt(rangeMatch[2], 10);
+      const end = rangeMatch[3] ? parseInt(rangeMatch[3], 10) : start;
+      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+        rules.push({ kind: 'range', chain, start, end });
+        continue;
+      }
+    }
+    // Bare ligand comp_id e.g. "SAM", "DHZ", "ZN", "FE2"
+    if (/^[A-Za-z][A-Za-z0-9]{1,4}$/.test(tok)) {
+      rules.push({ kind: 'ligand', compId: tok.toUpperCase() });
+    }
+  }
+  return rules;
+}
+
+function matchesRawCropRule(
+  rules: RawCropRule[],
+  group: string,
+  chain: string,
+  resNum: number | null,
+  compId: string,
+): boolean {
+  const ch = chain.toUpperCase();
+  const comp = compId.toUpperCase();
+  if (WATER_RESNAMES.has(comp)) return false;
+  for (const r of rules) {
+    if (r.kind === 'ligand') {
+      if (comp === r.compId && (!r.chain || r.chain === ch)) return true;
+    } else if (r.kind === 'chain') {
+      // Whole-chain crop keeps polymer ATOM records (protein + nucleic acids) on that chain
+      if (group === 'ATOM' && ch === r.chain) return true;
+    } else if (r.kind === 'range') {
+      if (
+        (group === 'ATOM' || comp === 'MSE') &&
+        ch === r.chain &&
+        resNum !== null &&
+        resNum >= (r.start ?? 0) &&
+        resNum <= (r.end ?? 0)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * All-atom mmCIF/PDB cropper: filters raw ATOM/HETATM lines directly so sidechain atoms,
+ * catalytic metals (ZN, FE2), substrates/cofactors (DHZ, AKG, TAU, SAM), and dsDNA chains
+ * are preserved verbatim with original PDB numbering for RFD4 all-atom & Mol* 3D preview.
+ */
+export function cropRawAllAtomStructure(
+  rawText: string,
+  segmentSpec: string,
+): { text: string; format: 'mmcif' | 'pdb'; keptAtomLines: number } {
+  const rules = parseRawCropRules(segmentSpec);
+  const isCif = /^\s*(data_|loop_|_atom_site\.)/m.test(rawText);
+  if (rules.length === 0) {
+    return { text: rawText, format: isCif ? 'mmcif' : 'pdb', keptAtomLines: 1 };
+  }
+
+  if (isCif) {
+    const lines = rawText.split('\n');
+    const out: string[] = [];
+    const cols: string[] = [];
+    let inAtomSite = false;
+    let firstModelNum: string | null = null;
+    let kept = 0;
+
+    for (const raw of lines) {
+      const tr = raw.trim();
+      if (tr.startsWith('_atom_site.')) {
+        inAtomSite = true;
+        cols.push(tr.slice('_atom_site.'.length));
+        out.push(raw);
+        continue;
+      }
+      if (inAtomSite) {
+        if (tr === '' || tr.startsWith('#') || tr.startsWith('loop_') || tr.startsWith('_')) {
+          inAtomSite = false;
+          out.push(raw);
+          continue;
+        }
+        const toks = tokenizeCifLine(tr);
+        if (toks.length < cols.length) continue;
+        const get = (name: string) => {
+          const idx = cols.indexOf(name);
+          return idx >= 0 ? toks[idx] : '';
+        };
+        const modelNum = get('pdbx_PDB_model_num');
+        if (modelNum && modelNum !== '.' && modelNum !== '?') {
+          if (firstModelNum === null) firstModelNum = modelNum;
+          else if (modelNum !== firstModelNum) continue;
+        }
+        const altId = get('label_alt_id');
+        if (altId && altId !== '.' && altId !== '?' && altId !== 'A' && altId !== '1') continue;
+
+        const grp = (get('group_PDB') || 'ATOM').toUpperCase();
+        const ch = get('auth_asym_id') || get('label_asym_id') || 'A';
+        const seqStr = get('auth_seq_id') || get('label_seq_id');
+        const rn = parseInt(seqStr, 10);
+        const comp = get('label_comp_id') || get('auth_comp_id') || '';
+        if (matchesRawCropRule(rules, grp, ch, Number.isFinite(rn) ? rn : null, comp)) {
+          out.push(raw);
+          kept++;
+        }
+        continue;
+      }
+      out.push(raw);
+    }
+
+    if (kept === 0) {
+      throw new Error(
+        `Segment crop "${segmentSpec}" matched 0 atoms in mmCIF structure. Clear the crop or check chain/residue/ligand codes.`,
+      );
+    }
+    return { text: out.join('\n'), format: 'mmcif', keptAtomLines: kept };
+  }
+
+  // Raw PDB filter (preserves all sidechain ATOM & matching HETATM records verbatim)
+  const lines = rawText.split('\n');
+  const out: string[] = [];
+  let kept = 0;
+  let seenAtom = false;
+  for (const line of lines) {
+    if (line.startsWith('ENDMDL') && seenAtom) break;
+    if (line.startsWith('ATOM  ') || line.startsWith('HETATM')) {
+      seenAtom = true;
+      const altLoc = line[16] ?? ' ';
+      if (altLoc !== ' ' && altLoc !== 'A' && altLoc !== '1') continue;
+      const grp = line.startsWith('HETATM') ? 'HETATM' : 'ATOM';
+      const comp = line.slice(17, 20).trim();
+      const ch = (line[21] ?? 'A').trim() || 'A';
+      const rn = parseInt(line.slice(22, 26).trim(), 10);
+      if (matchesRawCropRule(rules, grp, ch, Number.isFinite(rn) ? rn : null, comp)) {
+        out.push(line);
+        kept++;
+      }
+    } else if (
+      line.startsWith('HEADER') ||
+      line.startsWith('TITLE') ||
+      line.startsWith('CRYST1')
+    ) {
+      out.push(line);
+    }
+  }
+  out.push('END');
+  if (kept === 0) {
+    throw new Error(
+      `Segment crop "${segmentSpec}" matched 0 atoms in PDB structure. Clear the crop or check chain/residue/ligand codes.`,
+    );
+  }
+  return { text: out.join('\n') + '\n', format: 'pdb', keptAtomLines: kept };
+}
+
 /**
  * Crop a ParsedStructure to specific chains or residue ranges (e.g. "A163-181", "A16-35, A52-71", "A").
  * Preserves exact original PDB chain IDs and residue numbers so downstream hotspots/motif spans match verbatim.

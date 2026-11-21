@@ -200,7 +200,7 @@ describe('engine/share', () => {
     const src = WORKFLOW_PRESETS.find((p) => p.id === 'rfd4-conditioned-cath')!.graph;
     const yaml = graphToYamlRecipe(src);
     expect(yaml).toContain('denovo: v1');
-    expect(yaml).toContain('cond.condition -> gen.condition');
+    expect(yaml).toContain('gen.sequences -> fold.sequences');
 
     const parsedYaml = parseRecipeToGraph(yaml);
     expect(parsedYaml.nodes.map((n) => [n.id, n.adapterId])).toEqual(
@@ -208,6 +208,26 @@ describe('engine/share', () => {
     );
     expect(parsedYaml.edges).toEqual(src.edges);
     expect(parsedYaml.nodes[0].params.cathCode).toBe('3.40.50');
+
+    // Legacy YAML containing an rfd4-conditioner + template wire auto-migrates into inline generator fields + structure port
+    const legacyYaml = [
+      'denovo: v1',
+      'name: "Legacy Conditioned"',
+      'nodes:',
+      '  pdb: {"model":"pdb-input","mode":"pdb-id","pdbId":"5O45"}',
+      '  cond: {"model":"rfd4-conditioner","contig":"A17-132,/0,70-70","lockChain":"A","hotspots":"A54, A56"}',
+      '  g3: {"model":"genie3"}',
+      'wires:',
+      '  - pdb.structure -> cond.template',
+      '  - cond.condition -> g3.condition',
+    ].join('\n');
+    const migrated = parseRecipeToGraph(legacyYaml);
+    expect(migrated.nodes.map((n) => n.adapterId)).toEqual(['pdb-input', 'genie3']);
+    expect(migrated.edges).toEqual([
+      { fromNode: 'pdb', fromPort: 'structure', toNode: 'g3', toPort: 'structure' },
+    ]);
+    expect(migrated.nodes[1].params.taskMode).toBe('binder');
+    expect(migrated.nodes[1].params.hotspots).toBe('A54, A56');
 
     // JSON input support
     const parsedJson = parseRecipeToGraph(JSON.stringify(src));
@@ -365,16 +385,16 @@ describe('engine/share', () => {
     expect(seqParsed.nodes[0].label).toBe('My Sequence Block');
     expect(seqParsed.nodes[0].params.label).toBe('binder-alpha-1');
 
-    // 2. #p= URL params whose template value is a string (e.g. rawJsonOverride / customSpecYaml)
+    // 2. #p= URL params whose template value is a string (e.g. customSpecYaml)
     // must remain strings even when starting with '{' or '['
     const condPreset = structuredClone(WORKFLOW_PRESETS.find((p) => p.id === 'rfd4-conditioned-cath')!.graph);
     const jsonOverride = '{"contig":"60-60","seed":7}';
-    condPreset.nodes[0].params.rawJsonOverride = jsonOverride;
+    condPreset.nodes[0].params.customSpecYaml = jsonOverride;
     const encCond = await encodeGraphToHash(condPreset);
     expect(encCond.mode).toBe('preset-diff');
     const decCond = await decodeHashToGraph(encCond.hash);
-    expect(typeof decCond!.nodes[0].params.rawJsonOverride).toBe('string');
-    expect(decCond!.nodes[0].params.rawJsonOverride).toBe(jsonOverride);
+    expect(typeof decCond!.nodes[0].params.customSpecYaml).toBe('string');
+    expect(decCond!.nodes[0].params.customSpecYaml).toBe(jsonOverride);
 
     // 3. YAML strips >1500-char pdbText cleanly and resets mode so standalone YAML stays runnable
     const hugePdb = generateSampleHelixBundlePdb();

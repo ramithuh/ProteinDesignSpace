@@ -6,6 +6,7 @@
 import { parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import {
+  buildCanonicalConditionIntent,
   buildDefaultGenie3ConditionFromTemplate,
   compileConditionToGenie3Spec,
 } from '$lib/engine/conditioning';
@@ -132,15 +133,48 @@ self.onmessage = async (ev: MessageEvent) => {
       const predictSequence = p.predictSequence !== false;
       const seed = Math.max(0, Math.round(Number(p.seed ?? 42)));
       const condArtifact = msg.inputs?.condition as ConditionSpecArtifact | undefined;
-      const template = msg.inputs?.template as StructureArtifact | undefined;
+      const template = (msg.inputs?.structure ?? msg.inputs?.template) as StructureArtifact | undefined;
+      const taskMode = String(p.taskMode ?? 'unconditional');
+      const inlineContig = String(p.contig ?? '').trim();
+      const inlineLock = String(p.lockChain ?? '').trim().toUpperCase();
+      const inlineHotspots = String(p.hotspots ?? '').trim();
+      const inlineMotif = String(p.motifSpan ?? '').trim();
 
       await ensureLoaded(msg.id);
 
       let batch: Record<string, unknown> | undefined;
       let compiledSummary = '';
       let expectedChainLengths: number[] | undefined;
-      const effectiveCond =
-        condArtifact ?? (template ? buildDefaultGenie3ConditionFromTemplate(template, length) : undefined);
+
+      let effectiveCond: ConditionSpecArtifact | undefined = condArtifact;
+      if (!effectiveCond && (taskMode === 'binder' || taskMode === 'motif' || inlineLock || inlineMotif)) {
+        const isBinder = taskMode === 'binder' || Boolean(inlineLock);
+        const defaultChain = (template?.chainIds?.[0] || 'A').toUpperCase();
+        const resolvedLock = isBinder ? inlineLock || defaultChain : '';
+        const resolvedContig =
+          inlineContig ||
+          (isBinder ? `/0,${length}-${length}` : `${length}-${length}`);
+        const intent = buildCanonicalConditionIntent({
+          contig: resolvedContig,
+          lockChain: resolvedLock,
+          hotspots: inlineHotspots,
+          motifSpan: inlineMotif,
+        });
+        effectiveCond = {
+          kind: 'ConditionSpec',
+          id: `inline-g3-${fnv1a(JSON.stringify({ intent, templateId: template?.id }))}`,
+          label: isBinder ? `Binder (${resolvedLock})` : 'Motif Scaffold',
+          contig: intent.contig,
+          conditions: {},
+          intent,
+          inputCif: template?.cifText ?? template?.pdbText,
+          specMode: true,
+          summary: isBinder ? `binder vs ${resolvedLock}` : `motif ${inlineMotif}`,
+        };
+      } else if (!effectiveCond && template) {
+        effectiveCond = buildDefaultGenie3ConditionFromTemplate(template, length);
+      }
+
       if (effectiveCond) {
         const compiled = compileConditionToGenie3Spec(effectiveCond, template, length);
         batch = genie3Mod.createFeaturesFromSpec({
@@ -205,8 +239,13 @@ self.onmessage = async (ev: MessageEvent) => {
           noiseScale,
           predictSequence,
           seed,
-          condId: condArtifact?.id ?? null,
+          condId: effectiveCond?.id ?? null,
           templateId: template?.id ?? null,
+          taskMode,
+          inlineContig,
+          inlineLock,
+          inlineHotspots,
+          inlineMotif,
         }),
       );
 

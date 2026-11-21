@@ -41,6 +41,7 @@
     selectedNodeIds?: string[];
     compareColors?: Record<string, { badge: string; css: string }>;
     selectedEdgeId?: string | null;
+    activePeekPort?: { nodeId: string; slotId: string } | null;
     nodeStates: Record<string, NodeProgressEvent>;
     outputsByNode: Record<string, Record<string, CanonicalArtifact>>;
     theme?: 'dark' | 'light';
@@ -63,6 +64,7 @@
     selectedNodeIds = [],
     compareColors = {},
     selectedEdgeId = null,
+    activePeekPort = null,
     nodeStates,
     outputsByNode,
     theme = 'dark',
@@ -343,10 +345,11 @@
       const cmp = compareColors[n.id];
       let autoModeHint: string | undefined;
       if (n.adapterId === 'genie3') {
-        if (inputPortsConnected.condition) {
-          autoModeHint = 'Conditioned';
-        } else if (inputPortsConnected.template) {
-          const tplEdge = laid.edges.find((e) => e.toNode === n.id && e.toPort === 'template');
+        const tm = String(n.params?.taskMode ?? 'unconditional');
+        if (tm === 'unconditional' && (inputPortsConnected.structure || inputPortsConnected.template)) {
+          const tplEdge = laid.edges.find(
+            (e) => e.toNode === n.id && (e.toPort === 'structure' || e.toPort === 'template'),
+          );
           const tplNode = tplEdge ? laid.nodes.find((x) => x.id === tplEdge.fromNode) : null;
           const benchId =
             tplNode?.adapterId === 'pdb-input' ? String(tplNode.params.benchmarkId ?? '').trim() : '';
@@ -357,7 +360,7 @@
                 ? `Binder · ${bench.pdbId} hotspots`
                 : `Motif · ${bench.pdbId}`;
           } else {
-            autoModeHint = 'Binder vs template';
+            autoModeHint = 'Binder vs structure';
           }
         }
       }
@@ -378,6 +381,7 @@
           outputPortsReady,
           compareColor: cmp?.css,
           compareBadge: cmp?.badge,
+          activePeekSlotId: activePeekPort?.nodeId === n.id ? activePeekPort.slotId : undefined,
           autoModeHint,
           onDelete: disabled ? undefined : removeNode,
           onPeekPort,

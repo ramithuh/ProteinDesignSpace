@@ -183,10 +183,12 @@ function inferNodeOutputProfile(
   } else if (node.adapterId === 'rfd4-proteina') {
     const mode = String(node.params.mode ?? 'unconditional');
     const cond = upstreamProfileForPort('condition');
-    const tpl = upstreamProfileForPort('template');
+    const tpl = upstreamProfileForPort('structure') ?? upstreamProfileForPort('template');
     const entities = new Set<BioEntityKind>(['protein']);
     let chainCount = 1;
     let estimatedTokens = Number(node.params.length ?? 70);
+    const contig = String(node.params.contig ?? '');
+    const lockChain = String(node.params.lockChain ?? '').trim();
 
     if (mode === 'preset') {
       const presetId = String(node.params.presetId ?? '');
@@ -202,12 +204,16 @@ function inferNodeOutputProfile(
         estimatedTokens = 128;
       }
     }
+    if (mode === 'binder' || Boolean(lockChain) || contig.includes('/0')) {
+      chainCount = Math.max(chainCount, 2);
+      estimatedTokens = Math.max(estimatedTokens, (tpl?.estimatedTokens ?? 100) + Number(node.params.length ?? 70));
+    }
     if (cond) {
       for (const e of cond.entities) entities.add(e);
       chainCount = Math.max(chainCount, cond.chainCount);
       estimatedTokens = Math.max(estimatedTokens, cond.estimatedTokens);
     }
-    if (tpl && (mode === 'partial' || mode === 'inverse-folding')) {
+    if (tpl && (mode === 'partial' || mode === 'inverse-folding' || mode === 'motif' || mode === 'binder' || mode === 'conditioned')) {
       for (const e of tpl.entities) entities.add(e);
       chainCount = Math.max(chainCount, tpl.chainCount);
       estimatedTokens = Math.max(estimatedTokens, tpl.estimatedTokens);
@@ -220,16 +226,23 @@ function inferNodeOutputProfile(
     };
   } else if (node.adapterId === 'genie3') {
     const cond = upstreamProfileForPort('condition');
-    const tpl = upstreamProfileForPort('template');
-    const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'template');
+    const tpl = upstreamProfileForPort('structure') ?? upstreamProfileForPort('template');
+    const tplEdge = graph.edges.find(
+      (e) => e.toNode === node.id && (e.toPort === 'structure' || e.toPort === 'template'),
+    );
     const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
     const tplBenchId =
       tplNode?.adapterId === 'pdb-input' ? String(tplNode.params.benchmarkId ?? '').trim() : '';
     const tplBench = tplBenchId ? getBenchmarkById(tplBenchId) : undefined;
-    // Direct PDB -> Genie 3 (no explicit Conditioning block) defaults to 2-chain binder design
-    // unless the benchmark target is a single-chain motif scaffold.
-    const autoTemplateChains = tpl && !cond ? (tplBench?.category === 'motif' ? 1 : 2) : 1;
-    const chainCount = Math.max(1, cond?.chainCount ?? 1, autoTemplateChains);
+    const taskMode = String(node.params.taskMode ?? 'unconditional');
+    const inlineLock = String(node.params.lockChain ?? '').trim();
+    const inlineContig = String(node.params.contig ?? '');
+    const isBinderTask =
+      taskMode === 'binder' ||
+      Boolean(inlineLock) ||
+      inlineContig.includes('/0') ||
+      (Boolean(tpl) && !cond && taskMode !== 'motif' && tplBench?.category !== 'motif');
+    const chainCount = Math.max(1, cond?.chainCount ?? 1, isBinderTask ? 2 : 1);
     const binderLen = Number(node.params.length ?? 80);
     const estimatedTokens =
       tpl && !cond
@@ -291,7 +304,9 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
     if (node.adapterId === 'genie3') {
       const condEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'condition');
       const condNode = condEdge ? graph.nodes.find((n) => n.id === condEdge.fromNode) : null;
-      const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'template');
+      const tplEdge = graph.edges.find(
+        (e) => e.toNode === node.id && (e.toPort === 'structure' || e.toPort === 'template'),
+      );
       const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
 
       if (!condNode && tplNode?.adapterId === 'pdb-input') {
@@ -332,7 +347,9 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
 
     if (node.adapterId === 'rfd4-proteina') {
       const mode = String(node.params.mode ?? 'unconditional');
-      const hasTpl = graph.edges.some((e) => e.toNode === node.id && e.toPort === 'template');
+      const hasTpl = graph.edges.some(
+        (e) => e.toNode === node.id && (e.toPort === 'structure' || e.toPort === 'template'),
+      );
       const hasCond = graph.edges.some((e) => e.toNode === node.id && e.toPort === 'condition');
       const hasYaml = String(node.params.customSpecYaml ?? '').trim().length > 0;
       if (hasTpl && !hasCond && mode === 'unconditional' && !hasYaml) {
@@ -340,7 +357,7 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
           severity: 'warning',
           code: 'rfd4-unused-template',
           nodeId: node.id,
-          message: `${node.label ?? 'RFD4-Proteina'} has a wired template structure but is set to Unconditional mode (the template will be ignored). Switch to Partial Diffusion or wire a Conditioning block.`,
+          message: `${node.label ?? 'RFD4-Proteina'} has a wired input structure but is set to Unconditional mode (the structure will be ignored). Pick a task in RFD4 Parameters (Motif, Binder, or Partial Diffusion).`,
           fix: {
             label: 'Switch to Partial Diffusion',
             nodeId: node.id,

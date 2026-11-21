@@ -6,7 +6,11 @@ import MpnnWorker from '$lib/workers/mpnn.worker?worker';
 import LocalFoldWorker from '$lib/workers/localfold.worker?worker';
 import Rfd4Worker from '$lib/workers/rfd4.worker?worker';
 import Genie3Worker from '$lib/workers/genie3.worker?worker';
-import { cropParsedStructure, generateSampleHelixBundlePdb, parseStructureText } from '$lib/protein-ops/pdb';
+import {
+  cropRawAllAtomStructure,
+  generateSampleHelixBundlePdb,
+  parseStructureText,
+} from '$lib/protein-ops/pdb';
 import { fetchStructureByPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
 import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/protein-ops/kabsch';
 import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
@@ -76,30 +80,41 @@ export async function materializePdbInputNode(
     rawText = generateSampleHelixBundlePdb();
     filename = 'demo_3helix_53aa.pdb';
   }
-  let parsed = parseStructureText(rawText);
-  if (parsed.nResidues < 3) {
-    throw new Error('Input PDB/mmCIF must contain at least 3 residues with Cα atoms');
-  }
   const cropSpec = String(node.params.cropSegments ?? '').trim();
   const isCropped = cropSpec.length > 0;
+  let effectiveRawText = rawText;
   if (isCropped) {
-    parsed = cropParsedStructure(parsed, cropSpec);
+    effectiveRawText = cropRawAllAtomStructure(rawText, cropSpec).text;
+  }
+  const parsed = parseStructureText(effectiveRawText);
+  const hasNonProteinContext = parsed.diagnostics.hasLigands || parsed.diagnostics.hasNucleicAcids;
+  if (parsed.nResidues < 3 && !hasNonProteinContext) {
+    throw new Error('Input PDB/mmCIF must contain at least 3 residues with Cα atoms');
   }
   const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
   const benchmarkId = String(node.params.benchmarkId ?? '').trim() || undefined;
+
+  const summaryParts: string[] = [];
+  if (parsed.nResidues > 0) summaryParts.push(`L=${parsed.nResidues}`);
+  if (parsed.diagnostics.ligandNames.length > 0) summaryParts.push(parsed.diagnostics.ligandNames.join('+'));
+  if (parsed.diagnostics.nucleicAcidChains.length > 0) {
+    summaryParts.push(`DNA(${parsed.diagnostics.nucleicAcidChains.join(',')})`);
+  }
+  const summaryTag = summaryParts.join(' · ') || 'context';
+
   return {
     kind: 'StructureArtifact',
     id: `pdb-${fnv1a(`${rawText}::${cropSpec}`)}`,
     label: isCropped
-      ? `${filename} [${cropSpec}] (L=${parsed.nResidues})`
-      : `${filename} (L=${parsed.nResidues})`,
+      ? `${filename} [${cropSpec}] (${summaryTag})`
+      : `${filename} (${summaryTag})`,
     sourceModelId: 'pdb-input',
     length: parsed.nResidues,
     sequence: parsed.sequence,
     caCoords: parsed.caCoords,
     backbone4Coords: parsed.backbone4Coords,
-    pdbText: parsed.pdbText,
-    cifText: !isCropped && parsed.format === 'mmcif' ? rawText : undefined,
+    pdbText: parsed.nResidues > 0 ? parsed.pdbText : effectiveRawText,
+    cifText: parsed.format === 'mmcif' ? effectiveRawText : undefined,
     chainIds: parsed.chainIds,
     chainLengths: parsed.diagnostics.chainLengths,
     diagnostics: parsed.diagnostics,

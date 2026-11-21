@@ -20,6 +20,7 @@
     outputPortsReady?: Record<string, boolean>;
     compareColor?: string;
     compareBadge?: string;
+    activePeekSlotId?: string;
     autoModeHint?: string;
     onDelete?: (nodeId: string) => void;
     onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
@@ -103,18 +104,41 @@
       case 'rfd4-proteina': {
         const mode = String(p.mode ?? 'unconditional');
         const steps = Number(p.nsteps ?? 60);
-        if (mode === 'conditioned') return `Conditioned · ${steps} steps`;
+        if (mode === 'binder') {
+          const hotCount = String(p.hotspots ?? '').split(/[,\s]+/).filter(Boolean).length;
+          const hotTag = hotCount > 0 ? ` · ${hotCount} hotspots` : '';
+          return `Binder${hotTag} · ${steps} steps`;
+        }
+        if (mode === 'motif') {
+          const tag = p.unindexedMotif ? 'Unindexed Motif' : 'Motif';
+          const motif = String(p.motifSpan ?? '').trim();
+          return `${tag}${motif ? ` (${motif})` : ''} · ${steps} steps`;
+        }
+        if (mode === 'conditioned') {
+          const contig = String(p.contig ?? '').trim();
+          return `Conditioned${contig ? ` · ${contig}` : ''} · ${steps} steps`;
+        }
         if (mode === 'preset') {
           const opt = RFD4_BENCHMARK_OPTIONS.find((o) => o.id === String(p.presetId ?? ''));
           return `${opt?.label ?? 'Preset task'} · ${steps} steps`;
         }
-        if (mode === 'partial') return `Partial diffusion (${Number(p.partialFraction ?? 0.5)}) · ${steps} steps`;
+        if (mode === 'partial') return `Partial (${Number(p.partialFraction ?? 0.5)}) · ${steps} steps`;
         if (mode === 'inverse-folding') return `Inverse folding · ${steps} steps`;
-        return `${Number(p.length ?? 70)} aa · ${steps} steps`;
+        const cath = String(p.cathCode ?? '').trim();
+        return `${cath ? `CATH ${cath} · ` : ''}${Number(p.length ?? 70)} aa · ${steps} steps`;
       }
       case 'genie3': {
         const len = Number(p.length ?? 80);
         const steps = Number(p.nSampleStep ?? 100);
+        const tm = String(p.taskMode ?? 'unconditional');
+        if (tm === 'binder') {
+          const hotCount = String(p.hotspots ?? '').split(/[,\s]+/).filter(Boolean).length;
+          return `Binder · ${len} aa${hotCount > 0 ? ` · ${hotCount} hot` : ''} · ${steps} steps`;
+        }
+        if (tm === 'motif') {
+          const motif = String(p.motifSpan ?? '').trim();
+          return `Motif${motif ? ` (${motif})` : ''} · ${steps} steps`;
+        }
         if (data.autoModeHint) return `${data.autoModeHint} · ${len} aa · ${steps} steps`;
         return `${len} aa · ${steps} steps`;
       }
@@ -148,6 +172,18 @@
     }
   });
 
+  let primaryOutputInfo = $derived.by((): { portName: string; is3D: boolean } | null => {
+    const outs = data.outputs;
+    if (!outs) return null;
+    for (const [portName, art] of Object.entries(outs)) {
+      if (art.kind === 'DesignabilityMetrics' || art.kind === 'FoldedStructure' || art.kind === 'StructureArtifact') {
+        return { portName, is3D: true };
+      }
+    }
+    const firstKey = Object.keys(outs)[0];
+    return firstKey ? { portName: firstKey, is3D: false } : null;
+  });
+
   let outputBadge = $derived.by((): string | null => {
     const outs = data.outputs;
     if (!outs) return null;
@@ -163,7 +199,17 @@
         return `${art.candidates.length} seq${art.candidates.length > 1 ? 's' : ''} (${art.candidates[0]?.sequence.length ?? 0} aa)`;
       }
       if (art.kind === 'StructureArtifact') {
-        return `L=${art.length} aa · Rg ${art.geometry.rg.toFixed(1)} Å`;
+        if (art.length === 0) {
+          if (art.diagnostics?.ligandNames?.length) return `Ligand: ${art.diagnostics.ligandNames.join(', ')}`;
+          if (art.diagnostics?.nucleicAcidChains?.length) {
+            return `dsDNA (${art.diagnostics.nucleicAcidChains.join(', ')})`;
+          }
+          return art.label;
+        }
+        const ligTag = art.diagnostics?.ligandNames?.length
+          ? ` + ${art.diagnostics.ligandNames.join(',')}`
+          : '';
+        return `L=${art.length} aa${ligTag} · Rg ${art.geometry.rg.toFixed(1)} Å`;
       }
       if (art.kind === 'ConditionSpec') {
         return art.summary;
@@ -233,6 +279,7 @@
         {@const portLabel = PORT_COLORS[spec.type]?.label ?? spec.type}
         {@const connected = Boolean(data.inputPortsConnected?.[portName])}
         {@const ready = Boolean(data.inputPortsReady?.[portName])}
+        {@const peeking = data.activePeekSlotId === `in:${portName}`}
         <div class="port-row left">
           <Handle
             type="target"
@@ -240,12 +287,13 @@
             id={portName}
             style={connected
               ? 'background: transparent; border: none; width: 8px; height: 12px; left: -1px;'
-              : `background: ${color}; border: 1.5px solid var(--bg-surface); width: 8px; height: 8px; left: -4px;`}
+              : `background: ${color}; border: 1.5px solid ${peeking ? 'var(--text-primary)' : 'var(--bg-surface)'}; width: ${peeking ? 9 : 8}px; height: ${peeking ? 9 : 8}px; left: -4px;`}
           />
           <button
             type="button"
             class="port-label port-btn"
             class:ready
+            class:peeking
             title={`Click to inspect input "${portName}" (${portLabel})${spec.required === false ? ' [optional]' : ''}`}
             onclick={(e) => {
               e.stopPropagation();
@@ -263,11 +311,13 @@
         {@const color = PORT_COLORS[spec.type]?.bg ?? '#94a3b8'}
         {@const portLabel = PORT_COLORS[spec.type]?.label ?? spec.type}
         {@const ready = Boolean(data.outputPortsReady?.[portName])}
+        {@const peeking = data.activePeekSlotId === `out:${portName}`}
         <div class="port-row right">
           <button
             type="button"
             class="port-label port-btn"
             class:ready
+            class:peeking
             title={`Click to inspect output "${portName}" (${portLabel})`}
             onclick={(e) => {
               e.stopPropagation();
@@ -280,7 +330,7 @@
             type="source"
             position={Position.Right}
             id={portName}
-            style="background: {color}; border: 1.5px solid var(--bg-surface); width: 8px; height: 8px; right: -4px;"
+            style={`background: ${color}; border: 1.5px solid ${peeking ? 'var(--text-primary)' : 'var(--bg-surface)'}; width: ${peeking ? 9 : 8}px; height: ${peeking ? 9 : 8}px; right: -4px;`}
           />
         </div>
       {/each}
@@ -297,10 +347,31 @@
     {:else if st?.status === 'error'}
       <div class="status-line err-text" title={st.error}>{st.error ?? 'Error'}</div>
     {:else if outputBadge}
-      <div class="status-line ok-text">
-        {#if st?.status === 'cached'}<span class="cache-tag">CACHED</span>{/if}
-        {outputBadge}
-      </div>
+      <button
+        type="button"
+        class="status-line ok-text probe-footer-btn"
+        title={primaryOutputInfo?.is3D
+          ? 'Click to probe & view this 3D structure in the viewport'
+          : 'Click to inspect this block’s output'}
+        onclick={(e) => {
+          e.stopPropagation();
+          if (primaryOutputInfo) {
+            data.onPeekPort?.(id, 'out', primaryOutputInfo.portName);
+          }
+        }}
+      >
+        <span class="probe-badge-text">
+          {#if st?.status === 'cached'}<span class="cache-tag">CACHED</span>{/if}
+          {outputBadge}
+        </span>
+        <span class="probe-pill" aria-hidden="true">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+            <path d="M1.5 8C3 4.8 5.3 3.2 8 3.2C10.7 3.2 13 4.8 14.5 8C13 11.2 10.7 12.8 8 12.8C5.3 12.8 3 11.2 1.5 8Z" stroke="currentColor" stroke-width="1.5"/>
+            <circle cx="8" cy="8" r="2.2" fill="currentColor"/>
+          </svg>
+          {primaryOutputInfo?.is3D ? '3D' : 'Peek'}
+        </span>
+      </button>
     {:else if isNodeQueued}
       <div class="status-line queued-text">queued…</div>
     {:else}
@@ -628,6 +699,15 @@
   .port-btn.ready {
     color: var(--text-primary);
   }
+  .port-btn.peeking {
+    color: var(--text-primary);
+    font-weight: 700;
+    background: var(--bg-surface-2);
+    border: 1.5px solid var(--text-primary);
+    border-radius: 999px;
+    padding: 0 6px;
+    line-height: 16px;
+  }
   .ready-dot {
     width: 5px;
     height: 5px;
@@ -657,6 +737,45 @@
   }
   .status-line.ok-text {
     color: var(--ok-text);
+  }
+  .probe-footer-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    width: 100%;
+    padding: 1px 0;
+    margin: 0;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+  }
+  .probe-badge-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .probe-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--accent-bright);
+    background: var(--bg-pill);
+    border: 1px solid var(--border);
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+  .probe-footer-btn:hover .probe-pill {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
   }
   .status-line.err-text {
     color: var(--err-strong);
