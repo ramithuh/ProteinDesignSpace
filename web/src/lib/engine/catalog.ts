@@ -7,6 +7,7 @@ import {
   MPNN_VARIANT_OPTIONS,
   RFD4_BENCHMARK_OPTIONS,
 } from './registry';
+import { BENCHMARK_TARGETS } from './benchmarks';
 import { PORT_COLORS } from './graph-utils';
 
 export interface CatalogInsertRequest {
@@ -201,11 +202,11 @@ function buildSubGroupsForAdapter(adapterId: string): {
     const customItem: CatalogSubItem = {
       key: 'custom',
       label: 'Custom Conditioning Builder',
-      subtitle: 'Define custom binding hotspots, structural constraints & fold topology',
+      subtitle: 'Define binding hotspots, fixed motifs & fold topology (RFD4 & Genie 3)',
       insert: {
         adapterId: 'rfd4-conditioner',
         params: { taskPreset: 'custom' },
-        label: 'RFD4 Condition',
+        label: 'Conditioning',
       },
       searchBlob: 'custom conditioning builder hotspots cath hbond h-bond',
     };
@@ -265,7 +266,9 @@ export const CATALOG_ITEMS: CatalogItem[] = CATALOG_STAGE_GROUPS.flatMap((grp) =
         m.displayName.replace(/\s*\([^)]*\)/g, ''),
         m.stage,
         grp.title,
+        id === 'rfd4-conditioner' ? 'rfd4' : '',
       ]
+        .filter(Boolean)
         .join(' ')
         .toLowerCase();
 
@@ -341,15 +344,62 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         searchBlob: `${seq.id} ${seq.shortName} ${seq.displayName} ${CONCISE_BLOCK_ROLES['sequence-input']} fasta amino acid sequence input`.toLowerCase(),
       },
     ];
-    const subGroups: CatalogSubGroup[] = [{ title: 'Starting Inputs', items }];
-    const identityBlob = 'inputs input source pdb sequence fasta mmcif';
-    const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
+    const motifBenchItems: CatalogSubItem[] = BENCHMARK_TARGETS.filter(
+      (b) => b.category === 'motif' || b.category === 'enzyme-ligand',
+    ).map((b) => ({
+      key: `bench-${b.id}`,
+      label: b.shortLabel,
+      subtitle: b.biology,
+      meta: `${b.sourceFamily} · ~${b.approxTokens} tok`,
+      badge: b.tier === 'fast' ? 'Fast' : 'Standard',
+      insert: {
+        adapterId: 'pdb-input',
+        params: {
+          mode: 'pdb-id',
+          pdbId: b.pdbId,
+          filename: `${b.pdbId}.cif`,
+          pdbText: '',
+        },
+        label: `PDB: ${b.name} (${b.pdbId})`,
+      },
+      searchBlob: `${b.id} ${b.name} ${b.shortLabel} ${b.pdbId} ${b.biology} benchmark motif enzyme ligand dna`.toLowerCase(),
+    }));
+
+    const binderBenchItems: CatalogSubItem[] = BENCHMARK_TARGETS.filter(
+      (b) => b.category === 'binder',
+    ).map((b) => ({
+      key: `bench-${b.id}`,
+      label: b.shortLabel,
+      subtitle: b.biology,
+      meta: `${b.sourceFamily} · ~${b.approxTokens} tok`,
+      badge: b.tier === 'fast' ? 'Fast' : 'Standard',
+      insert: {
+        adapterId: 'pdb-input',
+        params: {
+          mode: 'pdb-id',
+          pdbId: b.pdbId,
+          filename: `${b.pdbId}.cif`,
+          pdbText: '',
+        },
+        label: `PDB: ${b.name} (${b.pdbId})`,
+      },
+      searchBlob: `${b.id} ${b.name} ${b.shortLabel} ${b.pdbId} ${b.biology} benchmark ppi binder target`.toLowerCase(),
+    }));
+
+    const subGroups: CatalogSubGroup[] = [
+      { title: 'Starting Inputs', items },
+      { title: 'Benchmark Targets · PPI Binders', items: binderBenchItems },
+      { title: 'Benchmark Targets · Motifs, Enzymes & Ligands', items: motifBenchItems },
+    ];
+    const allItems = [...items, ...binderBenchItems, ...motifBenchItems];
+    const identityBlob = 'inputs input source pdb sequence fasta mmcif benchmark';
+    const searchBlob = `${identityBlob} ${allItems.map((i) => i.searchBlob).join(' ')}`;
     return {
       id: 'inputs',
       title: 'Inputs',
       stage: 'source',
-      subtitle: 'PDB / mmCIF structures & FASTA sequences',
-      countLabel: `${items.length}`,
+      subtitle: 'PDB / mmCIF, FASTA & curated benchmark targets',
+      countLabel: `${allItems.length}`,
       subGroups,
       identityBlob,
       searchBlob,
@@ -366,7 +416,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
       stage: 'condition',
       subtitle: 'Binding hotspots, motifs, H-bonds & CATH folds',
       countLabel: `${total}`,
-      footnote: 'Powered by RFD4-Proteina conditioning',
+      footnote: 'Works with RFD4-Proteina & Genie 3 (motif / binder)',
       subGroups: cond.subGroups,
       identityBlob,
       searchBlob,

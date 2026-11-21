@@ -11,6 +11,7 @@ import { fetchStructureByPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
 import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/protein-ops/kabsch';
 import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
 import { splitMultiChainSequence, validateRuntimeNodeInputs } from './bio-capabilities';
+import { buildCanonicalConditionIntent, compileConditionToRfd4 } from './conditioning';
 import type {
   ArtifactRef,
   CanonicalArtifact,
@@ -396,79 +397,16 @@ export class ExecutionScheduler {
         return { condition: art };
       }
 
-      const contig = String(p.contig ?? '70-70').trim() || '70-70';
-      const conditions: Record<string, unknown> = {};
-      const tags: string[] = [contig];
-
-      const lockChain = String(p.lockChain ?? '').trim();
-      if (lockChain) {
-        const ch = lockChain[0].toUpperCase();
-        conditions.C_CRD = { true: [{ select: `sel('${ch}/*/*/*')` }] };
-        conditions.C_SEQ = { true: [{ select: `sel('${ch}/*/*/*')` }] };
-        tags.push(`lock:${ch}`);
-      }
-
-      const hotspots = String(p.hotspots ?? '').trim();
-      if (hotspots) {
-        // Group residues by chain (e.g. "A54, A56, A66" -> sel('A/*/[54,56,66]/*'))
-        const byChain = new Map<string, string[]>();
-        for (const tok of hotspots.split(/[,\s]+/).filter(Boolean)) {
-          const m = /^([A-Za-z])?:?(\d+(?:-\d+)?)$/.exec(tok);
-          if (!m) continue;
-          const ch = (m[1] || 'A').toUpperCase();
-          const list = byChain.get(ch) ?? [];
-          list.push(m[2]);
-          byChain.set(ch, list);
-        }
-        const exprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/[${nums.join(',')}]/*')`);
-        if (exprs.length > 0) {
-          conditions.C_HOT = { true: [{ select: exprs.join(' | ') }] };
-          tags.push(`hot:${hotspots}`);
-        }
-      }
-
-      const motifSpan = String(p.motifSpan ?? '').trim();
-      if (motifSpan) {
-        const byChain = new Map<string, string[]>();
-        for (const tok of motifSpan.split(/[,\s]+/).filter(Boolean)) {
-          const m = /^([A-Za-z])?:?(\d+(?:-\d+)?)$/.exec(tok);
-          if (!m) continue;
-          const ch = (m[1] || 'A').toUpperCase();
-          const list = byChain.get(ch) ?? [];
-          list.push(m[2]);
-          byChain.set(ch, list);
-        }
-        const exprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/[${nums.join(',')}]/*')`);
-        if (exprs.length > 0) {
-          const sel = exprs.join(' | ');
-          conditions.C_CRDGRP = { 1: [{ select: sel }] };
-          const prevSeqTrue = (conditions.C_SEQ as { true?: Array<{ select: string }> } | undefined)?.true ?? [];
-          conditions.C_SEQ = { true: [...prevSeqTrue, { select: sel }] };
-          if (p.unindexedMotif) conditions.C_IDX = { false: [{ select: sel, group: 'motif' }] };
-          tags.push(p.unindexedMotif ? `unidx-motif:${motifSpan}` : `motif:${motifSpan}`);
-        }
-      }
-
-      const hbondMode = String(p.hbondMode ?? 'none');
-      const hbondSel = String(p.hbondSelection ?? '').trim();
-      if (hbondMode !== 'none' && hbondSel) {
-        const expr = hbondSel.includes('sel(') ? hbondSel : `sel('${hbondSel}')`;
-        conditions.C_HB = { [hbondMode]: [{ select: expr }] };
-        tags.push(`HB:${hbondMode}`);
-      }
-
-      const cathCode = String(p.cathCode ?? '').trim();
-      if (cathCode) {
-        conditions.C_CATH = { [cathCode]: [{ select: "sel('*/*/*/*')" }] };
-        tags.push(`CATH:${cathCode}`);
-      }
+      const intent = buildCanonicalConditionIntent(p);
+      const { contig, conditions, tags } = compileConditionToRfd4(intent);
 
       const art: ConditionSpecArtifact = {
         kind: 'ConditionSpec',
-        id: `cond-${fnv1a(JSON.stringify({ contig, conditions, tpl: template?.id }))}`,
+        id: `cond-${fnv1a(JSON.stringify({ intent, tpl: template?.id }))}`,
         label: tags.join(' · '),
         contig,
         conditions,
+        intent,
         inputCif: template?.cifText ?? template?.pdbText,
         specMode: true,
         summary: tags.join(' · '),

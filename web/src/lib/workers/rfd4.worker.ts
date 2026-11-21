@@ -7,6 +7,7 @@
 import { AA3_TO_AA1, parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { fetchCachedBytes } from '$lib/engine/opfs-cache';
+import { compileConditionToRfd4 } from '$lib/engine/conditioning';
 import type { ConditionSpecArtifact, SequenceSet, StructureArtifact } from '$lib/engine/types';
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -302,8 +303,12 @@ self.onmessage = async (ev: MessageEvent) => {
             genOpts.partialTrajectoryFractionSteps = cond.partialFraction;
           }
           if (cond.inverseFolding) genOpts.inverseFolding = true;
+          const compiled =
+            cond.intent && Object.keys(cond.conditions ?? {}).length === 0
+              ? compileConditionToRfd4(cond.intent)
+              : { contig: cond.contig, conditions: cond.conditions ?? {} };
           built = rfd4Mod.buildBatch(
-            { contig: cond.contig, conditions: cond.conditions ?? {} },
+            { contig: compiled.contig, conditions: compiled.conditions },
             { inputCif, seed },
           );
         }

@@ -128,12 +128,27 @@ export interface DesignabilityMetrics {
   passRate: number;
 }
 
+export interface CanonicalConditionIntent {
+  contig: string;
+  lockChain?: string;
+  hotspots?: string[];
+  motifSpans?: string[];
+  unindexedMotif?: boolean;
+  hbondMode?: 'none' | 'ACCEPTOR' | 'DONOR' | 'BOTH';
+  hbondSelection?: string;
+  cathCode?: string;
+  benchmarkId?: string;
+  pdbId?: string;
+}
+
 export interface ConditionSpecArtifact {
   kind: 'ConditionSpec';
   id: string;
   label: string;
   contig: string;
   conditions: Record<string, unknown>;
+  /** Model-agnostic canonical conditioning intent (compiled per generator in RFD4 & Genie 3). */
+  intent?: CanonicalConditionIntent;
   /** Optional remote .cif.zst / .cif URL (e.g. RFD4 upstream benchmark context). */
   cifUrl?: string | null;
   /** Optional inline PDB/mmCIF structure text from upstream template. */

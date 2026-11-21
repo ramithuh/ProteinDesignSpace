@@ -5,7 +5,8 @@
 
 import { parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
-import type { SequenceSet, StructureArtifact } from '$lib/engine/types';
+import { compileConditionToGenie3Spec } from '$lib/engine/conditioning';
+import type { ConditionSpecArtifact, SequenceSet, StructureArtifact } from '$lib/engine/types';
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -127,11 +128,35 @@ self.onmessage = async (ev: MessageEvent) => {
       const noiseScale = Math.max(0, Math.min(1.5, Number(p.noiseScale ?? 1.0)));
       const predictSequence = p.predictSequence !== false;
       const seed = Math.max(0, Math.round(Number(p.seed ?? 42)));
+      const condArtifact = msg.inputs?.condition as ConditionSpecArtifact | undefined;
+      const template = msg.inputs?.template as StructureArtifact | undefined;
 
       await ensureLoaded(msg.id);
 
+      let batch: Record<string, unknown> | undefined;
+      let compiledSummary = '';
+      let expectedChainLengths: number[] | undefined;
+      if (condArtifact) {
+        const compiled = compileConditionToGenie3Spec(condArtifact, template, length);
+        batch = genie3Mod.createFeaturesFromSpec({
+          length: compiled.length,
+          asymId: compiled.asymId,
+          symId: compiled.symId,
+          entityId: compiled.entityId,
+          residueIndex: compiled.residueIndex,
+          condGroup: compiled.condGroup,
+          condSeqMask: compiled.condSeqMask,
+          condStructMask: compiled.condStructMask,
+          condInterfaceMask: compiled.condInterfaceMask,
+          gtRestype: compiled.gtRestype,
+          gtAtomPositions: compiled.gtAtomPositions,
+        });
+        compiledSummary = compiled.summary;
+        expectedChainLengths = compiled.chainLengths;
+      }
+
       const res = await generator.generate({
-        length,
+        ...(batch ? { batch } : { length }),
         nSampleStep,
         directionScale,
         noiseScale,
@@ -160,14 +185,32 @@ self.onmessage = async (ev: MessageEvent) => {
           : parsed.sequence;
 
       const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
+      const candChainLengths =
+        expectedChainLengths && expectedChainLengths.length > 1 &&
+        expectedChainLengths.reduce((a, b) => a + b, 0) === finalSeq.length
+          ? expectedChainLengths
+          : parsed.diagnostics.chainLengths.length > 1
+            ? parsed.diagnostics.chainLengths
+            : undefined;
       const runHash = fnv1a(
-        JSON.stringify({ length, nSampleStep, directionScale, noiseScale, predictSequence, seed }),
+        JSON.stringify({
+          length,
+          nSampleStep,
+          directionScale,
+          noiseScale,
+          predictSequence,
+          seed,
+          condId: condArtifact?.id ?? null,
+          templateId: template?.id ?? null,
+        }),
       );
 
       const structArtifact: StructureArtifact = {
         kind: 'StructureArtifact',
         id: `genie3-L${parsed.nResidues}-s${seed}-${runHash}`,
-        label: `Genie 3 (L=${parsed.nResidues}, ${res.stepsRun} DDIM steps)`,
+        label: compiledSummary
+          ? `Genie 3 (${compiledSummary}, ${res.stepsRun} steps)`
+          : `Genie 3 (L=${parsed.nResidues}, ${res.stepsRun} DDIM steps)`,
         sourceModelId: 'genie3',
         length: parsed.nResidues,
         sequence: finalSeq,
@@ -176,7 +219,7 @@ self.onmessage = async (ev: MessageEvent) => {
         pdbText,
         cifText,
         chainIds: parsed.chainIds,
-        chainLengths: parsed.diagnostics.chainLengths,
+        chainLengths: candChainLengths ?? parsed.diagnostics.chainLengths,
         diagnostics: parsed.diagnostics,
         geometry,
       };
@@ -194,6 +237,7 @@ self.onmessage = async (ev: MessageEvent) => {
             globalScore: null,
             sourceModelId: 'genie3',
             seed,
+            ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
           },
         ],
       };

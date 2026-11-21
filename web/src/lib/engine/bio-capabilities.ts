@@ -5,10 +5,12 @@
 
 import { LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { parseStructureText } from '$lib/protein-ops/pdb';
+import { checkGenie3ConditionCompatibility } from './conditioning';
 import type {
   BioCompatibilityIssue,
   BioEntityKind,
   CanonicalArtifact,
+  ConditionSpecArtifact,
   SequenceSet,
   StructureArtifact,
   WorkflowGraph,
@@ -199,11 +201,19 @@ function inferNodeOutputProfile(
       estimatedTokens,
     };
   } else if (node.adapterId === 'genie3') {
+    const cond = upstreamProfileForPort('condition');
+    const tpl = upstreamProfileForPort('template');
+    const chainCount = Math.max(1, cond?.chainCount ?? 1);
+    const estimatedTokens = Math.max(
+      Number(node.params.length ?? 80),
+      cond?.estimatedTokens ?? 0,
+      tpl?.estimatedTokens ?? 0,
+    );
     profile = {
       entities: new Set<BioEntityKind>(['protein']),
-      stoichiometry: 'monomer',
-      chainCount: 1,
-      estimatedTokens: Number(node.params.length ?? 80),
+      stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
+      chainCount,
+      estimatedTokens,
     };
   } else if (node.adapterId === 'web-protein-mpnn') {
     const st = upstreamProfileForPort('structure');
@@ -248,6 +258,32 @@ export function validateBioCapabilities(graph: WorkflowGraph): BioCompatibilityI
         nodeId: node.id,
         message: `${node.label ?? 'Sequence Input'} contains only A/C/G/T characters — make sure this is a protein sequence, not raw DNA.`,
       });
+    }
+
+    if (node.adapterId === 'genie3') {
+      const condEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'condition');
+      const condNode = condEdge ? graph.nodes.find((n) => n.id === condEdge.fromNode) : null;
+      if (condNode && condNode.adapterId === 'rfd4-conditioner') {
+        const tp = String(condNode.params.taskPreset ?? 'custom');
+        const hbond = String(condNode.params.hbondMode ?? 'none');
+        const cath = String(condNode.params.cathCode ?? '').trim();
+        const unidx = Boolean(condNode.params.unindexedMotif);
+        const upCond = inferNodeOutputProfile(condNode, graph, cache, visiting);
+        const reasons: string[] = [];
+        if (tp !== 'custom') reasons.push(`RFD4 preset "${tp}"`);
+        if (upCond.entities.has('ligand') || upCond.entities.has('dna')) reasons.push('ligand/DNA targets');
+        if (hbond !== 'none') reasons.push('H-bond atom constraints');
+        if (cath) reasons.push(`CATH fold "${cath}"`);
+        if (unidx) reasons.push('unindexed motif placement');
+        if (reasons.length > 0) {
+          issues.push({
+            severity: 'warning',
+            code: 'genie3-unsupported-condition',
+            nodeId: node.id,
+            message: `${node.label ?? 'Genie 3'} supports protein motif scaffolding and PPI binder design, not ${reasons.join(', ')}. Use RFD4-Proteina for those constraints.`,
+          });
+        }
+      }
     }
 
     if (node.adapterId === 'web-protein-mpnn') {
@@ -362,6 +398,16 @@ export function validateRuntimeNodeInputs(
         warnings.push(
           `Folding ${cand.chainLengths.length}-chain complex (${cand.chainLengths.join(' + ')} aa) with AF2 monomer (using unpaired multi-chain A3M); consider AF2-Multimer v3 or Boltz-2 for accurate interface scoring.`,
         );
+      }
+    }
+  }
+
+  if (node.adapterId === 'genie3') {
+    const cond = inputs.condition as ConditionSpecArtifact | undefined;
+    if (cond) {
+      const compat = checkGenie3ConditionCompatibility(cond);
+      if (!compat.supported) {
+        throw new Error(compat.reason ?? 'Conditioning spec is not supported by Genie 3.');
       }
     }
   }

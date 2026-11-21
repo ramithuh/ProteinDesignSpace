@@ -19,6 +19,7 @@
     fetchStructureByPdbId,
     normalizePdbId,
   } from '$lib/protein-ops/rcsb';
+  import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
   import NumericInput from './NumericInput.svelte';
   import type { WorkflowNode } from '$lib/engine/types';
 
@@ -72,7 +73,7 @@
         return `${famMeta.label} · ${ckpt}`;
       }
       case 'rfd4-conditioner':
-        return 'Hotspots, motifs, H-bonds & fold topology';
+        return 'Model-agnostic hotspots, motifs, H-bonds & fold topology';
       case 'designability-scorer':
         return 'Kabsch alignment · scRMSD / scTM';
       case 'pdb-input':
@@ -260,6 +261,35 @@
               </button>
             {/each}
           </div>
+          <label class="bench-pick">
+            <span>Or pick a curated benchmark target</span>
+            <select
+              disabled={disabled || pdbFetchBusy}
+              value=""
+              onchange={(e) => {
+                const picked = e.currentTarget.value;
+                if (picked) void handleFetchPdbId(picked);
+                e.currentTarget.value = '';
+              }}
+            >
+              <option value="">Select a curated benchmark PDB…</option>
+              <optgroup label="PPI Binders (RFdiffusion / Genie 3 / BindCraft)">
+                {#each BENCHMARK_TARGETS.filter((b) => b.category === 'binder') as b (b.id)}
+                  <option value={b.pdbId}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
+                {/each}
+              </optgroup>
+              <optgroup label="Motif Scaffolding (RFdiffusion / MotifBench)">
+                {#each BENCHMARK_TARGETS.filter((b) => b.category === 'motif') as b (b.id)}
+                  <option value={b.pdbId}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
+                {/each}
+              </optgroup>
+              <optgroup label="AME Enzymes, Ligands & DNA (RFD4 All-Atom)">
+                {#each BENCHMARK_TARGETS.filter((b) => b.category === 'enzyme-ligand') as b (b.id)}
+                  <option value={b.pdbId}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
+                {/each}
+              </optgroup>
+            </select>
+          </label>
           {#if pdbFetchError}
             <span class="field-hint err">{pdbFetchError}</span>
           {:else if pdbFetchSummary}
@@ -361,6 +391,59 @@
       {#if taskPresetId === 'custom'}
         {@const contigVal = String(node.params.contig ?? '70-70')}
         {@const rawJsonCheck = validateJsonOverride(String(node.params.rawJsonOverride ?? ''))}
+        {@const activeBench = getBenchmarkById(String(node.params.benchmarkId ?? ''))}
+        <label class="full">
+          Load Curated Benchmark Spec (optional)
+          <select
+            {disabled}
+            value={String(node.params.benchmarkId ?? '')}
+            onchange={(e) => {
+              const id = e.currentTarget.value;
+              const b = getBenchmarkById(id);
+              if (!b) {
+                setParam('benchmarkId', '');
+                return;
+              }
+              onUpdate(node.id, {
+                ...node.params,
+                benchmarkId: b.id,
+                pdbId: b.pdbId,
+                taskPreset: b.conditionParams.taskPreset,
+                contig: b.conditionParams.contig,
+                lockChain: b.conditionParams.lockChain ?? '',
+                hotspots: b.conditionParams.hotspots ?? '',
+                motifSpan: b.conditionParams.motifSpan ?? '',
+                unindexedMotif: Boolean(b.conditionParams.unindexedMotif),
+                hbondMode: b.conditionParams.hbondMode ?? 'none',
+                hbondSelection: b.conditionParams.hbondSelection ?? '',
+                cathCode: '',
+                rawJsonOverride: '',
+              });
+            }}
+          >
+            <option value="">— Custom parameters below —</option>
+            <optgroup label="PPI Binders (RFD4 & Genie 3)">
+              {#each BENCHMARK_TARGETS.filter((b) => b.category === 'binder') as b (b.id)}
+                <option value={b.id}>{b.shortLabel} · ~{b.approxTokens} tok</option>
+              {/each}
+            </optgroup>
+            <optgroup label="Motif Scaffolding (RFD4 & Genie 3)">
+              {#each BENCHMARK_TARGETS.filter((b) => b.category === 'motif') as b (b.id)}
+                <option value={b.id}>{b.shortLabel} · ~{b.approxTokens} tok</option>
+              {/each}
+            </optgroup>
+            <optgroup label="AME Enzymes, Ligands & DNA (RFD4 All-Atom)">
+              {#each BENCHMARK_TARGETS.filter((b) => b.category === 'enzyme-ligand') as b (b.id)}
+                <option value={b.id}>{b.shortLabel} · ~{b.approxTokens} tok</option>
+              {/each}
+            </optgroup>
+          </select>
+          {#if activeBench}
+            <span class="field-hint">
+              {activeBench.biology} · Wire PDB <code>{activeBench.pdbId}</code> into <code>template</code> · {activeBench.supportsGenie3 ? 'Compatible with RFD4 & Genie 3' : 'RFD4 all-atom only'}
+            </span>
+          {/if}
+        </label>
         <label class="full">
           Contig (e.g. <code>70-70</code>, <code>A18-132,/0,70-70</code>)
           <input
@@ -1186,6 +1269,16 @@
   .quick-chip:disabled {
     opacity: 0.45;
     cursor: not-allowed;
+  }
+  .bench-pick {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 2px;
+  }
+  .bench-pick span {
+    font-size: 10px;
+    color: var(--text-dim);
   }
   textarea {
     width: 100%;

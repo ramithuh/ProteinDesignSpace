@@ -365,6 +365,7 @@ export interface ParsedStructure {
   caCoords: Float32Array;
   backbone4Coords: Float32Array;
   chainIds: string[];
+  resNums: number[];
   pdbText: string;
   format: 'pdb' | 'mmcif';
   diagnostics: StructureParseDiagnostics;
@@ -567,12 +568,17 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
   }
 
   const chainLengths = computeChainLengthsFromIds(chainIds);
+  const resNums = valid.map((r, i) => {
+    const parsedNum = parseInt(r.resSeqCol.trim(), 10);
+    return Number.isFinite(parsedNum) ? parsedNum : i + 1;
+  });
   return {
     sequence: seq,
     nResidues: L,
     caCoords,
     backbone4Coords,
     chainIds,
+    resNums,
     pdbText: normalizedPdb,
     format: 'pdb',
     diagnostics: {
@@ -727,6 +733,10 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     caCoords,
     backbone4Coords,
     chainIds,
+    resNums: resSeqs.map((s, i) => {
+      const n = parseInt(s, 10);
+      return Number.isFinite(n) ? n : i + 1;
+    }),
     pdbText,
     format: 'mmcif',
     diagnostics: {

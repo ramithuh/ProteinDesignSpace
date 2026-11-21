@@ -37,15 +37,15 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
   },
   'rfd4-conditioner': {
     id: 'rfd4-conditioner',
-    displayName: 'RFD4 Conditioning (Hotspots / Motif / H-Bond)',
-    shortName: 'RFD4 Condition',
+    displayName: 'Design Conditioning (Hotspots / Motif / Fold)',
+    shortName: 'Conditioning',
     stage: 'condition',
     runtime: 'cpu-ts',
     estimatedVramMB: 0,
     approxWeightsMB: 0,
-    licenseNote: 'RFD4-Proteina constraint builder',
+    licenseNote: 'Model-agnostic constraint builder (RFD4-Proteina & Genie 3)',
     description:
-      'Define target binding hotspots, fixed structural motifs (indexed or unindexed), hydrogen-bond contacts, CATH fold topology, or benchmark design tasks.',
+      'Define target binding hotspots, fixed structural motifs (indexed or unindexed), hydrogen-bond contacts, CATH fold topology, or curated benchmark tasks for RFD4-Proteina and Genie 3.',
     inputs: {
       template: { type: 'StructureArtifact', required: false },
     },
@@ -83,8 +83,11 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 45,
     licenseNote: 'Apache-2.0 (aqlaboratory/genie3 · WebGPU port ramithuh/genie3-webgpu)',
     description:
-      'Fast de novo protein backbone diffusion (AlQuraishi Lab · 23.3M parameters). Reconstructs ideal N/Cα/C/O backbones with optional single-step sequence prediction.',
-    inputs: {},
+      'Fast de novo protein backbone diffusion (AlQuraishi Lab · 23.3M parameters). Supports unconditional generation, motif scaffolding, and PPI binder design with ideal N/Cα/C/O backbones and optional single-step sequence prediction.',
+    inputs: {
+      template: { type: 'StructureArtifact', required: false },
+      condition: { type: 'ConditionSpec', required: false },
+    },
     outputs: {
       structure: { type: 'StructureArtifact' },
       sequences: { type: 'SequenceSet' },
