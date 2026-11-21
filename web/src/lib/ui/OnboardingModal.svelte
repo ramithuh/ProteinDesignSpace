@@ -424,6 +424,17 @@
         </div>
       </div>
 
+      <div class="gpu-notice" role="note">
+        <svg class="warn-ico" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M10 2.6L18.2 16.8C18.55 17.4 18.12 18.15 17.42 18.15H2.58C1.88 18.15 1.45 17.4 1.8 16.8L10 2.6Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+          <path d="M10 7.6V11.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          <circle cx="10" cy="14.7" r="1" fill="currentColor"/>
+        </svg>
+        <span>
+          <b>GPU heads-up:</b> Initial model setup and structure prediction may take a moment and use GPU memory; weights stay cached for future runs.
+        </span>
+      </div>
+
       <div class="onb-footer">
         <button type="button" class="btn-skip" onclick={onDismiss}>
           Skip &amp; explore
@@ -689,6 +700,30 @@
     border-radius: 50%;
     flex-shrink: 0;
     margin-top: 5px;
+  }
+
+  .gpu-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    padding: 9px 12px;
+    border-radius: 9px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-text);
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+
+  .gpu-notice b {
+    font-weight: 600;
+  }
+
+  .warn-ico {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    margin-top: 1px;
   }
 
   .onb-footer {
