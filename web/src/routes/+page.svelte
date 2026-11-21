@@ -380,19 +380,19 @@
     selectedPresetId = 'tour-starter';
     graph = autoLayoutGraph({
       id: 'tour-starter',
-      name: 'First Designability Pipeline',
+      name: 'De Novo Design with Genie 3',
       nodes: [
         {
-          id: 'pdb_1',
-          adapterId: 'pdb-input',
-          label: 'PDB Input',
-          params: defaultParamsForAdapter('pdb-input'),
+          id: 'genie3_1',
+          adapterId: 'genie3',
+          label: 'Genie 3',
+          params: { ...defaultParamsForAdapter('genie3'), length: 70, nSampleStep: 50 },
           position: { x: 60, y: 120 },
         },
       ],
       edges: [],
     });
-    setSingleSelection('pdb_1');
+    setSingleSelection('genie3_1');
     nodeStates = {};
     outputsByNode = {};
     runError = null;
@@ -412,7 +412,9 @@
         ? (graph.nodes.find((n) => n.adapterId === 'localfold-af2')?.id ?? selectedNodeId)
         : adapterId === 'localfold-af2'
           ? (graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn')?.id ?? selectedNodeId)
-          : (graph.nodes.find((n) => n.adapterId === 'pdb-input')?.id ?? selectedNodeId);
+          : (graph.nodes.find((n) => n.adapterId === 'genie3')?.id ??
+            graph.nodes.find((n) => n.adapterId === 'pdb-input')?.id ??
+            selectedNodeId);
 
     const { graph: nextGraph, nodeId } = insertBlockSmart(
       $state.snapshot(graph) as WorkflowGraph,

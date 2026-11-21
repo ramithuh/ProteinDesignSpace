@@ -528,7 +528,7 @@
       {#if subStage === 'item'}
         <div class="coach-title">Click <b>SolubleMPNN</b></div>
         <p class="coach-body">
-          Click the highlighted model to insert it onto the canvas — it automatically connects to your starter <b>PDB Input</b>.
+          Click to design sequences for your de novo <b>Genie 3</b> backbone — it connects automatically.
         </p>
       {:else if subStage === 'category'}
         <div class="coach-title">Hover <b>Sequence Design ›</b></div>
@@ -538,7 +538,7 @@
       {:else}
         <div class="coach-title">1. Click <b>+ Add Block</b></div>
         <p class="coach-body">
-          We placed a starter <b>PDB Input</b> on the canvas. Click <b>+ Add Block</b> (or press <kbd>/</kbd>) to add sequence design next.
+          We placed <b>Genie 3</b> on the canvas to generate a de novo backbone. Click <b>+ Add Block</b> (or press <kbd>/</kbd>) to add sequence design next.
         </p>
       {/if}
       <div class="coach-actions">
@@ -553,7 +553,7 @@
       {#if subStage === 'item'}
         <div class="coach-title">Click <b>AlphaFold2 · Model 1</b></div>
         <p class="coach-body">
-          Click to add structure prediction and wire it directly to SolubleMPNN's output sequences.
+          Click to refold SolubleMPNN's designed sequences and check whether they adopt the Genie 3 backbone.
         </p>
       {:else if subStage === 'category'}
         <div class="coach-title">Hover <b>Structure Prediction ›</b></div>
@@ -578,7 +578,7 @@
       {#if subStage === 'item'}
         <div class="coach-title">Click <b>scRMSD / scTM</b></div>
         <p class="coach-body">
-          Click to drop the designability scorer — it automatically wires both your input backbone and predicted folds.
+          Click to drop the designability scorer — it wires both your Genie 3 backbone and predicted folds automatically.
         </p>
       {:else if subStage === 'category'}
         <div class="coach-title">Hover <b>Evaluation ›</b></div>
@@ -599,11 +599,10 @@
       </div>
 
     {:else if step === 'inspect-params'}
-      <div class="coach-ok">✓ 4-block pipeline ready</div>
+      <div class="coach-ok">✓ De novo pipeline ready</div>
       <div class="coach-title">4. Configure &amp; Peek Intermediates</div>
       <p class="coach-body">
-        Tweak any block here — try fetching an RCSB PDB ID or curated benchmark on <b>PDB Input</b>. After running,
-        open <b>Outputs</b> or click any colored wire to inspect intermediates, or <kbd>⌘</kbd>/<kbd>Ctrl</kbd>-click blocks to compare in 3D.
+        Adjust protein length, diffusion steps, or model checkpoints here. After running, open <b>Outputs</b> or click any colored wire to inspect intermediates, or <kbd>⌘</kbd>/<kbd>Ctrl</kbd>-click blocks to compare in 3D.
       </p>
       <div class="coach-actions">
         <button type="button" class="coach-link" onclick={onDismiss}>Skip tour</button>
