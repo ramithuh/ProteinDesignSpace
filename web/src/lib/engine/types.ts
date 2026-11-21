@@ -14,6 +14,46 @@ export type PortType =
 
 export type BioEntityKind = 'protein' | 'dna' | 'rna' | 'ligand';
 
+export type CollectionKind = 'independent-candidates' | 'multi-sample' | 'ordered-frames';
+
+export type ReferenceRelation =
+  | 'self-consistency'
+  | 'external-mismatch'
+  | 'external-unlinked'
+  | 'external-mapped';
+
+export interface RepresentativeSelection {
+  selectedKey: string;
+  criterion: string;
+  totalMembers: number;
+  selectedIndex?: number;
+  scoreValue?: number | null;
+}
+
+export interface CollectionItemOutcome {
+  key: string;
+  status: 'completed' | 'excluded' | 'failed';
+  reason?: string;
+}
+
+export interface ExcludedCandidateRecord {
+  key: string;
+  id: string;
+  index: number;
+  reason: string;
+}
+
+export interface ReferenceResidueMapping {
+  /** Explicit 0-based [foldIndex, referenceIndex] residue pairs. */
+  pairs?: Array<[number, number]>;
+  /** Explicit 0-based residue indices into the fold coordinates. */
+  foldIndices?: number[];
+  /** Explicit 0-based residue indices into the reference coordinates. */
+  referenceIndices?: number[];
+  /** Optional human-readable description of the external mapping. */
+  label?: string;
+}
+
 export interface StructureParseDiagnostics {
   chainCount: number;
   chainLengths: number[];
@@ -69,15 +109,48 @@ export interface StructureArtifact {
   motifIndices?: number[];
   /** Native template Cα [x, y, z] coordinates (Å) for each residue in `motifIndices`. */
   nativeMotifCoords?: number[][];
+  /** Optional parent structure ID when this structure was derived from an upstream structure/collection. */
+  parentStructureId?: string;
+  /** Optional provenance recording how this structure was selected from a multi-member collection. */
+  representativeSelection?: RepresentativeSelection;
   geometry: GeometryStats;
+}
+
+export interface TrajectoryFrame {
+  key: string;
+  frameIndex: number;
+  pdbText?: string;
+  cifText?: string;
+  caCoords?: Float32Array;
+  timeStep?: number;
+  confidence?: number | null;
+}
+
+export interface TrajectoryFramesArtifact {
+  kind: 'TrajectoryFrames';
+  id: string;
+  label?: string;
+  parentStructureId: string;
+  sourceModelId?: string;
+  frameCount: number;
+  ordering: 'ordered-frames';
+  collectionKind?: 'ordered-frames';
+  pdbText?: string;
+  cifText?: string;
+  frames?: TrajectoryFrame[];
+  representativeSelection?: RepresentativeSelection;
 }
 
 export interface SequenceCandidate {
   id: string;
+  /** Canonical immutable candidate key across workflow stages (defaults to `id`). */
+  key?: string;
   sequence: string;
   score: number | null;
   globalScore: number | null;
   sourceModelId: string;
+  sourceStructureId?: string;
+  sampleIndex?: number;
   temperature?: number;
   seed?: number;
   chainLengths?: number[];
@@ -87,18 +160,29 @@ export interface SequenceSet {
   kind: 'SequenceSet';
   id: string;
   parentStructureId: string;
+  /** Explicit source structure lineage (mirrors `parentStructureId` when derived from a structure). */
+  sourceStructureId?: string;
   sourceModelId: string;
+  collectionKind?: CollectionKind;
   candidates: SequenceCandidate[];
 }
 
 export interface FoldedCandidate {
   sequenceId: string;
+  /** Canonical immutable candidate key across workflow stages (defaults to `sequenceId`). */
+  key?: string;
   sequence: string;
   foldModelId: string;
+  sourceStructureId?: string;
+  sampleIndex?: number;
   pdbText: string;
   caCoords: Float32Array;
   plddt: Float32Array;
   meanPlddt: number;
+  /** Optional model confidence score; `null` or `undefined` when the predictor has no confidence head. */
+  confidence?: number | null;
+  /** Explicitly indicates whether a confidence score is available (`false` for confidence-less samplers). */
+  confidenceAvailable?: boolean;
   ptm: number | null;
   iptm?: number | null;
   /** Per-chain pTM keyed by chain ID (e.g. { A: 0.85, B: 0.72 }). */
@@ -121,16 +205,28 @@ export interface FoldedStructure {
   kind: 'FoldedStructure';
   id: string;
   parentStructureId: string;
+  /** Explicit upstream source structure ID carried from SequenceSet lineage. */
+  sourceStructureId?: string;
+  collectionKind?: CollectionKind;
+  excludedCandidates?: ExcludedCandidateRecord[];
+  itemOutcomes?: CollectionItemOutcome[];
+  representativeSelection?: RepresentativeSelection;
   folds: FoldedCandidate[];
 }
 
 export interface DesignabilityRow {
   structureId: string;
   sequenceId: string;
+  /** Canonical immutable candidate key (defaults to `sequenceId`). */
+  candidateKey?: string;
+  /** Recorded source structure lineage of the folded candidate. */
+  sourceStructureId?: string;
   sequence: string;
   scRmsd: number;
   scTm: number;
   meanPlddt: number;
+  /** Optional explicit confidence availability (`false` for confidence-less predictors). */
+  confidenceAvailable?: boolean;
   ptm: number | null;
   iptm?: number | null;
   /** Mean interface PAE (Å) across cross-chain residue pairs for multi-chain complexes. */
@@ -147,6 +243,20 @@ export interface DesignabilityRow {
   genMotifRmsd?: number;
   /** Refolded motif Cα RMSD (Å) against native template motif coordinates. */
   refoldMotifRmsd?: number;
+  /** Reference comparison classification for this row. */
+  referenceMode?: 'self-consistency' | 'external-reference' | 'lineage-mismatch';
+  /** Exact semantic relationship between the fold's lineage and the wired reference structure. */
+  referenceRelation?: ReferenceRelation;
+  /** Human-readable claim label (e.g. "Self-consistency against <ref>" vs "Comparison against <ref> · Fold originated from <parent>"). */
+  referenceLabel?: string;
+  /** True only when the fold descends directly from the wired reference structure (`parentStructureId === ref.id`). */
+  selfConsistencyValid?: boolean;
+  /** True when fold lineage conflicted with the wired reference without an explicit external-reference config. */
+  lineageMismatch?: boolean;
+  /** True when an explicit residue mapping was applied to align against an external reference. */
+  referenceMappingApplied?: boolean;
+  /** Number of aligned residue pairs used in Kabsch superposition. */
+  alignedResidueCount?: number;
   designable: boolean; // scRMSD < 2.0 Å && meanPlddt >= 70
   alignedFoldPdb: string;
   designedPdb: string;
@@ -162,6 +272,22 @@ export interface DesignabilityMetrics {
   rows: DesignabilityRow[];
   best: DesignabilityRow | null;
   passRate: number;
+  /** Wired reference StructureArtifact.id evaluated against. */
+  referenceStructureId?: string;
+  /** Recorded parent/source structure ID from the incoming FoldedStructure. */
+  foldParentStructureId?: string;
+  referenceMode?: 'self-consistency' | 'external-reference' | 'lineage-mismatch';
+  /** Exact semantic relationship between the fold's lineage and the wired reference structure. */
+  referenceRelation?: ReferenceRelation;
+  /** Human-readable claim label distinguishing self-consistency from external-reference comparisons. */
+  referenceLabel?: string;
+  /** True only when folds descend directly from the wired reference (`parentStructureId === ref.id`). */
+  selfConsistencyValid?: boolean;
+  lineageStatus?: 'matched' | 'external-mapped' | 'external-unmapped' | 'mismatch' | 'untracked';
+  lineageMismatch?: boolean;
+  lineageWarning?: string;
+  referenceMapping?: ReferenceResidueMapping;
+  collectionKind?: CollectionKind;
 }
 
 export interface CanonicalConditionIntent {
@@ -197,6 +323,7 @@ export interface ConditionSpecArtifact {
 
 export type CanonicalArtifact =
   | StructureArtifact
+  | TrajectoryFramesArtifact
   | SequenceSet
   | FoldedStructure
   | DesignabilityMetrics

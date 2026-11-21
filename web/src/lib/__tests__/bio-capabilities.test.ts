@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  selectFoldRepresentative,
+  selectFoldWorkItems,
   splitMultiChainSequence,
   validateBioCapabilities,
   validateRuntimeNodeInputs,
@@ -7,7 +9,12 @@ import {
 import { ExecutionScheduler } from '$lib/engine/scheduler';
 import { validateConnection } from '$lib/engine/graph-utils';
 import { atom37ToPdb, chainIdsFromLengths, parsePdbBackbone } from '$lib/protein-ops/pdb';
-import type { SequenceSet, StructureArtifact, WorkflowGraph } from '$lib/engine/types';
+import type {
+  FoldedCandidate,
+  SequenceSet,
+  StructureArtifact,
+  WorkflowGraph,
+} from '$lib/engine/types';
 
 describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
   it('Layer 1 warns when a multi-chain binder preset (ppi_pdl1) feeds AF2 monomer and offers 1-click AF2-Multimer v3 fix', () => {
@@ -333,5 +340,125 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
         { structure: pureLigStruct },
       ),
     ).toThrow(/at least 3 protein residues/i);
+  });
+
+  it('Issue #4: selectFoldWorkItems and preflight guard resolve identical candidate slice and expose excluded candidates', () => {
+    const seqSet: SequenceSet = {
+      kind: 'SequenceSet',
+      id: 'mixed-len-set',
+      parentStructureId: 'none',
+      sourceModelId: 'sequence-input',
+      collectionKind: 'independent-candidates',
+      candidates: [
+        {
+          id: 'cand-20aa',
+          key: 'cand-20aa',
+          sequence: 'MKTAYIAKQRQISFVKSHFS',
+          score: null,
+          globalScore: null,
+          sourceModelId: 'sequence-input',
+        },
+        {
+          id: 'cand-769aa',
+          key: 'cand-769aa',
+          sequence: 'A'.repeat(769),
+          score: null,
+          globalScore: null,
+          sourceModelId: 'sequence-input',
+        },
+      ],
+    };
+
+    // With maxSequences=1, shared helper selects only candidate #1 and exposes candidate #2 as excluded
+    const work = selectFoldWorkItems(seqSet, { maxSequences: 1 });
+    expect(work.maxSequences).toBe(1);
+    expect(work.selected.map((c) => c.id)).toEqual(['cand-20aa']);
+    expect(work.excludedCandidates).toHaveLength(1);
+    expect(work.excludedCandidates[0]).toMatchObject({
+      key: 'cand-769aa',
+      id: 'cand-769aa',
+      index: 1,
+    });
+
+    // Preflight passes cleanly (does NOT reject excluded 769-aa candidate #2!) and exposes excludedCandidates
+    const preflight = validateRuntimeNodeInputs(
+      { id: 'fold', adapterId: 'localfold-af2', params: { model: 'monomer', maxSequences: 1 } },
+      { sequences: seqSet },
+    );
+    expect(preflight.selectedCandidateIds).toEqual(['cand-20aa']);
+    expect(preflight.excludedCandidates).toEqual(work.excludedCandidates);
+    expect(preflight.warnings.some((w) => w.includes('cand-769aa'))).toBe(true);
+
+    // Increasing maxSequences to 2 includes the 769-aa candidate -> preflight rejects (>768 aa ceiling)
+    expect(() =>
+      validateRuntimeNodeInputs(
+        { id: 'fold', adapterId: 'localfold-af2', params: { model: 'monomer', maxSequences: 2 } },
+        { sequences: seqSet },
+      ),
+    ).toThrow(/WebGPU memory ceiling/);
+  });
+
+  it('Issue #5: selectFoldRepresentative records selection criterion and supports confidence-less ensembles & ordered frames', () => {
+    const makeFold = (
+      id: string,
+      meanPlddt: number,
+      extra?: Partial<FoldedCandidate>,
+    ): FoldedCandidate => ({
+      sequenceId: id,
+      key: id,
+      sequence: 'ACDEFGHIKL',
+      foldModelId: 'mock-folder',
+      pdbText: 'END\n',
+      caCoords: new Float32Array(30),
+      plddt: new Float32Array(10).fill(Number.isFinite(meanPlddt) ? meanPlddt : 0),
+      meanPlddt,
+      ptm: null,
+      elapsedMs: 10,
+      ...extra,
+    });
+
+    // 1. Confidence-scored folds select highest mean pLDDT with explicit provenance
+    const scoredRep = selectFoldRepresentative([
+      makeFold('cand-a', 76.2, { confidence: 76.2, confidenceAvailable: true }),
+      makeFold('cand-b', 91.4, { confidence: 91.4, confidenceAvailable: true }),
+      makeFold('cand-c', 82.0, { confidence: 82.0, confidenceAvailable: true }),
+    ]);
+    expect(scoredRep).not.toBeNull();
+    expect(scoredRep!.fold.sequenceId).toBe('cand-b');
+    expect(scoredRep!.selection).toEqual({
+      selectedKey: 'cand-b',
+      criterion: 'highest-mean-plddt',
+      totalMembers: 3,
+      selectedIndex: 1,
+      scoreValue: 91.4,
+    });
+
+    // 2. Confidence-less multi-sample ensemble falls back deterministically without fabricating a score
+    const ensembleRep = selectFoldRepresentative(
+      [
+        makeFold('sample-0', Number.NaN, { confidence: null, confidenceAvailable: false }),
+        makeFold('sample-1', Number.NaN, { confidence: null, confidenceAvailable: false }),
+      ],
+      { collectionKind: 'multi-sample' },
+    );
+    expect(ensembleRep).not.toBeNull();
+    expect(ensembleRep!.fold.sequenceId).toBe('sample-0');
+    expect(ensembleRep!.selection.selectedKey).toBe('sample-0');
+    expect(ensembleRep!.selection.criterion).toContain('first-member-fallback');
+    expect(ensembleRep!.selection.totalMembers).toBe(2);
+    expect(ensembleRep!.selection.scoreValue).toBeNull();
+
+    // 3. Confidence-less ordered frames falls back to final frame deterministically
+    const trajRep = selectFoldRepresentative(
+      [
+        makeFold('frame-0', Number.NaN, { confidence: null, confidenceAvailable: false }),
+        makeFold('frame-1', Number.NaN, { confidence: null, confidenceAvailable: false }),
+        makeFold('frame-2', Number.NaN, { confidence: null, confidenceAvailable: false }),
+      ],
+      { collectionKind: 'ordered-frames' },
+    );
+    expect(trajRep!.fold.sequenceId).toBe('frame-2');
+    expect(trajRep!.selection.criterion).toContain('final-frame-fallback');
+    expect(trajRep!.selection.scoreValue).toBeNull();
   });
 });

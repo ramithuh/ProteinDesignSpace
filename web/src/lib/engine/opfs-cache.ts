@@ -292,7 +292,8 @@ export async function getCacheStats(): Promise<{
   return { usedBytes, quotaBytes, opfsFiles };
 }
 
-/** Clear all denovo.run OPFS and CacheStorage caches (including localfold & rfd4 shard caches). */
+/** Clear all denovo.run OPFS and CacheStorage weight caches (including localfold, rfd4 & genie3 caches).
+ *  Note: persistent weight caches are managed independently of ExecutionScheduler's in-memory result-cache byte budget. */
 export async function clearAllModelCaches(): Promise<void> {
   try {
     const root = await navigator.storage?.getDirectory?.();
@@ -309,8 +310,8 @@ export async function clearAllModelCaches(): Promise<void> {
             (k) =>
               k.startsWith('denovo-run') ||
               k.startsWith('localfold-') ||
-              k.startsWith('genie3-weights-') ||
-              k.startsWith('rfd4p-'),
+              k.startsWith('rfd4p-') ||
+              k.startsWith('genie3-weights-'),
           )
           .map((k) => caches.delete(k)),
       );
@@ -318,4 +319,111 @@ export async function clearAllModelCaches(): Promise<void> {
       /* ignore */
     }
   }
+}
+
+/** Storage adapter interface for durable workflow run checkpoints (independent of model weight caches). */
+export interface CheckpointStorageAdapter {
+  save(key: string, serialized: string): Promise<void> | void;
+  load(key: string): Promise<string | null> | string | null;
+  delete?(key: string): Promise<void> | void;
+  listKeys?(): Promise<string[]> | string[];
+}
+
+/** In-memory checkpoint storage adapter for tests and headless sessions. */
+export function createMemoryCheckpointStore(
+  initial?: Record<string, string>,
+): CheckpointStorageAdapter {
+  const store = new Map<string, string>(Object.entries(initial ?? {}));
+  return {
+    save(key: string, serialized: string): void {
+      store.set(key, serialized);
+    },
+    load(key: string): string | null {
+      return store.get(key) ?? null;
+    },
+    delete(key: string): void {
+      store.delete(key);
+    },
+    listKeys(): string[] {
+      return [...store.keys()];
+    },
+  };
+}
+
+const CHECKPOINT_DB_NAME = 'denovo-run-checkpoints-v1';
+const CHECKPOINT_STORE_NAME = 'checkpoints';
+
+/** Browser IndexedDB-backed checkpoint storage adapter (falls back to in-memory map if IndexedDB is unavailable). */
+export function createIndexedDbCheckpointStore(): CheckpointStorageAdapter {
+  if (typeof indexedDB === 'undefined') {
+    return createMemoryCheckpointStore();
+  }
+
+  const openDb = (): Promise<IDBDatabase> =>
+    new Promise((resolve, reject) => {
+      const req = indexedDB.open(CHECKPOINT_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(CHECKPOINT_STORE_NAME)) {
+          db.createObjectStore(CHECKPOINT_STORE_NAME);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error ?? new Error('Failed to open checkpoint IndexedDB'));
+    });
+
+  return {
+    async save(key: string, serialized: string): Promise<void> {
+      const db = await openDb();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction(CHECKPOINT_STORE_NAME, 'readwrite');
+          tx.objectStore(CHECKPOINT_STORE_NAME).put(serialized, key);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error ?? new Error('Failed to save checkpoint'));
+        });
+      } finally {
+        db.close();
+      }
+    },
+    async load(key: string): Promise<string | null> {
+      const db = await openDb();
+      try {
+        return await new Promise<string | null>((resolve, reject) => {
+          const tx = db.transaction(CHECKPOINT_STORE_NAME, 'readonly');
+          const req = tx.objectStore(CHECKPOINT_STORE_NAME).get(key);
+          req.onsuccess = () => resolve(typeof req.result === 'string' ? req.result : null);
+          req.onerror = () => reject(req.error ?? new Error('Failed to load checkpoint'));
+        });
+      } finally {
+        db.close();
+      }
+    },
+    async delete(key: string): Promise<void> {
+      const db = await openDb();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction(CHECKPOINT_STORE_NAME, 'readwrite');
+          tx.objectStore(CHECKPOINT_STORE_NAME).delete(key);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error ?? new Error('Failed to delete checkpoint'));
+        });
+      } finally {
+        db.close();
+      }
+    },
+    async listKeys(): Promise<string[]> {
+      const db = await openDb();
+      try {
+        return await new Promise<string[]>((resolve, reject) => {
+          const tx = db.transaction(CHECKPOINT_STORE_NAME, 'readonly');
+          const req = tx.objectStore(CHECKPOINT_STORE_NAME).getAllKeys();
+          req.onsuccess = () => resolve((req.result ?? []).map((k) => String(k)));
+          req.onerror = () => reject(req.error ?? new Error('Failed to list checkpoint keys'));
+        });
+      } finally {
+        db.close();
+      }
+    },
+  };
 }

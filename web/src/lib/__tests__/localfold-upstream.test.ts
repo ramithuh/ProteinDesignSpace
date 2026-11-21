@@ -133,11 +133,16 @@ describe('upstream localfold multi-model integration', () => {
     // 10 protein + 8 DNA + 1 ZN ligand = 19 tokens
     expect(holoDnaBatch.tokens).toBe(19);
 
-    // Verify localfold.worker.ts wires mergeChainA3ms, iptmIsMonomerApprox, recycles clamp 0..4, and AF3 ligand/DNA passthrough
+    // Verify localfold.worker.ts wires mergeChainA3ms, iptmIsMonomerApprox, recycles clamp 0..4,
+    // AF3 ligand/DNA passthrough, shared selectFoldWorkItems (Issue #4), and selectFoldRepresentative (Issue #5)
     const workerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/localfold.worker.ts'), 'utf8');
     expect(workerSrc).toContain('mergeChainA3ms');
     expect(workerSrc).toContain('iptmIsMonomerApprox');
     expect(workerSrc).toContain('Math.min(4,');
     expect(workerSrc).toContain('ligandCcdCodes');
+    expect(workerSrc).toContain('selectFoldWorkItems');
+    expect(workerSrc).toContain('selectFoldRepresentative');
+    expect(workerSrc).toContain('representativeSelection');
+    expect(workerSrc).toContain('excludedCandidates');
   });
 });

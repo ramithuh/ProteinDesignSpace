@@ -1,7 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { applyTransformToPdb } from '$lib/protein-ops/kabsch';
 import { generateSampleHelixBundlePdb, parsePdbBackbone } from '$lib/protein-ops/pdb';
-import { ExecutionScheduler } from '$lib/engine/scheduler';
+import {
+  ExecutionScheduler,
+  RunCancellationError,
+  RunLeaseError,
+  attachProgrammaticApi,
+  computeInvalidatedNodeIds,
+  exportJoinedCollectionCsv,
+  joinBranchArtifacts,
+  materializePdbInputNode,
+  serializeCheckpoint,
+  deserializeCheckpoint,
+  type ActiveRunState,
+} from '$lib/engine/scheduler';
+import { createMemoryCheckpointStore } from '$lib/engine/opfs-cache';
 import type {
   ConditionSpecArtifact,
   DesignabilityMetrics,
@@ -9,17 +22,53 @@ import type {
   NodeProgressEvent,
   SequenceSet,
   StructureArtifact,
+  TrajectoryFramesArtifact,
   WorkflowGraph,
 } from '$lib/engine/types';
 
-// Controllable Worker stub so designability-scorer, memoization & releaseActiveGpu can be tested end-to-end
+// Controllable Worker stub so designability-scorer, memoization, output contracts & releaseActiveGpu can be tested end-to-end
 let mockFoldFactory: (() => FoldedStructure) | null = null;
 let mockGenStructureFactory: (() => StructureArtifact) | null = null;
+let mockRawOutputsFactory: ((msg: { id: number; params?: Record<string, unknown>; inputs?: Record<string, unknown> }) => unknown) | null = null;
+let mockWorkerDelayMs = 0;
+let mockDisposeDelayMs = 0;
+let mockLiveWorkers = 0;
+let mockMaxLiveWorkers = 0;
 let mockWorkerRunCalls = 0;
 let mockHangWorker = false;
 
+function makePlaceholderStructure(id: string, seq = 'ACDEFGHIKL'): StructureArtifact {
+  const L = Math.max(3, seq.length);
+  return {
+    kind: 'StructureArtifact',
+    id,
+    label: id,
+    sourceModelId: 'mock-worker',
+    length: L,
+    sequence: seq.slice(0, L),
+    caCoords: new Float32Array(L * 3),
+    backbone4Coords: new Float32Array(L * 4 * 3),
+    pdbText: 'END\n',
+    geometry: {
+      length: L,
+      rg: 10,
+      meanCaDist: 3.8,
+      chainBreaks: 0,
+      clashes: 0,
+      helixPct: 50,
+      sheetPct: 0,
+      coilPct: 50,
+    },
+  };
+}
+
 class MockWorker {
   private listeners = new Map<string, Set<(ev: MessageEvent) => void>>();
+  private terminated = false;
+  constructor() {
+    mockLiveWorkers++;
+    if (mockLiveWorkers > mockMaxLiveWorkers) mockMaxLiveWorkers = mockLiveWorkers;
+  }
   addEventListener(type: string, cb: (ev: MessageEvent) => void) {
     if (!this.listeners.has(type)) this.listeners.set(type, new Set());
     this.listeners.get(type)!.add(cb);
@@ -27,22 +76,52 @@ class MockWorker {
   removeEventListener(type: string, cb: (ev: MessageEvent) => void) {
     this.listeners.get(type)?.delete(cb);
   }
-  postMessage(msg: { id: number; type: string; inputs?: Record<string, unknown> }) {
+  postMessage(msg: { id: number; type: string; params?: Record<string, unknown>; inputs?: Record<string, unknown> }) {
     if (msg.type === 'dispose') {
-      this.emit('message', { data: { id: msg.id, type: 'disposed' } } as MessageEvent);
+      const reply = () => {
+        this.emit('message', { data: { id: msg.id, type: 'disposed' } } as MessageEvent);
+      };
+      if (mockDisposeDelayMs > 0) setTimeout(reply, mockDisposeDelayMs);
+      else reply();
       return;
     }
     if (msg.type === 'run') {
       mockWorkerRunCalls++;
-      if (mockHangWorker) return; // intentionally stays in-flight to test mid-run releaseActiveGpu()
+      if (mockHangWorker) return; // intentionally stays in-flight to test mid-run lease & releaseActiveGpu()
+      const deliver = (outputs: unknown) => {
+        const send = () => {
+          this.emit('message', {
+            data: { id: msg.id, type: 'result', outputs, elapsedMs: 5 },
+          } as MessageEvent);
+        };
+        if (mockWorkerDelayMs > 0) setTimeout(send, mockWorkerDelayMs);
+        else queueMicrotask(send);
+      };
+      if (mockRawOutputsFactory) {
+        deliver(mockRawOutputsFactory(msg));
+        return;
+      }
       const hasSeqInput = Boolean(msg.inputs && 'sequences' in msg.inputs);
       if (!hasSeqInput && mockGenStructureFactory) {
         const structure = mockGenStructureFactory();
-        queueMicrotask(() => {
-          this.emit('message', {
-            data: { id: msg.id, type: 'result', outputs: { structure }, elapsedMs: 5 },
-          } as MessageEvent);
-        });
+        const sequences: SequenceSet = {
+          kind: 'SequenceSet',
+          id: `mock-seq-${structure.id}`,
+          parentStructureId: structure.id,
+          sourceStructureId: structure.id,
+          sourceModelId: structure.sourceModelId,
+          candidates: [
+            {
+              id: 'mock-native-1',
+              key: 'mock-native-1',
+              sequence: structure.sequence || 'ACDEFGHIKL',
+              score: null,
+              globalScore: null,
+              sourceModelId: structure.sourceModelId,
+            },
+          ],
+        };
+        deliver({ structure, sequences });
         return;
       }
       const folds = mockFoldFactory ? mockFoldFactory() : {
@@ -51,14 +130,20 @@ class MockWorker {
         parentStructureId: 'none',
         folds: [],
       };
-      queueMicrotask(() => {
-        this.emit('message', {
-          data: { id: msg.id, type: 'result', outputs: { folds }, elapsedMs: 5 },
-        } as MessageEvent);
-      });
+      const repFold = folds.folds[0];
+      const repStruct = makePlaceholderStructure(
+        `mock-foldstruct-${folds.id}`,
+        repFold?.sequence || 'ACDEFGHIKL',
+      );
+      deliver({ folds, structure: repStruct });
     }
   }
-  terminate() {}
+  terminate() {
+    if (!this.terminated) {
+      this.terminated = true;
+      mockLiveWorkers = Math.max(0, mockLiveWorkers - 1);
+    }
+  }
   private emit(type: string, ev: MessageEvent) {
     for (const cb of this.listeners.get(type) ?? []) cb(ev);
   }
@@ -68,6 +153,11 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
   beforeEach(() => {
     mockFoldFactory = null;
     mockGenStructureFactory = null;
+    mockRawOutputsFactory = null;
+    mockWorkerDelayMs = 0;
+    mockDisposeDelayMs = 0;
+    mockLiveWorkers = 0;
+    mockMaxLiveWorkers = 0;
     mockWorkerRunCalls = 0;
     mockHangWorker = false;
     vi.stubGlobal('Worker', MockWorker);
@@ -431,10 +521,15 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     }
 
     // Intentionally return candidates unsorted (worst first) to verify ascending scRMSD sort
+    const demoRef = await materializePdbInputNode({
+      id: 'src',
+      adapterId: 'pdb-input',
+      params: { mode: 'demo-bundle' },
+    });
     mockFoldFactory = () => ({
       kind: 'FoldedStructure',
       id: 'folds-test-1',
-      parentStructureId: 'demo',
+      parentStructureId: demoRef.id,
       folds: [
         {
           sequenceId: 'cand-high-rmsd',
@@ -651,10 +746,15 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     // 3. designability-scorer rejects length mismatch with clear error
     const demoPdb = generateSampleHelixBundlePdb();
     const demoL = parsePdbBackbone(demoPdb).nResidues;
+    const demoRef = await materializePdbInputNode({
+      id: 'src',
+      adapterId: 'pdb-input',
+      params: { mode: 'demo-bundle' },
+    });
     mockFoldFactory = () => ({
       kind: 'FoldedStructure',
       id: 'folds-mismatch',
-      parentStructureId: 'demo',
+      parentStructureId: demoRef.id,
       folds: [
         {
           sequenceId: 'wrong-len',
@@ -695,7 +795,7 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     mockFoldFactory = () => ({
       kind: 'FoldedStructure',
       id: 'folds-nan',
-      parentStructureId: 'demo',
+      parentStructureId: demoRef.id,
       folds: [
         {
           sequenceId: 'nan-cand',
@@ -729,7 +829,7 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     expect(Number.isNaN(nanMetrics.rows[1].scRmsd)).toBe(true);
     expect(nanMetrics.rows[1].designable).toBe(false);
 
-    // 5. releaseActiveGpu() mid-run rejects the active promise cleanly and leaves scheduler reusable (no deadlock)
+    // 5. Default releaseActiveGpu() respects active run lease; { force: true } releases mid-run cleanly without deadlock
     mockHangWorker = true;
     const inflight = scheduler.run(
       {
@@ -744,10 +844,12 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
       () => {},
       { bypassCache: true },
     );
-    // Let runGpuNode spawn and postMessage before releasing GPU
+    // Let runGpuNode spawn and postMessage before testing lease guard & forced release
     await Promise.resolve();
     await Promise.resolve();
-    const releasePromise = scheduler.releaseActiveGpu();
+    await expect(scheduler.releaseActiveGpu()).rejects.toThrow(RunLeaseError);
+    expect(scheduler.getActiveRunState().leaseHeld).toBe(true);
+    const releasePromise = scheduler.releaseActiveGpu({ force: true });
     await expect(inflight).rejects.toThrow(/released while running/i);
     await releasePromise;
 
@@ -1207,5 +1309,1137 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     expect(typeof res.refsByNode.score.metrics.summary.bestGenMotifRmsd).toBe('number');
     expect(typeof res.refsByNode.score.metrics.summary.bestRefoldMotifRmsd).toBe('number');
     await scheduler.releaseActiveGpu();
+  });
+
+  it('Issue #3: flags lineage mismatch when fold descended from A is wired to equal-length reference B, and supports explicit residueMapping & allowExternalReference', async () => {
+    const scheduler = new ExecutionScheduler();
+    const pdbA = generateSampleHelixBundlePdb();
+    const parsedA = parsePdbBackbone(pdbA);
+    const L = parsedA.nResidues;
+
+    // Equal-length different reference B (shifted coordinates -> distinct artifact id)
+    const R90 = new Float64Array([0, -1, 0, 1, 0, 0, 0, 0, 1]);
+    const pdbB = applyTransformToPdb(pdbA, R90, new Float64Array([15, -8, 4]));
+    const structB = await materializePdbInputNode({
+      id: 'refB',
+      adapterId: 'pdb-input',
+      params: { mode: 'custom', pdbText: pdbB, filename: 'refB.pdb' },
+    });
+
+    // Fold descended from structure A ("struct-origin-A"), coordinates identical to A/B up to rigid transform
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'folds-from-A',
+      parentStructureId: 'struct-origin-A',
+      sourceStructureId: 'struct-origin-A',
+      folds: [
+        {
+          sequenceId: 'cand-A1',
+          key: 'cand-A1',
+          sequence: parsedA.sequence,
+          foldModelId: 'localfold-af2',
+          pdbText: pdbA,
+          caCoords: parsedA.caCoords,
+          plddt: new Float32Array(L).fill(94),
+          meanPlddt: 94,
+          ptm: 0.91,
+          elapsedMs: 20,
+        },
+      ],
+    });
+
+    // 1. Mismatched lineage without external-reference override: flagged & non-passing self-consistency!
+    const mismatchGraph: WorkflowGraph = {
+      id: 'lineage-mismatch',
+      name: 'Lineage Mismatch',
+      nodes: [
+        { id: 'refB', adapterId: 'pdb-input', params: { mode: 'custom', pdbText: pdbB, filename: 'refB.pdb' } },
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: parsedA.sequence } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 1 } },
+        { id: 'score', adapterId: 'designability-scorer', params: { scRmsdThreshold: 2.0, plddtThreshold: 70 } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'refB', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    };
+
+    const mmRes = await scheduler.run(mismatchGraph, () => {});
+    const mmMetrics = mmRes.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(mmMetrics.referenceStructureId).toBe(structB.id);
+    expect(mmMetrics.foldParentStructureId).toBe('struct-origin-A');
+    expect(mmMetrics.lineageMismatch).toBe(true);
+    expect(mmMetrics.lineageStatus).toBe('mismatch');
+    expect(mmMetrics.referenceMode).toBe('lineage-mismatch');
+    expect(mmMetrics.lineageWarning).toMatch(/struct-origin-A/);
+    expect(mmMetrics.rows[0].lineageMismatch).toBe(true);
+    expect(mmMetrics.rows[0].scRmsd).toBeLessThan(1e-2);
+    // Must NOT pass self-consistency despite low RMSD and high pLDDT!
+    expect(mmMetrics.rows[0].designable).toBe(false);
+    expect(mmMetrics.passRate).toBe(0);
+    expect(mmRes.refsByNode.score.metrics.summary.lineageMismatch).toBe(true);
+
+    // 2. Intentional external-reference comparison with explicit residueMapping (even a subset of residues!)
+    const mappedGraph = structuredClone(mismatchGraph);
+    mappedGraph.nodes[3].params.residueMapping = {
+      pairs: [
+        [0, 0],
+        [1, 1],
+        [2, 2],
+        [3, 3],
+        [4, 4],
+        [5, 5],
+      ],
+      label: 'N-terminal helix mapping',
+    };
+    const mappedRes = await scheduler.run(mappedGraph, () => {}, { bypassCache: true });
+    const mappedMetrics = mappedRes.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(mappedMetrics.lineageMismatch).toBe(false);
+    expect(mappedMetrics.lineageStatus).toBe('external-mapped');
+    expect(mappedMetrics.referenceMode).toBe('external-reference');
+    expect(mappedMetrics.referenceRelation).toBe('external-mapped');
+    expect(mappedMetrics.selfConsistencyValid).toBe(false);
+    expect(mappedMetrics.referenceMapping?.label).toBe('N-terminal helix mapping');
+    expect(mappedMetrics.rows[0].referenceMappingApplied).toBe(true);
+    expect(mappedMetrics.rows[0].alignedResidueCount).toBe(6);
+    expect(mappedMetrics.rows[0].scRmsd).toBeLessThan(1e-2);
+    // Per #81: external-mapped computes RMSD cleanly without claiming self-consistency PASS!
+    expect(mappedMetrics.rows[0].designable).toBe(false);
+    expect(mappedMetrics.passRate).toBe(0);
+
+    // 3. Explicit allowExternalReference=true without custom mapping still computes RMSD without claiming self-consistency PASS!
+    const extGraph = structuredClone(mismatchGraph);
+    extGraph.nodes[3].params.allowExternalReference = true;
+    const extRes = await scheduler.run(extGraph, () => {}, { bypassCache: true });
+    const extMetrics = extRes.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(extMetrics.lineageMismatch).toBe(false);
+    expect(extMetrics.lineageStatus).toBe('external-unmapped');
+    expect(extMetrics.referenceMode).toBe('external-reference');
+    expect(extMetrics.referenceRelation).toBe('external-mismatch');
+    expect(extMetrics.selfConsistencyValid).toBe(false);
+    expect(extMetrics.rows[0].scRmsd).toBeLessThan(1e-2);
+    expect(extMetrics.rows[0].designable).toBe(false);
+
+    // 4. Out-of-bounds, null-coerced, and duplicate residueMappings reject cleanly
+    const badMapGraph = structuredClone(mismatchGraph);
+    badMapGraph.nodes[3].params.residueMapping = [[0, 0], [1, 1], [999, 2]];
+    await expect(scheduler.run(badMapGraph, () => {}, { bypassCache: true })).rejects.toThrow(
+      /out of bounds/i,
+    );
+    const nullMapGraph = structuredClone(mismatchGraph);
+    nullMapGraph.nodes[3].params.residueMapping = [[null, 0], [1, 1], [2, 2]];
+    await expect(scheduler.run(nullMapGraph, () => {}, { bypassCache: true })).rejects.toThrow(
+      /strict finite integer/i,
+    );
+    const dupMapGraph = structuredClone(mismatchGraph);
+    dupMapGraph.nodes[3].params.residueMapping = [[0, 0], [0, 0], [0, 0]];
+    await expect(scheduler.run(dupMapGraph, () => {}, { bypassCache: true })).rejects.toThrow(
+      /duplicate/i,
+    );
+
+    await scheduler.releaseActiveGpu();
+  });
+
+  it('Issue #4: validates worker output contract (wrong artifact kind & missing required port) BEFORE memoizing or passing downstream', async () => {
+    const scheduler = new ExecutionScheduler();
+    const graph: WorkflowGraph = {
+      id: 'contract-test',
+      name: 'Contract Test',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'MKTAYIAKQRQISFVKSHFS' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 1 } },
+        { id: 'score', adapterId: 'designability-scorer', params: {} },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'src', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    };
+
+    // Case 1: Worker returns wrong artifact kind on `folds` port (`SequenceSet` instead of `FoldedStructure`)
+    mockRawOutputsFactory = () => ({
+      folds: {
+        kind: 'SequenceSet',
+        id: 'wrong-kind-1',
+        parentStructureId: 'none',
+        sourceModelId: 'bad-worker',
+        candidates: [],
+      },
+      structure: makePlaceholderStructure('ok-struct'),
+    });
+    const deliveredNodes1: string[] = [];
+    const progressEvents1: NodeProgressEvent[] = [];
+    await expect(
+      scheduler.run(graph, (ev) => progressEvents1.push(ev), {
+        onNodeOutput: (nid) => deliveredNodes1.push(nid),
+      }),
+    ).rejects.toThrow(/Output contract violation.*expected "FoldedStructure"/i);
+
+    // Must NOT pass bad output downstream and must NOT memoize `fold`!
+    expect(deliveredNodes1).not.toContain('fold');
+    expect(deliveredNodes1).not.toContain('score');
+    expect(progressEvents1.some((e) => e.nodeId === 'fold' && e.status === 'error')).toBe(true);
+    const memoAfterBadKind = scheduler.getMemoStats().entryCount;
+
+    // Case 2: Worker omits required output port (`structure` missing on `localfold-af2`)
+    mockRawOutputsFactory = () => ({
+      folds: {
+        kind: 'FoldedStructure',
+        id: 'missing-port-folds',
+        parentStructureId: 'none',
+        folds: [],
+      },
+    });
+    const deliveredNodes2: string[] = [];
+    await expect(
+      scheduler.run(graph, () => {}, {
+        onNodeOutput: (nid) => deliveredNodes2.push(nid),
+      }),
+    ).rejects.toThrow(/Output contract violation.*missing required output port "structure"/i);
+
+    expect(deliveredNodes2).not.toContain('fold');
+    expect(deliveredNodes2).not.toContain('score');
+    // Memo count did not increase with invalid `fold` output
+    expect(scheduler.getMemoStats().entryCount).toBe(memoAfterBadKind);
+
+    await scheduler.releaseActiveGpu();
+  });
+
+  it('Issue #5: handles confidence-less FoldedCandidate honestly in scorer and serializes TrajectoryFrames in checkpoints', async () => {
+    const scheduler = new ExecutionScheduler();
+    const pdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(pdb);
+    const demoRef = await materializePdbInputNode({
+      id: 'src',
+      adapterId: 'pdb-input',
+      params: { mode: 'demo-bundle' },
+    });
+
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'folds-no-conf',
+      parentStructureId: demoRef.id,
+      collectionKind: 'multi-sample',
+      folds: [
+        {
+          sequenceId: 'sample-noconf',
+          key: 'sample-noconf',
+          sequence: parsed.sequence,
+          foldModelId: 'ensemble-sampler',
+          pdbText: pdb,
+          caCoords: parsed.caCoords,
+          plddt: new Float32Array(0),
+          meanPlddt: Number.NaN,
+          confidence: null,
+          confidenceAvailable: false,
+          ptm: null,
+          elapsedMs: 15,
+        },
+      ],
+    });
+
+    const graph: WorkflowGraph = {
+      id: 'no-conf-score',
+      name: 'No Conf Score',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: parsed.sequence } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 1 } },
+        { id: 'score', adapterId: 'designability-scorer', params: {} },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'src', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    };
+
+    const res = await scheduler.run(graph, () => {});
+    const metrics = res.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(metrics.rows[0].confidenceAvailable).toBe(false);
+    expect(Number.isNaN(metrics.rows[0].meanPlddt)).toBe(true);
+    expect(metrics.rows[0].designable).toBe(false);
+    expect(res.refsByNode.fold.folds.summary.confidenceAvailable).toBe(false);
+    expect(res.refsByNode.fold.folds.summary.bestPlddt).toBeNull();
+
+    // Verify TrajectoryFramesArtifact round-trips cleanly through checkpoint serialization
+    const trajArt: TrajectoryFramesArtifact = {
+      kind: 'TrajectoryFrames',
+      id: 'traj-rt-1',
+      parentStructureId: demoRef.id,
+      frameCount: 2,
+      ordering: 'ordered-frames',
+      collectionKind: 'ordered-frames',
+      pdbText: pdb,
+      frames: [
+        { key: 'f0', frameIndex: 0, caCoords: new Float32Array([1, 2, 3]), confidence: null },
+        { key: 'f1', frameIndex: 1, caCoords: new Float32Array([4, 5, 6]), confidence: null },
+      ],
+    };
+    const encoded = serializeCheckpoint({
+      schema: 'denovo.checkpoint/v1',
+      runId: 'r-traj',
+      graphId: 'g-traj',
+      createdAt: new Date().toISOString(),
+      status: 'completed',
+      completedNodeIds: ['t'],
+      unfinishedNodeIds: [],
+      nodes: {
+        t: {
+          nodeId: 't',
+          adapterId: 'rfd4-proteina',
+          cacheKey: 'k1',
+          completedAt: new Date().toISOString(),
+          outputs: { trajectory: trajArt },
+          refs: {},
+        },
+      },
+    });
+    const decoded = deserializeCheckpoint(encoded);
+    const restoredTraj = decoded.nodes.t.outputs.trajectory as TrajectoryFramesArtifact;
+    expect(restoredTraj.kind).toBe('TrajectoryFrames');
+    expect(restoredTraj.frameCount).toBe(2);
+    expect(restoredTraj.frames?.[0].caCoords).toBeInstanceOf(Float32Array);
+    expect(Array.from(restoredTraj.frames![1].caCoords!)).toEqual([4, 5, 6]);
+
+    await scheduler.releaseActiveGpu();
+  });
+
+  it('Issue #6: unifies canvas & API run ownership, enforces active run lease on maintenance actions, and reports cancellation cleanly while preserving history', async () => {
+    const scheduler = new ExecutionScheduler();
+    const observedStates: ActiveRunState[] = [];
+    const unsubscribe = scheduler.subscribeRunState((s) => observedStates.push(s));
+
+    const simpleGraph: WorkflowGraph = {
+      id: 'unified-ownership',
+      name: 'Unified Ownership',
+      nodes: [
+        { id: 's', adapterId: 'sequence-input', params: { sequence: 'MKTAYIAKQRQISFVKSHFS' } },
+      ],
+      edges: [],
+    };
+
+    // 1. Canvas run updates canonical state and records history
+    const canvasRes = await scheduler.run(simpleGraph, () => {}, { source: 'canvas' });
+    expect(canvasRes.source).toBe('canvas');
+    expect(canvasRes.runId).toBeTruthy();
+    expect(scheduler.getActiveRunState().runId).toBe(canvasRes.runId);
+    expect(scheduler.getActiveRunState().status).toBe('completed');
+    expect(scheduler.getActiveRunState().leaseHeld).toBe(false);
+    expect(scheduler.getRunHistory()).toHaveLength(1);
+
+    // 2. API run via runWorkflowApi updates the EXACT same canonical state & holds lease while in-flight
+    mockHangWorker = true;
+    const apiGraph: WorkflowGraph = {
+      id: 'api-lease-graph',
+      name: 'API Lease Graph',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'ACDEFGHIKLMNPQRSTVWY' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 1 } },
+      ],
+      edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+    };
+
+    const abortCtrl = new AbortController();
+    const apiPromise = scheduler.runWorkflowApi(apiGraph, () => {}, {
+      signal: abortCtrl.signal,
+      bypassCache: true,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const liveState = scheduler.getActiveRunState();
+    expect(liveState.status).toBe('running');
+    expect(liveState.source).toBe('api');
+    expect(liveState.leaseHeld).toBe(true);
+    expect(liveState.activeNodeId).toBe('fold');
+    expect(liveState.completedNodeIds).toEqual(['seq']);
+
+    // Maintenance actions MUST reject with RunLeaseError instead of killing the in-flight API run!
+    await expect(scheduler.releaseGpu()).rejects.toThrow(RunLeaseError);
+    await expect(scheduler.releaseActiveGpu()).rejects.toThrow(RunLeaseError);
+    expect(() => scheduler.clearMemo()).toThrow(RunLeaseError);
+    await expect(scheduler.clearCache()).rejects.toThrow(RunLeaseError);
+
+    // Explicit cancellation via AbortSignal reports exact completed & unfinished nodes cleanly
+    abortCtrl.abort();
+    let caughtErr: unknown = null;
+    try {
+      await apiPromise;
+    } catch (e) {
+      caughtErr = e;
+    }
+    expect(caughtErr).toBeInstanceOf(RunCancellationError);
+    const cancelErr = caughtErr as RunCancellationError;
+    expect(cancelErr.completedNodeIds).toEqual(['seq']);
+    expect(cancelErr.unfinishedNodeIds).toEqual(['fold']);
+    expect(scheduler.getActiveRunState().status).toBe('cancelled');
+    expect(scheduler.getActiveRunState().leaseHeld).toBe(false);
+
+    // Prior completed canvas run is preserved in runHistory alongside the cancelled API run!
+    const history = scheduler.getRunHistory();
+    expect(history).toHaveLength(2);
+    expect(history[0].runId).toBe(canvasRes.runId);
+    expect(history[0].status).toBe('completed');
+    expect(history[1].status).toBe('cancelled');
+    expect(history[1].completedNodeIds).toEqual(['seq']);
+    expect(history[1].unfinishedNodeIds).toEqual(['fold']);
+
+    // attachProgrammaticApi routes through runWorkflowApi (source: 'api')
+    const fakeWin = {} as Record<string, unknown>;
+    vi.stubGlobal('window', fakeWin);
+    vi.stubGlobal('document', {});
+    attachProgrammaticApi(scheduler);
+    const denovoApi = fakeWin.__denovo as { runWorkflow: (g: WorkflowGraph) => Promise<{ runId: string }> };
+    mockHangWorker = false;
+    const apiRun3 = await denovoApi.runWorkflow(simpleGraph);
+    expect(apiRun3.runId).toBe(scheduler.getActiveRunState().runId);
+    expect(scheduler.getActiveRunState().source).toBe('api');
+
+    // Editing upstream input marks dependent nodes stale while preserving prior runs in history
+    const editedApiGraph = structuredClone(apiGraph);
+    editedApiGraph.nodes[0].params.sequence = 'GGGGGGGGGGAAAAAAAAAA';
+    const inv = scheduler.invalidateEditedGraph(apiGraph, editedApiGraph);
+    expect(inv.staleNodeIds).toEqual(['seq', 'fold']);
+    expect(computeInvalidatedNodeIds(apiGraph, editedApiGraph).validNodeIds).toEqual([]);
+    expect(scheduler.getRunHistory()).toHaveLength(3);
+
+    unsubscribe();
+    expect(observedStates.some((s) => s.source === 'api' && s.leaseHeld)).toBe(true);
+    await scheduler.releaseActiveGpu();
+  });
+
+  it('Issue #6: checkpoints a branched run, reloads into a fresh scheduler, and resumes ONLY unfinished or invalidated nodes', async () => {
+    const pdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(pdb);
+    const store = createMemoryCheckpointStore();
+    const scheduler1 = new ExecutionScheduler({ checkpointStore: store });
+    const demoRef = await materializePdbInputNode({
+      id: 'src',
+      adapterId: 'pdb-input',
+      params: { mode: 'demo-bundle' },
+    });
+
+    const executedNodesRun1: string[] = [];
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: `folds-ckpt-${mockWorkerRunCalls}`,
+      parentStructureId: demoRef.id,
+      folds: [
+        {
+          sequenceId: 'cand-1',
+          key: 'cand-1',
+          sequence: parsed.sequence,
+          foldModelId: 'localfold-af2',
+          pdbText: pdb,
+          caCoords: parsed.caCoords,
+          plddt: new Float32Array(parsed.nResidues).fill(89),
+          meanPlddt: 89,
+          ptm: 0.87,
+          elapsedMs: 10,
+        },
+      ],
+    });
+
+    // Two-branch workflow: Branch A (fold_a -> score_a) and Branch B (fold_b -> score_b)
+    const branchedGraph: WorkflowGraph = {
+      id: 'branched-resume',
+      name: 'Branched Resume',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: parsed.sequence } },
+        { id: 'fold_a', adapterId: 'localfold-af2', params: { model: 'monomer', recycles: 1, maxSequences: 1, seed: 1 } },
+        { id: 'score_a', adapterId: 'designability-scorer', params: { scRmsdThreshold: 2.0, plddtThreshold: 70 } },
+        { id: 'fold_b', adapterId: 'localfold-af2', params: { model: 'monomer', recycles: 1, maxSequences: 1, seed: 2 } },
+        { id: 'score_b', adapterId: 'designability-scorer', params: { scRmsdThreshold: 2.0, plddtThreshold: 70 } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold_a', toPort: 'sequences' },
+        { fromNode: 'src', fromPort: 'structure', toNode: 'score_a', toPort: 'structure' },
+        { fromNode: 'fold_a', fromPort: 'folds', toNode: 'score_a', toPort: 'folds' },
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold_b', toPort: 'sequences' },
+        { fromNode: 'src', fromPort: 'structure', toNode: 'score_b', toPort: 'structure' },
+        { fromNode: 'fold_b', fromPort: 'folds', toNode: 'score_b', toPort: 'folds' },
+      ],
+    };
+
+    // Interrupt after fold_a completes (before fold_b starts!)
+    const abort1 = new AbortController();
+    await expect(
+      scheduler1.run(
+        branchedGraph,
+        (ev) => {
+          if (ev.status === 'done') executedNodesRun1.push(ev.nodeId);
+        },
+        {
+          signal: abort1.signal,
+          checkpointKey: 'branched-job-1',
+          onNodeOutput: (nodeId) => {
+            if (nodeId === 'fold_a') abort1.abort();
+          },
+        },
+      ),
+    ).rejects.toThrow(RunCancellationError);
+
+    expect(executedNodesRun1).toEqual(['src', 'seq', 'fold_a']);
+    const savedJson = scheduler1.exportCheckpoint();
+    expect(await store.load('branched-job-1')).toBe(savedJson);
+
+    // Simulate reload: brand-new ExecutionScheduler instance loads checkpoint from store
+    const scheduler2 = new ExecutionScheduler({ checkpointStore: store });
+    const loadedCkpt = await scheduler2.loadCheckpointFromStore('branched-job-1');
+    expect(loadedCkpt?.completedNodeIds).toEqual(['src', 'seq', 'fold_a']);
+
+    const executedNodesRun2: string[] = [];
+    const cachedNodesRun2: string[] = [];
+    const workerCallsBeforeResume = mockWorkerRunCalls;
+    const res2 = await scheduler2.run(
+      branchedGraph,
+      (ev) => {
+        if (ev.status === 'done') executedNodesRun2.push(ev.nodeId);
+        if (ev.status === 'cached') cachedNodesRun2.push(ev.nodeId);
+      },
+      { checkpointKey: 'branched-job-1' },
+    );
+
+    // Only unfinished nodes (score_a, fold_b, score_b) executed; src/seq/fold_a hit verified checkpoint!
+    expect(cachedNodesRun2).toEqual(['src', 'seq', 'fold_a']);
+    expect(executedNodesRun2.sort()).toEqual(['fold_b', 'score_a', 'score_b']);
+    expect(mockWorkerRunCalls).toBe(workerCallsBeforeResume + 1); // ONLY fold_b invoked the worker!
+    // Verify restored Float32Array coordinates produced accurate scRMSD in score_a!
+    expect((res2.outputsByNode.score_a.metrics as DesignabilityMetrics).rows[0].scRmsd).toBeLessThan(1e-2);
+    expect((res2.outputsByNode.score_b.metrics as DesignabilityMetrics).rows[0].scRmsd).toBeLessThan(1e-2);
+
+    // Now invalidate ONLY Branch B (change fold_b.seed), reload into scheduler3, and resume:
+    // ONLY fold_b and score_b should re-execute!
+    const editedGraph = structuredClone(branchedGraph);
+    editedGraph.nodes.find((n) => n.id === 'fold_b')!.params.seed = 99;
+    const scheduler3 = new ExecutionScheduler({ checkpointStore: store });
+    await scheduler3.loadCheckpointFromStore('branched-job-1');
+    const executedRun3: string[] = [];
+    const cachedRun3: string[] = [];
+    const workerCallsBeforeEditResume = mockWorkerRunCalls;
+    await scheduler3.run(editedGraph, (ev) => {
+      if (ev.status === 'done') executedRun3.push(ev.nodeId);
+      if (ev.status === 'cached') cachedRun3.push(ev.nodeId);
+    });
+    expect(cachedRun3.sort()).toEqual(['fold_a', 'score_a', 'seq', 'src']);
+    expect(executedRun3.sort()).toEqual(['fold_b', 'score_b']);
+    expect(mockWorkerRunCalls).toBe(workerCallsBeforeEditResume + 1);
+
+    await scheduler1.releaseActiveGpu();
+    await scheduler2.releaseActiveGpu();
+    await scheduler3.releaseActiveGpu();
+  });
+
+  it('Issue #6: enforces configurable result-cache byte budget (maxMemoBytes) with deterministic LRU eviction over 64 distinct runs independent of weight cache', async () => {
+    // Stub a weight cache to confirm result-cache eviction never touches model weights
+    const weightCacheKeys = new Set(['denovo-run-weights-v1', 'localfold-v1']);
+    const cacheDeleteSpy = vi.fn(async (k: string) => weightCacheKeys.delete(k));
+    vi.stubGlobal('caches', {
+      keys: vi.fn(async () => [...weightCacheKeys]),
+      delete: cacheDeleteSpy,
+    });
+
+    const budgetBytes = 12 * 1024; // 12 KiB budget
+    const scheduler = new ExecutionScheduler({ maxMemoBytes: budgetBytes });
+
+    // Execute 64 distinct CPU sequence-input runs (each ~500-900 bytes in memo)
+    const AA20 = 'ACDEFGHIKLMNPQRSTVWY';
+    const graphs: WorkflowGraph[] = [];
+    for (let i = 0; i < 64; i++) {
+      const seq = `MKTAYIAKQR${'ACDEFGHIKL'.repeat(12)}${AA20[i % 20].repeat(4)}${AA20[Math.floor(i / 20) % 20].repeat(4)}`;
+      const g: WorkflowGraph = {
+        id: `run-64-${i}`,
+        name: `Run ${i}`,
+        nodes: [
+          {
+            id: 's',
+            adapterId: 'sequence-input',
+            params: { label: `cand-${i}`, sequence: seq },
+          },
+        ],
+        edges: [],
+      };
+      graphs.push(g);
+      await scheduler.run(g, () => {});
+      expect(scheduler.getMemoStats().usedBytes).toBeLessThanOrEqual(budgetBytes);
+    }
+
+    const stats = scheduler.getMemoStats();
+    expect(stats.maxBytes).toBe(budgetBytes);
+    expect(stats.usedBytes).toBeLessThanOrEqual(budgetBytes);
+    expect(stats.entryCount).toBeLessThan(64);
+    expect(stats.entryCount).toBeGreaterThan(0);
+    expect(stats.evictionCount).toBeGreaterThan(0);
+
+    // Most recent run (#63) MUST be a cache hit (MRU), while oldest run (#0) MUST be evicted (cache miss)!
+    const evNewest: NodeProgressEvent[] = [];
+    await scheduler.run(graphs[63], (ev) => evNewest.push(ev));
+    expect(evNewest.some((e) => e.status === 'cached')).toBe(true);
+
+    const evOldest: NodeProgressEvent[] = [];
+    await scheduler.run(graphs[0], (ev) => evOldest.push(ev));
+    expect(evOldest.some((e) => e.status === 'cached')).toBe(false);
+    expect(evOldest.some((e) => e.status === 'done')).toBe(true);
+
+    // Weight cache was completely untouched by result-cache LRU eviction
+    expect(cacheDeleteSpy).not.toHaveBeenCalled();
+    expect(weightCacheKeys.has('denovo-run-weights-v1')).toBe(true);
+    expect(weightCacheKeys.has('localfold-v1')).toBe(true);
+  });
+
+  it('Issue #3 (mandatory identical-coords test): distinguishes self-consistency against A vs external-mismatch against identical-coordinate B vs external-unlinked standalone sequence', async () => {
+    const scheduler = new ExecutionScheduler();
+    const pdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(pdb);
+    const L = parsed.nResidues;
+
+    // Two distinct StructureArtifacts A and B with IDENTICAL coordinates but different IDs!
+    const structA: StructureArtifact = {
+      kind: 'StructureArtifact',
+      id: 'struct-A',
+      label: 'Design A',
+      sourceModelId: 'genie3',
+      length: L,
+      sequence: parsed.sequence,
+      caCoords: new Float32Array(parsed.caCoords),
+      backbone4Coords: new Float32Array(parsed.backbone4Coords),
+      pdbText: pdb,
+      geometry: { length: L, rg: 11, meanCaDist: 3.8, chainBreaks: 0, clashes: 0, helixPct: 80, sheetPct: 0, coilPct: 20 },
+    };
+    const structB: StructureArtifact = {
+      ...structA,
+      id: 'struct-B',
+      label: 'Design B',
+      caCoords: new Float32Array(parsed.caCoords),
+      backbone4Coords: new Float32Array(parsed.backbone4Coords),
+    };
+
+    // Route mock generator by node seed so nodeA outputs structA and nodeB outputs structB
+    mockRawOutputsFactory = (msg) => {
+      if (msg.inputs && 'sequences' in msg.inputs) {
+        const folds: FoldedStructure = {
+          kind: 'FoldedStructure',
+          id: `folds-${String(msg.params?.seed ?? 0)}`,
+          parentStructureId: String(msg.params?.seed) === '99' ? 'none' : 'struct-A',
+          sourceStructureId: String(msg.params?.seed) === '99' ? 'none' : 'struct-A',
+          folds: [
+            {
+              sequenceId: 'cand-1',
+              key: 'cand-1',
+              sequence: parsed.sequence,
+              foldModelId: 'localfold-af2',
+              pdbText: pdb,
+              caCoords: new Float32Array(parsed.caCoords),
+              plddt: new Float32Array(L).fill(93),
+              meanPlddt: 93,
+              confidence: 93,
+              confidenceAvailable: true,
+              ptm: 0.9,
+              elapsedMs: 10,
+            },
+          ],
+        };
+        return { folds, structure: makePlaceholderStructure(`rep-${folds.id}`, parsed.sequence) };
+      }
+      const st = Number(msg.params?.seed) === 1 ? structA : structB;
+      return {
+        structure: st,
+        sequences: {
+          kind: 'SequenceSet',
+          id: `seq-${st.id}`,
+          parentStructureId: st.id,
+          sourceStructureId: st.id,
+          sourceModelId: 'genie3',
+          candidates: [
+            { id: 'cand-1', key: 'cand-1', sequence: parsed.sequence, score: null, globalScore: null, sourceModelId: 'genie3' },
+          ],
+        },
+      };
+    };
+
+    const makeGraph = (wireRefNode: 'genA' | 'genB', foldSeed: number): WorkflowGraph => ({
+      id: `ident-coords-${wireRefNode}-${foldSeed}`,
+      name: 'Identical Coords Lineage',
+      nodes: [
+        { id: 'genA', adapterId: 'genie3', params: { length: L, seed: 1 } },
+        { id: 'genB', adapterId: 'genie3', params: { length: L, seed: 2 } },
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: parsed.sequence } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 1, seed: foldSeed } },
+        { id: 'score', adapterId: 'designability-scorer', params: { scRmsdThreshold: 2.0, plddtThreshold: 70 } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: wireRefNode, fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    });
+
+    // 1. Fold from A scored against A -> self-consistency PASS!
+    const resA = await scheduler.run(makeGraph('genA', 1), () => {}, { bypassCache: true });
+    const mA = resA.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(mA.referenceRelation).toBe('self-consistency');
+    expect(mA.referenceLabel).toBe('Self-consistency against Design A');
+    expect(mA.selfConsistencyValid).toBe(true);
+    expect(mA.lineageMismatch).toBe(false);
+    expect(mA.rows[0].designable).toBe(true);
+    expect(mA.passRate).toBe(1);
+
+    // 2. Change ONLY the wire from A to identical-coordinate B -> identical RMSD, external-mismatch, NOT a self-consistency PASS!
+    const resB = await scheduler.run(makeGraph('genB', 1), () => {}, { bypassCache: true });
+    const mB = resB.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(mB.rows[0].scRmsd).toBeCloseTo(mA.rows[0].scRmsd, 6);
+    expect(mB.referenceRelation).toBe('external-mismatch');
+    expect(mB.referenceLabel).toBe('Comparison against Design B · Fold originated from struct-A');
+    expect(mB.selfConsistencyValid).toBe(false);
+    expect(mB.lineageMismatch).toBe(true);
+    expect(mB.rows[0].designable).toBe(false);
+    expect(mB.passRate).toBe(0);
+
+    // 3. Standalone sequence (no parentStructureId / 'none') scored against A -> external-unlinked, NOT a self-consistency PASS!
+    const resUnlinked = await scheduler.run(makeGraph('genA', 99), () => {}, { bypassCache: true });
+    const mU = resUnlinked.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(mU.rows[0].scRmsd).toBeCloseTo(mA.rows[0].scRmsd, 6);
+    expect(mU.referenceRelation).toBe('external-unlinked');
+    expect(mU.referenceLabel).toBe('Comparison against Design A · No parent structure recorded');
+    expect(mU.selfConsistencyValid).toBe(false);
+    expect(mU.rows[0].designable).toBe(false);
+    expect(mU.passRate).toBe(0);
+
+    await scheduler.releaseActiveGpu();
+  });
+
+  it('Issue #4/#6 (Astra regressions): preserves resume snapshot with maxMemoBytes=0, rejects tampered checkpoints, and parses indented FASTA headers', async () => {
+    // 1. Indented second FASTA header produces two separate sequences instead of fusing header text into sequence
+    const sFasta = new ExecutionScheduler();
+    const fastaRes = await sFasta.run(
+      {
+        id: 'indented-fasta',
+        name: 'Indented FASTA',
+        nodes: [
+          {
+            id: 'seq',
+            adapterId: 'sequence-input',
+            params: { sequence: '>alpha\nAAAAA\n  >second\nCCCCC' },
+          },
+        ],
+        edges: [],
+      },
+      () => {},
+    );
+    const fastaSet = fastaRes.outputsByNode.seq.sequences as SequenceSet;
+    expect(fastaSet.candidates.map((c) => [c.id, c.sequence])).toEqual([
+      ['alpha', 'AAAAA'],
+      ['second', 'CCCCC'],
+    ]);
+
+    // 2. Astra Finding #1: With maxMemoBytes=0 (memo disabled), resuming a 2-node checkpoint reuses BOTH nodes without re-execution!
+    const twoNodeGraph: WorkflowGraph = {
+      id: 'zero-memo-resume',
+      name: 'Zero Memo Resume',
+      nodes: [
+        { id: 'n1', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+        { id: 'n2', adapterId: 'rfd4-conditioner', params: { taskPreset: 'custom', contig: 'A1-53' } },
+      ],
+      edges: [{ fromNode: 'n1', fromPort: 'structure', toNode: 'n2', toPort: 'template' }],
+    };
+    const producer = new ExecutionScheduler();
+    await producer.run(twoNodeGraph, () => {});
+    const exported = producer.exportCheckpoint();
+
+    const zeroMemoResumer = new ExecutionScheduler({ maxMemoBytes: 0 });
+    zeroMemoResumer.importCheckpoint(exported);
+    const cachedIds: string[] = [];
+    const executedIds: string[] = [];
+    await zeroMemoResumer.run(twoNodeGraph, (ev) => {
+      if (ev.status === 'cached') cachedIds.push(ev.nodeId);
+      if (ev.status === 'done') executedIds.push(ev.nodeId);
+    });
+    expect(cachedIds).toEqual(['n1', 'n2']);
+    expect(executedIds).toEqual([]);
+
+    // 3. Astra Finding #7: Importing a checkpoint with missing required output ports throws Output contract violation!
+    const tampered = JSON.stringify({
+      schema: 'denovo.checkpoint/v1',
+      runId: 'bad-run',
+      graphId: 'bad-g',
+      createdAt: new Date().toISOString(),
+      status: 'completed',
+      completedNodeIds: ['seq'],
+      unfinishedNodeIds: [],
+      nodes: {
+        seq: {
+          nodeId: 'seq',
+          adapterId: 'sequence-input',
+          cacheKey: 'fake-key',
+          completedAt: new Date().toISOString(),
+          outputs: {}, // missing required 'sequences' port!
+          refs: {},
+        },
+      },
+    });
+    const validatorScheduler = new ExecutionScheduler();
+    expect(() => validatorScheduler.importCheckpoint(tampered)).toThrow(
+      /Output contract violation.*missing required output port "sequences"/i,
+    );
+  });
+
+  it('Issue #5 (end-to-end workflow): executes 3 named candidates across two branches in reversed order with 1 omitted member and exports paired join CSV', async () => {
+    const scheduler = new ExecutionScheduler();
+    const pdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(pdb);
+    const L = parsed.nResidues;
+
+    // Two predictor branches: branch A returns [cand-3, cand-1, cand-2]; branch B returns [cand-2, cand-1] (omits cand-3!)
+    mockRawOutputsFactory = (msg) => {
+      const model = String(msg.params?.model ?? 'monomer');
+      const isBranchA = model === 'monomer';
+      const makeCand = (id: string, plddt: number, confAvail = true) => ({
+        sequenceId: id,
+        key: id,
+        sequence: parsed.sequence,
+        foldModelId: `localfold-${model}`,
+        pdbText: pdb,
+        caCoords: new Float32Array(parsed.caCoords),
+        plddt: confAvail ? new Float32Array(L).fill(plddt) : new Float32Array(0),
+        meanPlddt: confAvail ? plddt : Number.NaN,
+        confidence: confAvail ? plddt : null,
+        confidenceAvailable: confAvail,
+        ptm: confAvail ? 0.85 : null,
+        elapsedMs: 10,
+      });
+      const folds: FoldedStructure = {
+        kind: 'FoldedStructure',
+        id: `folds-${model}`,
+        parentStructureId: 'none',
+        collectionKind: 'independent-candidates',
+        folds: isBranchA
+          ? [makeCand('cand-3', 79.0), makeCand('cand-1', 91.5), makeCand('cand-2', 0, false)]
+          : [makeCand('cand-2', 0, false), makeCand('cand-1', 88.0)],
+      };
+      return { folds, structure: makePlaceholderStructure(`rep-${model}`, parsed.sequence) };
+    };
+
+    const graph: WorkflowGraph = {
+      id: 'two-branch-join',
+      name: 'Two Branch Join',
+      nodes: [
+        {
+          id: 'seq',
+          adapterId: 'sequence-input',
+          params: {
+            sequence: `>cand-1\n${parsed.sequence}\n>cand-2\n${parsed.sequence}\n>cand-3\n${parsed.sequence}`,
+          },
+        },
+        { id: 'branch_a', adapterId: 'localfold-af2', label: 'Predictor A', params: { model: 'monomer', maxSequences: 3 } },
+        { id: 'branch_b', adapterId: 'localfold-af2', label: 'Predictor B', params: { model: 'rosettafold3', maxSequences: 3 } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'branch_a', toPort: 'sequences' },
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'branch_b', toPort: 'sequences' },
+      ],
+    };
+
+    const res = await scheduler.run(graph, () => {});
+    const joined = joinBranchArtifacts(graph, ['branch_a', 'branch_b'], res.outputsByNode);
+    expect(joined.rows).toHaveLength(3);
+    expect(joined.completeRowCount).toBe(2);
+    expect(joined.partialRowCount).toBe(1);
+
+    const row1 = joined.rows.find((r) => r.key === 'cand-1')!;
+    expect(row1.byBranch.branch_a.present).toBe(true);
+    expect(row1.byBranch.branch_b.present).toBe(true);
+    expect(row1.byBranch.branch_a.confidence).toBeCloseTo(91.5, 3);
+    expect(row1.byBranch.branch_b.confidence).toBeCloseTo(88.0, 3);
+
+    const row2 = joined.rows.find((r) => r.key === 'cand-2')!;
+    expect(row2.byBranch.branch_a.confidenceAvailable).toBe(false);
+    expect(row2.byBranch.branch_b.confidenceAvailable).toBe(false);
+
+    const row3 = joined.rows.find((r) => r.key === 'cand-3')!;
+    expect(row3.missingBranchIds).toEqual(['branch_b']);
+    expect(row3.byBranch.branch_b.present).toBe(false);
+
+    const csv = exportJoinedCollectionCsv(joined);
+    expect(csv).toContain('cand-3,1,branch_b,PRESENT,1,79,79,MISSING,,,');
+    expect(csv).toContain('cand-2,2,,PRESENT,3,,N/A,PRESENT,1,,N/A');
+
+    await scheduler.releaseActiveGpu();
+  });
+
+  it('Verifier regression suite: conflicting lineage, partial-mapping no-PASS, invalidateEditedGraph memo eviction, clearMemo checkpoint reset, entry integrity, single cancel history, GPU disposal await, and storage-save failure resilience', async () => {
+    const pdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(pdb);
+    const L = parsed.nResidues;
+
+    // 1. Conflicting parentStructureId (A) vs sourceStructureId (B) when ref is B -> external-mismatch, NOT self-consistency PASS!
+    const sLineage = new ExecutionScheduler();
+    const demoRef = await materializePdbInputNode({
+      id: 'src',
+      adapterId: 'pdb-input',
+      params: { mode: 'demo-bundle' },
+    });
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'folds-conflict',
+      parentStructureId: 'different-parent-A',
+      sourceStructureId: demoRef.id, // disagrees with parentStructureId!
+      folds: [
+        {
+          sequenceId: 'c1',
+          key: 'c1',
+          sequence: parsed.sequence,
+          foldModelId: 'localfold-af2',
+          pdbText: pdb,
+          caCoords: new Float32Array(parsed.caCoords),
+          plddt: new Float32Array(L).fill(94),
+          meanPlddt: 94,
+          ptm: 0.9,
+          elapsedMs: 5,
+        },
+      ],
+    });
+    const conflictRes = await sLineage.run(
+      {
+        id: 'conflict-lineage',
+        name: 'Conflict Lineage',
+        nodes: [
+          { id: 'src', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+          { id: 'seq', adapterId: 'sequence-input', params: { sequence: parsed.sequence } },
+          { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 1 } },
+          { id: 'score', adapterId: 'designability-scorer', params: {} },
+        ],
+        edges: [
+          { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+          { fromNode: 'src', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+          { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+        ],
+      },
+      () => {},
+    );
+    const conflictMetrics = conflictRes.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(conflictMetrics.referenceRelation).toBe('external-mismatch');
+    expect(conflictMetrics.selfConsistencyValid).toBe(false);
+    expect(conflictMetrics.lineageMismatch).toBe(true);
+    expect(conflictMetrics.rows[0].designable).toBe(false);
+
+    // 2. Partial residueMapping on a DISTORTED same-parent fold must NOT turn it into a self-consistency PASS!
+    const distortedCa = new Float32Array(parsed.caCoords);
+    for (let i = 6; i < L; i++) {
+      distortedCa[i * 3] += 25.0; // severely distorted outside first 6 residues!
+    }
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'folds-distorted-same',
+      parentStructureId: demoRef.id,
+      sourceStructureId: demoRef.id,
+      folds: [
+        {
+          sequenceId: 'distorted',
+          key: 'distorted',
+          sequence: parsed.sequence,
+          foldModelId: 'localfold-af2',
+          pdbText: pdb,
+          caCoords: distortedCa,
+          plddt: new Float32Array(L).fill(95),
+          meanPlddt: 95,
+          ptm: 0.9,
+          elapsedMs: 5,
+        },
+      ],
+    });
+    const partialRes = await sLineage.run(
+      {
+        id: 'partial-map-same-parent',
+        name: 'Partial Map Same Parent',
+        nodes: [
+          { id: 'src', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+          { id: 'seq', adapterId: 'sequence-input', params: { sequence: parsed.sequence } },
+          { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 1 } },
+          {
+            id: 'score',
+            adapterId: 'designability-scorer',
+            params: { residueMapping: [[0, 0], [1, 1], [2, 2], [3, 3]] },
+          },
+        ],
+        edges: [
+          { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+          { fromNode: 'src', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+          { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+        ],
+      },
+      () => {},
+      { bypassCache: true },
+    );
+    const partialMetrics = partialRes.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(partialMetrics.referenceRelation).toBe('external-mapped');
+    expect(partialMetrics.selfConsistencyValid).toBe(false);
+    expect(partialMetrics.rows[0].scRmsd).toBeLessThan(1e-2);
+    expect(partialMetrics.rows[0].designable).toBe(false);
+
+    // 2b. Explicitly forcing allowExternalReference: true even on a same-parent fold sets selfConsistencyValid: false & designable: false!
+    mockFoldFactory = () => ({
+      kind: 'FoldedStructure',
+      id: 'folds-same-parent-ext',
+      parentStructureId: demoRef.id,
+      sourceStructureId: demoRef.id,
+      folds: [
+        {
+          sequenceId: 'same-ext',
+          key: 'same-ext',
+          sequence: parsed.sequence,
+          foldModelId: 'localfold-af2',
+          pdbText: pdb,
+          caCoords: new Float32Array(parsed.caCoords),
+          plddt: new Float32Array(L).fill(95),
+          meanPlddt: 95,
+          ptm: 0.92,
+          elapsedMs: 5,
+        },
+      ],
+    });
+    const forcedExtRes = await sLineage.run(
+      {
+        id: 'forced-ext-same-parent',
+        name: 'Forced Ext Same Parent',
+        nodes: [
+          { id: 'src', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+          { id: 'seq', adapterId: 'sequence-input', params: { sequence: parsed.sequence } },
+          { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 1 } },
+          {
+            id: 'score',
+            adapterId: 'designability-scorer',
+            params: { allowExternalReference: true },
+          },
+        ],
+        edges: [
+          { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+          { fromNode: 'src', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+          { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+        ],
+      },
+      () => {},
+      { bypassCache: true },
+    );
+    const forcedExtMetrics = forcedExtRes.outputsByNode.score.metrics as DesignabilityMetrics;
+    expect(forcedExtMetrics.referenceMode).toBe('external-reference');
+    expect(forcedExtMetrics.referenceRelation).toBe('external-unlinked');
+    expect(forcedExtMetrics.selfConsistencyValid).toBe(false);
+    expect(forcedExtMetrics.rows[0].selfConsistencyValid).toBe(false);
+    expect(forcedExtMetrics.rows[0].designable).toBe(false);
+    await sLineage.releaseActiveGpu();
+
+    // 3. invalidateEditedGraph evicts stale memo entries AND benchmarkId changes bust StructureArtifact.id (forcing preflight re-check!)
+    const sInv = new ExecutionScheduler();
+    mockGenStructureFactory = () => makePlaceholderStructure('gen-ok', parsed.sequence);
+    const gBefore: WorkflowGraph = {
+      id: 'inv-memo',
+      name: 'Inv Memo',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+        { id: 'g3', adapterId: 'genie3', params: { length: 53, taskMode: 'motif' } },
+      ],
+      edges: [{ fromNode: 'src', fromPort: 'structure', toNode: 'g3', toPort: 'structure' }],
+    };
+    const rBefore = await sInv.run(gBefore, () => {});
+    const gAfter = structuredClone(gBefore);
+    // Switching benchmarkId to a ligand benchmark unsupported by Genie 3 MUST invalidate & fail preflight (not hit stale memo!)
+    gAfter.nodes[0].params.benchmarkId = 'rfd4-sm-sam';
+    const invRes = sInv.invalidateEditedGraph(gBefore, gAfter);
+    expect(invRes.staleNodeIds).toEqual(['src', 'g3']);
+    expect(sInv.getMemoStats().entryCount).toBe(0);
+    // Verify artifact id changes when benchmarkId changes
+    const srcAfter = await materializePdbInputNode(gAfter.nodes[0]);
+    expect(srcAfter.id).not.toBe(rBefore.outputsByNode.src.structure.id);
+    await sInv.releaseActiveGpu();
+
+    // 4. clearMemo() resets latestCheckpoint so subsequent identical run does NOT hit checkpoint!
+    const sClear = new ExecutionScheduler();
+    const cpuGraph: WorkflowGraph = {
+      id: 'clear-ckpt',
+      name: 'Clear Ckpt',
+      nodes: [{ id: 's', adapterId: 'sequence-input', params: { sequence: 'MKTAYIAKQRQISFVKSHFS' } }],
+      edges: [],
+    };
+    await sClear.run(cpuGraph, () => {});
+    sClear.clearMemo();
+    const clearEvs: NodeProgressEvent[] = [];
+    await sClear.run(cpuGraph, (ev) => clearEvs.push(ev));
+    expect(clearEvs.some((e) => e.status === 'cached')).toBe(false);
+    expect(clearEvs.some((e) => e.status === 'done')).toBe(true);
+
+    // 5. Checkpoint entry integrity rejects swapped valid outputs between two cache keys!
+    const sSwapA = new ExecutionScheduler();
+    const sSwapB = new ExecutionScheduler();
+    await sSwapA.run(
+      { id: 'gA', name: 'A', nodes: [{ id: 's', adapterId: 'sequence-input', params: { sequence: 'AAAAA' } }], edges: [] },
+      () => {},
+    );
+    await sSwapB.run(
+      { id: 'gB', name: 'B', nodes: [{ id: 's', adapterId: 'sequence-input', params: { sequence: 'CCCCC' } }], edges: [] },
+      () => {},
+    );
+    const ckptA = sSwapA.exportCheckpointObject()!;
+    const ckptB = sSwapB.exportCheckpointObject()!;
+    // Swap outputs from B into A's cacheKey & integrity tag
+    ckptA.nodes.s.outputs = ckptB.nodes.s.outputs;
+    expect(() => new ExecutionScheduler().importCheckpoint(ckptA)).toThrow(
+      /Checkpoint integrity violation/i,
+    );
+
+    // 6. Cancellation finalizes EXACTLY ONCE (no duplicate history entries) AND awaits GPU disposal before clearing lease / spawning next worker!
+    mockHangWorker = true;
+    mockDisposeDelayMs = 25;
+    mockLiveWorkers = 0;
+    mockMaxLiveWorkers = 0;
+    const sCancel = new ExecutionScheduler();
+    const gpuGraph: WorkflowGraph = {
+      id: 'cancel-gpu-dispose',
+      name: 'Cancel GPU Dispose',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'ACDEFGHIKLMNPQRSTVWY' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { recycles: 1, maxSequences: 1 } },
+      ],
+      edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+    };
+
+    const ac1 = new AbortController();
+    const p1 = sCancel.run(gpuGraph, () => {}, { signal: ac1.signal, bypassCache: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    ac1.abort();
+    await expect(p1).rejects.toThrow(RunCancellationError);
+    // Disposal MUST have finished before run settled (zero live workers left, exactly 1 history entry!)
+    expect(mockLiveWorkers).toBe(0);
+    expect(sCancel.getRunHistory()).toHaveLength(1);
+    expect(sCancel.getRunHistory()[0].status).toBe('cancelled');
+
+    // Starting a second run immediately after cancellation never overlaps two live GPU workers!
+    mockHangWorker = false;
+    mockDisposeDelayMs = 0;
+    await sCancel.run(gpuGraph, () => {}, { bypassCache: true });
+    expect(mockMaxLiveWorkers).toBe(1);
+    await sCancel.releaseActiveGpu();
+
+    // 7. Checkpoint-store save failure during run failure still transitions activeRun to 'failed', leaseHeld: false, and records history!
+    const failingStore = {
+      save: vi.fn(async () => {
+        throw new Error('IndexedDB quota exceeded');
+      }),
+      load: vi.fn(async () => null),
+    };
+    const sFailStore = new ExecutionScheduler({ checkpointStore: failingStore });
+    await expect(
+      sFailStore.run(cpuGraph, () => {}, { checkpointKey: 'fail-key' }),
+    ).rejects.toThrow(/IndexedDB quota exceeded/);
+    const postFailState = sFailStore.getActiveRunState();
+    expect(postFailState.status).toBe('failed');
+    expect(postFailState.leaseHeld).toBe(false);
+    expect(sFailStore.getRunHistory()).toHaveLength(1);
+    expect(sFailStore.getRunHistory()[0].status).toBe('failed');
   });
 });

@@ -14,13 +14,72 @@ import {
 } from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import { ADAPTER_REGISTRY } from './registry';
+import { resolveFoldConfidence, selectFoldRepresentative } from './bio-capabilities';
 import type {
   CanonicalArtifact,
+  CollectionKind,
   DesignabilityMetrics,
   FoldedStructure,
+  SequenceSet,
   StructureArtifact,
+  TrajectoryFramesArtifact,
   WorkflowGraph,
 } from './types';
+
+export type ComparisonPairingMode = 'by-candidate' | 'branch-best';
+
+export interface KeyedCollectionItem<T = unknown> {
+  key: string;
+  sequence?: string;
+  rank?: number;
+  score?: number | null;
+  confidence?: number | null;
+  confidenceAvailable?: boolean;
+  value: T;
+}
+
+export interface KeyedCollectionBranch<T = unknown> {
+  branchId: string;
+  label?: string;
+  collectionKind?: CollectionKind;
+  items: readonly KeyedCollectionItem<T>[];
+}
+
+export interface JoinedBranchEntry<T = unknown> {
+  branchId: string;
+  present: boolean;
+  missingReason?: string;
+  rank: number | null;
+  score: number | null;
+  confidence: number | null;
+  confidenceAvailable: boolean;
+  item: KeyedCollectionItem<T> | null;
+}
+
+export interface JoinedCollectionRow<T = unknown> {
+  key: string;
+  sequence?: string;
+  presentCount: number;
+  missingBranchIds: string[];
+  byBranch: Record<string, JoinedBranchEntry<T>>;
+}
+
+export interface KeyedCollectionJoinResult<T = unknown> {
+  keys: string[];
+  branchIds: string[];
+  rows: JoinedCollectionRow<T>[];
+  completeRowCount: number;
+  partialRowCount: number;
+}
+
+export interface BranchCandidateRef {
+  nodeId: string;
+  kind: 'metrics' | 'fold' | 'structure' | 'trajectory';
+  index: number;
+  key: string;
+  sequenceId: string;
+  sequence: string;
+}
 
 export interface CompareColorSlot {
   badge: string;
@@ -80,6 +139,12 @@ export interface CompareBranchSummary {
   hasNonProtein3D?: boolean;
   length: number | null;
   sequenceId: string | null;
+  candidateKey?: string | null;
+  missingSelectedCandidate?: boolean;
+  rankingPolicy?: string;
+  branchRank?: number | null;
+  confidenceAvailable?: boolean;
+  collectionKind?: CollectionKind;
   candidateCount: number;
   selectedIndex: number;
   scRmsd: number | null;
@@ -127,6 +192,16 @@ export interface ComparisonState {
   pairwise: PairwiseAgreement | null;
   /** Pairwise agreements across all alignable pairs (for 3–4 block comparisons). */
   allPairwise: PairwiseAgreement[];
+  /** Active candidate pairing mode across compared branches. */
+  pairingMode: ComparisonPairingMode;
+  /** Human-readable label distinguishing candidate-identity pairing vs branch-best ranking. */
+  pairingLabel: string;
+  /** Currently paired candidate key when in `'by-candidate'` mode (or `null` when unavailable). */
+  selectedCandidateKey: string | null;
+  /** Ordered union of candidate keys across compared branches. */
+  candidateKeys: string[];
+  /** Keyed join rows across all compared branches, explicitly flagging missing members. */
+  pairedCandidates: JoinedCollectionRow<BranchCandidateRef>[];
 }
 
 interface ChainSegment {
@@ -433,12 +508,440 @@ function computeIpaeFromMatrix(pae: Float32Array, chainLengths: readonly number[
   return count > 0 ? sum / count : null;
 }
 
+/**
+ * General keyed multi-branch collection join helper (Issue #5 / Issue #3).
+ * Pairs items across arbitrary branches by canonical candidate identity `key`
+ * (regardless of branch rank order), explicitly marking missing members on any branch
+ * and preserving confidence-less samples without fabricating confidence scores.
+ */
+export function joinKeyedCollections<T = unknown>(
+  branches: readonly KeyedCollectionBranch<T>[],
+  opts: { matchBySequenceFallback?: boolean } = {},
+): KeyedCollectionJoinResult<T> {
+  const branchIds = branches.map((b) => b.branchId);
+  const matchBySeq = Boolean(opts.matchBySequenceFallback);
+
+  // Disambiguate duplicate keys within the same branch deterministically so multi-sample
+  // members sharing a base key are never silently dropped or collapsed.
+  const normalizedBranches: KeyedCollectionBranch<T>[] = branches.map((br) => {
+    const usedKeys = new Set<string>();
+    const baseCounts = new Map<string, number>();
+    const items = br.items.map((it) => {
+      const base = it.key;
+      const count = (baseCounts.get(base) ?? 0) + 1;
+      baseCounts.set(base, count);
+      if (!usedKeys.has(base)) {
+        usedKeys.add(base);
+        return it;
+      }
+      let suffix = Math.max(2, count);
+      let disambig = `${base}#${suffix}`;
+      while (usedKeys.has(disambig)) {
+        suffix++;
+        disambig = `${base}#${suffix}`;
+      }
+      usedKeys.add(disambig);
+      return { ...it, key: disambig };
+    });
+    return { ...br, items };
+  });
+
+  // Track which item indices in each branch have been matched so sequence fallback never double-binds.
+  const consumedByBranch = new Map<string, Set<number>>();
+  const keyIndexByBranch = new Map<string, Map<string, number>>();
+  for (const br of normalizedBranches) {
+    consumedByBranch.set(br.branchId, new Set());
+    const idxMap = new Map<string, number>();
+    br.items.forEach((it, idx) => {
+      if (!idxMap.has(it.key)) idxMap.set(it.key, idx);
+    });
+    keyIndexByBranch.set(br.branchId, idxMap);
+  }
+
+  // First determine whether any branch shares exact keys; sequence fallback is only used
+  // for items that have no exact-key peer in another branch.
+  const rows: JoinedCollectionRow<T>[] = [];
+  const keys: string[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const sourceBranch of normalizedBranches) {
+    const srcConsumed = consumedByBranch.get(sourceBranch.branchId)!;
+    for (let srcIdx = 0; srcIdx < sourceBranch.items.length; srcIdx++) {
+      if (srcConsumed.has(srcIdx)) continue;
+      const anchorItem = sourceBranch.items[srcIdx];
+      const key = anchorItem.key;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      keys.push(key);
+
+      const normAnchorSeq = anchorItem.sequence?.trim().toUpperCase() || '';
+      const byBranch: Record<string, JoinedBranchEntry<T>> = {};
+      const missingBranchIds: string[] = [];
+      let presentCount = 0;
+
+      for (const br of normalizedBranches) {
+        const consumed = consumedByBranch.get(br.branchId)!;
+        let matchIdx: number | undefined = keyIndexByBranch.get(br.branchId)!.get(key);
+        if (matchIdx !== undefined && consumed.has(matchIdx)) {
+          matchIdx = undefined;
+        }
+        if (matchIdx === undefined && matchBySeq && normAnchorSeq.length > 0) {
+          // Only fallback-match by exact sequence when unique & unconsumed in this branch
+          const seqMatches: number[] = [];
+          for (let j = 0; j < br.items.length; j++) {
+            if (consumed.has(j)) continue;
+            const candSeq = br.items[j].sequence?.trim().toUpperCase() || '';
+            if (candSeq === normAnchorSeq) seqMatches.push(j);
+          }
+          if (seqMatches.length === 1) {
+            matchIdx = seqMatches[0];
+          }
+        }
+
+        if (matchIdx !== undefined) {
+          consumed.add(matchIdx);
+          const item = br.items[matchIdx];
+          const hasConf =
+            item.confidenceAvailable !== false &&
+            typeof item.confidence === 'number' &&
+            Number.isFinite(item.confidence);
+          byBranch[br.branchId] = {
+            branchId: br.branchId,
+            present: true,
+            rank: item.rank ?? matchIdx + 1,
+            score: typeof item.score === 'number' && Number.isFinite(item.score) ? item.score : null,
+            confidence: hasConf ? (item.confidence as number) : null,
+            confidenceAvailable: hasConf,
+            item,
+          };
+          presentCount++;
+        } else {
+          missingBranchIds.push(br.branchId);
+          byBranch[br.branchId] = {
+            branchId: br.branchId,
+            present: false,
+            missingReason: `Candidate "${key}" absent in branch "${br.label ?? br.branchId}"`,
+            rank: null,
+            score: null,
+            confidence: null,
+            confidenceAvailable: false,
+            item: null,
+          };
+        }
+      }
+
+      rows.push({
+        key,
+        ...(normAnchorSeq ? { sequence: normAnchorSeq } : {}),
+        presentCount,
+        missingBranchIds,
+        byBranch,
+      });
+    }
+  }
+
+  let completeRowCount = 0;
+  let partialRowCount = 0;
+  for (const r of rows) {
+    if (r.missingBranchIds.length === 0) completeRowCount++;
+    else partialRowCount++;
+  }
+
+  return {
+    keys,
+    branchIds,
+    rows,
+    completeRowCount,
+    partialRowCount,
+  };
+}
+
+function extractBranchCandidateItems(
+  graph: WorkflowGraph,
+  nodeId: string,
+  outputsByNode: Record<string, Record<string, CanonicalArtifact>>,
+): KeyedCollectionBranch<BranchCandidateRef> {
+  const node = graph.nodes.find((n) => n.id === nodeId);
+  const label =
+    node?.label || (node ? ADAPTER_REGISTRY[node.adapterId]?.shortName : undefined) || nodeId;
+  const outs = outputsByNode[nodeId];
+  if (!outs) return { branchId: nodeId, label, items: [] };
+  const values = Object.values(outs);
+
+  const metrics = values.find((a): a is DesignabilityMetrics => a.kind === 'DesignabilityMetrics');
+  if (metrics && metrics.rows.length > 0) {
+    return {
+      branchId: nodeId,
+      label,
+      collectionKind: metrics.collectionKind ?? 'independent-candidates',
+      items: metrics.rows.map((row, idx) => {
+        const key = row.candidateKey ?? row.sequenceId;
+        const hasConf = row.confidenceAvailable !== false && Number.isFinite(row.meanPlddt);
+        return {
+          key,
+          sequence: row.sequence,
+          rank: idx + 1,
+          score: Number.isFinite(row.scRmsd) ? row.scRmsd : null,
+          confidence: hasConf ? row.meanPlddt : null,
+          confidenceAvailable: hasConf,
+          value: {
+            nodeId,
+            kind: 'metrics' as const,
+            index: idx,
+            key,
+            sequenceId: row.sequenceId,
+            sequence: row.sequence,
+          },
+        };
+      }),
+    };
+  }
+
+  const folds = values.find((a): a is FoldedStructure => a.kind === 'FoldedStructure');
+  if (folds && folds.folds.length > 0) {
+    return {
+      branchId: nodeId,
+      label,
+      collectionKind: folds.collectionKind ?? 'independent-candidates',
+      items: folds.folds.map((f, idx) => {
+        const key =
+          f.key ??
+          (f.sampleIndex !== undefined && f.sampleIndex !== null
+            ? `${f.sequenceId}#sample-${f.sampleIndex}`
+            : f.sequenceId);
+        const conf = resolveFoldConfidence(f);
+        return {
+          key,
+          sequence: f.sequence,
+          rank: idx + 1,
+          score: conf,
+          confidence: conf,
+          confidenceAvailable: conf !== null,
+          value: {
+            nodeId,
+            kind: 'fold' as const,
+            index: idx,
+            key,
+            sequenceId: f.sequenceId,
+            sequence: f.sequence,
+          },
+        };
+      }),
+    };
+  }
+
+  const seqSet = values.find((a): a is SequenceSet => a.kind === 'SequenceSet');
+  if (seqSet && seqSet.candidates.length > 0) {
+    return {
+      branchId: nodeId,
+      label,
+      collectionKind: seqSet.collectionKind ?? 'independent-candidates',
+      items: seqSet.candidates.map((c, idx) => {
+        const key =
+          c.key ??
+          (c.sampleIndex !== undefined && c.sampleIndex !== null
+            ? `${c.id}#sample-${c.sampleIndex}`
+            : c.id);
+        return {
+          key,
+          sequence: c.sequence,
+          rank: idx + 1,
+          score: c.score,
+          confidence: null,
+          confidenceAvailable: false,
+          value: {
+            nodeId,
+            kind: 'structure' as const,
+            index: idx,
+            key,
+            sequenceId: c.id,
+            sequence: c.sequence,
+          },
+        };
+      }),
+    };
+  }
+
+  const traj = values.find((a): a is TrajectoryFramesArtifact => a.kind === 'TrajectoryFrames');
+  if (traj) {
+    const frames = traj.frames ?? [];
+    if (frames.length > 0) {
+      return {
+        branchId: nodeId,
+        label,
+        collectionKind: 'ordered-frames',
+        items: frames.map((fr, idx) => ({
+          key: fr.key,
+          rank: fr.frameIndex + 1,
+          score: null,
+          confidence: typeof fr.confidence === 'number' && Number.isFinite(fr.confidence) ? fr.confidence : null,
+          confidenceAvailable: typeof fr.confidence === 'number' && Number.isFinite(fr.confidence),
+          value: {
+            nodeId,
+            kind: 'trajectory' as const,
+            index: idx,
+            key: fr.key,
+            sequenceId: fr.key,
+            sequence: '',
+          },
+        })),
+      };
+    }
+    return {
+      branchId: nodeId,
+      label,
+      collectionKind: 'ordered-frames',
+      items: [
+        {
+          key: traj.id,
+          rank: 1,
+          score: null,
+          confidence: null,
+          confidenceAvailable: false,
+          value: {
+            nodeId,
+            kind: 'trajectory',
+            index: 0,
+            key: traj.id,
+            sequenceId: traj.label ?? traj.id,
+            sequence: '',
+          },
+        },
+      ],
+    };
+  }
+
+  const struct = values.find((a): a is StructureArtifact => a.kind === 'StructureArtifact');
+  if (struct) {
+    const key = struct.representativeSelection?.selectedKey ?? struct.id;
+    return {
+      branchId: nodeId,
+      label,
+      items: [
+        {
+          key,
+          sequence: struct.sequence,
+          rank: 1,
+          score: null,
+          confidence: struct.representativeSelection?.scoreValue ?? null,
+          confidenceAvailable:
+            typeof struct.representativeSelection?.scoreValue === 'number' &&
+            Number.isFinite(struct.representativeSelection.scoreValue),
+          value: {
+            nodeId,
+            kind: 'structure',
+            index: 0,
+            key,
+            sequenceId: struct.label,
+            sequence: struct.sequence,
+          },
+        },
+      ],
+    };
+  }
+
+  return { branchId: nodeId, label, items: [] };
+}
+
+/**
+ * Join multiple workflow branch outputs (metrics, folds, sequence sets, trajectory frames, or structures)
+ * into candidate-keyed comparison rows with explicit missing-member markers.
+ */
+export function joinBranchArtifacts(
+  graph: WorkflowGraph,
+  branchNodeIds: readonly string[],
+  outputsByNode: Record<string, Record<string, CanonicalArtifact>>,
+  opts: { matchBySequenceFallback?: boolean } = {},
+): KeyedCollectionJoinResult<BranchCandidateRef> {
+  const branches = branchNodeIds.map((id) => extractBranchCandidateItems(graph, id, outputsByNode));
+  return joinKeyedCollections(branches, opts);
+}
+
+/**
+ * Export a keyed multi-branch join result as a clean CSV table with explicit
+ * `MISSING` markers for absent branch members and `N/A` for confidence-less samples.
+ */
+export function exportJoinedCollectionCsv<T = unknown>(
+  joined: KeyedCollectionJoinResult<T>,
+): string {
+  const esc = (v: string): string =>
+    /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  const headers = [
+    'candidate_key',
+    'present_count',
+    'missing_branches',
+    ...joined.branchIds.flatMap((id) => [
+      `${id}_status`,
+      `${id}_rank`,
+      `${id}_score`,
+      `${id}_confidence`,
+    ]),
+  ];
+  const lines = [headers.map(esc).join(',')];
+  for (const row of joined.rows) {
+    const cols: string[] = [
+      row.key,
+      String(row.presentCount),
+      row.missingBranchIds.join(';'),
+    ];
+    for (const bid of joined.branchIds) {
+      const entry = row.byBranch[bid];
+      if (!entry || !entry.present) {
+        cols.push('MISSING', '', '', '');
+      } else {
+        cols.push(
+          'PRESENT',
+          entry.rank !== null ? String(entry.rank) : '',
+          entry.score !== null ? String(entry.score) : '',
+          entry.confidenceAvailable && entry.confidence !== null ? String(entry.confidence) : 'N/A',
+        );
+      }
+    }
+    lines.push(cols.map(esc).join(','));
+  }
+  return lines.join('\n');
+}
+
+function branchesShareCandidateIdentity(
+  branchItems: readonly KeyedCollectionBranch<BranchCandidateRef>[],
+): { hasSharedKey: boolean; hasSharedSequence: boolean } {
+  const keyBranchCount = new Map<string, number>();
+  const seqBranchCount = new Map<string, number>();
+  for (const br of branchItems) {
+    const localKeys = new Set<string>();
+    const localSeqs = new Set<string>();
+    for (const item of br.items) {
+      if (item.key) localKeys.add(item.key);
+      const seq = item.sequence?.trim().toUpperCase();
+      if (seq && seq.length >= 3) localSeqs.add(seq);
+    }
+    for (const k of localKeys) keyBranchCount.set(k, (keyBranchCount.get(k) ?? 0) + 1);
+    for (const s of localSeqs) seqBranchCount.set(s, (seqBranchCount.get(s) ?? 0) + 1);
+  }
+  let hasSharedKey = false;
+  for (const count of keyBranchCount.values()) {
+    if (count >= 2) {
+      hasSharedKey = true;
+      break;
+    }
+  }
+  let hasSharedSequence = false;
+  for (const count of seqBranchCount.values()) {
+    if (count >= 2) {
+      hasSharedSequence = true;
+      break;
+    }
+  }
+  return { hasSharedKey, hasSharedSequence };
+}
+
 function extractBranch(
   graph: WorkflowGraph,
   nodeId: string,
   slotIdx: number,
   outputsByNode: Record<string, Record<string, CanonicalArtifact>>,
   branchCandidateIdx: Record<string, number>,
+  overrideSelection?: { index: number | null; candidateKey: string | null; missing?: boolean },
 ): CompareBranchSummary {
   const node = graph.nodes.find((n) => n.id === nodeId);
   const slot = COMPARE_PALETTE[slotIdx % COMPARE_PALETTE.length];
@@ -473,6 +976,9 @@ function extractBranch(
     hasNonProtein3D: false,
     length: null,
     sequenceId: null,
+    candidateKey: overrideSelection?.candidateKey ?? null,
+    missingSelectedCandidate: Boolean(overrideSelection?.missing),
+    branchRank: null,
     candidateCount: 0,
     selectedIndex: 0,
     scRmsd: null,
@@ -500,7 +1006,24 @@ function extractBranch(
 
   const metrics = values.find((a): a is DesignabilityMetrics => a.kind === 'DesignabilityMetrics');
   if (metrics && metrics.rows.length > 0) {
-    const idx = Math.max(0, Math.min(metrics.rows.length - 1, branchCandidateIdx[nodeId] ?? 0));
+    if (overrideSelection?.missing) {
+      return {
+        ...empty,
+        hasOutputs: true,
+        kind: 'metrics',
+        candidateCount: metrics.rows.length,
+        selectedIndex: -1,
+        candidateKey: overrideSelection.candidateKey,
+        missingSelectedCandidate: true,
+        rankingPolicy: 'lowest-scRmsd',
+        collectionKind: metrics.collectionKind ?? 'independent-candidates',
+      };
+    }
+    const rawIdx =
+      overrideSelection?.index !== undefined && overrideSelection.index !== null
+        ? overrideSelection.index
+        : (branchCandidateIdx[nodeId] ?? 0);
+    const idx = Math.max(0, Math.min(metrics.rows.length - 1, rawIdx));
     const row = metrics.rows[idx] ?? metrics.best ?? metrics.rows[0];
     const parsed = parseStructureText(row.alignedFoldPdb);
     const upstreamStruct =
@@ -511,6 +1034,7 @@ function extractBranch(
     );
     const designedDisplay =
       designedHasNonProt && upstreamStruct?.cifText ? upstreamStruct.cifText : row.designedPdb;
+    const confAvail = row.confidenceAvailable !== false && Number.isFinite(row.meanPlddt);
     return {
       ...empty,
       hasOutputs: true,
@@ -530,11 +1054,17 @@ function extractBranch(
       benchmarkId: upstreamStruct?.benchmarkId ?? null,
       length: parsed.nResidues,
       sequenceId: row.sequenceId,
+      candidateKey: row.candidateKey ?? row.sequenceId,
+      missingSelectedCandidate: false,
+      rankingPolicy: 'lowest-scRmsd',
+      branchRank: idx + 1,
+      confidenceAvailable: confAvail,
+      collectionKind: metrics.collectionKind ?? 'independent-candidates',
       candidateCount: metrics.rows.length,
       selectedIndex: idx,
       scRmsd: row.scRmsd,
       scTm: row.scTm,
-      meanPlddt: row.meanPlddt,
+      meanPlddt: confAvail ? row.meanPlddt : null,
       ptm: row.ptm,
       iptm: row.iptm ?? null,
       ipae: row.ipae ?? null,
@@ -553,7 +1083,39 @@ function extractBranch(
 
   const folds = values.find((a): a is FoldedStructure => a.kind === 'FoldedStructure');
   if (folds && folds.folds.length > 0) {
-    const idx = Math.max(0, Math.min(folds.folds.length - 1, branchCandidateIdx[nodeId] ?? 0));
+    if (overrideSelection?.missing) {
+      return {
+        ...empty,
+        hasOutputs: true,
+        kind: 'fold',
+        candidateCount: folds.folds.length,
+        selectedIndex: -1,
+        candidateKey: overrideSelection.candidateKey,
+        missingSelectedCandidate: true,
+        rankingPolicy: 'branch-order',
+        collectionKind: folds.collectionKind ?? 'independent-candidates',
+      };
+    }
+    const hasExplicitIdx =
+      overrideSelection?.index !== undefined && overrideSelection.index !== null
+        ? true
+        : branchCandidateIdx[nodeId] !== undefined;
+    let rawIdx: number;
+    let rankingPolicy = 'branch-order';
+    if (overrideSelection?.index !== undefined && overrideSelection.index !== null) {
+      rawIdx = overrideSelection.index;
+    } else if (branchCandidateIdx[nodeId] !== undefined) {
+      rawIdx = branchCandidateIdx[nodeId];
+    } else {
+      // Branch-best default for FoldedStructure: pick the true representative winner
+      // (highest confidence when available, deterministic fallback when confidence-less)
+      const rep = selectFoldRepresentative(folds.folds, {
+        collectionKind: folds.collectionKind,
+      });
+      rawIdx = rep?.selection.selectedIndex ?? 0;
+      rankingPolicy = rep?.selection.criterion ?? 'branch-order';
+    }
+    const idx = Math.max(0, Math.min(folds.folds.length - 1, rawIdx));
     const f = folds.folds[idx] ?? folds.folds[0];
     const parsed = parseStructureText(f.pdbText);
     const geom =
@@ -565,6 +1127,10 @@ function extractBranch(
       findUpstreamStructureArtifact(graph, nodeId, outputsByNode);
     const chainLengths = f.chainLengths ?? parsed.diagnostics.chainLengths;
     const ipae = f.pae && chainLengths.length > 1 ? computeIpaeFromMatrix(f.pae, chainLengths) : null;
+    const conf = resolveFoldConfidence(f);
+    // Compute confidence rank (1 = highest confidence) when not explicitly overridden
+    const branchRank =
+      !hasExplicitIdx && rankingPolicy === 'highest-mean-plddt' ? 1 : idx + 1;
     return {
       ...empty,
       hasOutputs: true,
@@ -584,9 +1150,15 @@ function extractBranch(
       benchmarkId: upstreamStruct?.benchmarkId ?? null,
       length: parsed.nResidues,
       sequenceId: f.sequenceId,
+      candidateKey: f.key ?? f.sequenceId,
+      missingSelectedCandidate: false,
+      rankingPolicy,
+      branchRank,
+      confidenceAvailable: conf !== null,
+      collectionKind: folds.collectionKind ?? 'independent-candidates',
       candidateCount: folds.folds.length,
       selectedIndex: idx,
-      meanPlddt: f.meanPlddt,
+      meanPlddt: conf,
       ptm: f.ptm,
       iptm: f.iptm ?? null,
       ipae,
@@ -596,9 +1168,82 @@ function extractBranch(
     };
   }
 
+  const traj = values.find((a): a is TrajectoryFramesArtifact => a.kind === 'TrajectoryFrames');
+  if (traj) {
+    if (overrideSelection?.missing) {
+      return {
+        ...empty,
+        hasOutputs: true,
+        kind: 'structure',
+        candidateCount: traj.frames?.length || traj.frameCount,
+        selectedIndex: -1,
+        candidateKey: overrideSelection.candidateKey,
+        missingSelectedCandidate: true,
+        rankingPolicy: 'ordered-frames',
+        collectionKind: 'ordered-frames',
+      };
+    }
+    const frames = traj.frames ?? [];
+    const rawIdx =
+      overrideSelection?.index !== undefined && overrideSelection.index !== null
+        ? overrideSelection.index
+        : (branchCandidateIdx[nodeId] ?? Math.max(0, frames.length - 1));
+    const idx = frames.length > 0 ? Math.max(0, Math.min(frames.length - 1, rawIdx)) : 0;
+    const frame = frames[idx];
+    const text = frame?.cifText || frame?.pdbText || traj.cifText || traj.pdbText || '';
+    if (text) {
+      const parsed = parseStructureText(text);
+      const geom =
+        parsed.nResidues > 0
+          ? computeGeometryStats(parsed.caCoords, parsed.chainIds, parsed.resNums)
+          : null;
+      return {
+        ...empty,
+        hasOutputs: true,
+        has3D: parsed.nResidues > 0,
+        kind: 'structure',
+        structureId: traj.id,
+        pdbText: parsed.nResidues > 0 ? parsed.pdbText : text,
+        cifText: isMmcifText(text) ? text : null,
+        caCoords: parsed.caCoords,
+        resNums: parsed.resNums,
+        chainIds: parsed.chainIds,
+        chainLengths: parsed.diagnostics.chainLengths,
+        sequence: parsed.sequence,
+        length: parsed.nResidues,
+        sequenceId: frame?.key ?? traj.label ?? traj.id,
+        candidateKey: frame?.key ?? traj.id,
+        missingSelectedCandidate: false,
+        rankingPolicy: 'ordered-frames',
+        branchRank: idx + 1,
+        confidenceAvailable: typeof frame?.confidence === 'number' && Number.isFinite(frame.confidence),
+        meanPlddt:
+          typeof frame?.confidence === 'number' && Number.isFinite(frame.confidence)
+            ? frame.confidence
+            : null,
+        collectionKind: 'ordered-frames',
+        candidateCount: frames.length || traj.frameCount,
+        selectedIndex: idx,
+        geometry: geom,
+      };
+    }
+  }
+
   const struct = values.find((a): a is StructureArtifact => a.kind === 'StructureArtifact');
   const displayStructText = struct ? struct.cifText || struct.pdbText : '';
   if (struct && displayStructText) {
+    if (overrideSelection?.missing) {
+      return {
+        ...empty,
+        hasOutputs: true,
+        kind: 'structure',
+        candidateCount: 1,
+        selectedIndex: -1,
+        candidateKey: overrideSelection.candidateKey,
+        missingSelectedCandidate: true,
+        rankingPolicy: 'single-structure',
+      };
+    }
     let resNums: number[] | null = null;
     let parsedChainIds: string[] | null = struct.chainIds ?? null;
     let parsedChainLengths: number[] | null = struct.chainLengths ?? null;
@@ -637,6 +1282,10 @@ function extractBranch(
       hasNonProtein3D,
       length: struct.length,
       sequenceId: struct.label,
+      candidateKey: struct.representativeSelection?.selectedKey ?? struct.id,
+      missingSelectedCandidate: false,
+      rankingPolicy: 'single-structure',
+      branchRank: 1,
       candidateCount: 1,
       selectedIndex: 0,
       geometry: struct.geometry,
@@ -941,6 +1590,8 @@ export function buildComparisonState(
     alignKabsch?: boolean;
     branchCandidateIdx?: Record<string, number>;
     hiddenModelIds?: ReadonlySet<string>;
+    pairingMode?: ComparisonPairingMode;
+    selectedCandidateKey?: string | null;
   },
 ): ComparisonState {
   const capped = selectedNodeIds.slice(0, COMPARE_PALETTE.length);
@@ -948,9 +1599,71 @@ export function buildComparisonState(
   const hidden = opts.hiddenModelIds ?? new Set<string>();
   const wantKabsch = opts.alignKabsch !== false;
 
-  const branches = capped.map((id, idx) =>
-    extractBranch(graph, id, idx, outputsByNode, candIdx),
-  );
+  const branchCollections = capped.map((id) => extractBranchCandidateItems(graph, id, outputsByNode));
+  const { hasSharedKey, hasSharedSequence } = branchesShareCandidateIdentity(branchCollections);
+  const hasSharedIdentity = hasSharedKey || hasSharedSequence;
+  const pairingMode: ComparisonPairingMode =
+    opts.pairingMode ?? (hasSharedIdentity ? 'by-candidate' : 'branch-best');
+  const pairingLabel =
+    pairingMode === 'by-candidate'
+      ? 'Same candidate (by identity)'
+      : 'Branch best (independently ranked winners)';
+
+  // Use sequence fallback only when branches do not share explicit candidate keys
+  // (e.g., comparing branches with different per-branch auto-labels for the same sequence).
+  const joined = joinKeyedCollections(branchCollections, {
+    matchBySequenceFallback: !hasSharedKey && hasSharedSequence,
+  });
+
+  let selectedCandidateKey: string | null = null;
+  if (pairingMode === 'by-candidate') {
+    if (opts.selectedCandidateKey && joined.keys.includes(opts.selectedCandidateKey)) {
+      selectedCandidateKey = opts.selectedCandidateKey;
+    } else if (opts.selectedCandidateKey) {
+      // Caller explicitly requested a key (even if missing in some or all branches)
+      selectedCandidateKey = opts.selectedCandidateKey;
+    } else {
+      const firstBranch = branchCollections[0];
+      const firstExplicitIdx = firstBranch ? candIdx[firstBranch.branchId] : undefined;
+      if (
+        firstBranch &&
+        firstExplicitIdx !== undefined &&
+        firstExplicitIdx >= 0 &&
+        firstExplicitIdx < firstBranch.items.length
+      ) {
+        selectedCandidateKey = firstBranch.items[firstExplicitIdx].key;
+      } else {
+        selectedCandidateKey = joined.keys[0] ?? null;
+      }
+    }
+  }
+
+  const selectedRow =
+    selectedCandidateKey !== null
+      ? joined.rows.find((r) => r.key === selectedCandidateKey) ?? null
+      : null;
+
+  const branches = capped.map((id, idx) => {
+    if (pairingMode === 'by-candidate' && selectedCandidateKey !== null) {
+      const entry = selectedRow?.byBranch[id];
+      if (entry?.present && entry.item) {
+        return extractBranch(graph, id, idx, outputsByNode, candIdx, {
+          index: entry.item.value.index,
+          candidateKey: selectedCandidateKey,
+          missing: false,
+        });
+      }
+      return extractBranch(graph, id, idx, outputsByNode, candIdx, {
+        index: null,
+        candidateKey: selectedCandidateKey,
+        missing: true,
+      });
+    }
+    // In explicit `'branch-best'` mode, always select each branch's top-ranked winner
+    // rather than letting a stale per-branch `branchCandidateIdx` override the winner.
+    const effectiveBranchIdx = opts.pairingMode === 'branch-best' ? {} : candIdx;
+    return extractBranch(graph, id, idx, outputsByNode, effectiveBranchIdx);
+  });
 
   // All branches with renderable 3D (protein >= 3 aa OR pure ligand/DNA mmCIF/PDB)
   const renderable = branches.filter(
@@ -1147,5 +1860,10 @@ export function buildComparisonState(
     sharedReferenceLabel,
     pairwise,
     allPairwise,
+    pairingMode,
+    pairingLabel,
+    selectedCandidateKey,
+    candidateKeys: joined.keys,
+    pairedCandidates: joined.rows,
   };
 }

@@ -7,8 +7,10 @@
 import { atom37ToPdb, chainIdsFromLengths, parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { normalizeLocalFoldChainScores } from '$lib/engine/conditioning';
+import { selectFoldRepresentative, selectFoldWorkItems } from '$lib/engine/bio-capabilities';
 import { fetchCachedBytes } from '$lib/engine/opfs-cache';
 import type {
+  CollectionItemOutcome,
   FoldedCandidate,
   FoldedStructure,
   SequenceSet,
@@ -356,7 +358,8 @@ self.onmessage = async (ev: MessageEvent) => {
       const recycles = Math.max(0, Math.min(4, Math.round(Number(p.recycles ?? 1))));
       const tolerance = Math.max(0, Math.min(5, Number(p.tolerance ?? 0.5)));
       const diffusionSteps = Math.max(10, Math.min(200, Math.round(Number(p.diffusionSteps ?? 25))));
-      const maxSeqs = Math.max(1, Math.min(8, Math.round(Number(p.maxSequences ?? 2))));
+      const work = selectFoldWorkItems(seqSet, p);
+      const maxSeqs = work.maxSequences;
       const seed = Number(p.seed ?? 0);
       const ligandCcdCodes: string[] = Array.isArray(p.ligandCcdCodes)
         ? (p.ligandCcdCodes as string[]).map((s) => String(s).trim().toUpperCase()).filter(Boolean)
@@ -378,8 +381,9 @@ self.onmessage = async (ev: MessageEvent) => {
             .filter(Boolean);
 
       await ensureModelLoaded(msg.id, modelKey);
-      const targets = seqSet.candidates.slice(0, maxSeqs);
+      const targets = work.selected;
       const folds: FoldedCandidate[] = [];
+      const sourceStructureId = seqSet.sourceStructureId ?? seqSet.parentStructureId;
 
       if (!isAf3) {
         const runner = isAf2Multi
@@ -509,12 +513,17 @@ self.onmessage = async (ev: MessageEvent) => {
 
           folds.push({
             sequenceId: cand.id,
+            key: cand.key ?? cand.id,
             sequence: cleanSeq,
             foldModelId: `localfold-af2-${modelKey}-int5`,
+            sourceStructureId: cand.sourceStructureId ?? sourceStructureId,
+            ...(cand.sampleIndex !== undefined ? { sampleIndex: cand.sampleIndex } : {}),
             pdbText,
             caCoords,
             plddt,
             meanPlddt,
+            confidence: Number.isFinite(meanPlddt) ? meanPlddt : null,
+            confidenceAvailable: Number.isFinite(meanPlddt),
             ptm: ptmVal,
             iptm: iptmVal,
             ...chainScores,
@@ -681,12 +690,17 @@ self.onmessage = async (ev: MessageEvent) => {
 
           folds.push({
             sequenceId: cand.id,
+            key: cand.key ?? cand.id,
             sequence: cleanSeq,
             foldModelId: `localfold-${modelKey}-int5`,
+            sourceStructureId: cand.sourceStructureId ?? sourceStructureId,
+            ...(cand.sampleIndex !== undefined ? { sampleIndex: cand.sampleIndex } : {}),
             pdbText,
             caCoords: parsed.caCoords,
             plddt,
             meanPlddt,
+            confidence: Number.isFinite(meanPlddt) ? meanPlddt : null,
+            confidenceAvailable: Number.isFinite(meanPlddt),
             ptm: ptmVal,
             iptm: iptmVal,
             ...chainScores,
@@ -713,31 +727,54 @@ self.onmessage = async (ev: MessageEvent) => {
         }),
       );
 
+      const collectionKind = seqSet.collectionKind ?? 'independent-candidates';
+      const rep = selectFoldRepresentative(folds, { collectionKind });
+      const itemOutcomes: CollectionItemOutcome[] = [
+        ...folds.map((f): CollectionItemOutcome => ({
+          key: f.key ?? f.sequenceId,
+          status: 'completed',
+        })),
+        ...work.excludedCandidates.map((ex): CollectionItemOutcome => ({
+          key: ex.key,
+          status: 'excluded',
+          reason: ex.reason,
+        })),
+      ];
+
       const out: FoldedStructure = {
         kind: 'FoldedStructure',
         id: `folds-${modelKey}-${seqSet.id}-r${recycles}-${runHash}`,
         parentStructureId: seqSet.parentStructureId,
+        sourceStructureId,
+        collectionKind,
+        ...(work.excludedCandidates.length > 0 ? { excludedCandidates: work.excludedCandidates } : {}),
+        itemOutcomes,
+        ...(rep ? { representativeSelection: rep.selection } : {}),
         folds,
       };
 
-      // Also export the highest-pLDDT predicted fold as a StructureArtifact so downstream
-      // ProteinMPNN / RFD4 template / Scorer blocks can chain directly out of LocalFold.
+      // Also export the selected representative fold as a StructureArtifact so downstream
+      // ProteinMPNN / RFD4 template / Scorer blocks can chain directly out of LocalFold,
+      // carrying explicit `representativeSelection` provenance.
       let bestStructure: StructureArtifact | undefined;
-      if (folds.length > 0) {
-        const bestFold = folds.reduce(
-          (best, cur) => (cur.meanPlddt > best.meanPlddt ? cur : best),
-          folds[0],
-        );
+      if (rep) {
+        const bestFold = rep.fold;
         const bestParsed = parsePdbBackbone(bestFold.pdbText);
         const bestChainIds =
           bestFold.chainIds && bestFold.chainIds.length === bestParsed.nResidues
             ? bestFold.chainIds
             : bestParsed.chainIds;
+        const confTag =
+          rep.selection.scoreValue !== null && rep.selection.scoreValue !== undefined
+            ? `pLDDT ${rep.selection.scoreValue.toFixed(1)}`
+            : 'no confidence';
         bestStructure = {
           kind: 'StructureArtifact',
           id: `foldstruct-${modelKey}-${bestFold.sequenceId}-${runHash}`,
-          label: `${bestFold.sequenceId} (${modelKey}, pLDDT ${bestFold.meanPlddt.toFixed(1)})`,
+          label: `${bestFold.sequenceId} (${modelKey}, ${confTag})`,
           sourceModelId: 'localfold-af2',
+          parentStructureId: sourceStructureId,
+          representativeSelection: rep.selection,
           length: bestParsed.nResidues,
           sequence: bestFold.sequence,
           caCoords: bestParsed.caCoords,

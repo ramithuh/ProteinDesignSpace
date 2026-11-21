@@ -11,12 +11,123 @@ import type {
   BioCompatibilityIssue,
   BioEntityKind,
   CanonicalArtifact,
+  CollectionKind,
   ConditionSpecArtifact,
+  ExcludedCandidateRecord,
+  FoldedCandidate,
+  RepresentativeSelection,
+  SequenceCandidate,
   SequenceSet,
   StructureArtifact,
   WorkflowGraph,
   WorkflowNode,
 } from './types';
+
+export interface FoldWorkItemSelection {
+  maxSequences: number;
+  selected: SequenceCandidate[];
+  excludedCandidates: ExcludedCandidateRecord[];
+  totalCandidates: number;
+}
+
+/**
+ * Pure work-item resolver shared by preflight validation (`validateRuntimeNodeInputs`)
+ * and `localfold.worker.ts` so both inspect the EXACT identical candidate slice and
+ * surface excluded candidates explicitly.
+ */
+export function selectFoldWorkItems(
+  seqSet: SequenceSet | undefined | null,
+  params?: Record<string, unknown>,
+): FoldWorkItemSelection {
+  const rawMax = Number(params?.maxSequences ?? 2);
+  const maxSequences = Math.max(1, Math.min(8, Math.round(Number.isFinite(rawMax) ? rawMax : 2)));
+  const all = seqSet?.candidates ?? [];
+  const selected = all.slice(0, maxSequences);
+  const excludedCandidates: ExcludedCandidateRecord[] = all
+    .slice(maxSequences)
+    .map((cand, offset) => {
+      const index = maxSequences + offset;
+      return {
+        key: cand.key ?? cand.id,
+        id: cand.id,
+        index,
+        reason: `Excluded by maxSequences=${maxSequences} (candidate #${index + 1} of ${all.length})`,
+      };
+    });
+  return {
+    maxSequences,
+    selected,
+    excludedCandidates,
+    totalCandidates: all.length,
+  };
+}
+
+/**
+ * Resolve the effective numeric confidence for a folded candidate, returning `null`
+ * when the predictor emitted a confidence-less sample.
+ */
+export function resolveFoldConfidence(cand: FoldedCandidate): number | null {
+  if (cand.confidenceAvailable === false) return null;
+  if (cand.confidence === null) return null;
+  if (typeof cand.confidence === 'number') {
+    return Number.isFinite(cand.confidence) ? cand.confidence : null;
+  }
+  return Number.isFinite(cand.meanPlddt) ? cand.meanPlddt : null;
+}
+
+/**
+ * Deterministic representative selector for publishing a single `StructureArtifact`
+ * from a multi-member `FoldedStructure` collection. Records the exact key, criterion,
+ * and total member count, and falls back deterministically when confidence is unavailable.
+ */
+export function selectFoldRepresentative(
+  folds: readonly FoldedCandidate[],
+  opts: { collectionKind?: CollectionKind } = {},
+): { fold: FoldedCandidate; selection: RepresentativeSelection } | null {
+  if (folds.length === 0) return null;
+
+  let bestIdx = -1;
+  let bestScore = -Infinity;
+  for (let i = 0; i < folds.length; i++) {
+    const score = resolveFoldConfidence(folds[i]);
+    if (score !== null && score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  }
+
+  if (bestIdx >= 0) {
+    const best = folds[bestIdx];
+    return {
+      fold: best,
+      selection: {
+        selectedKey: best.key ?? best.sequenceId,
+        criterion: 'highest-mean-plddt',
+        totalMembers: folds.length,
+        selectedIndex: bestIdx,
+        scoreValue: bestScore,
+      },
+    };
+  }
+
+  // Deterministic confidence-less fallback
+  const fallbackIdx = opts.collectionKind === 'ordered-frames' ? folds.length - 1 : 0;
+  const fallback = folds[fallbackIdx];
+  const criterion =
+    opts.collectionKind === 'ordered-frames'
+      ? 'final-frame-fallback (no confidence score)'
+      : 'first-member-fallback (no confidence score)';
+  return {
+    fold: fallback,
+    selection: {
+      selectedKey: fallback.key ?? fallback.sequenceId,
+      criterion,
+      totalMembers: folds.length,
+      selectedIndex: fallbackIdx,
+      scoreValue: null,
+    },
+  };
+}
 
 export interface NodeBioProfile {
   entities: Set<BioEntityKind>;
@@ -549,8 +660,14 @@ export function validateBioCapabilities(
 export function validateRuntimeNodeInputs(
   node: WorkflowNode,
   inputs: Record<string, CanonicalArtifact>,
-): { warnings: string[] } {
+): {
+  warnings: string[];
+  excludedCandidates?: ExcludedCandidateRecord[];
+  selectedCandidateIds?: string[];
+} {
   const warnings: string[] = [];
+  let excludedCandidates: ExcludedCandidateRecord[] | undefined;
+  let selectedCandidateIds: string[] | undefined;
 
   if (node.adapterId === 'localfold-af2') {
     const seqSet = inputs.sequences as SequenceSet | undefined;
@@ -561,7 +678,17 @@ export function validateRuntimeNodeInputs(
     const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
     const hardLimit = meta.family === 'af3' ? 512 : 768;
 
-    for (const cand of seqSet.candidates) {
+    // Resolve the EXACT same candidate subset that localfold.worker.ts will execute.
+    const work = selectFoldWorkItems(seqSet, node.params);
+    selectedCandidateIds = work.selected.map((c) => c.id);
+    if (work.excludedCandidates.length > 0) {
+      excludedCandidates = work.excludedCandidates;
+      warnings.push(
+        `LocalFold maxSequences=${work.maxSequences} excludes ${work.excludedCandidates.length} candidate(s): ${work.excludedCandidates.map((c) => c.id).join(', ')}.`,
+      );
+    }
+
+    for (const cand of work.selected) {
       const len = cand.sequence.replace(/[\s/:,]+/g, '').length;
       if (len < 5) {
         throw new Error(`Refusing to fold "${cand.id}": sequence is too short (${len} aa; minimum 5 aa).`);
@@ -628,5 +755,9 @@ export function validateRuntimeNodeInputs(
     }
   }
 
-  return { warnings };
+  return {
+    warnings,
+    ...(excludedCandidates ? { excludedCandidates } : {}),
+    ...(selectedCandidateIds ? { selectedCandidateIds } : {}),
+  };
 }

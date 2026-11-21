@@ -1,9 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { insertBlockSmart, proposeConnectionsForNode } from '$lib/engine/graph-utils';
-import { buildComparisonState } from '$lib/engine/compare';
+import {
+  buildComparisonState,
+  exportJoinedCollectionCsv,
+  joinBranchArtifacts,
+  joinKeyedCollections,
+} from '$lib/engine/compare';
 import { generateSampleHelixBundlePdb, parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { applyTransformToPdb, computeGeometryStats } from '$lib/protein-ops/kabsch';
-import type { CanonicalArtifact, DesignabilityMetrics, StructureArtifact, WorkflowGraph } from '$lib/engine/types';
+import type {
+  CanonicalArtifact,
+  DesignabilityMetrics,
+  FoldedStructure,
+  StructureArtifact,
+  TrajectoryFramesArtifact,
+  WorkflowGraph,
+} from '$lib/engine/types';
 
 describe('ghost auto-connection proposals', () => {
   it('autoCommit: false returns proposedEdges without mutating graph.edges', () => {
@@ -506,5 +518,365 @@ describe('multi-select 3D comparison state', () => {
     expect(dnaSideBySide.models[0].pdbText).toContain('data_7M5W');
     // Side-by-side centered the DNA mmCIF coordinates around origin (from [2.5, 3.5, 4.5] to [-1.5, -1.5, -1.5] / [1.5, 1.5, 1.5])
     expect(dnaSideBySide.models[0].pdbText).toContain('-1.500');
+  });
+
+  it('Issue #3: pairs candidates by identity across reversed branch ranks, marks missing members, and labels branch-best mode separately', () => {
+    const pdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(pdb);
+    const geom = computeGeometryStats(parsed.caCoords);
+
+    const makeRow = (sequenceId: string, scRmsd: number, meanPlddt: number) => ({
+      structureId: 'shared-gen-1',
+      sequenceId,
+      candidateKey: sequenceId,
+      sequence: sequenceId === 'cand-1' ? 'A'.repeat(parsed.nResidues) : sequenceId === 'cand-2' ? 'G'.repeat(parsed.nResidues) : 'L'.repeat(parsed.nResidues),
+      scRmsd,
+      scTm: 0.9,
+      meanPlddt,
+      ptm: 0.85,
+      designable: scRmsd < 2.0 && meanPlddt >= 70,
+      geometry: geom,
+      foldElapsedMs: 100,
+      designedPdb: pdb,
+      alignedFoldPdb: pdb,
+      plddt: new Float32Array(parsed.nResidues).fill(meanPlddt),
+    });
+
+    // Branch A ranks cand-2 #1, cand-1 #2, cand-3 #3
+    const metricsA: DesignabilityMetrics = {
+      kind: 'DesignabilityMetrics',
+      id: 'm-branch-a',
+      rows: [makeRow('cand-2', 0.7, 92), makeRow('cand-1', 1.4, 86), makeRow('cand-3', 1.9, 80)],
+      best: null,
+      passRate: 1,
+    };
+    // Branch B reverses rank order (cand-1 #1, cand-2 #2) and omits cand-3
+    const metricsB: DesignabilityMetrics = {
+      kind: 'DesignabilityMetrics',
+      id: 'm-branch-b',
+      rows: [makeRow('cand-1', 0.8, 90), makeRow('cand-2', 1.6, 82)],
+      best: null,
+      passRate: 1,
+    };
+
+    const graph: WorkflowGraph = {
+      id: 'rank-rev',
+      name: 'Rank Reversed',
+      nodes: [
+        { id: 'score_a', adapterId: 'designability-scorer', label: 'Score A', params: {} },
+        { id: 'score_b', adapterId: 'designability-scorer', label: 'Score B', params: {} },
+      ],
+      edges: [],
+    };
+    const outputsByNode: Record<string, Record<string, CanonicalArtifact>> = {
+      score_a: { metrics: metricsA },
+      score_b: { metrics: metricsB },
+    };
+
+    // Default pairingMode is 'by-candidate' when branches share candidate identities
+    const byCandDefault = buildComparisonState(graph, ['score_a', 'score_b'], outputsByNode, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+    });
+    expect(byCandDefault.pairingMode).toBe('by-candidate');
+    expect(byCandDefault.pairingLabel).toContain('Same candidate');
+    expect(byCandDefault.selectedCandidateKey).toBe('cand-2');
+    // Both branches display cand-2 (rank #1 on A, rank #2 on B!)
+    expect(byCandDefault.branches[0].sequenceId).toBe('cand-2');
+    expect(byCandDefault.branches[0].branchRank).toBe(1);
+    expect(byCandDefault.branches[1].sequenceId).toBe('cand-2');
+    expect(byCandDefault.branches[1].branchRank).toBe(2);
+    expect(byCandDefault.branches[1].scRmsd).toBeCloseTo(1.6, 4);
+
+    // Selecting cand-1 pairs cand-1 across both branches (rank #2 on A, rank #1 on B)
+    const byCand1 = buildComparisonState(graph, ['score_a', 'score_b'], outputsByNode, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      pairingMode: 'by-candidate',
+      selectedCandidateKey: 'cand-1',
+    });
+    expect(byCand1.branches[0].sequenceId).toBe('cand-1');
+    expect(byCand1.branches[0].scRmsd).toBeCloseTo(1.4, 4);
+    expect(byCand1.branches[1].sequenceId).toBe('cand-1');
+    expect(byCand1.branches[1].scRmsd).toBeCloseTo(0.8, 4);
+
+    // Selecting cand-3 (absent on Branch B) explicitly marks Branch B missing instead of substituting another candidate
+    const byCand3 = buildComparisonState(graph, ['score_a', 'score_b'], outputsByNode, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      pairingMode: 'by-candidate',
+      selectedCandidateKey: 'cand-3',
+    });
+    expect(byCand3.branches[0].sequenceId).toBe('cand-3');
+    expect(byCand3.branches[0].missingSelectedCandidate).toBe(false);
+    expect(byCand3.branches[1].missingSelectedCandidate).toBe(true);
+    expect(byCand3.branches[1].sequenceId).toBeNull();
+    expect(byCand3.branches[1].has3D).toBe(false);
+    const cand3Row = byCand3.pairedCandidates.find((r) => r.key === 'cand-3');
+    expect(cand3Row?.missingBranchIds).toEqual(['score_b']);
+    expect(cand3Row?.byBranch.score_b.present).toBe(false);
+
+    // Separately labeled 'branch-best' mode compares independently ranked #1 winners (cand-2 vs cand-1)
+    const branchBest = buildComparisonState(graph, ['score_a', 'score_b'], outputsByNode, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      pairingMode: 'branch-best',
+    });
+    expect(branchBest.pairingMode).toBe('branch-best');
+    expect(branchBest.pairingLabel).toContain('independently ranked winners');
+    expect(branchBest.branches[0].sequenceId).toBe('cand-2');
+    expect(branchBest.branches[1].sequenceId).toBe('cand-1');
+    expect(branchBest.branches[0].branchRank).toBe(1);
+    expect(branchBest.branches[1].branchRank).toBe(1);
+  });
+
+  it('Issue #5: joins 3-candidate multi-branch collections with reordered & missing members, confidence-less samples, and TrajectoryFrames', () => {
+    // 1. Direct joinKeyedCollections on 2 CPU fixture predictors with 3 named candidates, reversed order, 1 missing, and confidence-less sample
+    const joined = joinKeyedCollections([
+      {
+        branchId: 'pred_a',
+        label: 'CPU Predictor A',
+        collectionKind: 'independent-candidates',
+        items: [
+          { key: 'cand-alpha', score: 0.9, confidence: 88.5, confidenceAvailable: true, value: { id: 'a1' } },
+          { key: 'cand-beta', score: 1.5, confidence: null, confidenceAvailable: false, value: { id: 'a2' } },
+          { key: 'cand-gamma', score: 2.1, confidence: 79.0, confidenceAvailable: true, value: { id: 'a3' } },
+        ],
+      },
+      {
+        branchId: 'pred_b',
+        label: 'CPU Predictor B',
+        collectionKind: 'independent-candidates',
+        items: [
+          { key: 'cand-beta', score: 1.1, confidence: null, confidenceAvailable: false, value: { id: 'b2' } },
+          { key: 'cand-alpha', score: 1.3, confidence: 91.2, confidenceAvailable: true, value: { id: 'b1' } },
+        ],
+      },
+    ]);
+
+    expect(joined.keys).toEqual(['cand-alpha', 'cand-beta', 'cand-gamma']);
+    expect(joined.rows).toHaveLength(3);
+    expect(joined.completeRowCount).toBe(2);
+    expect(joined.partialRowCount).toBe(1);
+
+    const rowAlpha = joined.rows.find((r) => r.key === 'cand-alpha')!;
+    expect(rowAlpha.byBranch.pred_a.rank).toBe(1);
+    expect(rowAlpha.byBranch.pred_b.rank).toBe(2);
+    expect(rowAlpha.byBranch.pred_b.confidence).toBeCloseTo(91.2, 3);
+
+    const rowBeta = joined.rows.find((r) => r.key === 'cand-beta')!;
+    expect(rowBeta.byBranch.pred_a.present).toBe(true);
+    expect(rowBeta.byBranch.pred_a.confidenceAvailable).toBe(false);
+    expect(rowBeta.byBranch.pred_a.confidence).toBeNull();
+    expect(rowBeta.byBranch.pred_b.confidenceAvailable).toBe(false);
+    expect(rowBeta.byBranch.pred_b.confidence).toBeNull();
+
+    const rowGamma = joined.rows.find((r) => r.key === 'cand-gamma')!;
+    expect(rowGamma.missingBranchIds).toEqual(['pred_b']);
+    expect(rowGamma.byBranch.pred_b.present).toBe(false);
+    expect(rowGamma.byBranch.pred_b.missingReason).toContain('cand-gamma');
+
+    // 2. joinBranchArtifacts + buildComparisonState handle confidence-less multi-sample FoldedStructure & TrajectoryFramesArtifact
+    const pdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(pdb);
+    const ensembleFolds: FoldedStructure = {
+      kind: 'FoldedStructure',
+      id: 'ens-1',
+      parentStructureId: 'ref-1',
+      collectionKind: 'multi-sample',
+      folds: [
+        {
+          sequenceId: 'sample-0',
+          key: 'sample-0',
+          sampleIndex: 0,
+          sequence: parsed.sequence,
+          foldModelId: 'ensemble-sampler',
+          pdbText: pdb,
+          caCoords: parsed.caCoords,
+          plddt: new Float32Array(0),
+          meanPlddt: Number.NaN,
+          confidence: null,
+          confidenceAvailable: false,
+          ptm: null,
+          elapsedMs: 12,
+        },
+      ],
+    };
+    const trajArt: TrajectoryFramesArtifact = {
+      kind: 'TrajectoryFrames',
+      id: 'traj-1',
+      label: 'Diffusion Trajectory',
+      parentStructureId: 'ref-1',
+      frameCount: 2,
+      ordering: 'ordered-frames',
+      collectionKind: 'ordered-frames',
+      pdbText: pdb,
+      frames: [
+        { key: 'frame-0', frameIndex: 0, pdbText: pdb, confidence: null },
+        { key: 'frame-1', frameIndex: 1, pdbText: pdb, confidence: null },
+      ],
+    };
+
+    const g: WorkflowGraph = {
+      id: 'ens-traj',
+      name: 'Ensemble & Traj',
+      nodes: [
+        { id: 'f_ens', adapterId: 'localfold-af2', label: 'Ensemble', params: {} },
+        { id: 't_node', adapterId: 'rfd4-proteina', label: 'Trajectory', params: {} },
+      ],
+      edges: [],
+    };
+    const outs: Record<string, Record<string, CanonicalArtifact>> = {
+      f_ens: { folds: ensembleFolds },
+      t_node: { trajectory: trajArt },
+    };
+
+    const artJoin = joinBranchArtifacts(g, ['f_ens', 't_node'], outs);
+    expect(artJoin.keys).toEqual(['sample-0', 'frame-0', 'frame-1']);
+    const cmp = buildComparisonState(g, ['f_ens', 't_node'], outs, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+    });
+    expect(cmp.branches[0].collectionKind).toBe('multi-sample');
+    expect(cmp.branches[0].confidenceAvailable).toBe(false);
+    expect(cmp.branches[0].meanPlddt).toBeNull();
+    expect(cmp.branches[1].collectionKind).toBe('ordered-frames');
+    expect(cmp.branches[1].has3D).toBe(true);
+
+    // 3. exportJoinedCollectionCsv emits paired rows with explicit MISSING and N/A markers
+    const csv = exportJoinedCollectionCsv(joined);
+    expect(csv).toContain('candidate_key,present_count,missing_branches');
+    expect(csv).toContain('cand-beta,2,,PRESENT,2,1.5,N/A,PRESENT,1,1.1,N/A');
+    expect(csv).toContain('cand-gamma,1,pred_b,PRESENT,3,2.1,79,MISSING,,,');
+  });
+
+  it('Issue #3 (Astra regression): branch-best mode picks the highest-confidence fold winner instead of index 0', () => {
+    const pdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(pdb);
+    const makeFoldBranch = (id: string, scores: [number, number]): FoldedStructure => ({
+      kind: 'FoldedStructure',
+      id,
+      parentStructureId: 'ref-1',
+      folds: [
+        {
+          sequenceId: `${id}-low`,
+          key: `${id}-low`,
+          sequence: parsed.sequence,
+          foldModelId: 'localfold-af2',
+          pdbText: pdb,
+          caCoords: parsed.caCoords,
+          plddt: new Float32Array(parsed.nResidues).fill(scores[0]),
+          meanPlddt: scores[0],
+          confidence: scores[0],
+          confidenceAvailable: true,
+          ptm: 0.5,
+          elapsedMs: 10,
+        },
+        {
+          sequenceId: `${id}-high`,
+          key: `${id}-high`,
+          sequence: parsed.sequence,
+          foldModelId: 'localfold-af2',
+          pdbText: pdb,
+          caCoords: parsed.caCoords,
+          plddt: new Float32Array(parsed.nResidues).fill(scores[1]),
+          meanPlddt: scores[1],
+          confidence: scores[1],
+          confidenceAvailable: true,
+          ptm: 0.92,
+          elapsedMs: 10,
+        },
+      ],
+    });
+
+    const g: WorkflowGraph = {
+      id: 'fold-branch-best',
+      name: 'Fold Branch Best',
+      nodes: [
+        { id: 'f1', adapterId: 'localfold-af2', label: 'AF2', params: {} },
+        { id: 'f2', adapterId: 'localfold-af2', label: 'RF3', params: {} },
+      ],
+      edges: [],
+    };
+    const outs: Record<string, Record<string, CanonicalArtifact>> = {
+      f1: { folds: makeFoldBranch('af2', [50, 95]) },
+      f2: { folds: makeFoldBranch('rf3', [91, 60]) },
+    };
+    const cmp = buildComparisonState(g, ['f1', 'f2'], outs, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      pairingMode: 'branch-best',
+      // Even if stale per-branch indices point to non-winners, explicit 'branch-best' MUST display the true winner!
+      branchCandidateIdx: { f1: 0, f2: 1 },
+    });
+    expect(cmp.pairingMode).toBe('branch-best');
+    expect(cmp.branches[0].sequenceId).toBe('af2-high');
+    expect(cmp.branches[0].meanPlddt).toBeCloseTo(95, 3);
+    expect(cmp.branches[0].rankingPolicy).toBe('highest-mean-plddt');
+    expect(cmp.branches[1].sequenceId).toBe('rf3-low');
+    expect(cmp.branches[1].meanPlddt).toBeCloseTo(91, 3);
+
+    // Defect #7 regression: multi-sample FoldedStructure members omitting `key` but carrying distinct `sampleIndex`
+    // (or duplicate sequenceId) must NOT collapse into one row during keyed join!
+    const multiSampleFolds: FoldedStructure = {
+      kind: 'FoldedStructure',
+      id: 'ms-1',
+      parentStructureId: 'ref-1',
+      collectionKind: 'multi-sample',
+      folds: [
+        {
+          sequenceId: 'seq-1',
+          sampleIndex: 0,
+          sequence: parsed.sequence,
+          foldModelId: 'sampler',
+          pdbText: pdb,
+          caCoords: parsed.caCoords,
+          plddt: new Float32Array(parsed.nResidues).fill(80),
+          meanPlddt: 80,
+          ptm: 0.7,
+          elapsedMs: 10,
+        },
+        {
+          sequenceId: 'seq-1',
+          sampleIndex: 1,
+          sequence: parsed.sequence,
+          foldModelId: 'sampler',
+          pdbText: pdb,
+          caCoords: parsed.caCoords,
+          plddt: new Float32Array(parsed.nResidues).fill(92),
+          meanPlddt: 92,
+          ptm: 0.88,
+          elapsedMs: 10,
+        },
+      ],
+    };
+    const msJoined = joinBranchArtifacts(
+      {
+        id: 'ms-g',
+        name: 'MS',
+        nodes: [{ id: 'ms', adapterId: 'localfold-af2', params: {} }],
+        edges: [],
+      },
+      ['ms'],
+      { ms: { folds: multiSampleFolds } },
+    );
+    expect(msJoined.rows).toHaveLength(2);
+    expect(msJoined.keys).toEqual(['seq-1#sample-0', 'seq-1#sample-1']);
+
+    // Also disambiguate duplicate keys directly in joinKeyedCollections without silently dropping members
+    // or hanging when existing keys collide with generated suffixes (e.g. ['x', 'x#2', 'x#4', 'x'])!
+    const dupJoined = joinKeyedCollections([
+      {
+        branchId: 'b1',
+        items: [
+          { key: 'x', value: 1 },
+          { key: 'x#2', value: 2 },
+          { key: 'x#4', value: 3 },
+          { key: 'x', value: 4 },
+        ],
+      },
+    ]);
+    expect(dupJoined.rows).toHaveLength(4);
+    expect(dupJoined.keys).toEqual(['x', 'x#2', 'x#4', 'x#3']);
   });
 });

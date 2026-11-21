@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   clearAllModelCaches,
+  createIndexedDbCheckpointStore,
+  createMemoryCheckpointStore,
   evictCachedUrls,
   fetchCachedBytes,
   makeCachedFetch,
@@ -182,5 +184,41 @@ describe('engine/opfs-cache', () => {
     expect(await r3.text()).toBe('model-bytes');
     expect(netFetch).toHaveBeenCalledTimes(2);
     expect(seen[2]).toEqual(['https://example.test/mpnn.onnx', false]);
+  });
+
+  it('clearAllModelCaches removes genie3 weight caches alongside denovo-run/localfold/rfd4 caches, and checkpoint stores persist independently', async () => {
+    const deleted: string[] = [];
+    vi.stubGlobal('caches', {
+      keys: vi.fn(async () => [
+        'denovo-run-weights-v1',
+        'localfold-v1',
+        'rfd4p-v1',
+        'genie3-weights-v1',
+        'unrelated-cache',
+      ]),
+      delete: vi.fn(async (k: string) => {
+        deleted.push(k);
+        return true;
+      }),
+    });
+
+    const memStore = createMemoryCheckpointStore();
+    await memStore.save('run-1', '{"schema":"denovo.checkpoint/v1"}');
+    const idbFallback = createIndexedDbCheckpointStore();
+    await idbFallback.save('run-2', '{"schema":"denovo.checkpoint/v1"}');
+
+    await clearAllModelCaches();
+    expect(deleted).toEqual([
+      'denovo-run-weights-v1',
+      'localfold-v1',
+      'rfd4p-v1',
+      'genie3-weights-v1',
+    ]);
+    // Checkpoint stores remain intact independently of weight caches
+    expect(await memStore.load('run-1')).toBe('{"schema":"denovo.checkpoint/v1"}');
+    expect(await idbFallback.load('run-2')).toBe('{"schema":"denovo.checkpoint/v1"}');
+    expect(await memStore.listKeys?.()).toEqual(['run-1']);
+    await memStore.delete?.('run-1');
+    expect(await memStore.load('run-1')).toBeNull();
   });
 });
