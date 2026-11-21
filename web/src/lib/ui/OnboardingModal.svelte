@@ -30,7 +30,10 @@
     | 'inspect-params'
     | 'run-workflow';
 
-  interface SpotlightRect {
+  type SubStage = 'button' | 'category' | 'item';
+  type CaretSide = 'left' | 'right' | 'top' | 'bottom' | 'none';
+
+  interface RectBox {
     top: number;
     left: number;
     width: number;
@@ -45,10 +48,35 @@
     'run-workflow',
   ];
 
+  const ADD_STEP_TARGETS: Record<
+    'add-mpnn' | 'add-fold' | 'add-scorer',
+    { categoryId: string; categoryLabel: string; subKey: string; subLabel: string }
+  > = {
+    'add-mpnn': {
+      categoryId: 'sequence-design',
+      categoryLabel: 'Sequence Design',
+      subKey: 'solublempnn',
+      subLabel: 'SolubleMPNN',
+    },
+    'add-fold': {
+      categoryId: 'prediction',
+      categoryLabel: 'Structure Prediction',
+      subKey: 'monomer',
+      subLabel: 'AlphaFold2 · Model 1',
+    },
+    'add-scorer': {
+      categoryId: 'evaluation',
+      categoryLabel: 'Evaluation',
+      subKey: 'designability-scorer',
+      subLabel: 'scRMSD / scTM',
+    },
+  };
+
   let step = $state<TourStepId>('welcome');
+  let subStage = $state<SubStage>('button');
   let cardEl = $state<HTMLDivElement | null>(null);
-  let targetRect = $state<SpotlightRect | null>(null);
-  let catalogIsOpen = $state(false);
+  let targetRect = $state<RectBox | null>(null);
+  let interactiveHole = $state<RectBox | null>(null);
   let viewportW = $state(1280);
   let viewportH = $state(800);
 
@@ -59,43 +87,111 @@
     onInteractiveChange?.(isInteractive);
   });
 
-  function targetSelectorFor(s: TourStepId): string | null {
-    switch (s) {
-      case 'add-mpnn':
-      case 'add-fold':
-      case 'add-scorer':
-        return '[data-tour="add-block-btn"]';
-      case 'inspect-params':
-        return '[data-tour="inspector-panel"]';
-      case 'run-workflow':
-        return '[data-tour="run-btn"]';
-      default:
-        return null;
+  function unionRects(rects: RectBox[]): RectBox | null {
+    if (rects.length === 0) return null;
+    let minL = Infinity;
+    let minT = Infinity;
+    let maxR = -Infinity;
+    let maxB = -Infinity;
+    for (const r of rects) {
+      if (r.left < minL) minL = r.left;
+      if (r.top < minT) minT = r.top;
+      if (r.left + r.width > maxR) maxR = r.left + r.width;
+      if (r.top + r.height > maxB) maxB = r.top + r.height;
     }
+    return {
+      left: Math.max(0, minL),
+      top: Math.max(0, minT),
+      width: Math.min(viewportW, maxR) - Math.max(0, minL),
+      height: Math.min(viewportH, maxB) - Math.max(0, minT),
+    };
+  }
+
+  function toPaddedBox(el: Element, pad: number): RectBox {
+    const r = el.getBoundingClientRect();
+    const top = Math.max(4, r.top - pad);
+    const left = Math.max(4, r.left - pad);
+    const right = Math.min(viewportW - 4, r.right + pad);
+    const bottom = Math.min(viewportH - 4, r.bottom + pad);
+    return {
+      top,
+      left,
+      width: Math.max(12, right - left),
+      height: Math.max(12, bottom - top),
+    };
   }
 
   function measureTarget() {
     if (typeof window === 'undefined') return;
     viewportW = window.innerWidth;
     viewportH = window.innerHeight;
-    const sel = targetSelectorFor(step);
-    if (!sel) {
+
+    if (step === 'welcome') {
       targetRect = null;
+      interactiveHole = null;
+      subStage = 'button';
       return;
     }
+
+    if (step === 'add-mpnn' || step === 'add-fold' || step === 'add-scorer') {
+      const cfg = ADD_STEP_TARGETS[step];
+      const addBtn = document.querySelector<HTMLElement>('[data-tour="add-block-btn"]');
+      const catalogShell = document.querySelector<HTMLElement>('.catalog-shell');
+      const subEl = catalogShell?.querySelector<HTMLElement>(`[data-sub-key="${cfg.subKey}"]`) ?? null;
+      const catEl = catalogShell?.querySelector<HTMLElement>(`[data-category-id="${cfg.categoryId}"]`) ?? null;
+
+      if (subEl) {
+        subStage = 'item';
+        const box = toPaddedBox(subEl, 4);
+        targetRect = box;
+        // Keep the entire open catalog + flyout interactive so hovering across items never gets blocked
+        const holeEls: RectBox[] = [box];
+        if (addBtn) holeEls.push(toPaddedBox(addBtn, 4));
+        const mainPane = catalogShell?.querySelector<HTMLElement>('.catalog-main');
+        const flyoutPane = catalogShell?.querySelector<HTMLElement>('.flyout');
+        if (mainPane) holeEls.push(toPaddedBox(mainPane, 4));
+        if (flyoutPane) holeEls.push(toPaddedBox(flyoutPane, 4));
+        interactiveHole = unionRects(holeEls);
+        return;
+      }
+
+      if (catEl) {
+        subStage = 'category';
+        const box = toPaddedBox(catEl, 4);
+        targetRect = box;
+        const holeEls: RectBox[] = [box];
+        if (addBtn) holeEls.push(toPaddedBox(addBtn, 4));
+        const mainPane = catalogShell?.querySelector<HTMLElement>('.catalog-main');
+        const flyoutPane = catalogShell?.querySelector<HTMLElement>('.flyout');
+        if (mainPane) holeEls.push(toPaddedBox(mainPane, 4));
+        if (flyoutPane) holeEls.push(toPaddedBox(flyoutPane, 4));
+        interactiveHole = unionRects(holeEls);
+        return;
+      }
+
+      subStage = 'button';
+      if (addBtn) {
+        const box = toPaddedBox(addBtn, 6);
+        targetRect = box;
+        interactiveHole = box;
+      } else {
+        targetRect = null;
+        interactiveHole = null;
+      }
+      return;
+    }
+
+    subStage = 'button';
+    const sel = step === 'inspect-params' ? '[data-tour="inspector-panel"]' : '[data-tour="run-btn"]';
     const el = document.querySelector<HTMLElement>(sel);
     if (!el) {
       targetRect = null;
+      interactiveHole = null;
       return;
     }
-    const r = el.getBoundingClientRect();
-    const pad = step === 'inspect-params' ? 4 : 6;
-    targetRect = {
-      top: Math.max(4, r.top - pad),
-      left: Math.max(4, r.left - pad),
-      width: Math.min(viewportW - 8, r.width + pad * 2),
-      height: Math.min(viewportH - 8, r.height + pad * 2),
-    };
+    const box = toPaddedBox(el, step === 'inspect-params' ? 4 : 6);
+    targetRect = box;
+    interactiveHole = box;
   }
 
   function startInteractiveTour() {
@@ -106,7 +202,7 @@
     });
   }
 
-  // Live auto-advance when user clicks real blocks in + Add Block or starts Run!
+  // Live auto-advance when user clicks real blocks in + Add Block or clicks Run!
   $effect(() => {
     const hasMpnn = graph.nodes.some((n) => n.adapterId === 'web-protein-mpnn');
     const hasFold = graph.nodes.some((n) => n.adapterId === 'localfold-af2');
@@ -123,7 +219,7 @@
     }
   });
 
-  // Re-measure spotlight whenever step or layout changes
+  // Re-measure spotlight whenever step or graph changes
   $effect(() => {
     void step;
     void graph.nodes.length;
@@ -132,68 +228,146 @@
     return () => cancelAnimationFrame(raf);
   });
 
-  // Compute non-overlapping coachmark placement for each spotlight step
-  let coachStyle = $derived.by((): string => {
-    const cardW = Math.min(350, Math.max(280, viewportW - 24));
+  // Position the coachmark popover RIGHT NEXT TO the spotlighted element (where the cursor should go!)
+  let coachLayout = $derived.by((): { style: string; caret: CaretSide; caretOffset: number } => {
+    const cardW = Math.min(316, Math.max(250, viewportW - 24));
+    const estH = 195;
+    const gap = 14;
     if (!targetRect) {
-      return `bottom: 24px; right: 24px; width: ${cardW}px;`;
+      return { style: `bottom: 24px; right: 24px; width: ${cardW}px;`, caret: 'none', caretOffset: 24 };
     }
 
-    if (step === 'add-mpnn' || step === 'add-fold' || step === 'add-scorer') {
-      // Keep bottom-left/middle clear of the + Add Block popover & right flyout:
-      // place cleanly near bottom-right of viewport so user can browse the full catalog freely!
-      return `bottom: 22px; right: 22px; width: ${cardW}px;`;
-    }
+    const r = targetRect;
+    const targetCenterY = r.top + r.height / 2;
+    const targetCenterX = r.left + r.width / 2;
 
-    if (step === 'inspect-params') {
-      // Place to the left of the right inspector panel (or bottom-left on narrow viewports)
-      if (targetRect.left > cardW + 32) {
-        const left = Math.max(16, targetRect.left - cardW - 18);
-        const top = Math.min(Math.max(70, targetRect.top + 12), Math.max(70, viewportH - 280));
-        return `top: ${top}px; left: ${left}px; width: ${cardW}px;`;
-      }
-      return `bottom: 20px; left: 16px; width: ${cardW}px;`;
-    }
-
+    // Step 5 (▶ Run at top-right): anchor directly below ▶ Run with top caret pointing up at it
     if (step === 'run-workflow') {
-      const top = Math.min(viewportH - 250, targetRect.top + targetRect.height + 14);
-      const right = Math.max(16, viewportW - (targetRect.left + targetRect.width));
-      return `top: ${top}px; right: ${right}px; width: ${cardW}px;`;
+      const top = Math.min(viewportH - estH - 12, r.top + r.height + gap);
+      const left = Math.max(12, Math.min(viewportW - cardW - 12, r.left + r.width - cardW));
+      const caretOffset = Math.max(18, Math.min(cardW - 26, targetCenterX - left - 6));
+      return {
+        style: `top: ${Math.round(top)}px; left: ${Math.round(left)}px; width: ${cardW}px;`,
+        caret: 'top',
+        caretOffset: Math.round(caretOffset),
+      };
     }
 
-    return `bottom: 22px; right: 22px; width: ${cardW}px;`;
+    // Step 4 (Inspector panel on right): anchor directly to the left of the panel with right caret
+    if (step === 'inspect-params') {
+      if (r.left >= cardW + gap + 12) {
+        const left = r.left - cardW - gap;
+        const top = Math.max(64, Math.min(viewportH - estH - 16, r.top + 22));
+        const caretOffset = Math.max(20, Math.min(estH - 28, r.top + 48 - top));
+        return {
+          style: `top: ${Math.round(top)}px; left: ${Math.round(left)}px; width: ${cardW}px;`,
+          caret: 'right',
+          caretOffset: Math.round(caretOffset),
+        };
+      }
+      return {
+        style: `bottom: 16px; left: 16px; width: ${cardW}px;`,
+        caret: 'none',
+        caretOffset: 24,
+      };
+    }
+
+    // Steps 1–3 (+ Add Block -> Category -> Flyout Item):
+    // Anchor directly to the RIGHT of the highlighted button/category/flyout item with a left caret!
+    const anchorRightEdge =
+      subStage === 'category' && interactiveHole
+        ? Math.max(r.left + r.width, interactiveHole.left + interactiveHole.width)
+        : r.left + r.width;
+
+    if (anchorRightEdge + gap + cardW <= viewportW - 10) {
+      const left = anchorRightEdge + gap;
+      const top = Math.max(58, Math.min(viewportH - estH - 12, targetCenterY - 46));
+      const caretOffset = Math.max(16, Math.min(estH - 28, targetCenterY - top - 6));
+      const isFlushToTarget = anchorRightEdge - (r.left + r.width) < 12;
+      return {
+        style: `top: ${Math.round(top)}px; left: ${Math.round(left)}px; width: ${cardW}px;`,
+        caret: isFlushToTarget ? 'left' : 'none',
+        caretOffset: Math.round(caretOffset),
+      };
+    }
+
+    // Fallback if viewport is narrow: anchor directly BELOW the target (with top caret)
+    if (r.top + r.height + gap + estH <= viewportH - 10) {
+      const top = r.top + r.height + gap;
+      const left = Math.max(12, Math.min(viewportW - cardW - 12, r.left));
+      const caretOffset = Math.max(18, Math.min(cardW - 26, targetCenterX - left - 6));
+      return {
+        style: `top: ${Math.round(top)}px; left: ${Math.round(left)}px; width: ${cardW}px;`,
+        caret: 'top',
+        caretOffset: Math.round(caretOffset),
+      };
+    }
+
+    // Final fallback: above target
+    const top = Math.max(12, r.top - estH - gap);
+    const left = Math.max(12, Math.min(viewportW - cardW - 12, r.left));
+    return {
+      style: `top: ${Math.round(top)}px; left: ${Math.round(left)}px; width: ${cardW}px;`,
+      caret: 'none',
+      caretOffset: 24,
+    };
+  });
+
+  // 4-panel transparent click-shield around `interactiveHole` so stray clicks outside
+  // the guided flow don't accidentally dismiss popovers or break the sequence
+  let shieldRects = $derived.by(() => {
+    const h = interactiveHole;
+    if (!h) return null;
+    const right = h.left + h.width;
+    const bottom = h.top + h.height;
+    return {
+      top: { top: 0, left: 0, width: viewportW, height: Math.max(0, h.top) },
+      bottom: { top: bottom, left: 0, width: viewportW, height: Math.max(0, viewportH - bottom) },
+      left: { top: h.top, left: 0, width: Math.max(0, h.left), height: h.height },
+      right: { top: h.top, left: right, width: Math.max(0, viewportW - right), height: h.height },
+    };
   });
 
   let domObserver: MutationObserver | null = null;
+  let measureRaf: number | null = null;
+
+  function scheduleMeasure() {
+    if (measureRaf !== null) return;
+    measureRaf = requestAnimationFrame(() => {
+      measureRaf = null;
+      measureTarget();
+    });
+  }
 
   onMount(() => {
     cardEl?.focus({ preventScroll: true });
     measureTarget();
-    window.addEventListener('resize', measureTarget);
-    window.addEventListener('scroll', measureTarget, true);
+    window.addEventListener('resize', scheduleMeasure);
+    window.addEventListener('scroll', scheduleMeasure, true);
     if (typeof MutationObserver !== 'undefined') {
-      const syncCatalog = () => {
-        catalogIsOpen = Boolean(document.querySelector('.catalog-shell'));
-      };
-      syncCatalog();
-      domObserver = new MutationObserver(syncCatalog);
-      domObserver.observe(document.body, { childList: true, subtree: true });
+      domObserver = new MutationObserver(scheduleMeasure);
+      domObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['class', 'style'],
+      });
     }
   });
 
   onDestroy(() => {
     onInteractiveChange?.(false);
+    if (measureRaf !== null) cancelAnimationFrame(measureRaf);
     domObserver?.disconnect();
     domObserver = null;
     if (typeof window !== 'undefined') {
-      window.removeEventListener('resize', measureTarget);
-      window.removeEventListener('scroll', measureTarget, true);
+      window.removeEventListener('resize', scheduleMeasure);
+      window.removeEventListener('scroll', scheduleMeasure, true);
     }
   });
 
   function handleKeydown(ev: KeyboardEvent) {
     if (ev.key === 'Escape') {
-      // If the block catalog popover is open during interactive steps, let the popover close first
       if (isInteractive && document.querySelector('.catalog-shell')) {
         return;
       }
@@ -290,29 +464,60 @@
     </div>
   </div>
 {:else}
-  <!-- Interactive Spotlight Ring (non-blocking so user clicks real UI elements & popovers) -->
+  <!-- Click-constraining transparent scrim outside the active interactive hole -->
+  {#if shieldRects}
+    <div
+      class="tour-shield"
+      style="top: {shieldRects.top.top}px; left: {shieldRects.top.left}px; width: {shieldRects.top.width}px; height: {shieldRects.top.height}px;"
+      aria-hidden="true"
+    ></div>
+    <div
+      class="tour-shield"
+      style="top: {shieldRects.bottom.top}px; left: {shieldRects.bottom.left}px; width: {shieldRects.bottom.width}px; height: {shieldRects.bottom.height}px;"
+      aria-hidden="true"
+    ></div>
+    <div
+      class="tour-shield"
+      style="top: {shieldRects.left.top}px; left: {shieldRects.left.left}px; width: {shieldRects.left.width}px; height: {shieldRects.left.height}px;"
+      aria-hidden="true"
+    ></div>
+    <div
+      class="tour-shield"
+      style="top: {shieldRects.right.top}px; left: {shieldRects.right.left}px; width: {shieldRects.right.width}px; height: {shieldRects.right.height}px;"
+      aria-hidden="true"
+    ></div>
+  {/if}
+
+  <!-- Tight glowing spotlight cutout directly on the exact button / category / model item to click -->
   {#if targetRect}
     <div
       class="spotlight-ring"
-      class:soft={catalogIsOpen}
       style="top: {targetRect.top}px; left: {targetRect.left}px; width: {targetRect.width}px; height: {targetRect.height}px;"
       aria-hidden="true"
     ></div>
   {/if}
 
-  <!-- Floating Coachmark Card -->
+  <!-- Anchored Coachmark Popover right next to the highlighted element -->
   <div
     class="coach-card"
-    style={coachStyle}
+    style={coachLayout.style}
     role="dialog"
     aria-label="Interactive walkthrough"
   >
+    {#if coachLayout.caret === 'left'}
+      <span class="caret caret-left" style="top: {coachLayout.caretOffset}px" aria-hidden="true"></span>
+    {:else if coachLayout.caret === 'right'}
+      <span class="caret caret-right" style="top: {coachLayout.caretOffset}px" aria-hidden="true"></span>
+    {:else if coachLayout.caret === 'top'}
+      <span class="caret caret-top" style="left: {coachLayout.caretOffset}px" aria-hidden="true"></span>
+    {/if}
+
     <div class="coach-top">
       <div class="coach-dots" aria-label={`Step ${interactiveIdx + 1} of ${INTERACTIVE_STEPS.length}`}>
         {#each INTERACTIVE_STEPS as s, i (s)}
           <span class="c-dot" class:done={i < interactiveIdx} class:active={i === interactiveIdx}></span>
         {/each}
-        <span class="c-count">Step {interactiveIdx + 1} / {INTERACTIVE_STEPS.length}</span>
+        <span class="c-count">{interactiveIdx + 1}/{INTERACTIVE_STEPS.length}</span>
       </div>
       <button type="button" class="coach-x" onclick={onDismiss} title="Exit tour (Esc)" aria-label="Exit tour">
         ×
@@ -320,11 +525,22 @@
     </div>
 
     {#if step === 'add-mpnn'}
-      <div class="coach-title">1. Add Sequence Design</div>
-      <p class="coach-body">
-        We placed a starter <b>PDB Input</b> on the canvas. Click the highlighted <b>+ Add Block</b> button
-        (or press <kbd>/</kbd>), hover <b>Sequence Design</b>, and pick <b>SolubleMPNN</b> — it will connect automatically.
-      </p>
+      {#if subStage === 'item'}
+        <div class="coach-title">Click <b>SolubleMPNN</b></div>
+        <p class="coach-body">
+          Click the highlighted model to insert it onto the canvas — it automatically connects to your starter <b>PDB Input</b>.
+        </p>
+      {:else if subStage === 'category'}
+        <div class="coach-title">Hover <b>Sequence Design ›</b></div>
+        <p class="coach-body">
+          Move your cursor onto the highlighted <b>Sequence Design</b> category to open its model variants.
+        </p>
+      {:else}
+        <div class="coach-title">1. Click <b>+ Add Block</b></div>
+        <p class="coach-body">
+          We placed a starter <b>PDB Input</b> on the canvas. Click <b>+ Add Block</b> (or press <kbd>/</kbd>) to add sequence design next.
+        </p>
+      {/if}
       <div class="coach-actions">
         <button type="button" class="coach-link" onclick={onDismiss}>Skip tour</button>
         <button type="button" class="coach-btn" onclick={() => onAutoStepBlock('web-protein-mpnn')}>
@@ -333,12 +549,23 @@
       </div>
 
     {:else if step === 'add-fold'}
-      <div class="coach-ok">✓ SolubleMPNN added &amp; wired!</div>
-      <div class="coach-title">2. Add Structure Prediction</div>
-      <p class="coach-body">
-        Next, verify whether your designed sequences fold back to the target shape. Click <b>+ Add Block</b>,
-        hover <b>Structure Prediction</b>, and choose <b>AlphaFold2 · Model 1</b> (or any of the 18 LocalFold models).
-      </p>
+      <div class="coach-ok">✓ SolubleMPNN connected</div>
+      {#if subStage === 'item'}
+        <div class="coach-title">Click <b>AlphaFold2 · Model 1</b></div>
+        <p class="coach-body">
+          Click to add structure prediction and wire it directly to SolubleMPNN's output sequences.
+        </p>
+      {:else if subStage === 'category'}
+        <div class="coach-title">Hover <b>Structure Prediction ›</b></div>
+        <p class="coach-body">
+          Hover the highlighted category to pick from all 18 LocalFold models (AF2, AF2-Multimer, RF3, Boltz-2, AF3 &amp; more).
+        </p>
+      {:else}
+        <div class="coach-title">2. Add Structure Prediction</div>
+        <p class="coach-body">
+          Click <b>+ Add Block</b> again to add a structure predictor and verify your designed sequences fold properly.
+        </p>
+      {/if}
       <div class="coach-actions">
         <button type="button" class="coach-link" onclick={onDismiss}>Skip tour</button>
         <button type="button" class="coach-btn" onclick={() => onAutoStepBlock('localfold-af2')}>
@@ -347,12 +574,23 @@
       </div>
 
     {:else if step === 'add-scorer'}
-      <div class="coach-ok">✓ LocalFold added &amp; wired!</div>
-      <div class="coach-title">3. Add Designability Scoring</div>
-      <p class="coach-body">
-        Complete the loop! Click <b>+ Add Block</b> and choose <b>Evaluation → scRMSD / scTM</b> to superimpose
-        the predicted fold onto the input backbone and score pass rate.
-      </p>
+      <div class="coach-ok">✓ LocalFold connected</div>
+      {#if subStage === 'item'}
+        <div class="coach-title">Click <b>scRMSD / scTM</b></div>
+        <p class="coach-body">
+          Click to drop the designability scorer — it automatically wires both your input backbone and predicted folds.
+        </p>
+      {:else if subStage === 'category'}
+        <div class="coach-title">Hover <b>Evaluation ›</b></div>
+        <p class="coach-body">
+          Hover <b>Evaluation</b> to add Kabsch alignment &amp; designability scoring.
+        </p>
+      {:else}
+        <div class="coach-title">3. Add Designability Scoring</div>
+        <p class="coach-body">
+          One last block: click <b>+ Add Block</b> to close the loop with <b>scRMSD / scTM</b> evaluation.
+        </p>
+      {/if}
       <div class="coach-actions">
         <button type="button" class="coach-link" onclick={onDismiss}>Skip tour</button>
         <button type="button" class="coach-btn" onclick={() => onAutoStepBlock('designability-scorer')}>
@@ -361,12 +599,11 @@
       </div>
 
     {:else if step === 'inspect-params'}
-      <div class="coach-ok">✓ Full 4-block pipeline built!</div>
+      <div class="coach-ok">✓ 4-block pipeline ready</div>
       <div class="coach-title">4. Configure &amp; Peek Intermediates</div>
       <p class="coach-body">
-        Edit any block's parameters here — try switching <b>PDB Input</b> to <b>Fetch from RCSB PDB ID</b> or picking
-        a curated benchmark target. After running, switch to <b>Outputs</b> or click any colored wire to inspect intermediates,
-        or <kbd>⌘</kbd>/<kbd>Ctrl</kbd>-click blocks to compare in 3D.
+        Tweak any block here — try fetching an RCSB PDB ID or curated benchmark on <b>PDB Input</b>. After running,
+        open <b>Outputs</b> or click any colored wire to inspect intermediates, or <kbd>⌘</kbd>/<kbd>Ctrl</kbd>-click blocks to compare in 3D.
       </p>
       <div class="coach-actions">
         <button type="button" class="coach-link" onclick={onDismiss}>Skip tour</button>
@@ -378,8 +615,7 @@
     {:else if step === 'run-workflow'}
       <div class="coach-title">5. Run Locally on WebGPU</div>
       <p class="coach-body">
-        Everything is wired and validated! Click <b>▶ Run</b> (or press <kbd>R</kbd>) to execute locally on your GPU —
-        model weights download once and cache in your browser. Explore more templates anytime in <b>Example Workflow</b>.
+        Click <b>▶ Run</b> above (or press <kbd>R</kbd>) to execute locally on your GPU — weights download once and stay cached in your browser.
       </p>
       <div class="coach-actions">
         <button type="button" class="coach-link" onclick={onDismiss}>Finish tour ✓</button>
@@ -588,27 +824,30 @@
     font-weight: 600;
   }
 
-  /* ── Interactive Spotlight Overlay ── */
+  /* ── Interactive Spotlight Overlay + Gentle Click Constraint ── */
+  .tour-shield {
+    position: fixed;
+    z-index: 190;
+    background: transparent;
+    pointer-events: auto;
+    cursor: default;
+  }
+
   .spotlight-ring {
     position: fixed;
     z-index: 195;
-    border-radius: 10px;
+    border-radius: 9px;
     border: 2px solid var(--accent-bright, #60a5fa);
     box-shadow:
-      0 0 0 4px rgba(59, 130, 246, 0.28),
-      0 0 0 9999px rgba(10, 14, 24, 0.44);
+      0 0 0 4px rgba(59, 130, 246, 0.32),
+      0 0 0 9999px rgba(10, 14, 24, 0.56);
     pointer-events: none;
     transition:
-      top 260ms cubic-bezier(0.22, 1, 0.36, 1),
-      left 260ms cubic-bezier(0.22, 1, 0.36, 1),
-      width 260ms cubic-bezier(0.22, 1, 0.36, 1),
-      height 260ms cubic-bezier(0.22, 1, 0.36, 1),
-      box-shadow 180ms ease;
-    animation: tour-pulse 2s ease-in-out infinite;
-  }
-
-  .spotlight-ring.soft {
-    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.25);
+      top 220ms cubic-bezier(0.22, 1, 0.36, 1),
+      left 220ms cubic-bezier(0.22, 1, 0.36, 1),
+      width 220ms cubic-bezier(0.22, 1, 0.36, 1),
+      height 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    animation: tour-pulse 1.8s ease-in-out infinite;
   }
 
   @keyframes tour-pulse {
@@ -628,14 +867,42 @@
     border: 1.5px solid var(--accent);
     border-radius: 12px;
     box-shadow:
-      0 18px 48px rgba(0, 0, 0, 0.36),
-      0 0 0 1px rgba(59, 130, 246, 0.2);
-    padding: 14px 16px 13px;
+      0 18px 48px rgba(0, 0, 0, 0.38),
+      0 0 0 1px rgba(59, 130, 246, 0.22);
+    padding: 13px 15px 12px;
     color: var(--text-body);
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 7px;
     box-sizing: border-box;
+    transition:
+      top 220ms cubic-bezier(0.22, 1, 0.36, 1),
+      left 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .caret {
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    background: var(--bg-surface);
+    border-left: 1.5px solid var(--accent);
+    border-top: 1.5px solid var(--accent);
+    pointer-events: none;
+  }
+
+  .caret-left {
+    left: -6px;
+    transform: rotate(-45deg);
+  }
+
+  .caret-right {
+    right: -6px;
+    transform: rotate(135deg);
+  }
+
+  .caret-top {
+    top: -6px;
+    transform: rotate(45deg);
   }
 
   .coach-top {
@@ -652,8 +919,8 @@
   }
 
   .c-dot {
-    width: 7px;
-    height: 7px;
+    width: 6px;
+    height: 6px;
     border-radius: 999px;
     background: var(--border-strong);
     transition: background 180ms ease, width 180ms ease;
@@ -664,7 +931,7 @@
   }
 
   .c-dot.active {
-    width: 16px;
+    width: 14px;
     background: var(--accent);
   }
 
@@ -693,26 +960,31 @@
 
   .coach-ok {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10.5px;
+    font-size: 10px;
     font-weight: 600;
     color: var(--ok-text, #10b981);
     background: var(--ok-bg);
     border: 1px solid var(--ok-border);
-    padding: 3px 8px;
+    padding: 2px 7px;
     border-radius: 5px;
     align-self: flex-start;
   }
 
   .coach-title {
-    font-size: 13.5px;
-    font-weight: 700;
+    font-size: 13px;
+    font-weight: 600;
     color: var(--text-primary);
+  }
+
+  .coach-title b {
+    color: var(--accent-bright);
+    font-weight: 700;
   }
 
   .coach-body {
     margin: 0;
-    font-size: 12px;
-    line-height: 1.48;
+    font-size: 11.8px;
+    line-height: 1.46;
     color: var(--text-secondary);
   }
 
@@ -758,8 +1030,8 @@
     color: var(--accent-soft);
     border: 1px solid var(--accent);
     border-radius: 7px;
-    padding: 6px 12px;
-    font-size: 12px;
+    padding: 5px 11px;
+    font-size: 11.5px;
     font-weight: 600;
     cursor: pointer;
   }
@@ -779,7 +1051,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .spotlight-ring {
+    .spotlight-ring,
+    .coach-card {
       animation: none;
       transition: none;
     }

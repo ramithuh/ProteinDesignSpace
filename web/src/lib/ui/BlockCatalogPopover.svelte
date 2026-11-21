@@ -460,6 +460,7 @@
               class="flyout-item"
               class:active={isSubActive}
               data-sub-idx={subIdx}
+              data-sub-key={sub.key}
               role="option"
               aria-selected={isSubActive}
               tabindex="-1"
