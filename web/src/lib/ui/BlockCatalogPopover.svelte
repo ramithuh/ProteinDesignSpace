@@ -118,6 +118,16 @@
     scheduleFlyoutClose();
   }
 
+  let placement = $state<'above' | 'below'>('above');
+
+  function updatePlacement() {
+    if (typeof window === 'undefined' || !triggerEl) return;
+    const rect = triggerEl.getBoundingClientRect();
+    const spaceAbove = rect.top - 12;
+    const spaceBelow = window.innerHeight - rect.bottom - 12;
+    placement = spaceAbove >= 310 || spaceAbove >= spaceBelow ? 'above' : 'below';
+  }
+
   function updateFlyoutGeometry() {
     if (typeof window === 'undefined' || !shellEl || !mainEl || !flyoutEntry) return;
     const shellRect = shellEl.getBoundingClientRect();
@@ -150,18 +160,20 @@
       left = desiredGlobalLeft - shellRect.left;
     }
 
-    const availH = Math.max(180, vh - shellRect.top - margin);
-    const maxH = Math.min(460, availH);
+    const availH = Math.min(460, Math.max(200, vh - margin * 2));
+    const maxH = availH;
 
-    // Align vertically near the hovered/active row, clamped to viewport bottom
+    // Align vertically near the hovered/active row, allowing upward expansion when placed above the dock
     const rowEl = mainEl.querySelector<HTMLElement>(`[data-category-id="${flyoutEntry.category.id}"]`);
     let desiredTop = 0;
     if (rowEl) {
       const rowRect = rowEl.getBoundingClientRect();
       desiredTop = rowRect.top - shellRect.top - 8;
     }
-    const maxTop = Math.max(0, vh - shellRect.top - maxH - margin);
-    const clampedTop = Math.max(0, Math.min(desiredTop, maxTop));
+    const minTop = -(shellRect.top - margin);
+    const estFlyoutH = Math.min(maxH, Math.max(200, flyoutEntry.matchingSubItems.length * 56 + 68));
+    const maxTop = vh - shellRect.top - estFlyoutH - margin;
+    const clampedTop = Math.max(minTop, Math.min(desiredTop, Math.max(minTop, maxTop)));
 
     flyoutSide = side;
     flyoutWidth = Math.round(width);
@@ -211,8 +223,12 @@
     void tick().then(() => updateFlyoutGeometry());
   });
 
+  // Compute initial auto-flip placement and recompute on resize
   $effect(() => {
+    void triggerEl;
+    updatePlacement();
     function onResize() {
+      updatePlacement();
       if (flyoutEntry) updateFlyoutGeometry();
     }
     window.addEventListener('resize', onResize);
@@ -384,6 +400,8 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="catalog-shell"
+  class:place-above={placement === 'above'}
+  class:place-below={placement === 'below'}
   bind:this={shellEl}
   role="dialog"
   aria-label="Add workflow block"
@@ -580,11 +598,19 @@
 <style>
   .catalog-shell {
     position: absolute;
-    top: 44px;
-    left: 10px;
+    left: 50%;
+    transform: translateX(-50%);
     z-index: 45;
     overflow: visible;
     outline: none;
+  }
+  .catalog-shell.place-above {
+    bottom: 60px;
+    top: auto;
+  }
+  .catalog-shell.place-below {
+    top: calc(100% + 4px);
+    bottom: auto;
   }
   .catalog-main {
     width: 310px;

@@ -3511,12 +3511,20 @@
   }
 
   .flow-panel {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 8px;
     margin-bottom: 0;
   }
   .share-toast {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 40;
+    max-width: calc(100% - 24px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
     color: var(--ok-text);

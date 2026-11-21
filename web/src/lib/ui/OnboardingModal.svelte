@@ -316,6 +316,18 @@
       };
     }
 
+    // Fallback if right side is tight: anchor directly to the LEFT of target (with right caret)
+    if (r.left - gap - cardW >= 12) {
+      const left = r.left - gap - cardW;
+      const top = Math.max(58, Math.min(viewportH - estH - 12, targetCenterY - 46));
+      const caretOffset = Math.max(16, Math.min(estH - 28, targetCenterY - top - 6));
+      return {
+        style: `top: ${Math.round(top)}px; left: ${Math.round(left)}px; width: ${cardW}px;`,
+        caret: 'right',
+        caretOffset: Math.round(caretOffset),
+      };
+    }
+
     // Fallback if viewport is narrow: anchor directly BELOW the target (with top caret)
     if (r.top + r.height + gap + estH <= viewportH - 10) {
       const top = r.top + r.height + gap;

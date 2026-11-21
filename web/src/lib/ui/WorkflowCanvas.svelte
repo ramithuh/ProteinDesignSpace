@@ -777,25 +777,29 @@
   ondrop={handleDrop}
   ondblclick={handlePaneDblClick}
 >
-  <!-- Floating Top-Left: + Add Block trigger & searchable catalog -->
-  <div class="canvas-left-tools canvas-overlay">
-    <button
-      bind:this={addBtnEl}
-      type="button"
-      class="add-block-btn"
-      class:open={catalogOpen}
-      data-tour="add-block-btn"
-      {disabled}
-      onclick={() => {
-        wireLegendOpen = false;
-        catalogOpen = !catalogOpen;
-      }}
-      title="Add a workflow block (shortcut: / or Shift+A, or double-click canvas)"
-    >
-      <span class="plus">+</span> Add Block
-      <kbd class="kbd-hint">/</kbd>
-    </button>
-  </div>
+  <!-- Quiet Top-Left tips (wide desktop only, dismissible) -->
+  {#if !isRunning && !canvasHintDismissed && !autoCommitProposed}
+    <div class="canvas-tips canvas-overlay" role="region" aria-label="Canvas quick tips">
+      <span class="dock-tip">Click wire to peek</span>
+      <span class="dock-sep" aria-hidden="true">·</span>
+      <span class="dock-tip"><kbd>{modKeyLabel}</kbd>-click to compare 3D</span>
+      {#if onOpenTour}
+        <span class="dock-sep" aria-hidden="true">·</span>
+        <button type="button" class="dock-action accent" onclick={onOpenTour}>
+          Quick Tour
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="dock-x"
+        onclick={() => (canvasHintDismissed = true)}
+        aria-label="Hide canvas tips"
+        title="Hide tips"
+      >
+        ×
+      </button>
+    </div>
+  {/if}
 
   {#if catalogOpen}
     <BlockCatalogPopover
@@ -807,11 +811,8 @@
     />
   {/if}
 
-  <!-- Floating Top-Right: Compact canvas controls -->
+  <!-- Floating Top-Right: Utility controls (Wire legend & Clear) -->
   <div class="canvas-tools canvas-overlay">
-    <button type="button" class="c-btn" {disabled} onclick={handleAutoLayout} title="Re-arrange DAG cleanly and fit view">
-      Auto Layout
-    </button>
     <button
       bind:this={wireBtnEl}
       type="button"
@@ -864,41 +865,37 @@
         Dismiss <kbd>Esc</kbd>
       </button>
     </div>
-  {:else if !isRunning && !canvasHintDismissed && !autoCommitProposed}
-    <div class="canvas-dock canvas-overlay" role="region" aria-label="Canvas quick tips">
-      <button
-        type="button"
-        class="dock-action"
-        {disabled}
-        onclick={() => {
-          wireLegendOpen = false;
-          catalogOpen = true;
-        }}
-        title="Open block catalog (/)"
-      >
-        <kbd>/</kbd> Add block
-      </button>
-      <span class="dock-sep" aria-hidden="true">·</span>
-      <span class="dock-tip">Click wire to peek</span>
-      <span class="dock-sep" aria-hidden="true">·</span>
-      <span class="dock-tip"><kbd>{modKeyLabel}</kbd>-click to compare 3D</span>
-      {#if onOpenTour}
-        <span class="dock-sep" aria-hidden="true">·</span>
-        <button type="button" class="dock-action accent" onclick={onOpenTour}>
-          Quick Tour
-        </button>
-      {/if}
-      <button
-        type="button"
-        class="dock-x"
-        onclick={() => (canvasHintDismissed = true)}
-        aria-label="Hide canvas tips"
-        title="Hide tips"
-      >
-        ×
-      </button>
-    </div>
   {/if}
+
+  <!-- Floating Bottom-Center Action Dock: Primary + Add Block & Auto Layout -->
+  <div class="canvas-action-dock canvas-overlay" role="toolbar" aria-label="Canvas authoring actions">
+    <button
+      bind:this={addBtnEl}
+      type="button"
+      class="add-block-btn"
+      class:open={catalogOpen}
+      data-tour="add-block-btn"
+      {disabled}
+      onclick={() => {
+        wireLegendOpen = false;
+        catalogOpen = !catalogOpen;
+      }}
+      title="Add a workflow block (shortcut: / or Shift+A, or double-click canvas)"
+    >
+      <span class="plus">+</span> Add Block
+      <kbd class="kbd-hint">/</kbd>
+    </button>
+    <span class="dock-divider" aria-hidden="true"></span>
+    <button
+      type="button"
+      class="dock-tool-btn"
+      {disabled}
+      onclick={handleAutoLayout}
+      title="Re-arrange DAG cleanly and fit view"
+    >
+      Auto Layout
+    </button>
+  </div>
 
   <div class="flow-inner">
     <SvelteFlow
@@ -1002,29 +999,31 @@
     border-radius: 7px;
     overflow: hidden;
   }
-  .canvas-dock {
-    position: absolute;
+  .flow-wrap :global(.svelte-flow__controls) {
     bottom: 12px;
-    left: 50%;
-    transform: translateX(-50%);
+    left: 12px;
+  }
+  .canvas-tips {
+    position: absolute;
+    top: 10px;
+    left: 10px;
     z-index: 16;
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 5px 10px 5px 11px;
+    gap: 7px;
+    padding: 4px 9px 4px 10px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-surface) 84%, transparent);
-    -webkit-backdrop-filter: blur(10px);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--border-strong);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+    background: color-mix(in srgb, var(--bg-surface) 76%, transparent);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border-subtle);
     font-size: 11px;
     color: var(--text-muted);
     white-space: nowrap;
-    max-width: calc(100% - 96px);
+    max-width: calc(100% - 130px);
     overflow: hidden;
   }
-  .canvas-dock kbd {
+  .canvas-tips kbd {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 9.5px;
     padding: 0 4px;
@@ -1081,8 +1080,8 @@
     color: var(--text-primary);
     background: var(--bg-surface-hover);
   }
-  @media (max-width: 720px) {
-    .canvas-dock {
+  @media (max-width: 960px) {
+    .canvas-tips {
       display: none;
     }
   }
@@ -1101,29 +1100,44 @@
       min-height: 260px;
     }
   }
-  .canvas-left-tools {
+  .canvas-action-dock {
     position: absolute;
-    top: 10px;
-    left: 10px;
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    left: 50%;
+    transform: translateX(-50%);
     z-index: 25;
-    display: flex;
-    gap: 6px;
+    display: inline-flex;
     align-items: center;
+    gap: 4px;
+    padding: 4px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-surface) 92%, transparent);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24), var(--node-shadow);
+    white-space: nowrap;
+  }
+  .dock-divider {
+    width: 1px;
+    height: 18px;
+    background: var(--border-strong);
+    opacity: 0.7;
+    flex-shrink: 0;
   }
   .add-block-btn {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    background: var(--bg-surface);
+    background: var(--bg-pill);
     color: var(--text-primary);
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    padding: 5px 10px;
+    border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border-strong));
+    border-radius: 999px;
+    padding: 5px 12px;
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
-    box-shadow: var(--node-shadow);
   }
   .add-block-btn:hover:not(:disabled),
   .add-block-btn.open {
@@ -1133,6 +1147,40 @@
   .add-block-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  .dock-tool-btn {
+    display: inline-flex;
+    align-items: center;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid transparent;
+    border-radius: 999px;
+    padding: 5px 11px;
+    font-size: 11.5px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .dock-tool-btn:hover:not(:disabled) {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+  }
+  .dock-tool-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  @media (max-width: 640px), (hover: none) {
+    .add-block-btn .kbd-hint {
+      display: none;
+    }
+    .add-block-btn {
+      padding: 5px 10px;
+      font-size: 11.5px;
+    }
+    .dock-tool-btn {
+      padding: 5px 9px;
+      font-size: 11px;
+    }
   }
   .plus {
     color: var(--accent-bright);
@@ -1243,7 +1291,7 @@
   }
   .ghost-bar {
     position: absolute;
-    bottom: 14px;
+    bottom: 62px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 24;
@@ -1298,7 +1346,7 @@
   }
   .toast {
     position: absolute;
-    bottom: 12px;
+    top: 12px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 30;
