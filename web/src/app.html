@@ -6,8 +6,19 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <meta name="description" content="denovo.run — browser-native WebGPU node-graph workbench for protein design, inverse folding, and AlphaFold2 refolding" />
   <meta property="og:title" content="denovo.run — Browser-Native WebGPU Protein Design" />
-  <meta property="og:description" content="Compose RFD4-Proteina, ProteinMPNN, and LocalFold AF2 pipelines locally in your browser on WebGPU." />
+  <meta property="og:description" content="Compose RFD4-Proteina, Genie 3, ProteinMPNN, and LocalFold AF2 pipelines locally in your browser on WebGPU." />
   <meta property="og:type" content="website" />
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('denovo-theme');
+        if (t !== 'light' && t !== 'dark') {
+          t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        }
+        document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    })();
+  </script>
   %sveltekit.head%
 </head>
 <body data-sveltekit-preload-data="hover">

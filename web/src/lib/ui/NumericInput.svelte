@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import {
     clampNumeric,
     commitNumericDraft,
@@ -24,7 +25,7 @@
     onChange,
   }: Props = $props();
 
-  let draft = $state('');
+  let draft = $state(untrack(() => formatNumericValue(value, spec)));
   let focused = $state(false);
 
   // Sync draft from external value changes (preset switches, node switches, stepper clicks)
