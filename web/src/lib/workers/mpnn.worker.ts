@@ -26,6 +26,47 @@ function fnv1a(str: string): string {
   return (h >>> 0).toString(16).padStart(8, '0');
 }
 
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Apply deterministic seeded Gaussian noise (Å) to finite backbone coordinates,
+ * matching upstream ProteinMPNN `--backbone_noise` semantics while preserving NaN gaps.
+ */
+function applyBackboneNoise(coordinates: Float32Array, sigma: number, seed: number): Float32Array {
+  if (!(sigma > 0) || !Number.isFinite(sigma)) return coordinates;
+  const out = new Float32Array(coordinates.length);
+  const rand = mulberry32((seed ^ 0x9e3779b9) >>> 0);
+  let hasSpare = false;
+  let spare = 0;
+  const nextGaussian = (): number => {
+    if (hasSpare) {
+      hasSpare = false;
+      return spare;
+    }
+    let u = 0;
+    let v = 0;
+    while (u <= 1e-12) u = rand();
+    v = rand();
+    const mag = Math.sqrt(-2.0 * Math.log(u));
+    spare = mag * Math.sin(2.0 * Math.PI * v);
+    hasSpare = true;
+    return mag * Math.cos(2.0 * Math.PI * v);
+  };
+  for (let i = 0; i < coordinates.length; i++) {
+    const val = coordinates[i];
+    out[i] = Number.isFinite(val) ? val + sigma * nextGaussian() : val;
+  }
+  return out;
+}
+
 function computeChainLengths(chainIds: readonly string[]): number[] {
   const lengths: number[] = [];
   for (let i = 0; i < chainIds.length; i++) {
@@ -249,6 +290,8 @@ self.onmessage = async (ev: MessageEvent) => {
       const modelName = String(p.modelName ?? 'v_48_020');
       const numSequences = Math.max(1, Math.min(8, Math.round(Number(p.numSequences ?? 2))));
       const temperature = Math.max(0.01, Math.min(1.5, Number(p.temperature ?? 0.1)));
+      const rawNoise = Number(p.backboneNoise ?? 0);
+      const backboneNoise = Number.isFinite(rawNoise) ? Math.max(0, Math.min(1, rawNoise)) : 0;
       const seed = Number(p.seed ?? 42);
       const fixedPositionsSpec = String(p.fixedPositions ?? '').trim();
       const omitAminoAcidsRaw = String(p.omitAminoAcids ?? '').trim().toUpperCase().replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, '');
@@ -280,9 +323,14 @@ self.onmessage = async (ev: MessageEvent) => {
         fillGaps: false,
         atomMode: model.manifest.atomMode,
       });
+      const noisyCoords =
+        backboneNoise > 0
+          ? applyBackboneNoise(rawParsed.coordinates, backboneNoise, seed)
+          : rawParsed.coordinates;
       const gapAwareIndices = buildGapAwareResidueIndices(rawParsed);
       const prepared = await model.prepare({
         ...rawParsed,
+        coordinates: noisyCoords,
         residueIndices: gapAwareIndices,
       });
       const defaultChain = prepared.structure.chainIds[0] ?? 'A';
@@ -371,6 +419,7 @@ self.onmessage = async (ev: MessageEvent) => {
           modelName,
           numSequences,
           temperature,
+          backboneNoise,
           seed,
           designChains: designChains ?? null,
           fixedPositions,

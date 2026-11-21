@@ -1685,20 +1685,51 @@
   function handleResidueClick(info: {
     chain: string;
     seqId: number;
+    insCode?: string;
+    residueToken?: string;
     compId: string;
+    atomName?: string;
     isNonPolymer?: boolean;
+    entityType?: 'protein' | 'dna' | 'rna' | 'ligand';
   }) {
     if (isCompareMode) return;
-    if (info.isNonPolymer) {
-      lastPickedResidue = `${info.chain}:${info.compId} (non-polymer)`;
+    const tag =
+      (info.residueToken && info.residueToken.trim()) ||
+      `${info.chain}${info.seqId}${info.insCode ?? ''}`;
+
+    if (info.isNonPolymer || info.entityType === 'ligand') {
+      const atomSelector = `${info.chain}/${info.compId}/*/${info.atomName || '*'}`;
+      if (
+        molPickMode !== 'off' &&
+        selectedNode?.adapterId === 'rfd4-proteina' &&
+        String(selectedNode.params.hbondMode ?? 'none') !== 'none'
+      ) {
+        updateNodeParams(selectedNode.id, {
+          ...selectedNode.params,
+          hbondSelection: atomSelector,
+          userEditedTask: true,
+        });
+        lastPickedResidue = `${atomSelector} → H-Bond target (${selectedNode.label || 'RFD4-Proteina'})`;
+        showToastMessage(`Set RFD4 H-bond target to ${atomSelector}`, 2800);
+        return;
+      }
+      lastPickedResidue = `${info.chain}:${info.compId}${info.atomName ? `.${info.atomName}` : ''} (ligand)`;
       showToastMessage(
-        `Clicked non-polymer ${info.compId} (${info.chain}) — only protein residues can be added to hotspots, motifs, or fixed positions.`,
+        `Clicked ligand ${info.compId} (${atomSelector}) — enable RFD4 H-bond conditioning to pick ligand atoms directly, or click protein residues for hotspots/motifs/locks.`,
         3400,
       );
       return;
     }
 
-    const tag = `${info.chain}${info.seqId}`;
+    if (info.entityType === 'dna' || info.entityType === 'rna') {
+      lastPickedResidue = `${tag} (${info.compId} · ${info.entityType.toUpperCase()})`;
+      showToastMessage(
+        `Clicked ${info.entityType.toUpperCase()} nucleotide ${tag} (${info.compId}) — hotspots, motifs, and MPNN fixed positions target protein residues.`,
+        3200,
+      );
+      return;
+    }
+
     const baseLabel = `${tag} (${info.compId})`;
 
     if (molPickMode === 'off') {

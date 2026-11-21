@@ -34,7 +34,9 @@
       insCode?: string;
       residueToken?: string;
       compId: string;
+      atomName?: string;
       isNonPolymer?: boolean;
+      entityType?: 'protein' | 'dna' | 'rna' | 'ligand';
     }) => void;
     onToggleModelVisibility?: (modelId: string) => void;
     onSoloModel?: (modelId: string) => void;
@@ -341,7 +343,7 @@
           },
         });
 
-        // Click picking -> emit protein residue info (including insertion code, ignoring DNA/RNA & ligands)
+        // Click picking -> emit structured residue/entity info (protein, DNA/RNA, and non-polymer ligands/ions)
         const { StructureElement, StructureProperties } = await import('molstar/lib/mol-model/structure');
         if (destroyed) {
           try {
@@ -351,6 +353,10 @@
           }
           return null;
         }
+        const DNA_COMP_IDS = new Set(['DA', 'DT', 'DG', 'DC', 'DI', 'T']);
+        const RNA_COMP_IDS = new Set(['A', 'U', 'G', 'C', 'I']);
+        const WATER_COMP_IDS = new Set(['HOH', 'WAT', 'DOD', 'H2O']);
+
         ctx.behaviors.interaction.click.subscribe((ev) => {
           if (!onResidueClick) return;
           const loci = ev.current.loci;
@@ -358,34 +364,46 @@
           const loc = StructureElement.Loci.getFirstLocation(loci);
           if (!loc) return;
 
-          // Ignore non-polymers (ligands, ions, waters, carbohydrates) and DNA/RNA nucleic polymers
-          let entityType = 'polymer';
+          const compId = StructureProperties.atom.label_comp_id(loc) || 'UNK';
+          const compUpper = compId.toUpperCase();
+          if (WATER_COMP_IDS.has(compUpper)) return;
+
+          let rawEntityType = 'polymer';
           let entitySubtype = '';
           try {
-            entityType = String(StructureProperties.entity.type(loc) ?? '');
+            rawEntityType = String(StructureProperties.entity.type(loc) ?? '').toLowerCase();
           } catch {
-            entityType = 'polymer';
+            rawEntityType = 'polymer';
           }
-          if (entityType !== 'polymer') return;
-
           try {
             entitySubtype = String(StructureProperties.entity.subtype(loc) ?? '').toLowerCase();
           } catch {
             entitySubtype = '';
           }
-          if (
+
+          let clickedEntityType: 'protein' | 'dna' | 'rna' | 'ligand' = 'protein';
+          if (rawEntityType !== 'polymer') {
+            clickedEntityType = 'ligand';
+          } else if (
+            entitySubtype.includes('deoxyribonucleotide') ||
+            DNA_COMP_IDS.has(compUpper)
+          ) {
+            clickedEntityType = 'dna';
+          } else if (
             entitySubtype.includes('ribonucleotide') ||
             entitySubtype.includes('nucleic') ||
-            (entitySubtype &&
-              !entitySubtype.includes('polypeptide') &&
-              !entitySubtype.includes('peptide') &&
-              entitySubtype !== 'other')
+            RNA_COMP_IDS.has(compUpper) ||
+            NUCLEIC_COMP_IDS.has(compUpper)
           ) {
-            return;
+            clickedEntityType = 'rna';
+          } else if (
+            entitySubtype &&
+            !entitySubtype.includes('polypeptide') &&
+            !entitySubtype.includes('peptide') &&
+            entitySubtype !== 'other'
+          ) {
+            clickedEntityType = 'ligand';
           }
-
-          const compId = StructureProperties.atom.label_comp_id(loc) || 'UNK';
-          if (NUCLEIC_COMP_IDS.has(compId.toUpperCase())) return;
 
           const chain = StructureProperties.chain.auth_asym_id(loc) || 'A';
           const seqId = StructureProperties.residue.auth_seq_id(loc);
@@ -398,13 +416,26 @@
           } catch {
             insCode = '';
           }
+          let atomName = '';
+          try {
+            atomName = String(
+              StructureProperties.atom.label_atom_id(loc) ||
+                StructureProperties.atom.auth_atom_id(loc) ||
+                '',
+            ).trim();
+          } catch {
+            atomName = '';
+          }
+
           onResidueClick({
             chain,
             seqId,
             ...(insCode ? { insCode } : {}),
             residueToken: `${chain}${seqId}${insCode}`,
             compId,
-            isNonPolymer: false,
+            ...(atomName ? { atomName } : {}),
+            isNonPolymer: clickedEntityType === 'ligand',
+            entityType: clickedEntityType,
           });
         });
 
