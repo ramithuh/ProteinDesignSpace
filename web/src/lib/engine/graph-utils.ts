@@ -11,6 +11,9 @@ export const PORT_COLORS: Record<PortType, { bg: string; label: string; short: s
   SequenceSet: { bg: '#a855f7', label: 'Sequences (AA)', short: 'Sequences' },
   FoldedStructure: { bg: '#10b981', label: 'Predicted Structure', short: 'Predicted' },
   DesignabilityMetrics: { bg: '#f59e0b', label: 'Designability Scores', short: 'Scores' },
+  MutationMatrix: { bg: '#ec4899', label: 'Mutation Matrix (L×20)', short: 'Mutations' },
+  ResidueTrack: { bg: '#14b8a6', label: 'Residue Profile', short: 'Profile' },
+  SequenceEmbedding: { bg: '#6366f1', label: 'Embeddings', short: 'Embeddings' },
   ConditionSpec: { bg: '#f43f5e', label: 'Design Constraints', short: 'Constraints' },
 };
 

@@ -2477,6 +2477,41 @@ function summarizeArtifact(art: CanonicalArtifact): ArtifactRef {
       },
     };
   }
+  if (art.kind === 'MutationMatrix') {
+    return {
+      id: art.id,
+      kind: art.kind,
+      summary: {
+        metric: art.metric,
+        direction: art.direction,
+        length: art.residues.length,
+        alphabetSize: art.alphabet.length,
+        targetedCount: art.targetedMutations?.length ?? 0,
+      },
+    };
+  }
+  if (art.kind === 'ResidueTrack') {
+    return {
+      id: art.id,
+      kind: art.kind,
+      summary: {
+        quantity: art.quantity,
+        length: art.residues.length,
+        ...(art.summary ? { mean: art.summary.mean, max: art.summary.max } : {}),
+      },
+    };
+  }
+  if (art.kind === 'SequenceEmbedding') {
+    return {
+      id: art.id,
+      kind: art.kind,
+      summary: {
+        length: art.sequence.length,
+        dim: art.dim,
+        ...(art.pseudoPerplexity !== undefined ? { pseudoPerplexity: art.pseudoPerplexity } : {}),
+      },
+    };
+  }
   if (art.kind === 'ConditionSpec') {
     return {
       id: art.id,

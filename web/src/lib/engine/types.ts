@@ -11,13 +11,31 @@ export type PortType =
   | 'SequenceSet'
   | 'FoldedStructure'
   | 'DesignabilityMetrics'
+  | 'MutationMatrix'
+  | 'ResidueTrack'
+  | 'SequenceEmbedding'
   | 'ConditionSpec';
 
 export type BioEntityKind = 'protein' | 'dna' | 'rna' | 'ligand';
 
+export type ChainMolecularKind =
+  | 'protein'
+  | 'antibody-H'
+  | 'antibody-L'
+  | 'nanobody'
+  | 'dna'
+  | 'rna'
+  | 'ligand';
+
 export type MsaMode = 'single' | 'mmseqs2' | 'target-only' | 'a3m';
 
-export type BfactorSemantics = 'none' | 'plddt-0-100' | 'plddt-0-1' | 'dynamics-prob' | 'crystal-b';
+export type BfactorSemantics =
+  | 'none'
+  | 'plddt-0-100'
+  | 'plddt-0-1'
+  | 'dynamics-prob'
+  | 'ddg-stability'
+  | 'crystal-b';
 
 export type AtomGranularity = 'ca-only' | 'backbone4' | 'all-atom';
 
@@ -40,9 +58,82 @@ export interface ResidueTrackArtifact {
   quantity: string;
   unit?: string;
   range?: [number, number];
+  threshold?: number;
   residues: string;
+  /** Insertion-code-safe residue labels matching `residues` (e.g. `['A1', 'A2', 'H100A']`). */
+  residueIds?: string[];
   values: Float32Array;
   rawLogits?: Float32Array;
+  summary?: {
+    mean: number;
+    max: number;
+    min?: number;
+    fractionAboveThreshold?: number;
+    pseudoPerplexity?: number;
+  };
+}
+
+export interface TargetedMutationScore {
+  mutation: string;
+  chainId?: string;
+  residueId?: string;
+  wildType: string;
+  mutant: string;
+  score: number;
+}
+
+export interface MutationMatrixArtifact {
+  kind: 'MutationMatrix';
+  id: string;
+  label?: string;
+  sourceModelId: string;
+  parentStructureId?: string;
+  /** Semantic score type (e.g. ThermoMPNN `ddg-kcal-mol` or ESMC `llr-fitness`). */
+  metric: 'ddg-kcal-mol' | 'llr-fitness' | string;
+  unit?: string;
+  /** Whether lower scores are favorable (`ddg-kcal-mol`) or higher scores are favorable (`llr-fitness`). */
+  direction: 'lower-is-better' | 'higher-is-better';
+  residues: string;
+  /** Insertion-code-safe residue labels matching `residues` (length L). */
+  residueIds: string[];
+  /** Canonical 20-AA column alphabet matching `values` stride (default `ACDEFGHIKLMNPQRSTVWY`). */
+  alphabet: string;
+  /** Row-major `[L * alphabet.length]` matrix of per-mutation scores. */
+  values: Float32Array;
+  /** Optional explicit point-mutant table when running targeted mutation mode. */
+  targetedMutations?: TargetedMutationScore[];
+  /** Optional per-position aggregate score (length L) for 3D B-factor painting. */
+  meanPerPosition?: Float32Array;
+  provenance?: ArtifactProvenance;
+}
+
+export interface SequenceEmbeddingArtifact {
+  kind: 'SequenceEmbedding';
+  id: string;
+  label?: string;
+  sourceModelId: string;
+  parentStructureId?: string;
+  sequenceId?: string;
+  sequence: string;
+  dim: number;
+  /** Mean-pooled sequence embedding `[dim]`. */
+  pooled: Float32Array;
+  /** Optional row-major per-residue embeddings `[L * dim]`. */
+  perResidue?: Float32Array;
+  /** Optional sequence pseudo-perplexity / naturalness score. */
+  pseudoPerplexity?: number;
+  provenance?: ArtifactProvenance;
+}
+
+export interface StructureMolecularContext {
+  /** Preserved non-water ligand/cofactor/metal residue names (CCD codes). */
+  ligands?: string[];
+  /** Preserved nucleic acid chain IDs. */
+  nucleicAcidChains?: string[];
+  /** Whether explicit hydrogens are present (e.g. LASErMPNN packed outputs). */
+  hasExplicitHydrogens?: boolean;
+  /** Per-chain molecular classification (protein, antibody-H/L, nanobody, dna, rna, ligand). */
+  chainTypes?: Record<string, ChainMolecularKind>;
 }
 
 export type CollectionKind = 'independent-candidates' | 'multi-sample' | 'ordered-frames';
@@ -158,6 +249,8 @@ export interface StructureArtifact {
   bfactorSemantics?: BfactorSemantics;
   /** True atomic resolution of emitted coordinates (avoids pretending Cα-only is all-atom). */
   atomGranularity?: AtomGranularity;
+  /** Preserved non-protein / antibody molecular context for holo & specialized models. */
+  molecularContext?: StructureMolecularContext;
   /** Execution provenance (quantization, early stopping, fallback warnings). */
   provenance?: ArtifactProvenance;
   geometry: GeometryStats;
@@ -394,6 +487,9 @@ export type CanonicalArtifact =
   | SequenceSet
   | FoldedStructure
   | DesignabilityMetrics
+  | MutationMatrixArtifact
+  | ResidueTrackArtifact
+  | SequenceEmbeddingArtifact
   | ConditionSpecArtifact;
 
 /** Content-addressed lightweight handle suitable for Agents / WebMCP / Campaign logs. */
@@ -408,6 +504,40 @@ export interface PortSpec {
   required?: boolean;
 }
 
+export interface AdapterParamOption {
+  value: string;
+  label: string;
+  hint?: string;
+}
+
+export interface AdapterParamField {
+  key: string;
+  label: string;
+  kind: 'number' | 'integer' | 'boolean' | 'select' | 'text' | 'textarea' | 'residue-list' | 'aa-set';
+  /** Controls whether this field renders in the primary area or inside Advanced parameters. */
+  tier: 'primary' | 'advanced';
+  defaultValue: unknown;
+  description?: string;
+  placeholder?: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  options?: AdapterParamOption[];
+  /** Optional list of adapter mode IDs where this field applies (omit = all modes). */
+  modes?: string[];
+  /** Optional upstream default hint shown next to the field label. */
+  upstreamDefaultHint?: string;
+}
+
+export interface AdapterModeSpec {
+  id: string;
+  label: string;
+  description: string;
+  /** Input port names that are strictly required when this mode is selected. */
+  requiredInputs?: string[];
+}
+
 export interface AdapterManifest {
   id: string;
   displayName: string;
@@ -420,6 +550,12 @@ export interface AdapterManifest {
   description: string;
   inputs: Record<string, PortSpec>;
   outputs: Record<string, PortSpec>;
+  /** Optional parameter key storing the active mode (e.g. `mode`, `taskMode`, `msaMode`). */
+  modeParamKey?: string;
+  /** First-class modes supported by this adapter (drives preflight + UI). */
+  modes?: AdapterModeSpec[];
+  /** Declarative parameter schema (single source of truth for UI, validation & coverage tests). */
+  paramSchema?: AdapterParamField[];
 }
 
 export interface WorkflowNode {
