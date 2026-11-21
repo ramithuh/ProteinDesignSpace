@@ -9,12 +9,10 @@ import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { fetchCachedBytes } from '$lib/engine/opfs-cache';
 import {
   assertRfd4ConditionSelectorsMatch,
-  buildCanonicalConditionIntent,
-  compileConditionToRfd4,
   extractRfd4DesignMetadata,
   extractRfd4TemplateContext,
-  isBareLengthContig,
   pdbTextToSplitCifText,
+  resolveRfd4CompiledInput,
   type Rfd4TemplateContext,
 } from '$lib/engine/conditioning';
 import type { ConditionSpecArtifact, SequenceSet, StructureArtifact } from '$lib/engine/types';
@@ -278,67 +276,70 @@ self.onmessage = async (ev: MessageEvent) => {
     if (msg.type === 'run') {
       const t0 = performance.now();
       const p = msg.params ?? {};
-      const mode = String(p.mode ?? 'unconditional');
-      const length = Math.max(30, Math.min(256, Number(p.length ?? 70)));
-      const nsteps = Math.max(10, Math.min(120, Number(p.nsteps ?? 60)));
-      const recycleSchedule = (p.recycleSchedule ?? 'low') as 'none' | 'low' | 'medium' | 'high';
-      const requestedEarlyStop = Boolean(p.earlyStop);
-      const earlyStop = mode === 'inverse-folding' ? false : requestedEarlyStop;
-      const seed = Number(p.seed ?? 42);
-      const customSpecYaml = String(p.customSpecYaml ?? '').trim();
-      const partialFraction = Math.max(0.05, Math.min(0.95, Number(p.partialFraction ?? 0.5)));
       const template = (msg.inputs?.structure ?? msg.inputs?.template) as StructureArtifact | undefined;
       const condArtifact = msg.inputs?.condition as ConditionSpecArtifact | undefined;
-      const inlineContig = String(p.contig ?? '').trim();
-      const inlineLock = String(p.lockChain ?? '').trim().toUpperCase();
-      const inlineHotspots = String(p.hotspots ?? '').trim();
-      const inlineMotif = String(p.motifSpan ?? '').trim();
-      const inlineUnidx = Boolean(p.unindexedMotif);
-      const inlineHbondMode = String(p.hbondMode ?? 'none');
-      const inlineHbondSel = String(p.hbondSelection ?? '').trim();
-      const inlineCath = String(p.cathCode ?? '').trim();
-
-      // Validate mode and resolve active preset ID strictly based on `mode`
-      if (
-        mode !== 'unconditional' &&
-        mode !== 'binder' &&
-        mode !== 'motif' &&
-        mode !== 'conditioned' &&
-        mode !== 'preset' &&
-        mode !== 'partial' &&
-        mode !== 'inverse-folding'
-      ) {
-        throw new Error(`Unknown RFD4 mode "${mode}"`);
-      }
+      const modeParam = String(p.mode ?? 'unconditional');
+      const requestedEarlyStop = Boolean(p.earlyStop);
+      const effectiveEarlyStop = modeParam === 'inverse-folding' ? false : requestedEarlyStop;
+      // Keep explicit p.<key> reads intact for param-schema bidirectional coverage guards
+      const rawParams: Record<string, unknown> = {
+        mode: modeParam,
+        length: p.length,
+        nsteps: p.nsteps,
+        recycleSchedule: p.recycleSchedule,
+        earlyStop: effectiveEarlyStop,
+        seed: p.seed,
+        presetId: p.presetId,
+        partialFraction: p.partialFraction,
+        contig: p.contig,
+        lockChain: p.lockChain,
+        hotspots: p.hotspots,
+        motifSpan: p.motifSpan,
+        unindexedMotif: p.unindexedMotif,
+        hbondMode: p.hbondMode,
+        hbondSelection: p.hbondSelection,
+        cathCode: p.cathCode,
+        customSpecYaml: p.customSpecYaml,
+      };
+      const inlineContig = String(rawParams.contig ?? '').trim();
+      const inlineLock = String(rawParams.lockChain ?? '').trim().toUpperCase();
+      const inlineHotspots = String(rawParams.hotspots ?? '').trim();
+      const inlineMotif = String(rawParams.motifSpan ?? '').trim();
+      const inlineUnidx = Boolean(rawParams.unindexedMotif);
+      const inlineHbondMode = String(rawParams.hbondMode ?? 'none');
+      const inlineHbondSel = String(rawParams.hbondSelection ?? '').trim();
+      const inlineCath = String(rawParams.cathCode ?? '').trim();
 
       // Fail fast BEFORE downloading 330–468 MB weights if a required template structure is missing
       const hasTemplateStructure = Boolean(
         template?.cifText || template?.pdbText || condArtifact?.inputCif || condArtifact?.cifUrl,
       );
       if (
-        (mode === 'motif' || mode === 'binder' || mode === 'partial' || mode === 'inverse-folding') &&
+        (modeParam === 'motif' ||
+          modeParam === 'binder' ||
+          modeParam === 'partial' ||
+          modeParam === 'inverse-folding') &&
         !hasTemplateStructure
       ) {
         throw new Error(
-          `RFD4 "${mode}" mode requires a wired structure input (e.g. from PDB Input).`,
+          `RFD4 "${modeParam}" mode requires a wired structure input (e.g. from PDB Input).`,
         );
       }
 
-      const activePresetId =
-        mode === 'preset'
-          ? String(p.presetId ?? 'custom_cath_monomer')
-          : mode === 'conditioned' && condArtifact?.cifUrl?.startsWith('preset:')
-            ? condArtifact.cifUrl.slice(7)
-            : null;
-
-      const needEncoder =
-        mode === 'partial' ||
-        mode === 'inverse-folding' ||
-        activePresetId === 'partial_diffusion_1prw' ||
-        activePresetId === 'inverse_folding_1prw' ||
-        (mode === 'conditioned' &&
-          (Boolean(condArtifact?.inverseFolding) ||
-            (condArtifact?.partialFraction != null && condArtifact.partialFraction > 0)));
+      // Resolve mode, contig, and conditions via single-source-of-truth resolver
+      const preResolved = resolveRfd4CompiledInput(rawParams, template, condArtifact);
+      const {
+        mode,
+        length,
+        nsteps,
+        recycleSchedule,
+        seed,
+        customSpecYaml,
+        partialFraction,
+        activePresetId,
+        needEncoder,
+      } = preResolved;
+      const earlyStop = mode === 'inverse-folding' ? false : requestedEarlyStop;
 
       await ensureLoaded(msg.id, needEncoder);
 
@@ -362,7 +363,7 @@ self.onmessage = async (ev: MessageEvent) => {
         },
       };
 
-      let runLabel = `RFD4 (L=${length})`;
+      let runLabel = preResolved.runLabel;
 
       const buildFromPreset = async (presetId: string) => {
         const presetsList = Array.isArray(rfd4Mod.RFD4P_PRESETS) ? rfd4Mod.RFD4P_PRESETS : [];
@@ -405,140 +406,46 @@ self.onmessage = async (ev: MessageEvent) => {
         );
       };
 
-      if (mode === 'preset') {
+      if (preResolved.kind === 'preset') {
         built = await buildFromPreset(activePresetId!);
-      } else if (mode === 'binder' || mode === 'motif' || mode === 'conditioned') {
-        if (condArtifact) {
-          const cond = condArtifact;
-          if (activePresetId) {
-            built = await buildFromPreset(activePresetId);
-            if (cond.partialFraction != null && cond.partialFraction > 0) {
-              await ensureLoaded(msg.id, true);
-              genOpts.partialTrajectoryFractionSteps = cond.partialFraction;
-            }
-            if (cond.inverseFolding) {
-              await ensureLoaded(msg.id, true);
-              genOpts.inverseFolding = true;
-              genOpts.earlyStop = false;
-            }
-          } else {
-            runLabel = `RFD4 · ${cond.label}`;
-            let inputCif: string | Uint8Array | undefined =
-              cond.inputCif ?? template?.cifText ?? template?.pdbText;
-            if (!inputCif && cond.cifUrl) {
-              inputCif = await fetchExampleCifBytes(msg.id, cond.cifUrl);
-            }
-            const prepared = await prepareTemplateForRfd4(msg.id, inputCif);
-            if (cond.partialFraction != null && cond.partialFraction > 0) {
-              genOpts.partialTrajectoryFractionSteps = cond.partialFraction;
-            }
-            if (cond.inverseFolding) {
-              genOpts.inverseFolding = true;
-              genOpts.earlyStop = false;
-            }
-            const compiled = cond.intent
-              ? compileConditionToRfd4(cond.intent, prepared?.templateContext)
-              : { contig: cond.contig, conditions: cond.conditions ?? {} };
-            if (prepared && Object.keys(compiled.conditions).length > 0) {
-              assertRfd4ConditionSelectorsMatch(
-                prepared.atomArray,
-                compiled.contig,
-                compiled.conditions,
-                rfd4SpecMod,
-              );
-            }
-            built = rfd4Mod.buildBatch(
-              { contig: compiled.contig, conditions: compiled.conditions },
-              prepared ? { inputAtomArray: prepared.atomArray, seed } : { inputCif, seed },
-            );
-          }
-        } else if (customSpecYaml) {
-          runLabel = 'RFD4 · custom spec';
-          const prepared = await prepareTemplateForRfd4(
-            msg.id,
-            template?.cifText ?? template?.pdbText,
-          );
-          built = rfd4Mod.buildBatch(
-            customSpecYaml,
-            prepared
-              ? { inputAtomArray: prepared.atomArray, seed }
-              : { inputCif: template?.cifText ?? template?.pdbText, seed },
-          );
-        } else {
-          // Inline conditioning directly from RFD4-Proteina node parameters
-          const rawTemplate = template?.cifText ?? template?.pdbText;
-          const prepared = await prepareTemplateForRfd4(msg.id, rawTemplate);
-          const defaultChain = (template?.chainIds?.[0] || 'A').toUpperCase();
-          const effectiveLock = mode === 'binder' ? inlineLock || defaultChain : inlineLock;
-
-          let effectiveContig = inlineContig;
-          if (mode === 'binder' && isBareLengthContig(effectiveContig)) {
-            if (!prepared) {
-              throw new Error(
-                'RFD4 binder mode requires a wired target structure (e.g. from PDB Input).',
-              );
-            }
-            const synth = prepared.templateContext.synthesizeBinderContig(effectiveLock, length);
-            if (!synth) {
-              throw new Error(
-                `Could not synthesize binder contig for target chain "${effectiveLock}" from wired structure.`,
-              );
-            }
-            effectiveContig = synth;
-          } else if (!effectiveContig) {
-            effectiveContig = `${length}-${length}`;
-          }
-
-          const intent = buildCanonicalConditionIntent({
-            contig: effectiveContig,
-            lockChain: effectiveLock,
-            hotspots: inlineHotspots,
-            motifSpan: inlineMotif,
-            unindexedMotif: inlineUnidx,
-            hbondMode: inlineHbondMode,
-            hbondSelection: inlineHbondSel,
-            cathCode: inlineCath,
-          });
-          const compiled = compileConditionToRfd4(intent, prepared?.templateContext);
-          if (prepared && Object.keys(compiled.conditions).length > 0) {
-            assertRfd4ConditionSelectorsMatch(
-              prepared.atomArray,
-              compiled.contig,
-              compiled.conditions,
-              rfd4SpecMod,
-            );
-          }
-          runLabel = `RFD4 · ${compiled.tags.slice(0, 2).join(' · ')}`;
-          built = rfd4Mod.buildBatch(
-            { contig: compiled.contig, conditions: compiled.conditions },
-            prepared ? { inputAtomArray: prepared.atomArray, seed } : { seed },
-          );
+        if (preResolved.effectivePartialFraction != null) {
+          await ensureLoaded(msg.id, true);
+          genOpts.partialTrajectoryFractionSteps = preResolved.effectivePartialFraction;
         }
-      } else if (mode === 'partial' || mode === 'inverse-folding') {
-        const inputCif = template?.cifText ?? template?.pdbText;
-        if (!inputCif) {
-          throw new Error(`RFD4 "${mode}" mode requires a wired structure input (e.g. from PDB Input)`);
-        }
-        if (mode === 'partial') {
-          genOpts.partialTrajectoryFractionSteps = partialFraction;
-          runLabel = `RFD4 partial (frac=${partialFraction})`;
-        } else {
+        if (preResolved.inverseFolding) {
+          await ensureLoaded(msg.id, true);
           genOpts.inverseFolding = true;
           genOpts.earlyStop = false;
-          runLabel = `RFD4 inverse-fold`;
         }
-        const prepared = (await prepareTemplateForRfd4(msg.id, inputCif))!;
-        const hasInlineCond =
-          Boolean(inlineLock) ||
-          Boolean(inlineHotspots) ||
-          Boolean(inlineMotif) ||
-          (inlineHbondMode !== 'none' && Boolean(inlineHbondSel)) ||
-          Boolean(inlineCath);
+      } else {
+        let inputCif: string | Uint8Array | undefined =
+          mode === 'partial' || mode === 'inverse-folding'
+            ? (template?.cifText ?? template?.pdbText)
+            : (condArtifact?.inputCif ?? template?.cifText ?? template?.pdbText);
+        if (!inputCif && condArtifact?.cifUrl && !activePresetId) {
+          inputCif = await fetchExampleCifBytes(msg.id, condArtifact.cifUrl);
+        }
+        const prepared =
+          preResolved.usesTemplate || Boolean(inputCif && (customSpecYaml || mode !== 'unconditional'))
+            ? await prepareTemplateForRfd4(msg.id, inputCif)
+            : null;
+        const resolved = prepared
+          ? resolveRfd4CompiledInput(rawParams, template, condArtifact, prepared.templateContext)
+          : preResolved;
+        runLabel = resolved.runLabel;
 
-        if (customSpecYaml) {
-          const parsedYaml = rfd4Mod.parseConditionSpecYaml(customSpecYaml);
+        if (resolved.effectivePartialFraction != null) {
+          genOpts.partialTrajectoryFractionSteps = resolved.effectivePartialFraction;
+        }
+        if (resolved.inverseFolding) {
+          genOpts.inverseFolding = true;
+          genOpts.earlyStop = false;
+        }
+
+        if (resolved.kind === 'template-custom-yaml') {
+          const parsedYaml = rfd4Mod.parseConditionSpecYaml(resolved.customSpecYaml);
           const yamlConds = (parsedYaml?.conditions ?? {}) as Record<string, unknown>;
-          if (Object.keys(yamlConds).length > 0) {
+          if (prepared && Object.keys(yamlConds).length > 0) {
             assertRfd4ConditionSelectorsMatch(
               prepared.atomArray,
               parsedYaml?.contig ?? null,
@@ -547,75 +454,47 @@ self.onmessage = async (ev: MessageEvent) => {
             );
           }
           built = rfd4Mod.buildBatch(
-            parsedYaml?.contig
-              ? parsedYaml
-              : { input: 'template', conditions: yamlConds },
-            { inputAtomArray: prepared.atomArray, seed },
+            parsedYaml?.contig ? parsedYaml : { input: 'template', conditions: yamlConds },
+            { inputAtomArray: prepared!.atomArray, seed },
           );
-        } else if (condArtifact?.intent || hasInlineCond) {
-          const intent =
-            condArtifact?.intent ??
-            buildCanonicalConditionIntent({
-              contig: inlineContig || '70-70',
-              lockChain: inlineLock,
-              hotspots: inlineHotspots,
-              motifSpan: inlineMotif,
-              unindexedMotif: false,
-              hbondMode: inlineHbondMode,
-              hbondSelection: inlineHbondSel,
-              cathCode: inlineCath,
-            });
-          // Omit contig so non-1-indexed, gapped, or multi-chain templates stay verbatim while applying conditions
-          const compiled = compileConditionToRfd4(intent, prepared.templateContext, {
-            omitContig: true,
-          });
-          if (Object.keys(compiled.conditions).length > 0) {
+        } else if (resolved.kind === 'template-spec') {
+          if (prepared && Object.keys(resolved.conditions).length > 0) {
             assertRfd4ConditionSelectorsMatch(
               prepared.atomArray,
               null,
-              compiled.conditions,
+              resolved.conditions,
               rfd4SpecMod,
             );
           }
           built = rfd4Mod.buildBatch(
-            { input: 'template', conditions: compiled.conditions },
-            { inputAtomArray: prepared.atomArray, seed },
+            { input: 'template', conditions: resolved.conditions },
+            { inputAtomArray: prepared!.atomArray, seed },
+          );
+        } else if (resolved.kind === 'custom-yaml') {
+          built = rfd4Mod.buildBatch(
+            resolved.customSpecYaml,
+            prepared
+              ? { inputAtomArray: prepared.atomArray, seed }
+              : { inputCif: template?.cifText ?? template?.pdbText, seed },
           );
         } else {
-          // Omit hardcoded contig so non-1-indexed, gapped, or multi-chain templates are preserved verbatim
+          if (prepared && Object.keys(resolved.conditions).length > 0) {
+            assertRfd4ConditionSelectorsMatch(
+              prepared.atomArray,
+              resolved.contig,
+              resolved.conditions,
+              rfd4SpecMod,
+            );
+          }
           built = rfd4Mod.buildBatch(
-            { input: 'template', conditions: {} },
-            { inputAtomArray: prepared.atomArray, seed },
+            { contig: resolved.contig, conditions: resolved.conditions },
+            prepared
+              ? { inputAtomArray: prepared.atomArray, seed }
+              : inputCif && condArtifact
+                ? { inputCif, seed }
+                : { seed },
           );
         }
-      } else if (customSpecYaml) {
-        runLabel = 'RFD4 custom spec';
-        const prepared = await prepareTemplateForRfd4(
-          msg.id,
-          template?.cifText ?? template?.pdbText,
-        );
-        built = rfd4Mod.buildBatch(
-          customSpecYaml,
-          prepared
-            ? { inputAtomArray: prepared.atomArray, seed }
-            : { inputCif: template?.cifText ?? template?.pdbText, seed },
-        );
-      } else if (inlineCath) {
-        const intent = buildCanonicalConditionIntent({
-          contig: `${length}-${length}`,
-          cathCode: inlineCath,
-        });
-        const compiled = compileConditionToRfd4(intent);
-        runLabel = `RFD4 · CATH ${inlineCath}`;
-        built = rfd4Mod.buildBatch(
-          { contig: compiled.contig, conditions: compiled.conditions },
-          { seed },
-        );
-      } else {
-        built = rfd4Mod.buildBatch(
-          { contig: `${length}-${length}`, conditions: {} },
-          { seed },
-        );
       }
 
       if (built.atoms) {

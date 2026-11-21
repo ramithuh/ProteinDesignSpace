@@ -1085,7 +1085,7 @@ export function buildCanonicalConditionIntent(
 export function compileConditionToRfd4(
   intent: CanonicalConditionIntent,
   templateContext?: Rfd4TemplateContext,
-  opts?: { omitContig?: boolean; cropSegments?: string },
+  opts?: { omitContig?: boolean; cropSegments?: string; contigAlreadyLabelSpace?: boolean },
 ): {
   contig: string;
   conditions: Record<string, unknown>;
@@ -1093,7 +1093,7 @@ export function compileConditionToRfd4(
   selectedSourceResidues?: SelectedMotifSourceResidue[];
 } {
   let contig = intent.contig.trim() || '70-70';
-  if (templateContext && !opts?.omitContig) {
+  if (templateContext && !opts?.omitContig && !opts?.contigAlreadyLabelSpace) {
     contig = templateContext.remapContig(contig);
   }
 
@@ -2229,5 +2229,527 @@ export function compileConditionToGenie3Spec(
     chainLengths: [totalLen],
     selectedSourceResidues,
     summary: `motif scaffold L=${totalLen} (${motifResAll.length} fixed motif aa)`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Unified pure synchronous input resolvers shared by GPU workers & Input Preview
+// ---------------------------------------------------------------------------
+
+function fnv1aHex(str: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+export type Rfd4CompiledKind =
+  | 'preset'
+  | 'spec'
+  | 'custom-yaml'
+  | 'template-spec'
+  | 'template-custom-yaml';
+
+export interface Rfd4CompiledInput {
+  kind: Rfd4CompiledKind;
+  mode:
+    | 'unconditional'
+    | 'binder'
+    | 'motif'
+    | 'conditioned'
+    | 'preset'
+    | 'partial'
+    | 'inverse-folding';
+  length: number;
+  nsteps: number;
+  recycleSchedule: 'none' | 'low' | 'medium' | 'high';
+  earlyStop: boolean;
+  seed: number;
+  partialFraction: number;
+  activePresetId: string | null;
+  needEncoder: boolean;
+  inverseFolding: boolean;
+  effectivePartialFraction: number | null;
+  runLabel: string;
+  contig: string | null;
+  conditions: Record<string, unknown>;
+  customSpecYaml: string;
+  tags: string[];
+  intent?: CanonicalConditionIntent;
+  selectedSourceResidues?: SelectedMotifSourceResidue[];
+  templateContext?: Rfd4TemplateContext;
+  usesTemplate: boolean;
+}
+
+/**
+ * Pure synchronous RFD4-Proteina mode-branching & conditioning compiler.
+ * Single source of truth shared by `rfd4.worker.ts` and `input-preview.ts`.
+ */
+export function resolveRfd4CompiledInput(
+  params: Record<string, unknown>,
+  template?: StructureArtifact,
+  condArtifact?: ConditionSpecArtifact,
+  templateContextOverride?: Rfd4TemplateContext,
+): Rfd4CompiledInput {
+  const mode = String(params.mode ?? 'unconditional');
+  if (
+    mode !== 'unconditional' &&
+    mode !== 'binder' &&
+    mode !== 'motif' &&
+    mode !== 'conditioned' &&
+    mode !== 'preset' &&
+    mode !== 'partial' &&
+    mode !== 'inverse-folding'
+  ) {
+    throw new Error(`Unknown RFD4 mode "${mode}"`);
+  }
+
+  const length = Math.max(30, Math.min(256, Number(params.length ?? 70)));
+  const nsteps = Math.max(10, Math.min(120, Number(params.nsteps ?? 60)));
+  const recycleSchedule = (params.recycleSchedule ?? 'low') as 'none' | 'low' | 'medium' | 'high';
+  const requestedEarlyStop = Boolean(params.earlyStop);
+  const earlyStop = mode === 'inverse-folding' ? false : requestedEarlyStop;
+  const seed = Number(params.seed ?? 42);
+  const customSpecYaml = String(params.customSpecYaml ?? '').trim();
+  const partialFraction = Math.max(0.05, Math.min(0.95, Number(params.partialFraction ?? 0.5)));
+  const inlineContig = String(params.contig ?? '').trim();
+  const inlineLock = String(params.lockChain ?? '').trim().toUpperCase();
+  const inlineHotspots = String(params.hotspots ?? '').trim();
+  const inlineMotif = String(params.motifSpan ?? '').trim();
+  const inlineUnidx = Boolean(params.unindexedMotif);
+  const inlineHbondMode = String(params.hbondMode ?? 'none');
+  const inlineHbondSel = String(params.hbondSelection ?? '').trim();
+  const inlineCath = String(params.cathCode ?? '').trim();
+
+  const hasTemplateStructure = Boolean(
+    template?.cifText || template?.pdbText || condArtifact?.inputCif || condArtifact?.cifUrl,
+  );
+  if (
+    (mode === 'motif' || mode === 'binder' || mode === 'partial' || mode === 'inverse-folding') &&
+    !hasTemplateStructure
+  ) {
+    throw new Error(
+      `RFD4 "${mode}" mode requires a wired structure input (e.g. from PDB Input).`,
+    );
+  }
+
+  const activePresetId =
+    mode === 'preset'
+      ? String(params.presetId ?? 'custom_cath_monomer')
+      : mode === 'conditioned' && condArtifact?.cifUrl?.startsWith('preset:')
+        ? condArtifact.cifUrl.slice(7)
+        : null;
+
+  const needEncoder =
+    mode === 'partial' ||
+    mode === 'inverse-folding' ||
+    activePresetId === 'partial_diffusion_1prw' ||
+    activePresetId === 'inverse_folding_1prw' ||
+    (mode === 'conditioned' &&
+      (Boolean(condArtifact?.inverseFolding) ||
+        (condArtifact?.partialFraction != null && condArtifact.partialFraction > 0)));
+
+  const rawTemplateText =
+    mode === 'partial' || mode === 'inverse-folding'
+      ? (template?.cifText ?? template?.pdbText)
+      : (condArtifact?.inputCif ?? template?.cifText ?? template?.pdbText);
+
+  const ensureTemplateContext = (): Rfd4TemplateContext | undefined => {
+    if (templateContextOverride) return templateContextOverride;
+    if (!rawTemplateText) return undefined;
+    return extractRfd4TemplateContext(rawTemplateText);
+  };
+
+  const base = {
+    mode,
+    length,
+    nsteps,
+    recycleSchedule,
+    earlyStop,
+    seed,
+    partialFraction,
+    activePresetId,
+    needEncoder,
+    inverseFolding: mode === 'inverse-folding',
+    effectivePartialFraction: mode === 'partial' ? partialFraction : null,
+    customSpecYaml,
+  } as const;
+
+  if (mode === 'preset') {
+    return {
+      ...base,
+      kind: 'preset',
+      runLabel: `RFD4 · ${activePresetId!}`,
+      contig: null,
+      conditions: {},
+      tags: [`preset:${activePresetId!}`],
+      usesTemplate: false,
+    };
+  }
+
+  if (mode === 'binder' || mode === 'motif' || mode === 'conditioned') {
+    if (condArtifact) {
+      if (activePresetId) {
+        const effPartial =
+          condArtifact.partialFraction != null && condArtifact.partialFraction > 0
+            ? condArtifact.partialFraction
+            : null;
+        const effInvFold = Boolean(condArtifact.inverseFolding);
+        return {
+          ...base,
+          kind: 'preset',
+          earlyStop: effInvFold ? false : earlyStop,
+          inverseFolding: effInvFold,
+          effectivePartialFraction: effPartial,
+          runLabel: `RFD4 · ${activePresetId}`,
+          contig: null,
+          conditions: {},
+          tags: [`preset:${activePresetId}`],
+          usesTemplate: false,
+        };
+      }
+
+      const templateContext = ensureTemplateContext();
+      const effPartial =
+        condArtifact.partialFraction != null && condArtifact.partialFraction > 0
+          ? condArtifact.partialFraction
+          : null;
+      const effInvFold = Boolean(condArtifact.inverseFolding);
+      const compiled = condArtifact.intent
+        ? compileConditionToRfd4(condArtifact.intent, templateContext)
+        : {
+            contig: condArtifact.contig,
+            conditions: condArtifact.conditions ?? {},
+            tags: [condArtifact.contig],
+          };
+      return {
+        ...base,
+        kind: 'spec',
+        earlyStop: effInvFold ? false : earlyStop,
+        inverseFolding: effInvFold,
+        effectivePartialFraction: effPartial,
+        runLabel: `RFD4 · ${condArtifact.label}`,
+        contig: compiled.contig,
+        conditions: compiled.conditions,
+        tags: compiled.tags,
+        ...(condArtifact.intent ? { intent: condArtifact.intent } : {}),
+        ...(compiled.selectedSourceResidues
+          ? { selectedSourceResidues: compiled.selectedSourceResidues }
+          : {}),
+        ...(templateContext ? { templateContext } : {}),
+        usesTemplate: Boolean(templateContext || condArtifact.cifUrl),
+      };
+    }
+
+    if (customSpecYaml) {
+      const templateContext = ensureTemplateContext();
+      return {
+        ...base,
+        kind: 'custom-yaml',
+        runLabel: 'RFD4 · custom spec',
+        contig: null,
+        conditions: {},
+        tags: ['custom-spec'],
+        ...(templateContext ? { templateContext } : {}),
+        usesTemplate: Boolean(templateContext),
+      };
+    }
+
+    // Inline conditioning directly from RFD4-Proteina node parameters
+    const templateContext = ensureTemplateContext();
+    const defaultChain = (template?.chainIds?.[0] || 'A').toUpperCase();
+    const effectiveLock = mode === 'binder' ? inlineLock || defaultChain : inlineLock;
+
+    let effectiveContig = inlineContig;
+    let synthesizedContig = false;
+    if (mode === 'binder' && isBareLengthContig(effectiveContig)) {
+      if (!templateContext) {
+        throw new Error(
+          'RFD4 binder mode requires a wired target structure (e.g. from PDB Input).',
+        );
+      }
+      const synth = templateContext.synthesizeBinderContig(effectiveLock, length);
+      if (!synth) {
+        throw new Error(
+          `Could not synthesize binder contig for target chain "${effectiveLock}" from wired structure.`,
+        );
+      }
+      effectiveContig = synth;
+      synthesizedContig = true;
+    } else if (!effectiveContig) {
+      effectiveContig = `${length}-${length}`;
+    }
+
+    const intent = buildCanonicalConditionIntent({
+      contig: effectiveContig,
+      lockChain: effectiveLock,
+      hotspots: inlineHotspots,
+      motifSpan: inlineMotif,
+      unindexedMotif: inlineUnidx,
+      hbondMode: inlineHbondMode,
+      hbondSelection: inlineHbondSel,
+      cathCode: inlineCath,
+    });
+    const compiled = compileConditionToRfd4(intent, templateContext, {
+      contigAlreadyLabelSpace: synthesizedContig,
+    });
+    return {
+      ...base,
+      kind: 'spec',
+      runLabel: `RFD4 · ${compiled.tags.slice(0, 2).join(' · ')}`,
+      contig: compiled.contig,
+      conditions: compiled.conditions,
+      tags: compiled.tags,
+      intent,
+      ...(compiled.selectedSourceResidues
+        ? { selectedSourceResidues: compiled.selectedSourceResidues }
+        : {}),
+      ...(templateContext ? { templateContext } : {}),
+      usesTemplate: Boolean(templateContext),
+    };
+  }
+
+  if (mode === 'partial' || mode === 'inverse-folding') {
+    const templateContext = ensureTemplateContext();
+    if (!templateContext) {
+      throw new Error(
+        `RFD4 "${mode}" mode requires a wired structure input (e.g. from PDB Input)`,
+      );
+    }
+    const runLabel =
+      mode === 'partial' ? `RFD4 partial (frac=${partialFraction})` : 'RFD4 inverse-fold';
+    const hasInlineCond =
+      Boolean(inlineLock) ||
+      Boolean(inlineHotspots) ||
+      Boolean(inlineMotif) ||
+      (inlineHbondMode !== 'none' && Boolean(inlineHbondSel)) ||
+      Boolean(inlineCath);
+
+    if (customSpecYaml) {
+      return {
+        ...base,
+        kind: 'template-custom-yaml',
+        runLabel,
+        contig: null,
+        conditions: {},
+        tags: ['input:template', 'custom-spec'],
+        templateContext,
+        usesTemplate: true,
+      };
+    }
+
+    if (condArtifact?.intent || hasInlineCond) {
+      const intent =
+        condArtifact?.intent ??
+        buildCanonicalConditionIntent({
+          contig: inlineContig || '70-70',
+          lockChain: inlineLock,
+          hotspots: inlineHotspots,
+          motifSpan: inlineMotif,
+          unindexedMotif: false,
+          hbondMode: inlineHbondMode,
+          hbondSelection: inlineHbondSel,
+          cathCode: inlineCath,
+        });
+      const compiled = compileConditionToRfd4(intent, templateContext, {
+        omitContig: true,
+      });
+      return {
+        ...base,
+        kind: 'template-spec',
+        runLabel,
+        contig: null,
+        conditions: compiled.conditions,
+        tags: ['input:template', ...compiled.tags.slice(1)],
+        intent,
+        ...(compiled.selectedSourceResidues
+          ? { selectedSourceResidues: compiled.selectedSourceResidues }
+          : {}),
+        templateContext,
+        usesTemplate: true,
+      };
+    }
+
+    return {
+      ...base,
+      kind: 'template-spec',
+      runLabel,
+      contig: null,
+      conditions: {},
+      tags: ['input:template'],
+      templateContext,
+      usesTemplate: true,
+    };
+  }
+
+  if (customSpecYaml) {
+    const templateContext = ensureTemplateContext();
+    return {
+      ...base,
+      kind: 'custom-yaml',
+      runLabel: 'RFD4 custom spec',
+      contig: null,
+      conditions: {},
+      tags: ['custom-spec'],
+      ...(templateContext ? { templateContext } : {}),
+      usesTemplate: Boolean(templateContext),
+    };
+  }
+
+  if (inlineCath) {
+    const intent = buildCanonicalConditionIntent({
+      contig: `${length}-${length}`,
+      cathCode: inlineCath,
+    });
+    const compiled = compileConditionToRfd4(intent);
+    return {
+      ...base,
+      kind: 'spec',
+      runLabel: `RFD4 · CATH ${inlineCath}`,
+      contig: compiled.contig,
+      conditions: compiled.conditions,
+      tags: compiled.tags,
+      intent,
+      usesTemplate: false,
+    };
+  }
+
+  return {
+    ...base,
+    kind: 'spec',
+    runLabel: `RFD4 (L=${length})`,
+    contig: `${length}-${length}`,
+    conditions: {},
+    tags: [`${length}-${length}`],
+    usesTemplate: false,
+  };
+}
+
+export interface Genie3CompiledInput {
+  mode: 'unconditional' | 'binder' | 'motif';
+  taskMode: string;
+  length: number;
+  nSampleStep: number;
+  effectiveSteps: number;
+  directionScale: number;
+  noiseScale: number;
+  predictSequence: boolean;
+  seed: number;
+  effectiveCond?: ConditionSpecArtifact;
+  compiledSpec?: Genie3CompiledSpec;
+  totalLength: number;
+  chainLengths: number[];
+  summary: string;
+}
+
+/**
+ * Pure synchronous Genie 3 mode-branching, validation, and feature-spec compiler.
+ * Single source of truth shared by `genie3.worker.ts` and `input-preview.ts`.
+ */
+export function resolveGenie3CompiledInput(
+  params: Record<string, unknown>,
+  template?: StructureArtifact,
+  condArtifact?: ConditionSpecArtifact,
+): Genie3CompiledInput {
+  const length = Math.max(30, Math.min(256, Math.round(Number(params.length ?? 80))));
+  const nSampleStep = Math.max(10, Math.min(250, Math.round(Number(params.nSampleStep ?? 100))));
+  const directionScale = Math.max(0.0, Math.min(1.5, Number(params.directionScale ?? 0.8)));
+  const noiseScale = Math.max(0, Math.min(1.5, Number(params.noiseScale ?? 1.0)));
+  const predictSequence = params.predictSequence !== false;
+  const seed = Math.max(0, Math.round(Number(params.seed ?? 42)));
+  const taskMode = String(params.taskMode ?? 'unconditional');
+  const inlineContig = String(params.contig ?? '').trim();
+  const inlineLock = String(params.lockChain ?? '').trim().toUpperCase();
+  const inlineHotspots = String(params.hotspots ?? '').trim();
+  const inlineMotif = String(params.motifSpan ?? '').trim();
+
+  // Fail fast BEFORE downloading 45 MB weights if required motif/binder inputs are missing
+  if (!condArtifact && taskMode === 'motif' && !inlineMotif && !inlineContig) {
+    throw new Error(
+      'Genie 3 motif mode requires a motifSpan (e.g. A16-35) or contig specifying motif residues.',
+    );
+  }
+  if (
+    (taskMode === 'motif' || taskMode === 'binder' || Boolean(inlineLock) || Boolean(inlineMotif)) &&
+    !template?.cifText &&
+    !template?.pdbText &&
+    !condArtifact?.inputCif
+  ) {
+    throw new Error(
+      `Genie 3 "${taskMode}" mode requires a wired structure input (e.g. from PDB Input).`,
+    );
+  }
+
+  // Guard against non-protein/enzyme/DNA templates across ALL Genie 3 modes
+  if (template && (taskMode !== 'unconditional' || !condArtifact)) {
+    if (template.benchmarkId) {
+      const bench = getBenchmarkById(template.benchmarkId);
+      if (bench && !bench.supportsGenie3) {
+        throw new Error(
+          `${bench.shortLabel} requires all-atom enzyme/ligand/DNA conditioning, which is supported by RFD4-Proteina rather than Genie 3.`,
+        );
+      }
+    }
+    if (template.diagnostics?.hasLigands || template.diagnostics?.hasNucleicAcids) {
+      const extras = [
+        ...(template.diagnostics.hasLigands ? [`ligands (${template.diagnostics.ligandNames.join(', ')})`] : []),
+        ...(template.diagnostics.hasNucleicAcids ? [`nucleic acid chains (${template.diagnostics.nucleicAcidChains.join(', ')})`] : []),
+      ];
+      throw new Error(
+        `Genie 3 is a protein-only Cα backbone diffusion model and cannot condition on ${extras.join(' and ')}. Use RFD4-Proteina for all-atom ligand/DNA conditioning.`,
+      );
+    }
+  }
+
+  let effectiveCond: ConditionSpecArtifact | undefined = condArtifact;
+  if (!effectiveCond && (taskMode === 'binder' || taskMode === 'motif' || inlineLock || inlineMotif)) {
+    const isBinder = taskMode === 'binder' || Boolean(inlineLock);
+    const defaultChain = (template?.chainIds?.[0] || 'A').toUpperCase();
+    const resolvedLock = isBinder ? inlineLock || defaultChain : '';
+    const resolvedContig =
+      inlineContig || (isBinder ? `/0,${length}-${length}` : `${length}-${length}`);
+    const intent = buildCanonicalConditionIntent({
+      contig: resolvedContig,
+      lockChain: resolvedLock,
+      hotspots: inlineHotspots,
+      motifSpan: inlineMotif,
+    });
+    effectiveCond = {
+      kind: 'ConditionSpec',
+      id: `inline-g3-${fnv1aHex(JSON.stringify({ intent, templateId: template?.id }))}`,
+      label: isBinder ? `Binder (${resolvedLock})` : 'Motif Scaffold',
+      contig: intent.contig,
+      conditions: {},
+      intent,
+      inputCif: template?.cifText ?? template?.pdbText,
+      specMode: true,
+      summary: isBinder ? `binder vs ${resolvedLock}` : `motif ${inlineMotif}`,
+    };
+  } else if (!effectiveCond && template) {
+    effectiveCond = buildDefaultGenie3ConditionFromTemplate(template, length);
+  }
+
+  const compiledSpec = effectiveCond
+    ? compileConditionToGenie3Spec(effectiveCond, template, length)
+    : undefined;
+  const effectiveSteps = effectiveGenie3DdimSteps(nSampleStep);
+
+  return {
+    mode: compiledSpec?.mode ?? 'unconditional',
+    taskMode,
+    length,
+    nSampleStep,
+    effectiveSteps,
+    directionScale,
+    noiseScale,
+    predictSequence,
+    seed,
+    ...(effectiveCond ? { effectiveCond } : {}),
+    ...(compiledSpec ? { compiledSpec } : {}),
+    totalLength: compiledSpec?.length ?? length,
+    chainLengths: compiledSpec?.chainLengths ?? [length],
+    summary: compiledSpec?.summary ?? `unconditional L=${length}`,
   };
 }

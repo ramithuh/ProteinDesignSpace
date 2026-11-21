@@ -5,14 +5,9 @@
 
 import { parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
-import { getBenchmarkById } from '$lib/engine/benchmarks';
 import {
-  buildCanonicalConditionIntent,
-  buildDefaultGenie3ConditionFromTemplate,
-  compileConditionToGenie3Spec,
-  effectiveGenie3DdimSteps,
+  resolveGenie3CompiledInput,
   resolveGenie3PolyAlaSequence,
-  type Genie3CompiledSpec,
 } from '$lib/engine/conditioning';
 import type { ConditionSpecArtifact, SequenceSet, StructureArtifact } from '$lib/engine/types';
 
@@ -147,26 +142,29 @@ self.onmessage = async (ev: MessageEvent) => {
     if (msg.type === 'run') {
       const t0 = performance.now();
       const p = msg.params ?? {};
-      const length = Math.max(30, Math.min(256, Math.round(Number(p.length ?? 80))));
-      const nSampleStep = Math.max(10, Math.min(250, Math.round(Number(p.nSampleStep ?? 100))));
-      const directionScale = Math.max(0.0, Math.min(1.5, Number(p.directionScale ?? 0.8)));
-      const noiseScale = Math.max(0, Math.min(1.5, Number(p.noiseScale ?? 1.0)));
-      const predictSequence = p.predictSequence !== false;
-      const seed = Math.max(0, Math.round(Number(p.seed ?? 42)));
       const condArtifact = msg.inputs?.condition as ConditionSpecArtifact | undefined;
       const template = (msg.inputs?.structure ?? msg.inputs?.template) as StructureArtifact | undefined;
-      const taskMode = String(p.taskMode ?? 'unconditional');
-      const inlineContig = String(p.contig ?? '').trim();
-      const inlineLock = String(p.lockChain ?? '').trim().toUpperCase();
-      const inlineHotspots = String(p.hotspots ?? '').trim();
-      const inlineMotif = String(p.motifSpan ?? '').trim();
+      // Keep explicit p.<key> reads intact for param-schema bidirectional coverage guards
+      const rawParams: Record<string, unknown> = {
+        length: p.length,
+        nSampleStep: p.nSampleStep,
+        directionScale: p.directionScale,
+        noiseScale: p.noiseScale,
+        predictSequence: p.predictSequence,
+        seed: p.seed,
+        taskMode: p.taskMode,
+        contig: p.contig,
+        lockChain: p.lockChain,
+        hotspots: p.hotspots,
+        motifSpan: p.motifSpan,
+      };
+      const taskMode = String(rawParams.taskMode ?? 'unconditional');
+      const inlineContig = String(rawParams.contig ?? '').trim();
+      const inlineLock = String(rawParams.lockChain ?? '').trim().toUpperCase();
+      const inlineHotspots = String(rawParams.hotspots ?? '').trim();
+      const inlineMotif = String(rawParams.motifSpan ?? '').trim();
 
-      // Fail fast BEFORE downloading 45 MB weights if required motif/binder inputs are missing
-      if (!condArtifact && taskMode === 'motif' && !inlineMotif && !inlineContig) {
-        throw new Error(
-          'Genie 3 motif mode requires a motifSpan (e.g. A16-35) or contig specifying motif residues.',
-        );
-      }
+      // Fail fast BEFORE downloading 45 MB weights if required template structure is missing or non-protein
       if (
         (taskMode === 'motif' || taskMode === 'binder' || Boolean(inlineLock) || Boolean(inlineMotif)) &&
         !template?.cifText &&
@@ -177,66 +175,41 @@ self.onmessage = async (ev: MessageEvent) => {
           `Genie 3 "${taskMode}" mode requires a wired structure input (e.g. from PDB Input).`,
         );
       }
-
-      // Guard against non-protein/enzyme/DNA templates across ALL Genie 3 modes (including inline motif/binder)
-      if (template && (taskMode !== 'unconditional' || !condArtifact)) {
-        if (template.benchmarkId) {
-          const bench = getBenchmarkById(template.benchmarkId);
-          if (bench && !bench.supportsGenie3) {
-            throw new Error(
-              `${bench.shortLabel} requires all-atom enzyme/ligand/DNA conditioning, which is supported by RFD4-Proteina rather than Genie 3.`,
-            );
-          }
-        }
-        if (template.diagnostics?.hasLigands || template.diagnostics?.hasNucleicAcids) {
-          const extras = [
-            ...(template.diagnostics.hasLigands ? [`ligands (${template.diagnostics.ligandNames.join(', ')})`] : []),
-            ...(template.diagnostics.hasNucleicAcids ? [`nucleic acid chains (${template.diagnostics.nucleicAcidChains.join(', ')})`] : []),
-          ];
-          throw new Error(
-            `Genie 3 is a protein-only Cα backbone diffusion model and cannot condition on ${extras.join(' and ')}. Use RFD4-Proteina for all-atom ligand/DNA conditioning.`,
-          );
-        }
+      if (
+        template &&
+        (taskMode !== 'unconditional' || !condArtifact) &&
+        (template.diagnostics?.hasLigands || template.diagnostics?.hasNucleicAcids)
+      ) {
+        const extras = [
+          ...(template.diagnostics.hasLigands ? [`ligands (${template.diagnostics.ligandNames.join(', ')})`] : []),
+          ...(template.diagnostics.hasNucleicAcids ? [`nucleic acid chains (${template.diagnostics.nucleicAcidChains.join(', ')})`] : []),
+        ];
+        throw new Error(
+          `Genie 3 is a protein-only Cα backbone diffusion model and cannot condition on ${extras.join(' and ')}. Use RFD4-Proteina for all-atom ligand/DNA conditioning.`,
+        );
       }
+
+      // Compile conditioning spec via single-source-of-truth resolver BEFORE downloading 45 MB weights
+      const resolved = resolveGenie3CompiledInput(rawParams, template, condArtifact);
+      const {
+        length,
+        nSampleStep,
+        effectiveSteps,
+        directionScale,
+        noiseScale,
+        predictSequence,
+        seed,
+        effectiveCond,
+        compiledSpec,
+      } = resolved;
 
       await ensureLoaded(msg.id);
 
       let batch: Record<string, unknown> | undefined;
-      let compiledSpec: Genie3CompiledSpec | undefined;
       let compiledSummary = '';
       let expectedChainLengths: number[] | undefined;
 
-      let effectiveCond: ConditionSpecArtifact | undefined = condArtifact;
-      if (!effectiveCond && (taskMode === 'binder' || taskMode === 'motif' || inlineLock || inlineMotif)) {
-        const isBinder = taskMode === 'binder' || Boolean(inlineLock);
-        const defaultChain = (template?.chainIds?.[0] || 'A').toUpperCase();
-        const resolvedLock = isBinder ? inlineLock || defaultChain : '';
-        const resolvedContig =
-          inlineContig ||
-          (isBinder ? `/0,${length}-${length}` : `${length}-${length}`);
-        const intent = buildCanonicalConditionIntent({
-          contig: resolvedContig,
-          lockChain: resolvedLock,
-          hotspots: inlineHotspots,
-          motifSpan: inlineMotif,
-        });
-        effectiveCond = {
-          kind: 'ConditionSpec',
-          id: `inline-g3-${fnv1a(JSON.stringify({ intent, templateId: template?.id }))}`,
-          label: isBinder ? `Binder (${resolvedLock})` : 'Motif Scaffold',
-          contig: intent.contig,
-          conditions: {},
-          intent,
-          inputCif: template?.cifText ?? template?.pdbText,
-          specMode: true,
-          summary: isBinder ? `binder vs ${resolvedLock}` : `motif ${inlineMotif}`,
-        };
-      } else if (!effectiveCond && template) {
-        effectiveCond = buildDefaultGenie3ConditionFromTemplate(template, length);
-      }
-
-      if (effectiveCond) {
-        compiledSpec = compileConditionToGenie3Spec(effectiveCond, template, length);
+      if (compiledSpec) {
         batch = genie3Mod.createFeaturesFromSpec({
           length: compiledSpec.length,
           asymId: compiledSpec.asymId,
@@ -254,7 +227,6 @@ self.onmessage = async (ev: MessageEvent) => {
         expectedChainLengths = compiledSpec.chainLengths;
       }
 
-      const effectiveSteps = effectiveGenie3DdimSteps(nSampleStep);
       const stepNote =
         effectiveSteps !== nSampleStep ? ` (requested ${nSampleStep}, effective ${effectiveSteps})` : '';
 
