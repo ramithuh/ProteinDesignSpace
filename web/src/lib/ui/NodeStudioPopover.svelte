@@ -466,23 +466,21 @@
 
           <!-- Collapsible Raw Compiled Spec Drawer -->
           {#if preview.payload.rawSpecText}
-            <details class="raw-drawer">
-              <summary>
-                <span>Raw Compiled Spec ({preview.payload.format})</span>
-                <button
-                  type="button"
-                  class="raw-copy-btn"
-                  onclick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    void copyRawSpec();
-                  }}
-                >
-                  {copiedRaw ? '✓ Copied' : 'Copy'}
-                </button>
-              </summary>
-              <pre class="raw-pre">{preview.payload.rawSpecText}</pre>
-            </details>
+            <div class="raw-drawer-wrap">
+              <details class="raw-drawer">
+                <summary>
+                  <span>Raw Compiled Spec ({preview.payload.format})</span>
+                </summary>
+                <pre class="raw-pre">{preview.payload.rawSpecText}</pre>
+              </details>
+              <button
+                type="button"
+                class="raw-copy-btn raw-copy-floating"
+                onclick={() => void copyRawSpec()}
+              >
+                {copiedRaw ? '✓ Copied' : 'Copy'}
+              </button>
+            </div>
           {/if}
         {/if}
       </div>
@@ -888,6 +886,9 @@
     border-color: var(--accent);
     color: var(--accent-bright);
   }
+  .raw-drawer-wrap {
+    position: relative;
+  }
   .raw-drawer {
     background: var(--bg-surface-2);
     border: 1px solid var(--border);
@@ -899,7 +900,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 7px 10px;
+    padding: 7px 66px 7px 10px;
     cursor: pointer;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
@@ -921,6 +922,12 @@
     font-size: 10px;
     font-weight: 600;
     cursor: pointer;
+  }
+  .raw-copy-floating {
+    position: absolute;
+    top: 5px;
+    right: 8px;
+    z-index: 2;
   }
   .raw-copy-btn:hover {
     border-color: var(--accent);

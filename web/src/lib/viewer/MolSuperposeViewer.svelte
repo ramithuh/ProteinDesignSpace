@@ -238,7 +238,27 @@
     localSpinSpeed = null;
   }
 
+  let renderChain: Promise<void> = Promise.resolve();
+  let forceRenderTick = $state(0);
+
+  function enqueueSceneRender(task: () => Promise<void>) {
+    renderChain = renderChain.then(task, task);
+    return renderChain;
+  }
+
   function handleResetCamera() {
+    const liveStructs = plugin?.managers?.structure?.hierarchy?.current?.structures?.length ?? 0;
+    const expectsStructure = Boolean(
+      (models && models.length > 0) ||
+        (showDesigned && (designedPdb || (showTrajectory && trajectoryPdb))) ||
+        (showRefold && refoldPdb),
+    );
+    if (expectsStructure && liveStructs === 0) {
+      lastRenderedKey = '';
+      lastStructureKey = '';
+      forceRenderTick += 1;
+      return;
+    }
     plugin?.canvas3d?.requestCameraReset();
   }
 
@@ -666,165 +686,177 @@
     }
     const mySeq = ++loadSeq;
     initError = null;
-    if (!dPdb && !rPdb) {
-      if (plugin) await plugin.clear();
-      trajModelRef = null;
-      lastStructureKey = '';
-      lastRenderedKey = styleOpts.fullKey;
-      return;
-    }
-
-    try {
-      const ctx = await ensurePlugin();
-      if (destroyed || !ctx || mySeq !== loadSeq) return;
-      const savedCam = styleOpts.preserveCamera ? ctx.canvas3d?.camera?.getSnapshot() : null;
-
-      await ctx.clear();
-      trajModelRef = null;
+    await enqueueSceneRender(async () => {
       if (destroyed || mySeq !== loadSeq) return;
+      if (!dPdb && !rPdb) {
+        if (plugin) await plugin.clear();
+        trajModelRef = null;
+        lastStructureKey = '';
+        lastRenderedKey = styleOpts.fullKey;
+        return;
+      }
 
-      const [{ Color }, { StructConn }] = await Promise.all([
-        import('molstar/lib/mol-util/color'),
-        import('molstar/lib/mol-model-formats/structure/property/bonds/struct_conn'),
-      ]);
-      if (destroyed || mySeq !== loadSeq) return;
-      const hasOverlay = Boolean(sDesigned && dPdb && sRefold && rPdb && !useTraj);
-      const useSemanticUncertainty =
-        styleOpts.bfactorSemantics === 'dynamics-prob' ||
-        styleOpts.bfactorSemantics === 'ddg-stability';
+      try {
+        const ctx = await ensurePlugin();
+        if (destroyed || !ctx || mySeq !== loadSeq) return;
+        const savedCam = styleOpts.preserveCamera ? ctx.canvas3d?.camera?.getSnapshot() : null;
 
-      // 1. Designed structure (or multi-model trajectory)
-      if (sDesigned && (useTraj && tPdb ? tPdb : dPdb)) {
-        const text = useTraj && tPdb ? tPdb : dPdb!;
-        const fmt = /^\s*(data_|loop_|_atom_site\.)/m.test(text) ? 'mmcif' : 'pdb';
-        const data = await ctx.builders.data.rawData({
-          data: text,
-          label: useTraj ? 'Trajectory' : 'Designed Backbone',
-        });
-        const traj = await ctx.builders.structure.parseTrajectory(data, fmt);
-        // Fixed off-by-one: MODEL 1 = index 0 (topology), frames 0..T-1 = indices 1..T
-        const targetIdx = useTraj && fIdx !== undefined ? fIdx + 1 : 0;
-        const model = await ctx.builders.structure.createModel(traj, { modelIndex: targetIdx });
+        await ctx.clear();
+        trajModelRef = null;
         if (destroyed || mySeq !== loadSeq) return;
-        pruneFalseCyclicPolymers(traj, model, text, StructConn);
-        if (useTraj) trajModelRef = model.ref;
-        const struct = await ctx.builders.structure.createStructure(model, {
-          name: 'model',
-          params: {},
-        });
-        // Color multi-chain complexes (e.g. binder + target) by chain so binder and target
-        // stand apart clearly in 3D without needing an overlay/scRMSD block.
-        let isMultiChain = false;
-        if (!hasOverlay) {
-          if (fmt === 'pdb') {
-            isMultiChain = hasMultiplePdbChains(text);
-          } else {
-            // mmCIF: count distinct polymer units in the asymmetric/cropped model
-            const sData = struct.data;
-            if (sData) {
-              let polymerUnits = 0;
-              for (const u of sData.units) {
-                if (u.polymerElements.length > 0) {
-                  polymerUnits++;
-                  if (polymerUnits >= 2) {
-                    isMultiChain = true;
-                    break;
+
+        const [{ Color }, { StructConn }] = await Promise.all([
+          import('molstar/lib/mol-util/color'),
+          import('molstar/lib/mol-model-formats/structure/property/bonds/struct_conn'),
+        ]);
+        if (destroyed || mySeq !== loadSeq) return;
+        const hasOverlay = Boolean(sDesigned && dPdb && sRefold && rPdb && !useTraj);
+        const useSemanticUncertainty =
+          styleOpts.bfactorSemantics === 'dynamics-prob' ||
+          styleOpts.bfactorSemantics === 'ddg-stability';
+
+        // 1. Designed structure (or multi-model trajectory)
+        if (sDesigned && (useTraj && tPdb ? tPdb : dPdb)) {
+          const text = useTraj && tPdb ? tPdb : dPdb!;
+          const fmt = /^\s*(data_|loop_|_atom_site\.)/m.test(text) ? 'mmcif' : 'pdb';
+          const data = await ctx.builders.data.rawData({
+            data: text,
+            label: useTraj ? 'Trajectory' : 'Designed Backbone',
+          });
+          const traj = await ctx.builders.structure.parseTrajectory(data, fmt);
+          // Fixed off-by-one: MODEL 1 = index 0 (topology), frames 0..T-1 = indices 1..T
+          const targetIdx = useTraj && fIdx !== undefined ? fIdx + 1 : 0;
+          const model = await ctx.builders.structure.createModel(traj, { modelIndex: targetIdx });
+          if (destroyed || mySeq !== loadSeq) return;
+          pruneFalseCyclicPolymers(traj, model, text, StructConn);
+          if (useTraj) trajModelRef = model.ref;
+          const struct = await ctx.builders.structure.createStructure(model, {
+            name: 'model',
+            params: {},
+          });
+          // Color multi-chain complexes (e.g. binder + target) by chain so binder and target
+          // stand apart clearly in 3D without needing an overlay/scRMSD block.
+          let isMultiChain = false;
+          if (!hasOverlay) {
+            if (fmt === 'pdb') {
+              isMultiChain = hasMultiplePdbChains(text);
+            } else {
+              // mmCIF: count distinct polymer units in the asymmetric/cropped model
+              const sData = struct.data;
+              if (sData) {
+                let polymerUnits = 0;
+                for (const u of sData.units) {
+                  if (u.polymerElements.length > 0) {
+                    polymerUnits++;
+                    if (polymerUnits >= 2) {
+                      isMultiChain = true;
+                      break;
+                    }
                   }
                 }
               }
             }
           }
+          const effectiveDesignedColor =
+            styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
+              ? 'auto'
+              : styleOpts.color;
+          const designedColorArg =
+            effectiveDesignedColor === 'uncertainty'
+              ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+              : effectiveDesignedColor !== 'auto'
+                ? { color: effectiveDesignedColor }
+                : hasOverlay
+                  ? { color: 'uniform', colorParams: { value: Color(0x94a3b8) } }
+                  : useSemanticUncertainty
+                    ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+                    : isMultiChain
+                      ? { color: 'chain-id' }
+                      : { color: 'uniform', colorParams: { value: Color(0x60a5fa) } };
+          const designedAlpha = hasOverlay ? 0.45 : 1.0;
+          await ctx.builders.structure.representation.addRepresentation(struct, {
+            type: styleOpts.rep,
+            ...designedColorArg,
+            typeParams: { alpha: designedAlpha },
+          });
+          await addAccessoryRepresentations(ctx, struct, {
+            includeLigands: styleOpts.ligands,
+            includeSidechains: styleOpts.sidechains && !hasOverlay,
+            includeSurfaceOverlay: styleOpts.surfaceOverlay && !hasOverlay,
+            primaryRep: styleOpts.rep,
+            colorArg: designedColorArg,
+            alpha: designedAlpha,
+          });
         }
-        const effectiveDesignedColor =
-          styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
-            ? 'auto'
-            : styleOpts.color;
-        const designedColorArg =
-          effectiveDesignedColor === 'uncertainty'
-            ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
-            : effectiveDesignedColor !== 'auto'
-              ? { color: effectiveDesignedColor }
-              : hasOverlay
-                ? { color: 'uniform', colorParams: { value: Color(0x94a3b8) } }
+
+        if (destroyed || mySeq !== loadSeq) return;
+
+        // 2. Kabsch-aligned refolded structure colored by pLDDT or semantic B-factor
+        if (sRefold && rPdb && !useTraj) {
+          const rFmt = /^\s*(data_|loop_|_atom_site\.)/m.test(rPdb) ? 'mmcif' : 'pdb';
+          const data = await ctx.builders.data.rawData({
+            data: rPdb,
+            label: 'LocalFold Refold (pLDDT)',
+          });
+          const traj = await ctx.builders.structure.parseTrajectory(data, rFmt);
+          const model = await ctx.builders.structure.createModel(traj, { modelIndex: 0 });
+          pruneFalseCyclicPolymers(traj, model, rPdb, StructConn);
+          const struct = await ctx.builders.structure.createStructure(model, {
+            name: 'model',
+            params: {},
+          });
+          const refoldColorArg =
+            styleOpts.color === 'uncertainty'
+              ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+              : styleOpts.color !== 'auto'
+                ? styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
+                  ? { color: 'secondary-structure' }
+                  : { color: styleOpts.color }
                 : useSemanticUncertainty
                   ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
-                  : isMultiChain
-                    ? { color: 'chain-id' }
+                  : styleOpts.plddtAllowed
+                    ? { color: 'plddt-confidence' }
                     : { color: 'uniform', colorParams: { value: Color(0x60a5fa) } };
-        const designedAlpha = hasOverlay ? 0.45 : 1.0;
-        await ctx.builders.structure.representation.addRepresentation(struct, {
-          type: styleOpts.rep,
-          ...designedColorArg,
-          typeParams: { alpha: designedAlpha },
-        });
-        await addAccessoryRepresentations(ctx, struct, {
-          includeLigands: styleOpts.ligands,
-          includeSidechains: styleOpts.sidechains && !hasOverlay,
-          includeSurfaceOverlay: styleOpts.surfaceOverlay && !hasOverlay,
-          primaryRep: styleOpts.rep,
-          colorArg: designedColorArg,
-          alpha: designedAlpha,
-        });
-      }
+          await ctx.builders.structure.representation.addRepresentation(struct, {
+            type: styleOpts.rep,
+            ...refoldColorArg,
+          });
+          await addAccessoryRepresentations(ctx, struct, {
+            includeLigands: styleOpts.ligands,
+            includeSidechains: styleOpts.sidechains,
+            includeSurfaceOverlay: styleOpts.surfaceOverlay,
+            primaryRep: styleOpts.rep,
+            colorArg: refoldColorArg,
+          });
+        }
 
-      if (destroyed || mySeq !== loadSeq) return;
-
-      // 2. Kabsch-aligned refolded structure colored by pLDDT or semantic B-factor
-      if (sRefold && rPdb && !useTraj) {
-        const rFmt = /^\s*(data_|loop_|_atom_site\.)/m.test(rPdb) ? 'mmcif' : 'pdb';
-        const data = await ctx.builders.data.rawData({
-          data: rPdb,
-          label: 'LocalFold Refold (pLDDT)',
-        });
-        const traj = await ctx.builders.structure.parseTrajectory(data, rFmt);
-        const model = await ctx.builders.structure.createModel(traj, { modelIndex: 0 });
-        pruneFalseCyclicPolymers(traj, model, rPdb, StructConn);
-        const struct = await ctx.builders.structure.createStructure(model, {
-          name: 'model',
-          params: {},
-        });
-        const refoldColorArg =
-          styleOpts.color === 'uncertainty'
-            ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
-            : styleOpts.color !== 'auto'
-              ? styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
-                ? { color: 'secondary-structure' }
-                : { color: styleOpts.color }
-              : useSemanticUncertainty
-                ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
-                : styleOpts.plddtAllowed
-                  ? { color: 'plddt-confidence' }
-                  : { color: 'uniform', colorParams: { value: Color(0x60a5fa) } };
-        await ctx.builders.structure.representation.addRepresentation(struct, {
-          type: styleOpts.rep,
-          ...refoldColorArg,
-        });
-        await addAccessoryRepresentations(ctx, struct, {
-          includeLigands: styleOpts.ligands,
-          includeSidechains: styleOpts.sidechains,
-          includeSurfaceOverlay: styleOpts.surfaceOverlay,
-          primaryRep: styleOpts.rep,
-          colorArg: refoldColorArg,
-        });
+        if (destroyed || mySeq !== loadSeq) return;
+        const requestedRender = Boolean(
+          (sDesigned && (useTraj && tPdb ? tPdb : dPdb)) || (sRefold && rPdb && !useTraj),
+        );
+        const liveStructs = ctx.managers?.structure?.hierarchy?.current?.structures?.length ?? 0;
+        applyPostprocessing(illustrative, spin && hasAnyStructure);
+        if (savedCam && liveStructs > 0) {
+          ctx.canvas3d?.camera?.setState(savedCam, 0);
+        } else {
+          ctx.canvas3d?.requestCameraReset();
+        }
+        if (!requestedRender || liveStructs > 0) {
+          lastStructureKey = styleOpts.structureKey;
+          lastRenderedKey = styleOpts.fullKey;
+        } else {
+          lastStructureKey = '';
+          lastRenderedKey = '';
+        }
+        lastAppliedOverpaintKey = '';
+        sceneRenderEpoch += 1;
+      } catch (err) {
+        if (!destroyed && mySeq === loadSeq) {
+          lastRenderedKey = '';
+          initError = err instanceof Error ? err.message : String(err);
+        }
       }
-
-      if (destroyed || mySeq !== loadSeq) return;
-      applyPostprocessing(illustrative, spin && hasAnyStructure);
-      if (savedCam) {
-        ctx.canvas3d?.camera?.setState(savedCam, 0);
-      } else {
-        ctx.canvas3d?.requestCameraReset();
-      }
-      lastStructureKey = styleOpts.structureKey;
-      lastRenderedKey = styleOpts.fullKey;
-      lastAppliedOverpaintKey = '';
-      sceneRenderEpoch += 1;
-    } catch (err) {
-      if (!destroyed && mySeq === loadSeq) {
-        lastRenderedKey = '';
-        initError = err instanceof Error ? err.message : String(err);
-      }
-    }
+    });
   }
 
   async function scrubFrame(userFrameIdx: number) {
@@ -953,107 +985,116 @@
     }
     const mySeq = ++loadSeq;
     initError = null;
-    modelRefs = new Map();
-    trajModelRef = null;
-    if (specs.length === 0) {
-      if (plugin) await plugin.clear();
-      lastStructureKey = '';
-      lastRenderedKey = styleOpts.fullKey;
-      return;
-    }
-
-    try {
-      const ctx = await ensurePlugin();
-      if (destroyed || !ctx || mySeq !== loadSeq) return;
-      const savedCam = styleOpts.preserveCamera ? ctx.canvas3d?.camera?.getSnapshot() : null;
-
-      await ctx.clear();
+    await enqueueSceneRender(async () => {
       if (destroyed || mySeq !== loadSeq) return;
+      modelRefs = new Map();
+      trajModelRef = null;
+      if (specs.length === 0) {
+        if (plugin) await plugin.clear();
+        lastStructureKey = '';
+        lastRenderedKey = styleOpts.fullKey;
+        return;
+      }
 
-      const [{ Color }, { setSubtreeVisibility }, { StructConn }] = await Promise.all([
-        import('molstar/lib/mol-util/color'),
-        import('molstar/lib/mol-plugin/behavior/static/state'),
-        import('molstar/lib/mol-model-formats/structure/property/bonds/struct_conn'),
-      ]);
-      if (destroyed || mySeq !== loadSeq) return;
+      try {
+        const ctx = await ensurePlugin();
+        if (destroyed || !ctx || mySeq !== loadSeq) return;
+        const savedCam = styleOpts.preserveCamera ? ctx.canvas3d?.camera?.getSnapshot() : null;
 
-      const useSemanticUncertainty =
-        styleOpts.bfactorSemantics === 'dynamics-prob' ||
-        styleOpts.bfactorSemantics === 'ddg-stability';
+        await ctx.clear();
+        if (destroyed || mySeq !== loadSeq) return;
 
-      const nextRefs = new Map<string, string[]>();
-      for (const m of specs) {
-        const fmt = /^\s*(data_|loop_|_atom_site\.)/m.test(m.pdbText) ? 'mmcif' : 'pdb';
-        const data = await ctx.builders.data.rawData({
-          data: m.pdbText,
-          label: m.label,
-        });
-        const traj = await ctx.builders.structure.parseTrajectory(data, fmt);
-        const model = await ctx.builders.structure.createModel(traj, { modelIndex: 0 });
+        const [{ Color }, { setSubtreeVisibility }, { StructConn }] = await Promise.all([
+          import('molstar/lib/mol-util/color'),
+          import('molstar/lib/mol-plugin/behavior/static/state'),
+          import('molstar/lib/mol-model-formats/structure/property/bonds/struct_conn'),
+        ]);
         if (destroyed || mySeq !== loadSeq) return;
-        pruneFalseCyclicPolymers(traj, model, m.pdbText, StructConn);
-        const struct = await ctx.builders.structure.createStructure(model, {
-          name: 'model',
-          params: {},
-        });
-        const effectiveColor =
-          styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
-            ? 'auto'
-            : styleOpts.color;
-        const modelColorArg =
-          effectiveColor === 'uncertainty'
-            ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
-            : effectiveColor !== 'auto'
-              ? { color: effectiveColor }
-              : useSemanticUncertainty && (m.colorByPlddt || specs.length === 1)
-                ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
-                : m.colorByPlddt && styleOpts.plddtAllowed
-                  ? { color: 'plddt-confidence' }
-                  : { color: 'uniform', colorParams: { value: Color(m.colorHex) } };
-        const repr = await ctx.builders.structure.representation.addRepresentation(struct, {
-          type: styleOpts.rep,
-          ...modelColorArg,
-          typeParams: { alpha: m.alpha },
-        });
-        if (destroyed || mySeq !== loadSeq) return;
-        const extraRefs = await addAccessoryRepresentations(ctx, struct, {
-          includeLigands: styleOpts.ligands,
-          includeSidechains: styleOpts.sidechains,
-          includeSurfaceOverlay: styleOpts.surfaceOverlay,
-          primaryRep: styleOpts.rep,
-          colorArg: modelColorArg,
-          alpha: m.alpha,
-        });
-        if (destroyed || mySeq !== loadSeq) return;
-        const refs = [repr?.ref ?? struct.ref, ...extraRefs];
-        nextRefs.set(m.id, refs);
-        if (!m.visible) {
-          for (const ref of refs) {
-            if (ctx.state?.data?.cells?.has(ref)) {
-              setSubtreeVisibility(ctx.state.data, ref, true);
+
+        const useSemanticUncertainty =
+          styleOpts.bfactorSemantics === 'dynamics-prob' ||
+          styleOpts.bfactorSemantics === 'ddg-stability';
+
+        const nextRefs = new Map<string, string[]>();
+        for (const m of specs) {
+          const fmt = /^\s*(data_|loop_|_atom_site\.)/m.test(m.pdbText) ? 'mmcif' : 'pdb';
+          const data = await ctx.builders.data.rawData({
+            data: m.pdbText,
+            label: m.label,
+          });
+          const traj = await ctx.builders.structure.parseTrajectory(data, fmt);
+          const model = await ctx.builders.structure.createModel(traj, { modelIndex: 0 });
+          if (destroyed || mySeq !== loadSeq) return;
+          pruneFalseCyclicPolymers(traj, model, m.pdbText, StructConn);
+          const struct = await ctx.builders.structure.createStructure(model, {
+            name: 'model',
+            params: {},
+          });
+          const effectiveColor =
+            styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
+              ? 'auto'
+              : styleOpts.color;
+          const modelColorArg =
+            effectiveColor === 'uncertainty'
+              ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+              : effectiveColor !== 'auto'
+                ? { color: effectiveColor }
+                : useSemanticUncertainty && (m.colorByPlddt || specs.length === 1)
+                  ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+                  : m.colorByPlddt && styleOpts.plddtAllowed
+                    ? { color: 'plddt-confidence' }
+                    : { color: 'uniform', colorParams: { value: Color(m.colorHex) } };
+          const repr = await ctx.builders.structure.representation.addRepresentation(struct, {
+            type: styleOpts.rep,
+            ...modelColorArg,
+            typeParams: { alpha: m.alpha },
+          });
+          if (destroyed || mySeq !== loadSeq) return;
+          const extraRefs = await addAccessoryRepresentations(ctx, struct, {
+            includeLigands: styleOpts.ligands,
+            includeSidechains: styleOpts.sidechains,
+            includeSurfaceOverlay: styleOpts.surfaceOverlay,
+            primaryRep: styleOpts.rep,
+            colorArg: modelColorArg,
+            alpha: m.alpha,
+          });
+          if (destroyed || mySeq !== loadSeq) return;
+          const refs = [repr?.ref ?? struct.ref, ...extraRefs];
+          nextRefs.set(m.id, refs);
+          if (!m.visible) {
+            for (const ref of refs) {
+              if (ctx.state?.data?.cells?.has(ref)) {
+                setSubtreeVisibility(ctx.state.data, ref, true);
+              }
             }
           }
         }
-      }
 
-      if (destroyed || mySeq !== loadSeq) return;
-      modelRefs = nextRefs;
-      applyPostprocessing(illustrative, spin && hasAnyStructure);
-      if (savedCam) {
-        ctx.canvas3d?.camera?.setState(savedCam, 0);
-      } else {
-        ctx.canvas3d?.requestCameraReset();
+        if (destroyed || mySeq !== loadSeq) return;
+        const liveStructs = ctx.managers?.structure?.hierarchy?.current?.structures?.length ?? 0;
+        modelRefs = nextRefs;
+        applyPostprocessing(illustrative, spin && hasAnyStructure);
+        if (savedCam && liveStructs > 0) {
+          ctx.canvas3d?.camera?.setState(savedCam, 0);
+        } else {
+          ctx.canvas3d?.requestCameraReset();
+        }
+        if (liveStructs > 0) {
+          lastStructureKey = styleOpts.structureKey;
+          lastRenderedKey = styleOpts.fullKey;
+        } else {
+          lastStructureKey = '';
+          lastRenderedKey = '';
+        }
+        lastAppliedOverpaintKey = '';
+        sceneRenderEpoch += 1;
+      } catch (err) {
+        if (!destroyed && mySeq === loadSeq) {
+          lastRenderedKey = '';
+          initError = err instanceof Error ? err.message : String(err);
+        }
       }
-      lastStructureKey = styleOpts.structureKey;
-      lastRenderedKey = styleOpts.fullKey;
-      lastAppliedOverpaintKey = '';
-      sceneRenderEpoch += 1;
-    } catch (err) {
-      if (!destroyed && mySeq === loadSeq) {
-        lastRenderedKey = '';
-        initError = err instanceof Error ? err.message : String(err);
-      }
-    }
+    });
   }
 
   async function syncModelVisibility(specs: ViewerModelSpec[]) {
@@ -1350,6 +1391,7 @@
 
   // Re-render full scene ONLY when (structureKey + styleKey) actually changes
   $effect(() => {
+    void forceRenderTick;
     const styleOpts = {
       rep: repType,
       color: colorScheme,
@@ -1553,7 +1595,7 @@
         <div class="style-panel" role="region" aria-label="Structure representation controls">
           <label class="sp-field">
             <span>Polymer</span>
-            <select bind:value={repType}>
+            <select name="mol-polymer-rep" bind:value={repType}>
               <option value="cartoon">Cartoon</option>
               <option value="ball-and-stick">Ball &amp; Stick</option>
               <option value="molecular-surface">Molecular Surface</option>
@@ -1565,7 +1607,7 @@
           </label>
           <label class="sp-field">
             <span>Color</span>
-            <select bind:value={colorScheme}>
+            <select name="mol-color-scheme" bind:value={colorScheme}>
               <option value="auto">Auto (Default)</option>
               <option value="chain-id">By Chain</option>
               <option value="plddt-confidence" disabled={!plddtAllowed}>
@@ -1579,9 +1621,9 @@
             </select>
           </label>
           <div class="sp-checks">
-            <label><input type="checkbox" bind:checked={showSidechains} /> All-atom sticks</label>
-            <label><input type="checkbox" bind:checked={showSurfaceOverlay} /> Translucent surface</label>
-            <label><input type="checkbox" bind:checked={showLigands} /> Ligands &amp; ions</label>
+            <label><input type="checkbox" name="mol-show-sidechains" bind:checked={showSidechains} /> All-atom sticks</label>
+            <label><input type="checkbox" name="mol-show-surface" bind:checked={showSurfaceOverlay} /> Translucent surface</label>
+            <label><input type="checkbox" name="mol-show-ligands" bind:checked={showLigands} /> Ligands &amp; ions</label>
           </div>
           <div class="sp-field">
             <span>Projection</span>

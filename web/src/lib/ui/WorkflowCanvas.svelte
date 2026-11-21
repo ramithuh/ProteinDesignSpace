@@ -204,7 +204,23 @@
     flowApi = null;
   }
 
-  const FIT_VIEW_OPTS = { padding: 0.2, maxZoom: 1, duration: 220 } as const;
+  function getFitViewOpts(duration = 220) {
+    // Reserve extra bottom padding on compact/mobile viewports so the floating
+    // bottom-center Add Block / Auto Layout dock never overlaps fitted node cards.
+    const compact =
+      (canvasEl?.clientWidth ?? (typeof window !== 'undefined' ? window.innerWidth : 1200)) < 640 ||
+      (canvasEl?.clientHeight ?? 480) < 380;
+    return {
+      padding: {
+        top: 0.12,
+        left: 0.1,
+        right: 0.1,
+        bottom: compact ? 0.36 : 0.22,
+      },
+      maxZoom: 1,
+      duration,
+    };
+  }
 
   let fitTimer: ReturnType<typeof setTimeout> | null = null;
   let fitRaf1: number | null = null;
@@ -232,11 +248,11 @@
         fitRaf1 = null;
         fitRaf2 = requestAnimationFrame(() => {
           fitRaf2 = null;
-          void flowApi?.fitView({ ...FIT_VIEW_OPTS, duration });
+          void flowApi?.fitView(getFitViewOpts(duration));
           // Backup pass once SvelteFlow's ResizeObserver finishes measuring new node boxes
           fitTimer = setTimeout(() => {
             fitTimer = null;
-            void flowApi?.fitView({ ...FIT_VIEW_OPTS, duration });
+            void flowApi?.fitView(getFitViewOpts(duration));
           }, 80);
         });
       });
@@ -483,7 +499,7 @@
     // so parallel skip wires don't overlap on the exact same horizontal track.
     const outCounts = new Map<string, number>();
 
-    flowEdges = laid.edges.map((e) => {
+    const nextFlowEdges: Edge[] = laid.edges.map((e) => {
       const eid = makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort);
       const col = edgeColor(e.fromNode, e.fromPort);
       const srcState = nodeStates[e.fromNode]?.status;
@@ -575,8 +591,10 @@
           },
         };
       });
-      flowEdges = [...flowEdges, ...ghostFlowEdges];
+      nextFlowEdges.push(...ghostFlowEdges);
     }
+    // Single write without reading flowEdges inside $effect (prevents Svelte 5 effect_update_depth_exceeded)
+    flowEdges = nextFlowEdges;
   });
 
   const isValidConnection: IsValidConnection = (conn) => {
@@ -948,7 +966,7 @@
       deleteKey={disabled ? null : ['Backspace', 'Delete']}
       minZoom={0.2}
       fitView
-      fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
+      fitViewOptions={{ padding: { top: 0.12, left: 0.1, right: 0.1, bottom: 0.28 }, maxZoom: 1 }}
       {isValidConnection}
       onconnect={handleConnect}
       onnodedragstop={handleNodeDragStop}

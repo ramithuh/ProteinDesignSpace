@@ -931,6 +931,20 @@ export function compileNodeInputPreview(
           ...keptParsed.diagnostics.ligandNames,
           ...keptCtx.ligands.map((l) => l.compId),
         ]);
+        if (cropSpec) {
+          const fullLigClass = classifyLigands(fullParsed.diagnostics.ligandNames);
+          const keptLigSet = new Set(ligClass.includedLigands.map((l) => l.toUpperCase()));
+          const droppedLigands = fullLigClass.includedLigands.filter(
+            (l) => !keptLigSet.has(l.toUpperCase()),
+          );
+          if (droppedLigands.length > 0) {
+            pushIssue({
+              severity: 'warning',
+              source: 'compiler',
+              message: `Crop "${cropSpec}" omits ligand/ion context (${droppedLigands.join(', ')}). Include them explicitly (e.g. ${cropSpec}, ${droppedLigands.join(', ')}) or clear the crop to keep holo ligands.`,
+            });
+          }
+        }
         entities = {
           includedLigands: ligClass.includedLigands,
           filteredBuffers: ligClass.filteredBuffers,
@@ -2970,10 +2984,14 @@ export function compileNodeInputPreview(
           totalResidues + (useLigandContext ? entities.includedLigands.length : 0);
 
         const hasNonProt = entities.includedLigands.length > 0 || entities.nucleicChains.length > 0;
-        previewStructurePdb =
-          structure.cifText && (hasNonProt || !structure.pdbText)
-            ? structure.cifText
-            : structure.pdbText;
+        if (useLigandContext && !hasNonProt) {
+          pushIssue({
+            severity: 'warning',
+            source: 'compiler',
+            message: `${modelName} has Use Ligand Context enabled, but the input structure contains no non-polymer ligands, ions, or nucleic acids — running protein-only (apo). If an upstream PDB Input is cropped, add ligand codes (e.g. A:BEN, A:CA) or clear the crop to retain holo context.`,
+          });
+        }
+        previewStructurePdb = structure.cifText || structure.pdbText;
         previewStructureMeta = {
           label: structure.label,
           atomGranularity: structure.atomGranularity ?? 'all-atom',
@@ -2999,7 +3017,9 @@ export function compileNodeInputPreview(
                   ? [`${entities.nucleicChains.length} NA chain${entities.nucleicChains.length === 1 ? '' : 's'}`]
                   : []),
               ].join(' + ')}`
-            : '';
+            : useLigandContext
+              ? ' · apo (no ligands in input)'
+              : '';
 
         payload = {
           format: 'mpnn-masks',
@@ -3009,7 +3029,7 @@ export function compileNodeInputPreview(
             precision,
             numSequences,
             temperature,
-            useLigandContext,
+            useLigandContext: useLigandContext ? (hasNonProt ? 'Yes (holo)' : 'Yes (apo — 0 ligands in input)') : 'No',
             ...(isLigand ? {} : { allAtomRotamers: true }),
             retainedLigands: useLigandContext ? entities.includedLigands : [],
             retainedNucleicChains: useLigandContext ? entities.nucleicChains : [],

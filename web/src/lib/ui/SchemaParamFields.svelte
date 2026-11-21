@@ -108,6 +108,8 @@
       </span>
       <NumericInput
         disabled={fieldDisabled}
+        id={`param-${field.key}`}
+        name={field.key}
         ariaLabel={field.label}
         spec={numSpec}
         value={Number(params[field.key] ?? field.defaultValue ?? numSpec.defaultValue)}
@@ -122,6 +124,8 @@
       <label class="inline-check" class:is-muted={fieldDisabled}>
         <input
           type="checkbox"
+          id={`param-${field.key}`}
+          name={field.key}
           disabled={fieldDisabled}
           checked={Boolean(params[field.key] ?? field.defaultValue)}
           onchange={(e) => onChange(field.key, e.currentTarget.checked)}
@@ -145,6 +149,8 @@
         {/if}
       </span>
       <select
+        id={`param-${field.key}`}
+        name={field.key}
         disabled={fieldDisabled}
         value={resolveSelectValue(field, opts)}
         onchange={(e) => onChange(field.key, e.currentTarget.value)}
@@ -166,6 +172,8 @@
         {/if}
       </span>
       <textarea
+        id={`param-${field.key}`}
+        name={field.key}
         rows="3"
         disabled={fieldDisabled}
         placeholder={field.placeholder ?? ''}
@@ -188,6 +196,8 @@
         </span>
         <input
           type="text"
+          id={`param-${field.key}`}
+          name={field.key}
           disabled={fieldDisabled}
           placeholder={field.placeholder ?? 'e.g. A10, A12-15'}
           value={String(params[field.key] ?? field.defaultValue ?? '')}
@@ -232,6 +242,8 @@
         </span>
         <input
           type="text"
+          id={`param-${field.key}`}
+          name={field.key}
           class:input-error={hasInvalidAa}
           disabled={fieldDisabled}
           placeholder={field.placeholder ?? 'e.g. C'}
@@ -275,6 +287,8 @@
       </span>
       <input
         type="text"
+        id={`param-${field.key}`}
+        name={field.key}
         disabled={fieldDisabled}
         placeholder={field.placeholder ?? ''}
         value={String(params[field.key] ?? field.defaultValue ?? '')}

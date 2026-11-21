@@ -4,10 +4,15 @@ import { resolve } from 'node:path';
 import { WORKFLOW_PRESETS } from '$lib/engine/registry';
 import { defaultParamsForAdapter } from '$lib/engine/graph-utils';
 import { decodeHashToGraph, encodeGraphToHash } from '$lib/engine/share';
-import { selectFoldWorkItems } from '$lib/engine/bio-capabilities';
+import {
+  selectFoldWorkItems,
+  validateBioCapabilities,
+  validateRuntimeNodeInputs,
+} from '$lib/engine/bio-capabilities';
 import { compileNodeInputPreview } from '$lib/engine/input-preview';
+import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { generateSampleHelixBundlePdb } from '$lib/protein-ops/pdb';
-import type { SequenceSet, WorkflowGraph } from '$lib/engine/types';
+import type { SequenceSet, StructureArtifact, WorkflowGraph } from '$lib/engine/types';
 
 describe('Codex computer-use regression suite', () => {
   it('preserves numeric numDesigns on #p= preset links and custom node positions on both #p= and #g= share URLs', async () => {
@@ -156,5 +161,115 @@ describe('Codex computer-use regression suite', () => {
     const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/mpnn.worker.ts'), 'utf8');
     expect(mpnnSrc).toContain('logSeverityLevel: 3');
     expect(mpnnSrc).toContain("logLevel = 'error'");
+  });
+
+  it('flags dropped ligands loudly across Studio preview, Layer-1 bio compatibility (with 1-click fix), and Layer-2 runtime guard', () => {
+    const holoPdb = [
+      'ATOM      1  N   ALA A  10       0.000   0.000   0.000  1.00 20.00           N  ',
+      'ATOM      2  CA  ALA A  10       1.458   0.000   0.000  1.00 20.00           C  ',
+      'ATOM      3  C   ALA A  10       2.009   1.420   0.000  1.00 20.00           C  ',
+      'ATOM      4  O   ALA A  10       1.250   2.390   0.000  1.00 20.00           O  ',
+      'ATOM      5  N   GLY A  11       3.320   1.500   0.000  1.00 20.00           N  ',
+      'ATOM      6  CA  GLY A  11       4.000   2.800   0.000  1.00 20.00           C  ',
+      'ATOM      7  C   GLY A  11       5.500   2.600   0.000  1.00 20.00           C  ',
+      'ATOM      8  O   GLY A  11       6.100   1.550   0.000  1.00 20.00           O  ',
+      'ATOM      9  N   VAL A  12       6.100   3.800   0.000  1.00 20.00           N  ',
+      'ATOM     10  CA  VAL A  12       7.500   4.000   0.000  1.00 20.00           C  ',
+      'ATOM     11  C   VAL A  12       8.200   2.700   0.000  1.00 20.00           C  ',
+      'ATOM     12  O   VAL A  12       7.700   1.600   0.000  1.00 20.00           O  ',
+      'HETATM   13  C1  BEN A 246       3.000   5.000   2.000  1.00 18.00           C  ',
+      'HETATM   14 CA    CA A 480       5.000   5.000   2.000  1.00 12.00          CA  ',
+      'END',
+    ].join('\n');
+
+    const graph: WorkflowGraph = {
+      id: 'holo-crop-test',
+      name: 'Holo Crop Test',
+      nodes: [
+        {
+          id: 'pdb1',
+          adapterId: 'pdb-input',
+          label: 'RCSB 3PTB',
+          params: {
+            mode: 'pdb-id',
+            pdbId: '3PTB',
+            fetchedPdbId: '3PTB',
+            filename: '3PTB.cif',
+            pdbText: holoPdb,
+            cropSegments: 'A',
+          },
+        },
+        {
+          id: 'lig1',
+          adapterId: 'ligandmpnn',
+          label: 'LigandMPNN',
+          params: { ...defaultParamsForAdapter('ligandmpnn'), useLigandContext: true },
+        },
+      ],
+      edges: [{ fromNode: 'pdb1', fromPort: 'structure', toNode: 'lig1', toPort: 'structure' }],
+    };
+
+    // 1. Studio pdb-input preview explicitly warns about dropped ligands BEN & CA
+    const pdbPrev = compileNodeInputPreview(graph, 'pdb1', {});
+    expect(pdbPrev.issues.some((i) => i.severity === 'warning' && /BEN/.test(i.message) && /CA/.test(i.message))).toBe(true);
+
+    // 2. Studio ligandmpnn preview warns about apo fallback instead of silently showing holo
+    const ligPrev = compileNodeInputPreview(graph, 'lig1', {});
+    expect(ligPrev.issues.some((i) => i.severity === 'warning' && /apo|no non-polymer ligands/i.test(i.message))).toBe(true);
+    expect(String(ligPrev.payload.compiledSummary.useLigandContext)).toMatch(/apo/i);
+
+    // 3. Layer-1 bio compatibility surfaces crop-dropped-ligands with 1-click fix restoring BEN, CA
+    const bioIssues = validateBioCapabilities(graph, {});
+    const dropIssue = bioIssues.find((i) => i.code === 'crop-dropped-ligands');
+    expect(dropIssue).toBeDefined();
+    expect(dropIssue?.fix?.nodeId).toBe('pdb1');
+    expect(String(dropIssue?.fix?.paramsPatch?.cropSegments)).toContain('BEN');
+    expect(String(dropIssue?.fix?.paramsPatch?.cropSegments)).toContain('CA');
+
+    // 4. Layer-2 runtime guard warns when LigandMPNN receives an apo StructureArtifact
+    const apoCoords = new Float32Array([0, 0, 0, 3.8, 0, 0, 7.6, 0, 0]);
+    const apoStruct: StructureArtifact = {
+      kind: 'StructureArtifact',
+      id: 'apo-1',
+      label: '3PTB [A]',
+      sourceModelId: 'pdb-input',
+      length: 3,
+      sequence: 'AGV',
+      caCoords: apoCoords,
+      backbone4Coords: new Float32Array(36),
+      pdbText: holoPdb.split('\n').filter((l) => !l.startsWith('HETATM')).join('\n'),
+      geometry: computeGeometryStats(apoCoords),
+      diagnostics: {
+        chainCount: 1,
+        chainLengths: [3],
+        hasLigands: false,
+        ligandNames: [],
+        hasNucleicAcids: false,
+        nucleicAcidChains: [],
+      },
+    };
+    const rt = validateRuntimeNodeInputs(graph.nodes[1], { structure: apoStruct });
+    expect(rt.warnings.some((w) => /0 ligands/i.test(w))).toBe(true);
+  });
+
+  it('guards against Svelte 5 flowEdges effect loop, Mol* concurrent clear race, mobile dock overlap, and summary/form a11y issues', () => {
+    const canvasSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/WorkflowCanvas.svelte'), 'utf8');
+    // Must never read `flowEdges` inside the $effect that writes `flowEdges`
+    expect(canvasSrc).not.toContain('flowEdges = [...flowEdges');
+    expect(canvasSrc).toContain('nextFlowEdges.push(...ghostFlowEdges)');
+    expect(canvasSrc).toContain('getFitViewOpts');
+
+    const molSrc = readFileSync(resolve(process.cwd(), 'src/lib/viewer/MolSuperposeViewer.svelte'), 'utf8');
+    expect(molSrc).toContain('enqueueSceneRender');
+    expect(molSrc).toContain('liveStructs === 0');
+
+    const studioSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/NodeStudioPopover.svelte'), 'utf8');
+    const summaryMatch = studioSrc.match(/<summary>[\s\S]*?<\/summary>/);
+    expect(summaryMatch?.[0]).toBeTruthy();
+    expect(summaryMatch![0]).not.toContain('<button');
+
+    const schemaFieldsSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/SchemaParamFields.svelte'), 'utf8');
+    expect(schemaFieldsSrc).toContain('name={field.key}');
+    expect(schemaFieldsSrc).toContain('id={`param-${field.key}`}');
   });
 });

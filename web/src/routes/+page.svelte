@@ -2440,6 +2440,7 @@
       <span class="example-lbl">Example Workflow</span>
       <select
         class="preset-select"
+        name="workflow-preset"
         aria-label="Select an example workflow"
         disabled={isRunning}
         value={selectedPresetId}
@@ -2931,15 +2932,16 @@
                 </button>
               </div>
             {/if}
-            <label><input type="checkbox" bind:checked={showDesigned} /> Designed</label>
-            <label><input type="checkbox" bind:checked={showRefold} /> Refold (pLDDT)</label>
-            <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
-            <label title="Slowly rotate the 3D view (pauses while dragging)"><input type="checkbox" bind:checked={viewerSpin} /> Spin</label>
+            <label><input type="checkbox" name="viewer-show-designed" bind:checked={showDesigned} /> Designed</label>
+            <label><input type="checkbox" name="viewer-show-refold" bind:checked={showRefold} /> Refold (pLDDT)</label>
+            <label><input type="checkbox" name="viewer-illustrative" bind:checked={illustrative} /> Illustrative</label>
+            <label title="Slowly rotate the 3D view (pauses while dragging)"><input type="checkbox" name="viewer-spin" bind:checked={viewerSpin} /> Spin</label>
             {#if viewerStructureMeta?.trajectoryPdb}
-              <label><input type="checkbox" bind:checked={showTrajectory} /> Trajectory</label>
+              <label><input type="checkbox" name="viewer-show-trajectory" bind:checked={showTrajectory} /> Trajectory</label>
               {#if showTrajectory}
                 <input
                   type="range"
+                  name="viewer-trajectory-frame"
                   min="0"
                   max={Math.max(0, (viewerStructureMeta.trajectoryFrameCount ?? 1) - 1)}
                   bind:value={trajFrame}
@@ -2952,7 +2954,7 @@
             {#if hasConditionerNode || hasMpnnNode}
               <label class="pick-mode" title="Choose what clicking a 3D protein residue modifies">
                 Pick:
-                <select class="pick-select" bind:value={molPickMode}>
+                <select class="pick-select" name="viewer-pick-mode" bind:value={molPickMode}>
                   <option value="auto">Auto</option>
                   <option value="off">Off</option>
                   {#if hasConditionerNode}

@@ -22,6 +22,8 @@
     spec: NumericFieldSpec;
     disabled?: boolean;
     ariaLabel?: string;
+    name?: string;
+    id?: string;
     onChange: (next: number) => void;
   }
 
@@ -30,8 +32,17 @@
     spec,
     disabled = false,
     ariaLabel = undefined,
+    name = undefined,
+    id = undefined,
     onChange,
   }: Props = $props();
+
+  let resolvedName = $derived(
+    name ??
+      (ariaLabel
+        ? `num-${ariaLabel.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`
+        : 'numeric-param'),
+  );
 
   let draft = $state(untrack(() => formatNumericValue(value, spec)));
   let focused = $state(false);
@@ -118,6 +129,8 @@
     <input
       type="text"
       class="num-input"
+      {id}
+      name={resolvedName}
       inputmode={spec.integer ? 'numeric' : 'decimal'}
       autocomplete="off"
       spellcheck="false"

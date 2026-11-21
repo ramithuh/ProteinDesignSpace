@@ -1045,13 +1045,30 @@
 
       {#if node.params.mode === 'pdb-id' || node.params.mode === 'custom'}
         {@const cropVal = String(node.params.cropSegments ?? '')}
+        {@const droppedCropLigands = (() => {
+          const trimCrop = cropVal.trim();
+          const rawTxt = String(node.params.pdbText ?? '').trim();
+          if (!trimCrop || !rawTxt) return [] as string[];
+          try {
+            const fullLigs = parseStructureText(rawTxt).diagnostics.ligandNames;
+            if (fullLigs.length === 0) return [] as string[];
+            const keptLigs = new Set(
+              (liveStructure?.diagnostics?.ligandNames ?? []).map((l) => l.toUpperCase()),
+            );
+            return fullLigs.filter((l) => !keptLigs.has(l.toUpperCase()));
+          } catch {
+            return [] as string[];
+          }
+        })()}
         <div class="full pdb-fetch-wrap">
           <span class="field-lbl">Segment / Chain Crop (optional)</span>
           <div class="pdb-fetch-row">
             <input
               type="text"
+              id="pdb-crop-segments"
+              name="cropSegments"
               {disabled}
-              placeholder="Full structure (or e.g. A163-181, A17-132)"
+              placeholder="Full structure (or e.g. A, A:BEN, A:CA)"
               value={cropVal}
               oninput={(e) => setParam('cropSegments', e.currentTarget.value)}
             />
@@ -1067,8 +1084,28 @@
               </button>
             {/if}
           </div>
+          {#if droppedCropLigands.length > 0}
+            <div class="crop-lig-warn" role="status">
+              <span>
+                ⚠ Crop omits ligands/ions: <b>{droppedCropLigands.join(', ')}</b> (downstream LigandMPNN/LASErMPNN will run apo).
+              </span>
+              <button
+                type="button"
+                class="fetch-btn"
+                {disabled}
+                onclick={() =>
+                  setParam(
+                    'cropSegments',
+                    `${cropVal.trim()}, ${droppedCropLigands.join(', ')}`,
+                  )}
+                title="Append omitted ligands/ions to the crop"
+              >
+                + Keep {droppedCropLigands.join(', ')}
+              </button>
+            </div>
+          {/if}
           <span class="field-hint">
-            Extracts exact chains or residue spans while preserving original PDB residue numbers for hotspots &amp; motifs.
+            Extracts exact chains or residue spans while preserving original PDB residue numbers; include ligand codes (e.g. <code>A, BEN, CA</code>) to retain holo ligands.
           </span>
         </div>
       {/if}
@@ -2764,5 +2801,20 @@
   .mu-clear-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  .crop-lig-warn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-text);
+    font-size: 11px;
+    line-height: 1.35;
   }
 </style>
