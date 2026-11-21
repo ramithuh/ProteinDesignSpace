@@ -287,6 +287,18 @@ self.onmessage = async (ev: MessageEvent) => {
           unlockInherited,
         );
 
+        const hasNonProteinContext = Boolean(
+          structure.diagnostics?.hasLigands ||
+            (structure.diagnostics?.ligandNames?.length ?? 0) > 0 ||
+            structure.diagnostics?.hasNucleicAcids ||
+            (structure.diagnostics?.nucleicAcidChains?.length ?? 0) > 0,
+        );
+        const contextTag = !useLigandContext
+          ? ' (protein-only)'
+          : hasNonProteinContext
+            ? ' (holo context)'
+            : ' (apo — 0 ligands in input)';
+
         const candidates: SequenceCandidate[] = [];
         for (let i = 0; i < numSequences; i++) {
           self.postMessage({
@@ -294,7 +306,7 @@ self.onmessage = async (ev: MessageEvent) => {
             type: 'progress',
             phase: 'sample',
             progress: i / numSequences,
-            detail: `LigandMPNN designing seq ${i + 1}/${numSequences}${useLigandContext ? ' (holo context)' : ' (protein-only)'}...`,
+            detail: `LigandMPNN designing seq ${i + 1}/${numSequences}${contextTag}...`,
           });
 
           const res = await activeEngine.design(structureText, {

@@ -235,11 +235,15 @@ function resolveAntiFoldPlan(
 
   const heavyChain =
     variant === 'antifold'
-      ? explicitTarget ?? detectedHeavy ?? firstUnlocked
+      ? detectedHeavy ?? explicitTarget ?? firstUnlocked
       : undefined;
   const lightChain =
-    variant === 'antifold' && detectedLight && detectedLight !== heavyChain
-      ? detectedLight
+    variant === 'antifold'
+      ? detectedLight && detectedLight !== heavyChain
+        ? detectedLight
+        : explicitTarget && explicitTarget !== heavyChain
+          ? explicitTarget
+          : undefined
       : undefined;
 
   const combineOpts: Record<string, unknown> = {
@@ -278,14 +282,16 @@ function resolveAntiFoldPlan(
     }
   }
 
-  // Build index-keyed fixed map against `prepared.residues` (bounded by `sampleLength`)
+  // Build index-keyed fixed map against `prepared.residues` (bounded by `sampleLength`).
+  // Whenever the user explicitly specifies `targetChain`, ALWAYS fix every residue on
+  // non-target chains — even when `regions` (e.g. `CDR3`) is also set, so selecting
+  // heavy chain `H` + `CDR3` never mutates `CDRL3` on the light chain.
   const fixed: Record<number, number> = {};
   for (let i = 0; i < sampleLength; i++) {
     const r = prepared.residues[i];
     if (!r) continue;
     const k = residueKey(r.chain, r.number, r.insertion);
-    const fixedByTarget =
-      Boolean(explicitTarget) && regionList.length === 0 && r.chain !== explicitTarget;
+    const fixedByTarget = Boolean(explicitTarget) && r.chain !== explicitTarget;
     if (lockedChainSet.has(r.chain) || fixedKeySet.has(k) || fixedByTarget) {
       fixed[i] = prepared.tokens[i];
     }

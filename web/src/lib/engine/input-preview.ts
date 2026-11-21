@@ -934,9 +934,15 @@ export function compileNodeInputPreview(
         if (cropSpec) {
           const fullLigClass = classifyLigands(fullParsed.diagnostics.ligandNames);
           const keptLigSet = new Set(ligClass.includedLigands.map((l) => l.toUpperCase()));
-          const droppedLigands = fullLigClass.includedLigands.filter(
+          const droppedFromFull = fullLigClass.includedLigands.filter(
             (l) => !keptLigSet.has(l.toUpperCase()),
           );
+          const droppedLigands =
+            droppedFromFull.length > 0
+              ? droppedFromFull
+              : (outStruct?.diagnostics?.omittedLigands ?? []).filter(
+                  (l) => !keptLigSet.has(l.toUpperCase()),
+                );
           if (droppedLigands.length > 0) {
             pushIssue({
               severity: 'warning',
@@ -3117,22 +3123,140 @@ export function compileNodeInputPreview(
         const entry = getOrParseCachedStructure(structure.id, rawText);
         const parsed = entry.parsed;
         const allChains = [...new Set(parsed.sourceResidues.map((s) => s.authChainId))];
-        let resolvedTargetChain = allChains[0] ?? 'A';
-        if (targetChainParam) {
-          const matched = allChains.find((c) => c.toUpperCase() === targetChainParam.toUpperCase());
-          if (matched) {
-            resolvedTargetChain = matched;
-          } else {
-            resolvedTargetChain = targetChainParam;
-            pushIssue({
-              severity: 'warning',
-              source: 'compiler',
-              message: `Target chain "${targetChainParam}" not found in structure (available: ${allChains.join(', ')}).`,
+        const upperToChain = new Map(allChains.map((c) => [c.toUpperCase(), c]));
+        const resolveChain = (raw: string): string | undefined =>
+          raw ? (allChains.includes(raw) ? raw : upperToChain.get(raw.toUpperCase())) : undefined;
+
+        const explicitTarget = targetChainParam ? resolveChain(targetChainParam) : undefined;
+        if (targetChainParam && !explicitTarget) {
+          pushIssue({
+            severity: 'warning',
+            source: 'compiler',
+            message: `Target chain "${targetChainParam}" not found in structure (available: ${allChains.join(', ')}).`,
+          });
+        }
+
+        const chainTypes = structure.molecularContext?.chainTypes ?? {};
+        const detectedHeavy =
+          allChains.find((id) => chainTypes[id] === 'antibody-H' || chainTypes[id] === 'nanobody') ??
+          resolveChain('H');
+        const detectedLight =
+          allChains.find(
+            (id) => chainTypes[id] === 'antibody-L' && id !== (explicitTarget ?? detectedHeavy),
+          ) ?? (resolveChain('L') !== (explicitTarget ?? detectedHeavy) ? resolveChain('L') : undefined);
+
+        const resolvedTargetChain =
+          explicitTarget ??
+          (targetChainParam ||
+            (variant === 'antifold' ? detectedHeavy ?? allChains[0] ?? 'A' : allChains[0] ?? 'A'));
+
+        const heavyChain =
+          variant === 'antifold'
+            ? detectedHeavy ?? explicitTarget ?? allChains[0]
+            : undefined;
+        const lightChain =
+          variant === 'antifold'
+            ? detectedLight && detectedLight !== heavyChain
+              ? detectedLight
+              : explicitTarget && explicitTarget !== heavyChain
+                ? explicitTarget
+                : undefined
+            : undefined;
+
+        // Exact IMGT regionMask matching web/static/vendor/antifold-esmif1/shared/structure.js
+        const regionList =
+          variant === 'antifold'
+            ? regions
+                .split(/[,\s]+/)
+                .map((t) => t.trim())
+                .filter(Boolean)
+            : [];
+        const regionSelectors: Array<(r: { chain: string; number: number; insertion: string }) => boolean> = [];
+        if (regionList.length > 0 && heavyChain) {
+          const imgtBounds = {
+            H: [
+              [27, 38],
+              [56, 65],
+              [105, 117],
+            ],
+            L: [
+              [27, 38],
+              [56, 65],
+              [105, 117],
+            ],
+          } as const;
+          for (const region of regionList) {
+            const explicitSpan = /^([^:]+):(-?\d+[A-Za-z]?(?:--?\d+)?(?:,-?\d+[A-Za-z]?(?:--?\d+)?)*)$/.exec(region);
+            if (explicitSpan) {
+              const chainId =
+                explicitSpan[1] === 'H'
+                  ? heavyChain
+                  : explicitSpan[1] === 'L'
+                    ? lightChain
+                    : resolveChain(explicitSpan[1]) ?? explicitSpan[1];
+              const ranges: Array<{ a: number; b: number; ins: string }> = [];
+              let valid = true;
+              for (const part of explicitSpan[2].split(',')) {
+                const rm = /^(-?\d+)([A-Za-z]?)(?:-(-?\d+))?$/.exec(part);
+                if (!rm) {
+                  valid = false;
+                  break;
+                }
+                const a = Number(rm[1]);
+                const b = rm[3] === undefined ? a : Number(rm[3]);
+                if (b < a) {
+                  valid = false;
+                  break;
+                }
+                ranges.push({ a, b, ins: rm[2] ?? '' });
+              }
+              if (valid && chainId) {
+                regionSelectors.push(
+                  (r) =>
+                    r.chain === chainId &&
+                    ranges.some((x) => r.number >= x.a && r.number <= x.b && (!x.ins || r.insertion === x.ins)),
+                );
+              } else {
+                pushIssue({
+                  severity: 'warning',
+                  source: 'compiler',
+                  message: `Invalid AntiFold region selector "${region}".`,
+                });
+              }
+              continue;
+            }
+            const m = /^(all|CDR|FW)([HL]?)([1-4]?)$/.exec(region);
+            if (!m || (m[1] === 'CDR' && m[3] === '4')) {
+              pushIssue({
+                severity: 'warning',
+                source: 'compiler',
+                message: `Invalid AntiFold region "${region}" (expected CDR1-3, CDRH1-3, CDRL1-3, FW1-4, all, or chain:start-end).`,
+              });
+              continue;
+            }
+            const [, type, role, num] = m;
+            regionSelectors.push((r) => {
+              const roleHere = r.chain === heavyChain ? 'H' : r.chain === lightChain ? 'L' : null;
+              if (!roleHere || (role && role !== roleHere)) return false;
+              if (r.number < 1 || r.number > 128) return false;
+              if (type === 'all') return true;
+              const b = imgtBounds[roleHere];
+              const regionsHere: ReadonlyArray<readonly [number, number]> =
+                type === 'CDR'
+                  ? b
+                  : [
+                      [1, b[0][0] - 1],
+                      [b[0][1] + 1, b[1][0] - 1],
+                      [b[1][1] + 1, b[2][0] - 1],
+                      [b[2][1] + 1, 128],
+                    ];
+              return regionsHere.some(
+                ([lo, hi], idx) => (!num || idx === Number(num) - 1) && r.number >= lo && r.number <= hi,
+              );
             });
           }
-        } else if (variant === 'antifold' && allChains.some((c) => c.toUpperCase() === 'H')) {
-          resolvedTargetChain = allChains.find((c) => c.toUpperCase() === 'H')!;
         }
+        const useRegionMask = regionList.length > 0;
 
         const { fixedPositions: userFixed, lockedChains: userLockedRaw } =
           parseFixedPositionsAndChains(fixedSpec, resolvedTargetChain);
@@ -3183,14 +3307,25 @@ export function compileNodeInputPreview(
             if (delta > 0) gapBefore = delta;
           }
 
-          const isTarget = chUpper === resolvedTargetChain.toUpperCase();
+          // Match antifold.worker.ts exact chain + region + fixedPositions locking:
+          // - When targetChain is explicitly set, non-target chains are always locked.
+          // - In autoregressive mode, only the target chain prefix is sampled.
+          // - When regions are set (AntiFold), only residues matching regionMask are designable.
+          const lockedByTargetChain =
+            (Boolean(explicitTarget) && src.authChainId !== explicitTarget) ||
+            (samplingMode === 'autoregressive' && chUpper !== resolvedTargetChain.toUpperCase());
+          const inRegion =
+            !useRegionMask ||
+            regionSelectors.some((sel) =>
+              sel({ chain: src.authChainId, number: src.resNum, insertion: src.insCode }),
+            );
           const resKey = `${chUpper}:${src.resNum}:${src.insCode}`;
           const isUserFixed = userLockedChainSet.has(chUpper) || userFixedKeys.has(resKey);
           const isInheritedFixed =
             !isUserFixed && (inheritedLockedChainSet.has(chUpper) || inheritedFixedIndices.has(i));
-          const roles: ResidueRole[] = !isTarget
+          const roles: ResidueRole[] = lockedByTargetChain
             ? ['fixed-backbone', 'fixed-sequence']
-            : isUserFixed || isInheritedFixed
+            : !inRegion || isUserFixed || isInheritedFixed
               ? ['fixed-sequence']
               : ['designable'];
           if (roles.includes('designable')) designedCount++;

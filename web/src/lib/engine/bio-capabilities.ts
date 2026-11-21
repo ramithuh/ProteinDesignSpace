@@ -842,27 +842,32 @@ export function validateBioCapabilities(
           const hasNonProt = up.entities.has('ligand') || up.entities.has('dna');
           if (!hasNonProt && src.adapterId === 'pdb-input') {
             const cropSpec = String(src.params.cropSegments ?? '').trim();
-            const rawText = String(src.params.pdbText ?? '').trim();
-            if (cropSpec && rawText) {
-              try {
-                const fullSummary = getCachedStructureBioSummary(rawText);
-                const fullLigands = fullSummary.diagnostics.ligandNames;
-                if (fullLigands.length > 0) {
-                  const keepSpec = `${cropSpec}, ${fullLigands.join(', ')}`;
-                  issues.push({
-                    severity: 'warning',
-                    code: 'crop-dropped-ligands',
-                    nodeId: node.id,
-                    message: `${node.label ?? node.adapterId} has ligand context enabled, but upstream crop "${cropSpec}" dropped ${fullLigands.join(', ')} (running apo protein-only).`,
-                    fix: {
-                      label: `Keep ${fullLigands.join(', ')} in crop`,
-                      nodeId: src.id,
-                      paramsPatch: { cropSegments: keepSpec },
-                    },
-                  });
+            if (cropSpec) {
+              const liveStruct = outputsByNode?.[src.id]?.structure as StructureArtifact | undefined;
+              let droppedLigands = liveStruct?.diagnostics?.omittedLigands ?? [];
+              if (droppedLigands.length === 0) {
+                const rawText = String(src.params.pdbText ?? '').trim();
+                if (rawText) {
+                  try {
+                    droppedLigands = getCachedStructureBioSummary(rawText).diagnostics.ligandNames;
+                  } catch {
+                    droppedLigands = [];
+                  }
                 }
-              } catch {
-                /* ignore unparseable partial text */
+              }
+              if (droppedLigands.length > 0) {
+                const keepSpec = `${cropSpec}, ${droppedLigands.join(', ')}`;
+                issues.push({
+                  severity: 'warning',
+                  code: 'crop-dropped-ligands',
+                  nodeId: node.id,
+                  message: `${node.label ?? node.adapterId} has ligand context enabled, but upstream crop "${cropSpec}" dropped ${droppedLigands.join(', ')} (running apo protein-only).`,
+                  fix: {
+                    label: `Keep ${droppedLigands.join(', ')} in crop`,
+                    nodeId: src.id,
+                    paramsPatch: { cropSegments: keepSpec },
+                  },
+                });
               }
             }
           }

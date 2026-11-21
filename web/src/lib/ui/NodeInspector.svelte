@@ -1047,8 +1047,13 @@
         {@const cropVal = String(node.params.cropSegments ?? '')}
         {@const droppedCropLigands = (() => {
           const trimCrop = cropVal.trim();
+          if (!trimCrop) return [] as string[];
+          const liveOmitted = liveStructure?.diagnostics?.omittedLigands;
+          if (Array.isArray(liveOmitted) && liveOmitted.length > 0) {
+            return liveOmitted;
+          }
           const rawTxt = String(node.params.pdbText ?? '').trim();
-          if (!trimCrop || !rawTxt) return [] as string[];
+          if (!rawTxt) return [] as string[];
           try {
             const fullLigs = parseStructureText(rawTxt).diagnostics.ligandNames;
             if (fullLigs.length === 0) return [] as string[];

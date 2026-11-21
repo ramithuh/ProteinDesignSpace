@@ -3748,6 +3748,9 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
   }
   .workbench-split.horizontal {
     flex-direction: row;
@@ -3798,6 +3801,9 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
     margin-bottom: 0;
   }
   .share-toast {
@@ -3886,9 +3892,16 @@
 
   .results-grid {
     display: grid;
-    grid-template-columns: 1.25fr 1fr;
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
     gap: 14px;
     align-items: start;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .results-grid > * {
+    min-width: 0;
+    max-width: 100%;
   }
   .results-grid.stacked-pane {
     flex: 1;
@@ -3938,7 +3951,7 @@
   }
   @media (max-width: 960px) {
     .results-grid {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
   }
   .viewer-bar {

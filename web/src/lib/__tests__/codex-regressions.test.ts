@@ -13,6 +13,7 @@ import { compileNodeInputPreview } from '$lib/engine/input-preview';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { cropRawAllAtomStructure, generateSampleHelixBundlePdb } from '$lib/protein-ops/pdb';
 import { filterCatalogCategories } from '$lib/engine/catalog';
+import { ExecutionScheduler } from '$lib/engine/scheduler';
 import type { SequenceSet, StructureArtifact, WorkflowGraph } from '$lib/engine/types';
 
 describe('Codex computer-use regression suite', () => {
@@ -288,5 +289,165 @@ describe('Codex computer-use regression suite', () => {
     expect(hits).toHaveLength(1);
     expect(hits[0].matchingSubItems.map((i) => i.key)).toEqual(['top-k-filter']);
     expect(hits[0].hasNarrowedSubMatch).toBe(true);
+  });
+
+  it('AntiFold locks non-target chains when regions is set and Studio counts only IMGT CDR3 residues on targetChain', () => {
+    // Build a synthetic H + L antibody PDB spanning IMGT FW3 (100-104), CDR3 (105-117), FW4 (118-120), and CH1/CL (150)
+    const lines: string[] = [];
+    let serial = 1;
+    const resNums = [
+      100, 101, 102, 103, 104,
+      105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117,
+      118, 119, 120, 150,
+    ];
+    for (const [cIdx, chain] of (['H', 'L'] as const).entries()) {
+      for (const [rIdx, rn] of resNums.entries()) {
+        const x = rIdx * 3.8;
+        const y = cIdx * 12.0;
+        const fmt = (n: number) => n.toFixed(3).padStart(8);
+        const rStr = String(rn).padStart(4);
+        lines.push(`ATOM  ${String(serial++).padStart(5)}  N   ALA ${chain}${rStr}    ${fmt(x - 1.2)}${fmt(y)}${fmt(0)}  1.00 20.00           N  `);
+        lines.push(`ATOM  ${String(serial++).padStart(5)}  CA  ALA ${chain}${rStr}    ${fmt(x)}${fmt(y)}${fmt(0)}  1.00 20.00           C  `);
+        lines.push(`ATOM  ${String(serial++).padStart(5)}  C   ALA ${chain}${rStr}    ${fmt(x + 1.2)}${fmt(y + 0.5)}${fmt(0)}  1.00 20.00           C  `);
+        lines.push(`ATOM  ${String(serial++).padStart(5)}  O   ALA ${chain}${rStr}    ${fmt(x + 1.2)}${fmt(y + 1.7)}${fmt(0)}  1.00 20.00           O  `);
+      }
+    }
+    lines.push('END');
+    const abPdb = lines.join('\n');
+
+    const graph: WorkflowGraph = {
+      id: 'antifold-cdr3-mask',
+      name: 'AntiFold CDR3 Mask Test',
+      nodes: [
+        {
+          id: 'pdb1',
+          adapterId: 'pdb-input',
+          label: '1FDL-like',
+          params: { mode: 'custom', pdbText: abPdb, filename: '1fdl_mini.pdb' },
+        },
+        {
+          id: 'af1',
+          adapterId: 'antifold-esmif1',
+          label: 'AntiFold',
+          params: {
+            ...defaultParamsForAdapter('antifold-esmif1'),
+            variant: 'antifold',
+            targetChain: 'H',
+            regions: 'CDR3',
+          },
+        },
+      ],
+      edges: [{ fromNode: 'pdb1', fromPort: 'structure', toNode: 'af1', toPort: 'structure' }],
+    };
+
+    const preview = compileNodeInputPreview(graph, 'af1', {});
+    const hChain = preview.chains.find((c) => c.chainId === 'H');
+    const lChain = preview.chains.find((c) => c.chainId === 'L');
+    expect(hChain).toBeDefined();
+    expect(lChain).toBeDefined();
+
+    const designableH = hChain!.residues
+      .filter((r) => r.roles.includes('designable'))
+      .map((r) => r.authSeqId);
+    const designableL = lChain!.residues
+      .filter((r) => r.roles.includes('designable'))
+      .map((r) => r.authSeqId);
+    // Only IMGT CDR3 (105..117 = 13 residues) on H should be designable; 0 on L
+    expect(designableH).toEqual([105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117]);
+    expect(designableL).toEqual([]);
+    const totalDesignable = preview.chains.reduce(
+      (sum, c) => sum + c.residues.filter((r) => r.roles.includes('designable')).length,
+      0,
+    );
+    expect(totalDesignable).toBe(13);
+
+    // Worker contract: fixedByTarget must never be gated on regionList.length === 0
+    const workerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/antifold.worker.ts'), 'utf8');
+    expect(workerSrc).toContain('const fixedByTarget = Boolean(explicitTarget) && r.chain !== explicitTarget;');
+    expect(workerSrc).not.toContain('regionList.length === 0 && r.chain !== explicitTarget');
+  });
+
+  it('retains 1-click ligand repair via diagnostics.omittedLigands when pdb-input runs without pdbText, reports accurate apo/holo progress, and guards mobile Compare width', async () => {
+    const holoPdb = [
+      'ATOM      1  N   ALA A  10       0.000   0.000   0.000  1.00 20.00           N  ',
+      'ATOM      2  CA  ALA A  10       1.458   0.000   0.000  1.00 20.00           C  ',
+      'ATOM      3  C   ALA A  10       2.009   1.420   0.000  1.00 20.00           C  ',
+      'ATOM      4  O   ALA A  10       1.250   2.390   0.000  1.00 20.00           O  ',
+      'ATOM      5  N   GLY A  11       3.320   1.500   0.000  1.00 20.00           N  ',
+      'ATOM      6  CA  GLY A  11       4.000   2.800   0.000  1.00 20.00           C  ',
+      'ATOM      7  C   GLY A  11       5.500   2.600   0.000  1.00 20.00           C  ',
+      'ATOM      8  O   GLY A  11       6.100   1.550   0.000  1.00 20.00           O  ',
+      'ATOM      9  N   VAL A  12       6.100   3.800   0.000  1.00 20.00           N  ',
+      'ATOM     10  CA  VAL A  12       7.500   4.000   0.000  1.00 20.00           C  ',
+      'ATOM     11  C   VAL A  12       8.200   2.700   0.000  1.00 20.00           C  ',
+      'ATOM     12  O   VAL A  12       7.700   1.600   0.000  1.00 20.00           O  ',
+      'HETATM   13  C1  BEN A 246       3.000   5.000   2.000  1.00 18.00           C  ',
+      'HETATM   14 CA    CA A 480       5.000   5.000   2.000  1.00 12.00          CA  ',
+      'END',
+    ].join('\n');
+
+    // Run scheduler on custom holo PDB with cropSegments='A' to verify diagnostics.omittedLigands
+    const scheduler = new ExecutionScheduler();
+    const matGraph: WorkflowGraph = {
+      id: 'mat-omitted-ligands',
+      name: 'Materialize Omitted Ligands',
+      nodes: [
+        {
+          id: 'pdb1',
+          adapterId: 'pdb-input',
+          label: '3PTB',
+          params: { mode: 'custom', pdbText: holoPdb, filename: '3PTB.pdb', cropSegments: 'A' },
+        },
+      ],
+      edges: [],
+    };
+    const res = await scheduler.run(matGraph, () => {});
+    const outStruct = res.outputsByNode.pdb1.structure as StructureArtifact;
+    expect(outStruct.diagnostics?.hasLigands).toBe(false);
+    expect(outStruct.diagnostics?.omittedLigands).toEqual(expect.arrayContaining(['BEN', 'CA']));
+
+    // Simulate auto-fetched pdb-id mode where node.params.pdbText is empty and only outputsByNode has the materialized StructureArtifact
+    const autoFetchGraph: WorkflowGraph = {
+      id: 'autofetch-crop-repair',
+      name: 'AutoFetch Crop Repair',
+      nodes: [
+        {
+          id: 'pdb1',
+          adapterId: 'pdb-input',
+          label: 'RCSB 3PTB',
+          params: { mode: 'pdb-id', pdbId: '3PTB', pdbText: '', cropSegments: 'A' },
+        },
+        {
+          id: 'lig1',
+          adapterId: 'ligandmpnn',
+          label: 'LigandMPNN',
+          params: { ...defaultParamsForAdapter('ligandmpnn'), useLigandContext: true },
+        },
+      ],
+      edges: [{ fromNode: 'pdb1', fromPort: 'structure', toNode: 'lig1', toPort: 'structure' }],
+    };
+
+    const issues = validateBioCapabilities(autoFetchGraph, { pdb1: { structure: outStruct } });
+    const dropIssue = issues.find((i) => i.code === 'crop-dropped-ligands');
+    expect(dropIssue).toBeDefined();
+    expect(dropIssue?.fix?.nodeId).toBe('pdb1');
+    expect(String(dropIssue?.fix?.paramsPatch?.cropSegments)).toContain('BEN');
+    expect(String(dropIssue?.fix?.paramsPatch?.cropSegments)).toContain('CA');
+
+    const pdbPrev = compileNodeInputPreview(autoFetchGraph, 'pdb1', { pdb1: { structure: outStruct } });
+    expect(pdbPrev.issues.some((i) => i.severity === 'warning' && /BEN/.test(i.message) && /CA/.test(i.message))).toBe(true);
+
+    // LigandMPNN worker must check actual ligand/NA presence instead of blindly reporting "(holo context)"
+    const ligWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/ligandmpnn.worker.ts'), 'utf8');
+    expect(ligWorkerSrc).toContain('hasNonProteinContext');
+    expect(ligWorkerSrc).toContain('(apo — 0 ligands in input)');
+
+    // Mobile Compare layout width guards (prevent 390px viewport shrink)
+    const pageSrc = readFileSync(resolve(process.cwd(), 'src/routes/+page.svelte'), 'utf8');
+    expect(pageSrc).toContain('grid-template-columns: minmax(0, 1fr);');
+    expect(pageSrc).toContain('.results-grid > *');
+    const cmpSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/ComparePeekPanel.svelte'), 'utf8');
+    expect(cmpSrc).toContain('min-width: 0;');
+    expect(cmpSrc).toContain('max-width: 100%;');
   });
 });

@@ -210,6 +210,8 @@ export interface StructureParseDiagnostics {
   ligandNames: string[];
   hasNucleicAcids: boolean;
   nucleicAcidChains: string[];
+  /** Non-buffer ligands/ions present in the source structure that were dropped by an active crop. */
+  omittedLigands?: string[];
 }
 
 export interface BioCompatibilityFix {

@@ -132,10 +132,26 @@ export async function materializePdbInputNode(
   const cropSpec = mode === 'demo-bundle' ? '' : String(node.params.cropSegments ?? '').trim();
   const isCropped = cropSpec.length > 0;
   let effectiveRawText = rawText;
+  let omittedLigands: string[] = [];
   if (isCropped) {
     effectiveRawText = cropRawAllAtomStructure(rawText, cropSpec).text;
   }
   const parsed = parseStructureText(effectiveRawText);
+  if (isCropped) {
+    try {
+      const fullLigands = parseStructureText(rawText).diagnostics.ligandNames;
+      if (fullLigands.length > 0) {
+        const keptSet = new Set(parsed.diagnostics.ligandNames.map((l) => l.toUpperCase()));
+        omittedLigands = fullLigands.filter((l) => !keptSet.has(l.toUpperCase()));
+      }
+    } catch {
+      omittedLigands = [];
+    }
+  }
+  const diagnostics =
+    omittedLigands.length > 0
+      ? { ...parsed.diagnostics, omittedLigands }
+      : parsed.diagnostics;
   const hasNonProteinContext = parsed.diagnostics.hasLigands || parsed.diagnostics.hasNucleicAcids;
   if (parsed.nResidues < 3 && !hasNonProteinContext) {
     throw new Error('Input PDB/mmCIF must contain at least 3 residues with Cα atoms');
@@ -176,7 +192,7 @@ export async function materializePdbInputNode(
     chainIdMap: parsed.chainIdMap,
     atomPresence: parsed.atomPresence,
     observedBackboneMask: parsed.observedBackboneMask,
-    diagnostics: parsed.diagnostics,
+    diagnostics,
     ...(benchmarkId ? { benchmarkId } : {}),
     geometry,
   };

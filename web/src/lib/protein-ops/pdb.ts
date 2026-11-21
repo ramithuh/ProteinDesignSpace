@@ -467,6 +467,8 @@ export interface StructureParseDiagnostics {
   chainLengths: number[];
   hasLigands: boolean;
   ligandNames: string[];
+  /** Non-water ligands/ions present in the full input that were omitted by an active segment/chain crop. */
+  omittedLigands?: string[];
   hasNucleicAcids: boolean;
   nucleicAcidChains: string[];
 }
