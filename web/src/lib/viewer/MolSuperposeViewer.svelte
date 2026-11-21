@@ -18,7 +18,7 @@
     /** Rotations per second when `spin` is enabled (Mol* default is 0.1; 0.02 ≈ 1 turn / 50s). */
     spinSpeed?: number;
     theme?: 'dark' | 'light';
-    height?: number;
+    height?: number | string;
     label?: string;
     emptyMessage?: string;
     emptyActionLabel?: string;
@@ -81,13 +81,15 @@
     const cvEl = canvasEl;
 
     pluginPromise = (async () => {
-      const [{ PluginContext }, { DefaultPluginSpec }] = await Promise.all([
+      const [{ PluginContext }, { DefaultPluginSpec, PluginSpec }, { MAQualityAssessment }] = await Promise.all([
         import('molstar/lib/mol-plugin/context'),
         import('molstar/lib/mol-plugin/spec'),
+        import('molstar/lib/extensions/model-archive/quality-assessment/behavior'),
       ]);
       if (destroyed) return null;
 
       const spec = DefaultPluginSpec();
+      spec.behaviors.push(PluginSpec.Behavior(MAQualityAssessment));
       const ctx = new PluginContext(spec);
       await ctx.init();
       if (destroyed) {
@@ -168,15 +170,15 @@
   }
 
   /**
-   * Add ligand (ball-and-stick), ion (spacefill), and sparse theozyme (<= 280 atoms, ball-and-stick)
-   * representations to a Mol* structure and return their state refs for visibility toggling.
+   * Add ligand (ball-and-stick), ion (spacefill), and sparse theozyme (<= 15 polymer residues,
+   * ball-and-stick) representations to a Mol* structure and return their state refs for visibility toggling.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async function addAccessoryRepresentations(ctx: any, struct: any): Promise<string[]> {
     const refs: string[] = [];
     const sData = struct.data;
-    const totalAtoms = sData?.elementCount ?? 0;
-    const isSparseTheozyme = totalAtoms > 0 && totalAtoms <= 280;
+    const polymerResidues = sData?.polymerResidueCount ?? 0;
+    const isSparseTheozyme = polymerResidues > 0 && polymerResidues <= 15;
     try {
       const ligComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ligand');
       if (ligComp) {
@@ -561,6 +563,21 @@
     }
   });
 
+  $effect(() => {
+    const el = containerEl;
+    const ctx = plugin;
+    if (!el || !ctx?.canvas3d || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      try {
+        ctx.canvas3d?.handleResize();
+      } catch {
+        /* ignore resize during teardown */
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+
   onDestroy(() => {
     destroyed = true;
     loadSeq++;
@@ -573,7 +590,7 @@
   });
 </script>
 
-<div class="mol-card" style="height: {height}px">
+<div class="mol-card" style="height: {typeof height === 'number' ? `${height}px` : height}">
   {#if label}
     <div class="badge">{label}</div>
   {/if}

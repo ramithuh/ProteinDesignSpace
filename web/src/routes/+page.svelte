@@ -54,6 +54,7 @@
   const scheduler = new ExecutionScheduler();
 
   let rightPanelTab = $state<'params' | 'peek'>('params');
+  let expandedPane = $state<'none' | 'viewer' | 'inspector'>('none');
   let splitMode = $state<'horizontal' | 'vertical'>('horizontal');
   let splitPct = $state<number>(65);
   let draggingSplit = $state(false);
@@ -238,6 +239,10 @@
 
   function handleWindowKeydown(ev: KeyboardEvent) {
     if (ev.key === 'Escape') {
+      if (expandedPane !== 'none') {
+        expandedPane = 'none';
+        return;
+      }
       if (showCredits) {
         showCredits = false;
         return;
@@ -2101,7 +2106,14 @@
 
     <!-- Output & Inspector Pane (Right in Horizontal Split, Bottom in Vertical Split) -->
     <section class="results-grid" class:stacked-pane={splitMode === 'horizontal'}>
-      <div class="viewer-col">
+      {#if expandedPane !== 'none'}
+        <div
+          class="expand-backdrop"
+          role="presentation"
+          onclick={() => (expandedPane = 'none')}
+        ></div>
+      {/if}
+      <div class="viewer-col" class:is-expanded={expandedPane === 'viewer'}>
         <div class="viewer-bar">
           {#if isCompareMode && comparisonState}
             <div class="seg-group" role="group" aria-label="3D comparison layout">
@@ -2234,31 +2246,43 @@
               </button>
             {/if}
           {/if}
+          <button
+            type="button"
+            class="pane-expand-btn"
+            class:active={expandedPane === 'viewer'}
+            onclick={() => (expandedPane = expandedPane === 'viewer' ? 'none' : 'viewer')}
+            title={expandedPane === 'viewer' ? 'Collapse 3D viewer (Esc)' : 'Expand 3D viewer to full view'}
+            aria-label={expandedPane === 'viewer' ? 'Collapse 3D viewer' : 'Expand 3D viewer'}
+          >
+            {expandedPane === 'viewer' ? '⤡ Collapse' : '⤢ Expand'}
+          </button>
         </div>
 
-        <MolSuperposeViewer
-          designedPdb={isCompareMode ? null : viewerDesignedPdb}
-          refoldPdb={isCompareMode ? null : viewerRefoldPdb}
-          models={isCompareMode && comparisonState ? comparisonState.models : null}
-          trajectoryPdb={isCompareMode ? null : (viewerStructureMeta?.trajectoryPdb ?? null)}
-          frameIndex={showTrajectory ? trajFrame : undefined}
-          {showDesigned}
-          {showRefold}
-          {showTrajectory}
-          {illustrative}
-          spin={viewerSpin}
-          {theme}
-          height={splitMode === 'horizontal' ? 350 : 460}
-          label={isCompareMode ? compareViewerLabel : viewerLabel}
-          emptyMessage={isCompareMode ? undefined : viewerEmptyMessage}
-          emptyActionLabel={!isCompareMode && isPeekingSequenceSlot && !showSeqParentBackbone && contextStructure
-            ? 'Preview parent backbone'
-            : undefined}
-          onEmptyAction={() => (showSeqParentBackbone = true)}
-          onResidueClick={isCompareMode ? undefined : handleResidueClick}
-          onToggleModelVisibility={toggleCompareModelVisibility}
-          onSoloModel={soloCompareModel}
-        />
+        <div class="viewer-stage">
+          <MolSuperposeViewer
+            designedPdb={isCompareMode ? null : viewerDesignedPdb}
+            refoldPdb={isCompareMode ? null : viewerRefoldPdb}
+            models={isCompareMode && comparisonState ? comparisonState.models : null}
+            trajectoryPdb={isCompareMode ? null : (viewerStructureMeta?.trajectoryPdb ?? null)}
+            frameIndex={showTrajectory ? trajFrame : undefined}
+            {showDesigned}
+            {showRefold}
+            {showTrajectory}
+            {illustrative}
+            spin={viewerSpin}
+            {theme}
+            height={expandedPane === 'viewer' ? '100%' : splitMode === 'horizontal' ? 350 : 460}
+            label={isCompareMode ? compareViewerLabel : viewerLabel}
+            emptyMessage={isCompareMode ? undefined : viewerEmptyMessage}
+            emptyActionLabel={!isCompareMode && isPeekingSequenceSlot && !showSeqParentBackbone && contextStructure
+              ? 'Preview parent backbone'
+              : undefined}
+            onEmptyAction={() => (showSeqParentBackbone = true)}
+            onResidueClick={isCompareMode ? undefined : handleResidueClick}
+            onToggleModelVisibility={toggleCompareModelVisibility}
+            onSoloModel={soloCompareModel}
+          />
+        </div>
 
         {#if !isCompareMode && viewerStructureMeta}
           <div class="geom-strip">
@@ -2277,7 +2301,7 @@
         {/if}
       </div>
 
-      <div class="right-panel" data-tour="inspector-panel">
+      <div class="right-panel" class:is-expanded={expandedPane === 'inspector'} data-tour="inspector-panel">
         <div class="right-tabs" role="tablist" aria-label="Block inspector tabs">
           <button
             type="button"
@@ -2316,6 +2340,16 @@
               {isCompareMode ? 'Editing: ' : ''}{selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
             </span>
           {/if}
+          <button
+            type="button"
+            class="pane-expand-btn tab-expand-btn"
+            class:active={expandedPane === 'inspector'}
+            onclick={() => (expandedPane = expandedPane === 'inspector' ? 'none' : 'inspector')}
+            title={expandedPane === 'inspector' ? 'Collapse panel (Esc)' : 'Expand panel to full view'}
+            aria-label={expandedPane === 'inspector' ? 'Collapse inspector panel' : 'Expand inspector panel'}
+          >
+            {expandedPane === 'inspector' ? '⤡' : '⤢'}
+          </button>
         </div>
 
         <div class="right-body">
@@ -2939,6 +2973,79 @@
     align-items: center;
     gap: 5px;
     cursor: pointer;
+  }
+  .viewer-stage {
+    min-height: 0;
+  }
+  .expand-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 155;
+    background: rgba(10, 14, 24, 0.58);
+    backdrop-filter: blur(4px);
+  }
+  .viewer-col.is-expanded,
+  .right-panel.is-expanded {
+    position: fixed;
+    inset: 16px;
+    z-index: 160;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    padding: 12px 14px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.52);
+    width: auto !important;
+    max-width: none !important;
+    height: auto !important;
+  }
+  .viewer-col.is-expanded .viewer-stage {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .viewer-col.is-expanded .viewer-stage > :global(.mol-card) {
+    flex: 1;
+    height: 100% !important;
+  }
+  .right-panel.is-expanded {
+    padding: 0;
+    overflow: hidden;
+  }
+  .right-panel.is-expanded .right-body {
+    flex: 1;
+    max-height: none !important;
+    overflow-y: auto;
+  }
+  .pane-expand-btn {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .pane-expand-btn:hover,
+  .pane-expand-btn.active {
+    border-color: var(--accent);
+    color: var(--text-primary);
+    background: var(--bg-pill);
+  }
+  .tab-expand-btn {
+    margin-left: 6px;
+    margin-bottom: 4px;
+    padding: 2px 6px;
+    flex-shrink: 0;
   }
   .pick-mode {
     display: inline-flex;
