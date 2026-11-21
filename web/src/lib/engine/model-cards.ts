@@ -221,8 +221,8 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
           '209 F16 2D weight tensors + 295 F32 1D norms/biases (2 shards, 44.57 MB); packed FP16 GPU weights with FP32 accumulation',
         approxSizeMB: 45,
         parityVsPytorchFp32: {
-          metric: 'Forward xl / ai relRMS vs PyTorch FP32',
-          value: 'xl 2.243e-4 · ai 4.390e-4 (weights 1.968e-4)',
+          metric: 'Cα coords & sequence logits relRMS vs PyTorch FP32',
+          value: 'Cα coords 2.243e-4 · seq logits 4.390e-4 (weights 1.968e-4)',
           scope: 'Unconditional L=16 V1Denoiser oracle (seed=42, canonicalized pairwise quaternions)',
         },
         caveat:
@@ -246,8 +246,8 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
           '188 symmetric per-row I8 weights + colocated F32 scales, 316 F32 tensors (1 shard, 22.75 MB)',
         approxSizeMB: 23,
         parityVsPytorchFp32: {
-          metric: 'Forward xl / ai relRMS vs PyTorch FP32',
-          value: 'xl 1.065e-2 · ai 1.894e-2 (weights 9.383e-3)',
+          metric: 'Cα coords & sequence logits relRMS vs PyTorch FP32',
+          value: 'Cα coords 1.065e-2 · seq logits 1.894e-2 (weights 9.383e-3)',
           scope: 'Unconditional L=16 V1Denoiser export quantization benchmark (not active in live worker)',
         },
         caveat:
