@@ -1612,9 +1612,14 @@
     height: 100%;
     display: flex;
     flex-direction: column;
+    align-items: stretch;
     gap: 10px;
     overflow-y: auto;
     padding-right: 2px;
+  }
+  .results-grid.stacked-pane > * {
+    width: 100%;
+    min-width: 0;
   }
   .results-grid.stacked-pane .right-panel {
     flex: 1;

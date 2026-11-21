@@ -469,12 +469,14 @@
   {:else}
     <div class="placeholder-box">
       {#if activeSlot && !activeSlot.wired}
-        Optional input <code>{activeSlot.portName}</code> (<code>{activeSlot.portType}</code>) is not connected.
-        <br />
-        Drag a matching colored wire into this port on the canvas to pass data in.
+        <p class="placeholder-msg">
+          Optional input <code>{activeSlot.portName}</code> (<code>{activeSlot.portType}</code>) is not connected.
+          Drag a matching colored wire into this port on the canvas to pass data in.
+        </p>
       {:else if activeSlot}
-        No data on <b>{activeSlot.direction === 'in' ? 'IN' : 'OUT'} · {activeSlot.portName}</b> yet.
-        <br />
+        <p class="placeholder-msg">
+          No data on <b>{activeSlot.direction === 'in' ? 'IN' : 'OUT'} · {activeSlot.portName}</b> yet.
+        </p>
         {#if node && onRunUpToNode}
           <button
             class="run-to-btn"
@@ -485,7 +487,9 @@
           </button>
         {/if}
       {:else}
-        Wire any blocks on the canvas (or pick a preset above) and click <b>▶ Run</b>.
+        <p class="placeholder-msg">
+          Wire any blocks on the canvas (or pick a preset above) and click <b>▶ Run</b>.
+        </p>
       {/if}
       <div class="hint-foot">
         Click any block, port label, or colored wire to peek at intermediate structures, sequences, folds, or conditioning specs.
@@ -827,6 +831,10 @@
     flex-direction: column;
     align-items: center;
     gap: 10px;
+  }
+  .placeholder-msg {
+    margin: 0;
+    color: var(--text-secondary);
   }
   .run-to-btn {
     background: #2563eb;
