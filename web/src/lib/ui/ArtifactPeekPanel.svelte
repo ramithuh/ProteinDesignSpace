@@ -1305,7 +1305,6 @@
             <div><b>Refold Motif RMSD:</b> {activeRow.refoldMotifRmsd.toFixed(2)} Å</div>
           {/if}
           <div><b>Refold R<sub>g</sub>:</b> {fmtNum(activeRow.geometry?.rg, 1, ' Å')}</div>
-          <div><b>Refold α/β:</b> {fmtNum(activeRow.geometry?.helixPct, 0, '%')} / {fmtNum(activeRow.geometry?.sheetPct, 0, '%')}</div>
           <p class="tip">
             Tip: Click any block, port label, or colored wire on the canvas to peek at intermediate structures, sequences, or folds!
           </p>
@@ -1737,7 +1736,7 @@
               <th>ID</th>
               <th>Len</th>
               <th>R<sub>g</sub></th>
-              <th>α / β</th>
+              <th>Breaks / Clashes</th>
             </tr>
           </thead>
           <tbody>
@@ -1748,7 +1747,7 @@
                 <td><code>{item.id}</code></td>
                 <td>{item.length} aa</td>
                 <td>{fmtNum(item.geometry?.rg, 1, ' Å')}</td>
-                <td>{fmtNum(item.geometry?.helixPct, 0, '%')} / {fmtNum(item.geometry?.sheetPct, 0, '%')}</td>
+                <td>{item.geometry?.chainBreaks ?? '—'} / {item.geometry?.clashes ?? '—'}</td>
               </tr>
             {/each}
           </tbody>
@@ -1788,7 +1787,6 @@
         <span class="stat-chip">{activeStruct.diagnostics.chainCount} chains</span>
       {/if}
       <span class="stat-chip">R<sub>g</sub> = {fmtNum(activeStruct.geometry?.rg, 1, ' Å')}</span>
-      <span class="stat-chip">α {fmtNum(activeStruct.geometry?.helixPct, 0, '%')} · β {fmtNum(activeStruct.geometry?.sheetPct, 0, '%')}</span>
       <span class="stat-chip">breaks: {activeStruct.geometry?.chainBreaks ?? '—'}</span>
       <span class="stat-chip">clashes: {activeStruct.geometry?.clashes ?? '—'}</span>
       {#if activeStruct.representativeSelection}
