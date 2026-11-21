@@ -12,6 +12,32 @@ export type PortType =
   | 'DesignabilityMetrics'
   | 'ConditionSpec';
 
+export type BioEntityKind = 'protein' | 'dna' | 'rna' | 'ligand';
+
+export interface StructureParseDiagnostics {
+  chainCount: number;
+  chainLengths: number[];
+  hasLigands: boolean;
+  ligandNames: string[];
+  hasNucleicAcids: boolean;
+  nucleicAcidChains: string[];
+}
+
+export interface BioCompatibilityFix {
+  label: string;
+  nodeId: string;
+  paramsPatch: Record<string, unknown>;
+  nodeLabel?: string;
+}
+
+export interface BioCompatibilityIssue {
+  severity: 'error' | 'warning';
+  code: string;
+  nodeId: string;
+  message: string;
+  fix?: BioCompatibilityFix;
+}
+
 export interface StructureArtifact {
   kind: 'StructureArtifact';
   id: string;
@@ -25,6 +51,9 @@ export interface StructureArtifact {
   backbone4Coords: Float32Array;
   pdbText: string;
   cifText?: string;
+  chainIds?: string[];
+  chainLengths?: number[];
+  diagnostics?: StructureParseDiagnostics;
   /** Optional multi-model PDB when trajectory frames are available. */
   trajectoryPdb?: string;
   trajectoryFrameCount?: number;
@@ -59,6 +88,9 @@ export interface FoldedCandidate {
   plddt: Float32Array;
   meanPlddt: number;
   ptm: number | null;
+  iptm?: number | null;
+  chainLengths?: number[];
+  chainIds?: string[];
   pae?: Float32Array;
   elapsedMs: number;
 }
@@ -78,6 +110,7 @@ export interface DesignabilityRow {
   scTm: number;
   meanPlddt: number;
   ptm: number | null;
+  iptm?: number | null;
   designable: boolean; // scRMSD < 2.0 Å && meanPlddt >= 70
   alignedFoldPdb: string;
   designedPdb: string;

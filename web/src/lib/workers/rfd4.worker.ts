@@ -474,7 +474,7 @@ self.onmessage = async (ev: MessageEvent) => {
         );
       }
 
-      const geometry = computeGeometryStats(parsed.caCoords);
+      const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
       const chainLengths = computeChainLengths(parsed.chainIds);
       const candChainLengths =
         chainLengths.length > 0 && chainLengths.reduce((a, b) => a + b, 0) === finalSeq.length
@@ -508,6 +508,9 @@ self.onmessage = async (ev: MessageEvent) => {
         backbone4Coords: parsed.backbone4Coords,
         pdbText,
         cifText,
+        chainIds: parsed.chainIds,
+        chainLengths: parsed.diagnostics.chainLengths,
+        diagnostics: parsed.diagnostics,
         geometry,
       };
 

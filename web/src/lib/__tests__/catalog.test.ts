@@ -26,11 +26,12 @@ import { validateNodeParams } from '$lib/engine/param-validation';
 import type { WorkflowGraph } from '$lib/engine/types';
 
 describe('engine/catalog & biologist terminology', () => {
-  it('exposes complete registry metadata for all 13 LocalFold models, 3 MPNN variants, 9 RFD4 tasks, and 7 presets', () => {
-    expect(LOCALFOLD_MODEL_OPTIONS).toHaveLength(13);
+  it('exposes complete registry metadata for all 18 LocalFold models, 3 MPNN variants, 9 RFD4 tasks, and 7 presets', () => {
+    expect(LOCALFOLD_MODEL_OPTIONS).toHaveLength(18);
     expect(LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af2')).toHaveLength(5);
+    expect(LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af2-multimer')).toHaveLength(5);
     expect(LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af3')).toHaveLength(8);
-    expect(new Set(LOCALFOLD_MODEL_OPTIONS.map((m) => m.id)).size).toBe(13);
+    expect(new Set(LOCALFOLD_MODEL_OPTIONS.map((m) => m.id)).size).toBe(18);
     for (const m of LOCALFOLD_MODEL_OPTIONS) {
       expect(m.approxMB).toBeGreaterThan(0);
       expect(m.license.length).toBeGreaterThan(0);
@@ -59,10 +60,15 @@ describe('engine/catalog & biologist terminology', () => {
     expect(CATALOG_ITEMS).toHaveLength(Object.keys(ADAPTER_REGISTRY).length);
 
     const lf = CATALOG_ITEMS.find((i) => i.id === 'localfold-af2')!;
-    expect(lf.subGroups.map((g) => g.title)).toEqual(['AF2-Class (Monomer)', 'AF3-Class (All-Atom)']);
+    expect(lf.subGroups.map((g) => g.title)).toEqual([
+      'AF2-Class (Monomer)',
+      'AF2-Multimer v3 (Complexes)',
+      'AF3-Class (All-Atom)',
+    ]);
     expect(lf.subGroups[0].items).toHaveLength(5);
-    expect(lf.subGroups[1].items).toHaveLength(8);
-    const af3Sub = lf.subGroups[1].items.find((s) => s.key === 'af3')!;
+    expect(lf.subGroups[1].items).toHaveLength(5);
+    expect(lf.subGroups[2].items).toHaveLength(8);
+    const af3Sub = lf.subGroups[2].items.find((s) => s.key === 'af3')!;
     expect(af3Sub.nonCommercial).toBe(true);
     expect(af3Sub.badge).toBe('Non-Commercial');
 
@@ -138,10 +144,15 @@ describe('engine/catalog & biologist terminology', () => {
     expect(mpnnBare.hasNarrowedSubMatch).toBe(false);
     expect(mpnnBare.matchingSubItems).toHaveLength(3);
 
-    // "af2" still narrows LocalFold to the 5 AF2-class models
+    // "af2" narrows LocalFold to the 10 AF2-class models (5 monomer + 5 multimer v3)
     const af2Res = filterCatalog('af2').find((r) => r.item.id === 'localfold-af2')!;
     expect(af2Res.hasNarrowedSubMatch).toBe(true);
-    expect(af2Res.matchingSubItems).toHaveLength(5);
+    expect(af2Res.matchingSubItems).toHaveLength(10);
+
+    // "multimer" narrows LocalFold to the 5 AF2-Multimer v3 models
+    const multiRes = filterCatalog('multimer').find((r) => r.item.id === 'localfold-af2')!;
+    expect(multiRes.hasNarrowedSubMatch).toBe(true);
+    expect(multiRes.matchingSubItems).toHaveLength(5);
   });
 
   it('exposes 6 compact top-level workflow categories with direct model flyouts and LocalFold footnote', () => {
@@ -156,7 +167,7 @@ describe('engine/catalog & biologist terminology', () => {
 
     const pred = CATALOG_CATEGORIES.find((c) => c.id === 'prediction')!;
     expect(pred.footnote).toContain('LocalFold');
-    expect(pred.subGroups.flatMap((g) => g.items)).toHaveLength(13);
+    expect(pred.subGroups.flatMap((g) => g.items)).toHaveLength(18);
 
     const boltz = filterCatalogCategories('boltz');
     expect(boltz).toHaveLength(1);

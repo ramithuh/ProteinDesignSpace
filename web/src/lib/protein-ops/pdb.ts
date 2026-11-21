@@ -215,25 +215,77 @@ export function coordsToPolyGlyPdb(coords: Float32Array, nResidues: number): str
   return coordsToBackbonePdb(coords, nResidues, { atomsPerRes: 3 });
 }
 
+const WATER_RESNAMES = new Set(['HOH', 'WAT', 'DOD', 'H2O', 'TIP', 'TIP3']);
+const NUCLEIC_RESNAMES = new Set([
+  'DA', 'DC', 'DG', 'DT', 'DU', 'DI',
+  'A', 'C', 'G', 'U', 'T', 'I',
+  'ADE', 'CYT', 'GUA', 'THY', 'URA',
+]);
+
+export interface StructureParseDiagnostics {
+  chainCount: number;
+  chainLengths: number[];
+  hasLigands: boolean;
+  ligandNames: string[];
+  hasNucleicAcids: boolean;
+  nucleicAcidChains: string[];
+}
+
+export function computeChainLengthsFromIds(chainIds: readonly string[]): number[] {
+  const lengths: number[] = [];
+  for (let i = 0; i < chainIds.length; i++) {
+    if (i === 0 || chainIds[i] !== chainIds[i - 1]) {
+      lengths.push(1);
+    } else {
+      lengths[lengths.length - 1]++;
+    }
+  }
+  return lengths;
+}
+
+export function chainIdsFromLengths(chainLengths: readonly number[]): string[] {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const out: string[] = [];
+  for (let c = 0; c < chainLengths.length; c++) {
+    const ch = alphabet[c % alphabet.length] ?? 'A';
+    for (let k = 0; k < chainLengths[c]; k++) out.push(ch);
+  }
+  return out;
+}
+
 /**
  * Convert AlphaFold2 atom37 coordinates [L * 37 * 3] + mask [L * 37] + sequence + pLDDT [L]
  * into an all-atom PDB string (with pLDDT written to the B-factor column in 0..100 scale).
+ * Supports single chainId ('A') or per-residue chainIds[] for multi-chain complexes.
  */
 export function atom37ToPdb(
   atom37: Float32Array,
   atom37Mask: Float32Array,
   sequence: string,
   plddt?: Float32Array,
-  chainId = 'A',
+  chainIdOrIds: string | readonly string[] = 'A',
 ): { pdbText: string; caCoords: Float32Array; backbone4Coords: Float32Array } {
   const L = sequence.length;
-  const chain = chainId[0] ?? 'A';
+  const perResChains =
+    Array.isArray(chainIdOrIds) && chainIdOrIds.length === L ? chainIdOrIds : null;
+  const defaultChain = typeof chainIdOrIds === 'string' ? (chainIdOrIds[0] ?? 'A') : 'A';
   const lines: string[] = [];
   const caCoords = new Float32Array(L * 3);
   const backbone4Coords = new Float32Array(L * 4 * 3);
   let atomIdx = 1;
+  let prevChain: string | null = null;
+  let chainResNum = 0;
 
   for (let r = 0; r < L; r++) {
+    const chain = (perResChains ? perResChains[r] : defaultChain)[0] ?? 'A';
+    if (prevChain !== null && chain !== prevChain) {
+      lines.push(`TER   ${pad(String(atomIdx), 5)}      ${AA1_TO_AA3[sequence[r - 1].toUpperCase()] ?? 'ALA'} ${prevChain}${pad(String(chainResNum), 4)}`);
+      atomIdx++;
+      chainResNum = 0;
+    }
+    prevChain = chain;
+    chainResNum++;
+
     const aa1 = sequence[r].toUpperCase();
     const resName = AA1_TO_AA3[aa1] ?? 'ALA';
     const bVal = plddt ? plddt[r] : 0.0;
@@ -263,7 +315,7 @@ export function atom37ToPdb(
       const atomCol = name.length === 4 ? name : ` ${padR(name, 3)}`;
       const element = name[0];
       lines.push(
-        `ATOM  ${pad(String(atomIdx), 5)} ${atomCol} ${resName} ${chain}${pad(String(r + 1), 4)}    ` +
+        `ATOM  ${pad(String(atomIdx), 5)} ${atomCol} ${resName} ${chain}${pad(String(chainResNum), 4)}    ` +
           `${pad(x.toFixed(3), 8)}${pad(y.toFixed(3), 8)}${pad(z.toFixed(3), 8)}` +
           `  1.00${pad(bVal.toFixed(2), 6)}           ${element}  `,
       );
@@ -315,6 +367,7 @@ export interface ParsedStructure {
   chainIds: string[];
   pdbText: string;
   format: 'pdb' | 'mmcif';
+  diagnostics: StructureParseDiagnostics;
 }
 
 /**
@@ -374,13 +427,31 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
 
   const lines = pdbText.split('\n');
   let maxSerial = 0;
+  const ligandSet = new Set<string>();
+  const nucleicChains = new Set<string>();
   for (const line of lines) {
     if (line.startsWith('ENDMDL') && residues.length > 0) break;
     if ((line.startsWith('ATOM  ') || line.startsWith('HETATM')) && line.length >= 11) {
       const serial = parseInt(line.slice(6, 11).trim(), 10);
       if (Number.isFinite(serial) && serial > maxSerial) maxSerial = serial;
     }
+    if (line.startsWith('HETATM') && line.length >= 22) {
+      const hetRes = line.slice(17, 20).trim().toUpperCase();
+      if (hetRes && !WATER_RESNAMES.has(hetRes) && !AA3_TO_AA1[hetRes]) {
+        if (NUCLEIC_RESNAMES.has(hetRes)) {
+          nucleicChains.add(line[21]?.trim() || 'A');
+        } else {
+          ligandSet.add(hetRes);
+        }
+      }
+      continue;
+    }
     if (!line.startsWith('ATOM  ') || line.length < 54) continue;
+    const rawResName = line.slice(17, 20).trim().toUpperCase();
+    if (NUCLEIC_RESNAMES.has(rawResName)) {
+      nucleicChains.add(line[21]?.trim() || 'A');
+      continue;
+    }
     const altLoc = line[16];
     if (altLoc !== ' ' && altLoc !== 'A' && altLoc !== '1') continue;
     const atomName = line.slice(12, 16).trim();
@@ -495,6 +566,7 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
     normalizedPdb = patchedLines.join('\n');
   }
 
+  const chainLengths = computeChainLengthsFromIds(chainIds);
   return {
     sequence: seq,
     nResidues: L,
@@ -503,6 +575,14 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
     chainIds,
     pdbText: normalizedPdb,
     format: 'pdb',
+    diagnostics: {
+      chainCount: chainLengths.length,
+      chainLengths,
+      hasLigands: ligandSet.size > 0,
+      ligandNames: [...ligandSet],
+      hasNucleicAcids: nucleicChains.size > 0,
+      nucleicAcidChains: [...nucleicChains],
+    },
   };
 }
 
@@ -620,7 +700,44 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     resSeqs,
     caOnly: L > 0 && !anyHasNC,
   });
-  return { sequence: seq, nResidues: L, caCoords, backbone4Coords, chainIds, pdbText, format: 'mmcif' };
+  // Scan mmCIF for HETATM ligands and nucleic acid residues
+  const ligandSet = new Set<string>();
+  const nucleicChains = new Set<string>();
+  for (const rawLine of cifText.split('\n')) {
+    const line = rawLine.trim();
+    if (line.startsWith('HETATM')) {
+      const toks = tokenizeCifLine(line);
+      const comp = (toks[5] ?? '').toUpperCase();
+      if (comp && !WATER_RESNAMES.has(comp) && !AA3_TO_AA1[comp]) {
+        if (NUCLEIC_RESNAMES.has(comp)) nucleicChains.add(toks[6] ?? 'A');
+        else ligandSet.add(comp);
+      }
+    } else if (line.startsWith('ATOM')) {
+      const toks = tokenizeCifLine(line);
+      const comp = (toks[5] ?? '').toUpperCase();
+      if (NUCLEIC_RESNAMES.has(comp)) {
+        nucleicChains.add(toks[6] ?? 'A');
+      }
+    }
+  }
+  const chainLengths = computeChainLengthsFromIds(chainIds);
+  return {
+    sequence: seq,
+    nResidues: L,
+    caCoords,
+    backbone4Coords,
+    chainIds,
+    pdbText,
+    format: 'mmcif',
+    diagnostics: {
+      chainCount: chainLengths.length,
+      chainLengths,
+      hasLigands: ligandSet.size > 0,
+      ligandNames: [...ligandSet],
+      hasNucleicAcids: nucleicChains.size > 0,
+      nucleicAcidChains: [...nucleicChains],
+    },
+  };
 }
 
 /**

@@ -20,7 +20,9 @@
   import { clearAllModelCaches, getCacheStats } from '$lib/engine/opfs-cache';
   import { COMPARE_PALETTE, buildComparisonState } from '$lib/engine/compare';
   import { estimateRunRequirements, type RunPreflightSummary } from '$lib/engine/run-preflight';
+  import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
   import type {
+    BioCompatibilityIssue,
     CanonicalArtifact,
     ConditionSpecArtifact,
     DesignabilityMetrics,
@@ -463,6 +465,25 @@
   }
 
   let validationErrors = $derived(validateGraph(graph));
+  let bioIssues = $derived(validateBioCapabilities(graph));
+
+  function applyBioFix(issue: BioCompatibilityIssue) {
+    if (!issue.fix || isRunning) return;
+    const { nodeId, paramsPatch, nodeLabel } = issue.fix;
+    graph = {
+      ...graph,
+      nodes: graph.nodes.map((n) =>
+        n.id === nodeId
+          ? {
+              ...n,
+              params: { ...n.params, ...paramsPatch },
+              ...(nodeLabel ? { label: nodeLabel } : {}),
+            }
+          : n,
+      ),
+    };
+    runError = null;
+  }
 
   function confirmPendingRun(rememberChoice: boolean) {
     const req = pendingRun;
@@ -1249,6 +1270,28 @@
         </div>
       {/if}
 
+      {#if bioIssues.length > 0}
+        <div class="bio-banner-list" role="status" aria-live="polite">
+          {#each bioIssues as issue (`${issue.code}:${issue.nodeId}`)}
+            <div class="bio-banner" class:is-err={issue.severity === 'error'}>
+              <span class="bio-msg">
+                <b>Biological compatibility:</b> {issue.message}
+              </span>
+              {#if issue.fix}
+                <button
+                  type="button"
+                  class="bio-fix-btn"
+                  disabled={isRunning}
+                  onclick={() => applyBioFix(issue)}
+                >
+                  {issue.fix.label}
+                </button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+
       {#if runError}
         <div class="error-banner">
           <b>Pipeline error:</b> {runError}
@@ -1924,6 +1967,54 @@
     border-radius: 6px;
     font-size: 12px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  .bio-banner-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .bio-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-text);
+    padding: 7px 12px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    line-height: 1.4;
+  }
+  .bio-banner.is-err {
+    background: var(--err-bg);
+    border-color: var(--err-border);
+    color: var(--err-text);
+  }
+  .bio-msg {
+    flex: 1 1 240px;
+  }
+  .bio-fix-btn {
+    flex-shrink: 0;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--warn-border);
+    border-radius: 5px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+  .bio-fix-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent-bright);
+  }
+  .bio-fix-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .error-banner {
     background: var(--err-bg);

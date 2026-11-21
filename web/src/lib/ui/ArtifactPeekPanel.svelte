@@ -275,6 +275,9 @@
         <PaePlot pae={activeRow.pae} size={200} />
         <div class="pae-notes">
           <div><b>Fold time:</b> {(activeRow.foldElapsedMs / 1000).toFixed(1)} s</div>
+          {#if activeRow.iptm !== null && activeRow.iptm !== undefined}
+            <div><b>ipTM:</b> {activeRow.iptm.toFixed(3)}</div>
+          {/if}
           <div><b>Refold R<sub>g</sub>:</b> {activeRow.geometry.rg.toFixed(1)} Å</div>
           <div><b>Refold α/β:</b> {activeRow.geometry.helixPct.toFixed(0)}% / {activeRow.geometry.sheetPct.toFixed(0)}%</div>
           <p class="tip">
@@ -337,6 +340,9 @@
           {/if}
           {#if activeFold.ptm !== null}
             <div><b>pTM:</b> {activeFold.ptm.toFixed(3)}</div>
+          {/if}
+          {#if activeFold.iptm !== null && activeFold.iptm !== undefined}
+            <div><b>ipTM:</b> {activeFold.iptm.toFixed(3)}</div>
           {/if}
           <div><b>Fold time:</b> {(activeFold.elapsedMs / 1000).toFixed(1)} s</div>
         </div>

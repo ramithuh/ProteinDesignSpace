@@ -151,11 +151,13 @@ describe('peek helpers', () => {
     expect(res.preview.split('\n')).toHaveLength(10);
   });
 
-  it('foldModelSlug and formatFoldModelName format all 13 worker foldModelId values and bare localfold-af2', () => {
-    expect(LOCALFOLD_MODEL_OPTIONS).toHaveLength(13);
+  it('foldModelSlug and formatFoldModelName format all 18 worker foldModelId values and bare localfold-af2', () => {
+    expect(LOCALFOLD_MODEL_OPTIONS).toHaveLength(18);
     for (const opt of LOCALFOLD_MODEL_OPTIONS) {
       const workerId =
-        opt.family === 'af2' ? `localfold-af2-${opt.id}-int5` : `localfold-${opt.id}-int5`;
+        opt.family === 'af2' || opt.family === 'af2-multimer'
+          ? `localfold-af2-${opt.id}-int5`
+          : `localfold-${opt.id}-int5`;
       expect(foldModelSlug(workerId)).toBe(opt.id);
       expect(formatFoldModelName(workerId)).toBe(opt.label);
     }

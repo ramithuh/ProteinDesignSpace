@@ -101,6 +101,34 @@ function buildSubGroupsForAdapter(adapterId: string): {
         .toLowerCase(),
     }));
 
+    const af2MultimerItems: CatalogSubItem[] = LOCALFOLD_MODEL_OPTIONS.filter(
+      (m) => m.family === 'af2-multimer',
+    ).map((opt) => ({
+      key: opt.id,
+      label: opt.label,
+      meta: `~${opt.approxMB} MB · ${opt.license}`,
+      insert: {
+        adapterId: 'localfold-af2',
+        params: { model: opt.id },
+        label: `LocalFold (${opt.shortLabel})`,
+      },
+      searchBlob: [
+        opt.id,
+        opt.label,
+        opt.shortLabel,
+        opt.license,
+        'af2',
+        'af2-multimer',
+        'alphafold2',
+        'multimer',
+        'complex',
+        'binder',
+        'ppi',
+      ]
+        .join(' ')
+        .toLowerCase(),
+    }));
+
     const af3Items: CatalogSubItem[] = LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af3').map((opt) => ({
       key: opt.id,
       label: opt.label,
@@ -132,6 +160,7 @@ function buildSubGroupsForAdapter(adapterId: string): {
       subCountLabel: `${LOCALFOLD_MODEL_OPTIONS.length} models`,
       subGroups: [
         { title: 'AF2-Class (Monomer)', items: af2Items },
+        { title: 'AF2-Multimer v3 (Complexes)', items: af2MultimerItems },
         { title: 'AF3-Class (All-Atom)', items: af3Items },
       ],
     };

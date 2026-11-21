@@ -68,7 +68,12 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
           key,
           label: meta.label,
           approxMB: meta.approxMB,
-          estimatedVramMB: meta.family === 'af3' ? 1800 : manifest.estimatedVramMB,
+          estimatedVramMB:
+            meta.family === 'af3'
+              ? 1800
+              : meta.family === 'af2-multimer'
+                ? 1500
+                : manifest.estimatedVramMB,
           runtime: manifest.runtime,
           nonCommercial: meta.nonCommercial,
         });

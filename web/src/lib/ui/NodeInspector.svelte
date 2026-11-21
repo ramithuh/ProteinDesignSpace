@@ -689,6 +689,11 @@
               <option value={opt.id}>{opt.label}</option>
             {/each}
           </optgroup>
+          <optgroup label="AlphaFold2-Multimer v3 (Complexes)">
+            {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af2-multimer') as opt (opt.id)}
+              <option value={opt.id}>{opt.label}</option>
+            {/each}
+          </optgroup>
           <optgroup label="AF3-Class (All-Atom)">
             {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af3') as opt (opt.id)}
               <option value={opt.id}>{opt.label}</option>

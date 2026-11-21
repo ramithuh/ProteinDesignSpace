@@ -9,6 +9,7 @@ import Genie3Worker from '$lib/workers/genie3.worker?worker';
 import { generateSampleHelixBundlePdb, parseStructureText } from '$lib/protein-ops/pdb';
 import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/protein-ops/kabsch';
 import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
+import { splitMultiChainSequence, validateRuntimeNodeInputs } from './bio-capabilities';
 import type {
   ArtifactRef,
   CanonicalArtifact,
@@ -270,6 +271,9 @@ export class ExecutionScheduler {
         backbone4Coords: parsed.backbone4Coords,
         pdbText: parsed.pdbText,
         cifText: parsed.format === 'mmcif' ? rawText : undefined,
+        chainIds: parsed.chainIds,
+        chainLengths: parsed.diagnostics.chainLengths,
+        diagnostics: parsed.diagnostics,
         geometry,
       };
       return { structure: art };
@@ -281,6 +285,7 @@ export class ExecutionScheduler {
       const candidates: Array<{
         id: string;
         sequence: string;
+        chainLengths?: number[];
         score: null;
         globalScore: null;
         sourceModelId: string;
@@ -291,20 +296,28 @@ export class ExecutionScheduler {
         blocks.forEach((b, idx) => {
           const lines = b.split('\n');
           const baseHeader = lines[0].trim().split(/\s+/)[0] || `seq-${idx + 1}`;
-          const seq = lines.slice(1).join('').replace(/[^ACDEFGHIKLMNPQRSTVWY]/gi, '').toUpperCase();
-          if (seq.length >= 5) {
+          const split = splitMultiChainSequence(lines.slice(1).join(''));
+          if (split.concatenated.length >= 5) {
             const count = seenIds.get(baseHeader) ?? 0;
             seenIds.set(baseHeader, count + 1);
             const id = count === 0 ? baseHeader : `${baseHeader}_${count + 1}`;
-            candidates.push({ id, sequence: seq, score: null, globalScore: null, sourceModelId: 'sequence-input' });
+            candidates.push({
+              id,
+              sequence: split.concatenated,
+              ...(split.chains.length > 1 ? { chainLengths: split.chainLengths } : {}),
+              score: null,
+              globalScore: null,
+              sourceModelId: 'sequence-input',
+            });
           }
         });
       } else {
-        const seq = raw.replace(/[^ACDEFGHIKLMNPQRSTVWY]/gi, '').toUpperCase();
-        if (seq.length >= 5) {
+        const split = splitMultiChainSequence(raw);
+        if (split.concatenated.length >= 5) {
           candidates.push({
             id: String(node.params.label || 'custom-seq-1'),
-            sequence: seq,
+            sequence: split.concatenated,
+            ...(split.chains.length > 1 ? { chainLengths: split.chainLengths } : {}),
             score: null,
             globalScore: null,
             sourceModelId: 'sequence-input',
@@ -457,7 +470,7 @@ export class ExecutionScheduler {
         }
         const align = kabschAlign(f.caCoords, structure.caCoords);
         const alignedFoldPdb = applyTransformToPdb(f.pdbText, align.rotation, align.translation);
-        const geom = computeGeometryStats(f.caCoords);
+        const geom = computeGeometryStats(f.caCoords, f.chainIds);
         const designable = Number.isFinite(align.rmsd) && align.rmsd < scThresh && f.meanPlddt >= plddtThresh;
         return {
           structureId: structure.id,
@@ -467,6 +480,7 @@ export class ExecutionScheduler {
           scTm: align.tmScore,
           meanPlddt: f.meanPlddt,
           ptm: f.ptm,
+          iptm: f.iptm ?? null,
           designable,
           alignedFoldPdb,
           designedPdb: structure.pdbText,
@@ -557,6 +571,11 @@ export class ExecutionScheduler {
               nodeOutputs = this.runCpuNode(node, inputs);
               elapsedMs = performance.now() - nStart;
             } else {
+              // Layer 2 biological capability guard before launching GPU worker / downloading weights
+              const guard = validateRuntimeNodeInputs(node, inputs);
+              if (guard.warnings.length > 0) {
+                console.warn(`[denovo.run] ${node.label ?? node.adapterId}:`, guard.warnings.join(' | '));
+              }
               const res = await this.runGpuNode(node, inputs, onProgress);
               nodeOutputs = res.outputs;
               elapsedMs = res.elapsedMs || performance.now() - nStart;

@@ -116,14 +116,15 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 1400,
     approxWeightsMB: 97,
-    licenseNote: 'Beerware engine (sokrypton/localfold); model weights fetched per-checkpoint from Hugging Face (AF2 CC-BY-4.0, RF3 BSD-3, Boltz-2 MIT, OpenBind-0/Protenix-2/OpenDDE/Mol-1/IF2 Apache-2.0, AF3 Non-Commercial)',
+    licenseNote: 'Beerware engine (sokrypton/localfold); model weights fetched per-checkpoint from Hugging Face (AF2 & AF2-Multimer CC-BY-4.0, RF3 BSD-3, Boltz-2 MIT, OpenBind-0/Protenix-2/OpenDDE/Mol-1/IF2 Apache-2.0, AF3 Non-Commercial)',
     description:
-      'In-browser protein structure prediction supporting AlphaFold2 (models 1–5), RoseTTAFold3, Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, and AlphaFold 3.',
+      'In-browser protein structure prediction supporting AlphaFold2 Monomer (models 1–5), AlphaFold2-Multimer v3 (models 1–5), RoseTTAFold3, Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, and AlphaFold 3.',
     inputs: {
       sequences: { type: 'SequenceSet' },
     },
     outputs: {
       folds: { type: 'FoldedStructure' },
+      structure: { type: 'StructureArtifact' },
     },
   },
   'designability-scorer': {
@@ -214,7 +215,7 @@ export interface LocalFoldModelMeta {
   id: string;
   label: string;
   shortLabel: string;
-  family: 'af2' | 'af3';
+  family: 'af2' | 'af2-multimer' | 'af3';
   approxMB: number;
   license: string;
   nonCommercial?: boolean;
@@ -226,6 +227,11 @@ export const LOCALFOLD_MODEL_OPTIONS: LocalFoldModelMeta[] = [
   { id: 'monomer-3', label: 'AlphaFold2 · Model 3 (pTM, template-free)', shortLabel: 'AF2 Model 3', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
   { id: 'monomer-4', label: 'AlphaFold2 · Model 4 (pTM, template-free)', shortLabel: 'AF2 Model 4', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
   { id: 'monomer-5', label: 'AlphaFold2 · Model 5 (pTM, template-free)', shortLabel: 'AF2 Model 5', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
+  { id: 'multimer', label: 'AlphaFold2-Multimer v3 · Model 1', shortLabel: 'AF2-Multimer 1', family: 'af2-multimer', approxMB: 74, license: 'CC-BY-4.0' },
+  { id: 'multimer-2', label: 'AlphaFold2-Multimer v3 · Model 2', shortLabel: 'AF2-Multimer 2', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0' },
+  { id: 'multimer-3', label: 'AlphaFold2-Multimer v3 · Model 3', shortLabel: 'AF2-Multimer 3', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0' },
+  { id: 'multimer-4', label: 'AlphaFold2-Multimer v3 · Model 4', shortLabel: 'AF2-Multimer 4', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0' },
+  { id: 'multimer-5', label: 'AlphaFold2-Multimer v3 · Model 5', shortLabel: 'AF2-Multimer 5', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0' },
   { id: 'rosettafold3', label: 'RoseTTAFold3 (RF3)', shortLabel: 'RF3', family: 'af3', approxMB: 266, license: 'BSD-3-Clause' },
   { id: 'boltz2', label: 'Boltz-2', shortLabel: 'Boltz-2', family: 'af3', approxMB: 364, license: 'MIT' },
   { id: 'openbind0', label: 'OpenBind-0 (OpenFold3 v0.5.0)', shortLabel: 'OpenBind-0', family: 'af3', approxMB: 265, license: 'Apache-2.0' },

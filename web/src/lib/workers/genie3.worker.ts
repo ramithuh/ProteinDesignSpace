@@ -159,7 +159,7 @@ self.onmessage = async (ev: MessageEvent) => {
           ? res.sequence
           : parsed.sequence;
 
-      const geometry = computeGeometryStats(parsed.caCoords);
+      const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
       const runHash = fnv1a(
         JSON.stringify({ length, nSampleStep, directionScale, noiseScale, predictSequence, seed }),
       );
@@ -175,6 +175,9 @@ self.onmessage = async (ev: MessageEvent) => {
         backbone4Coords: parsed.backbone4Coords,
         pdbText,
         cifText,
+        chainIds: parsed.chainIds,
+        chainLengths: parsed.diagnostics.chainLengths,
+        diagnostics: parsed.diagnostics,
         geometry,
       };
 

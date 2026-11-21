@@ -1,15 +1,28 @@
 /// <reference lib="webworker" />
 // Dedicated WebGPU worker wrapping sokrypton/localfold
-// Supports AlphaFold2 monomer (models 1–5) AND all AF3-lineage models
-// (RoseTTAFold3, Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, AF3)
-// loaded directly from /vendor/localfold/ as plain ES modules.
+// Supports AlphaFold2 monomer (models 1–5), AlphaFold2-Multimer v3 (models 1–5),
+// and all AF3-lineage models (RoseTTAFold3, Boltz-2, OpenBind-0, Protenix-v2,
+// OpenDDE, Mol-1, IntelliFold-2, AF3) loaded directly from /vendor/localfold/.
 
-import { atom37ToPdb, parsePdbBackbone } from '$lib/protein-ops/pdb';
-import type { FoldedCandidate, FoldedStructure, SequenceSet } from '$lib/engine/types';
+import { atom37ToPdb, chainIdsFromLengths, parsePdbBackbone } from '$lib/protein-ops/pdb';
+import { computeGeometryStats } from '$lib/protein-ops/kabsch';
+import type {
+  FoldedCandidate,
+  FoldedStructure,
+  SequenceSet,
+  StructureArtifact,
+} from '$lib/engine/types';
 
 declare const self: DedicatedWorkerGlobalScope;
 
 const AF2_MODELS = new Set(['monomer', 'monomer-2', 'monomer-3', 'monomer-4', 'monomer-5']);
+const AF2_MULTIMER_MODELS = new Set([
+  'multimer',
+  'multimer-2',
+  'multimer-3',
+  'multimer-4',
+  'multimer-5',
+]);
 const AF3_MODELS = new Set([
   'rosettafold3',
   'boltz2',
@@ -55,8 +68,19 @@ async function ensureCoreModules(id: number) {
     progress: 0.02,
     detail: 'Loading LocalFold WebGPU modules...',
   });
-  const [monomerMod, fixtureMod, storeMod, deltaStoreMod, manifestsMod, deviceMod] = await Promise.all([
+  const [
+    monomerMod,
+    unifiedMod,
+    chainsMod,
+    fixtureMod,
+    storeMod,
+    deltaStoreMod,
+    manifestsMod,
+    deviceMod,
+  ] = await Promise.all([
     importVendor('webgpu/af2/model/monomer.js'),
+    importVendor('webgpu/af2/multimer/model.js'),
+    importVendor('shared/input/chains.js'),
     importVendor('shared/bundles/alphafold-fixture.js'),
     importVendor('shared/bundles/http-tensor-store.js'),
     importVendor('shared/bundles/delta-tensor-store.js'),
@@ -65,6 +89,8 @@ async function ensureCoreModules(id: number) {
   ]);
   lfCore = {
     AlphaFoldMonomerGpu: monomerMod.AlphaFoldMonomerGpu,
+    AlphaFoldUnifiedGpu: unifiedMod.AlphaFoldUnifiedGpu,
+    mergeUnpairedChainA3ms: chainsMod.mergeUnpairedChainA3ms,
     AlphaFoldFixture: fixtureMod.AlphaFoldFixture,
     HttpTensorStore: storeMod.HttpTensorStore,
     DeltaTensorStore: deltaStoreMod.DeltaTensorStore,
@@ -174,7 +200,9 @@ async function ensureModelLoaded(id: number, modelKey: string) {
     });
   };
 
-  if (AF2_MODELS.has(modelKey)) {
+  if (AF2_MODELS.has(modelKey) || AF2_MULTIMER_MODELS.has(modelKey)) {
+    const isMultimer = AF2_MULTIMER_MODELS.has(modelKey);
+    const labelPrefix = isMultimer ? 'AF2-Multimer v3' : 'AlphaFold2';
     const bundleMeta = lfCore.MODEL_BUNDLES[modelKey];
     let store;
     let baseStore = null;
@@ -188,13 +216,13 @@ async function ensureModelLoaded(id: number, modelKey: string) {
       baseStore = await lfCore.HttpTensorStore.fromManifest(
         lfCore.bundleBaseUrl(baseKey),
         baseManifest,
-        makeWeightProgress('AlphaFold2 base'),
+        makeWeightProgress(`${labelPrefix} base`),
       );
       baseStore.prefetch?.();
       const deltaStore = await lfCore.HttpTensorStore.fromManifest(
         lfCore.bundleBaseUrl(modelKey),
         deltaManifest,
-        makeWeightProgress(`AlphaFold2 (${modelKey})`),
+        makeWeightProgress(`${labelPrefix} (${modelKey})`),
       );
       deltaStore.prefetch?.();
       store = new lfCore.DeltaTensorStore(baseStore, deltaStore);
@@ -203,7 +231,7 @@ async function ensureModelLoaded(id: number, modelKey: string) {
       store = await lfCore.HttpTensorStore.fromManifest(
         lfCore.bundleBaseUrl(modelKey),
         manifest,
-        makeWeightProgress('AlphaFold2'),
+        makeWeightProgress(labelPrefix),
       );
       store.prefetch?.();
     }
@@ -211,7 +239,7 @@ async function ensureModelLoaded(id: number, modelKey: string) {
     const fixture = lfCore.AlphaFoldFixture.fromStore(store);
     const [
       embedding,
-      template,
+      templateTrack,
       extraStack,
       mainStack,
       structure,
@@ -221,7 +249,7 @@ async function ensureModelLoaded(id: number, modelKey: string) {
       paeBreaks,
     ] = await Promise.all([
       fixture.embeddingWeights(),
-      fixture.templateWeights(),
+      isMultimer ? fixture.templateEmbeddingWeights() : fixture.templateWeights(),
       fixture.extraStackWeights(),
       fixture.mainStackWeights(),
       fixture.structureWeights(),
@@ -236,10 +264,11 @@ async function ensureModelLoaded(id: number, modelKey: string) {
       baseStore,
       featureTables,
       paeBreaks,
+      isMultimer,
       weights: {
         embedding,
-        template,
-        templateEmbedding: undefined,
+        template: isMultimer ? undefined : templateTrack,
+        templateEmbedding: isMultimer ? templateTrack : undefined,
         extraStack,
         mainStack,
         structure,
@@ -280,15 +309,19 @@ async function ensureModelLoaded(id: number, modelKey: string) {
   throw new Error(`Unsupported LocalFold model "${modelKey}"`);
 }
 
-function splitIntoColonChains(cleanSeq: string, chainLengths: number[]): string {
-  if (chainLengths.length <= 1) return cleanSeq;
+function splitChainSequences(cleanSeq: string, chainLengths: number[]): string[] {
+  if (chainLengths.length <= 1) return [cleanSeq];
   const parts: string[] = [];
   let offset = 0;
   for (const len of chainLengths) {
     parts.push(cleanSeq.slice(offset, offset + len));
     offset += len;
   }
-  return parts.join(':');
+  return parts;
+}
+
+function splitIntoColonChains(cleanSeq: string, chainLengths: number[]): string {
+  return splitChainSequences(cleanSeq, chainLengths).join(':');
 }
 
 self.onmessage = async (ev: MessageEvent) => {
@@ -311,10 +344,12 @@ self.onmessage = async (ev: MessageEvent) => {
 
       const p = msg.params ?? {};
       const modelKey = String(p.model ?? 'monomer');
-      if (!AF2_MODELS.has(modelKey) && !AF3_MODELS.has(modelKey)) {
+      const isAf2Mono = AF2_MODELS.has(modelKey);
+      const isAf2Multi = AF2_MULTIMER_MODELS.has(modelKey);
+      const isAf3 = AF3_MODELS.has(modelKey);
+      if (!isAf2Mono && !isAf2Multi && !isAf3) {
         throw new Error(`Unsupported LocalFold model "${modelKey}"`);
       }
-      const isAf3 = AF3_MODELS.has(modelKey);
       const recycles = Math.max(0, Math.min(6, Number(p.recycles ?? 1)));
       const diffusionSteps = Math.max(10, Math.min(200, Number(p.diffusionSteps ?? 25)));
       const maxSeqs = Math.max(1, Math.min(8, Number(p.maxSequences ?? 2)));
@@ -325,7 +360,9 @@ self.onmessage = async (ev: MessageEvent) => {
       const folds: FoldedCandidate[] = [];
 
       if (!isAf3) {
-        const runner = new lfCore.AlphaFoldMonomerGpu(gpuDevice);
+        const runner = isAf2Multi
+          ? new lfCore.AlphaFoldUnifiedGpu(gpuDevice)
+          : new lfCore.AlphaFoldMonomerGpu(gpuDevice);
         for (let i = 0; i < targets.length; i++) {
           const cand = targets[i];
           const stripped = cand.sequence.toUpperCase().replace(/[\s/:,]+/g, '');
@@ -347,7 +384,11 @@ self.onmessage = async (ev: MessageEvent) => {
             cand.chainLengths.reduce((a, b) => a + b, 0) === cleanSeq.length
               ? cand.chainLengths
               : [cleanSeq.length];
-          const a3m = `>query\n${cleanSeq}\n`;
+          const chainSeqs = splitChainSequences(cleanSeq, chainLengths);
+          const a3m =
+            chainSeqs.length > 1
+              ? lfCore.mergeUnpairedChainA3ms(chainSeqs.map((s) => `>q\n${s}\n`))
+              : `>query\n${cleanSeq}\n`;
           const foldStart = performance.now();
 
           self.postMessage({
@@ -355,22 +396,38 @@ self.onmessage = async (ev: MessageEvent) => {
             type: 'progress',
             phase: 'fold',
             progress: i / targets.length,
-            detail: `Folding ${cand.id} with AF2 ${modelKey} (${cleanSeq.length} aa, ${recycles} rec)...`,
+            detail: `Folding ${cand.id} with ${isAf2Multi ? 'AF2-Multimer' : 'AF2'} ${modelKey} (${cleanSeq.length} aa${chainLengths.length > 1 ? `, ${chainLengths.length} chains` : ''}, ${recycles} rec)...`,
           });
+
+          const predictOpts = isAf2Multi
+            ? {
+                recycles,
+                randomSeed: seed + i,
+                maxMsaSequences: Math.max(1, chainSeqs.length + 1),
+                maxExtraSequences: 1,
+                maskFraction: 0,
+                chainLengths,
+                chainSequences: chainSeqs,
+                chainAware: true,
+                outerProductMeanFirst: true,
+                positionScale: 20,
+                tolerance: 0.5,
+              }
+            : {
+                recycles,
+                randomSeed: seed + i,
+                maxMsaSequences: Math.max(1, chainSeqs.length + 1),
+                maxExtraSequences: 1,
+                maskFraction: 0,
+                chainLengths,
+                tolerance: 0.5,
+              };
 
           const prediction = await runner.predictA3m(
             a3m,
             loadedAf2.weights,
             loadedAf2.featureTables,
-            {
-              recycles,
-              randomSeed: seed + i,
-              maxMsaSequences: 1,
-              maxExtraSequences: 1,
-              maskFraction: 0,
-              chainLengths,
-              tolerance: 0.5,
-            },
+            predictOpts,
             loadedAf2.paeBreaks,
             undefined,
             (prog: { completed: number; total: number }) => {
@@ -391,11 +448,13 @@ self.onmessage = async (ev: MessageEvent) => {
           for (let k = 0; k < plddt.length; k++) sumPlddt += plddt[k];
           const meanPlddt = plddt.length ? sumPlddt / plddt.length : 0;
 
+          const chainIds = chainIdsFromLengths(chainLengths);
           const { pdbText, caCoords } = atom37ToPdb(
             fin.structure.atom37 as Float32Array,
             fin.structure.atom37Mask as Float32Array,
             cleanSeq,
             plddt,
+            chainIds,
           );
 
           const paeRaw = fin.confidence.predictedAlignedError as Float32Array | undefined;
@@ -405,6 +464,10 @@ self.onmessage = async (ev: MessageEvent) => {
               : typeof fin.confidence.predictedTmScore === 'number'
                 ? fin.confidence.predictedTmScore
                 : null;
+          const iptmVal =
+            typeof fin.confidence.iptm === 'number' && Number.isFinite(fin.confidence.iptm)
+              ? fin.confidence.iptm
+              : null;
 
           folds.push({
             sequenceId: cand.id,
@@ -415,6 +478,9 @@ self.onmessage = async (ev: MessageEvent) => {
             plddt,
             meanPlddt,
             ptm: ptmVal,
+            iptm: iptmVal,
+            chainLengths,
+            chainIds,
             pae: paeRaw ? new Float32Array(paeRaw) : undefined,
             elapsedMs: performance.now() - foldStart,
           });
@@ -522,6 +588,12 @@ self.onmessage = async (ev: MessageEvent) => {
           const paeRaw = result.scores?.pae as Float32Array | undefined;
           const ptmVal =
             typeof result.ptm === 'number' && Number.isFinite(result.ptm) ? result.ptm : null;
+          const rawIptm = result.iptm ?? result.scores?.iptm;
+          const iptmVal = typeof rawIptm === 'number' && Number.isFinite(rawIptm) ? rawIptm : null;
+          const chainIds =
+            parsed.chainIds.length === cleanSeq.length
+              ? parsed.chainIds
+              : chainIdsFromLengths(chainLengths);
 
           folds.push({
             sequenceId: cand.id,
@@ -532,6 +604,9 @@ self.onmessage = async (ev: MessageEvent) => {
             plddt,
             meanPlddt,
             ptm: ptmVal,
+            iptm: iptmVal,
+            chainLengths,
+            chainIds,
             pae: paeRaw ? new Float32Array(paeRaw) : undefined,
             elapsedMs: performance.now() - foldStart,
           });
@@ -556,10 +631,40 @@ self.onmessage = async (ev: MessageEvent) => {
         folds,
       };
 
+      // Also export the highest-pLDDT predicted fold as a StructureArtifact so downstream
+      // ProteinMPNN / RFD4 template / Scorer blocks can chain directly out of LocalFold.
+      let bestStructure: StructureArtifact | undefined;
+      if (folds.length > 0) {
+        const bestFold = folds.reduce(
+          (best, cur) => (cur.meanPlddt > best.meanPlddt ? cur : best),
+          folds[0],
+        );
+        const bestParsed = parsePdbBackbone(bestFold.pdbText);
+        const bestChainIds =
+          bestFold.chainIds && bestFold.chainIds.length === bestParsed.nResidues
+            ? bestFold.chainIds
+            : bestParsed.chainIds;
+        bestStructure = {
+          kind: 'StructureArtifact',
+          id: `foldstruct-${modelKey}-${bestFold.sequenceId}-${runHash}`,
+          label: `${bestFold.sequenceId} (${modelKey}, pLDDT ${bestFold.meanPlddt.toFixed(1)})`,
+          sourceModelId: 'localfold-af2',
+          length: bestParsed.nResidues,
+          sequence: bestFold.sequence,
+          caCoords: bestParsed.caCoords,
+          backbone4Coords: bestParsed.backbone4Coords,
+          pdbText: bestFold.pdbText,
+          chainIds: bestChainIds,
+          chainLengths: bestFold.chainLengths ?? bestParsed.diagnostics.chainLengths,
+          diagnostics: bestParsed.diagnostics,
+          geometry: computeGeometryStats(bestParsed.caCoords, bestChainIds),
+        };
+      }
+
       self.postMessage({
         id: msg.id,
         type: 'result',
-        outputs: { folds: out },
+        outputs: bestStructure ? { folds: out, structure: bestStructure } : { folds: out },
         elapsedMs: performance.now() - t0,
       });
     }
