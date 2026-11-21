@@ -9,9 +9,11 @@ import {
   WORKFLOW_PRESETS,
 } from '$lib/engine/registry';
 import {
+  CATALOG_CATEGORIES,
   CATALOG_ITEMS,
   CATALOG_STAGE_GROUPS,
   filterCatalog,
+  filterCatalogCategories,
 } from '$lib/engine/catalog';
 import {
   PORT_COLORS,
@@ -140,6 +142,31 @@ describe('engine/catalog & biologist terminology', () => {
     const af2Res = filterCatalog('af2').find((r) => r.item.id === 'localfold-af2')!;
     expect(af2Res.hasNarrowedSubMatch).toBe(true);
     expect(af2Res.matchingSubItems).toHaveLength(5);
+  });
+
+  it('exposes 6 compact top-level workflow categories with direct model flyouts and LocalFold footnote', () => {
+    expect(CATALOG_CATEGORIES.map((c) => c.title)).toEqual([
+      'Inputs',
+      'Conditioning',
+      'Structure Generation',
+      'Sequence Design',
+      'Structure Prediction',
+      'Evaluation',
+    ]);
+
+    const pred = CATALOG_CATEGORIES.find((c) => c.id === 'prediction')!;
+    expect(pred.footnote).toContain('LocalFold');
+    expect(pred.subGroups.flatMap((g) => g.items)).toHaveLength(13);
+
+    const boltz = filterCatalogCategories('boltz');
+    expect(boltz).toHaveLength(1);
+    expect(boltz[0].category.id).toBe('prediction');
+    expect(boltz[0].matchingSubItems.map((s) => s.key)).toEqual(['boltz2']);
+
+    const genie = filterCatalogCategories('genie');
+    expect(genie).toHaveLength(1);
+    expect(genie[0].category.id).toBe('generation');
+    expect(genie[0].matchingSubItems.map((s) => s.key)).toEqual(['genie3']);
   });
 
   it('insertBlockSmart supports pre-configured params, label deduplication, default param preservation, and auto-wire proposals', () => {

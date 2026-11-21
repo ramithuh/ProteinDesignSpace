@@ -1,10 +1,10 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import {
-    filterCatalog,
+    filterCatalogCategories,
     type CatalogInsertRequest,
     type CatalogSubItem,
-    type FilteredCatalogEntry,
+    type FilteredCategoryEntry,
   } from '$lib/engine/catalog';
   import { STAGE_COLORS } from '$lib/engine/graph-utils';
 
@@ -29,46 +29,27 @@
   let activeSubIdx = $state(0);
   let focusPane = $state<'main' | 'flyout'>('main');
   let flyoutFromKeyboard = $state(false);
-  let flyoutAdapterId = $state<string | null>(null);
+  let flyoutCategoryId = $state<string | null>(null);
 
   let shellEl: HTMLDivElement | null = $state(null);
   let mainEl: HTMLDivElement | null = $state(null);
   let flyoutEl: HTMLDivElement | null = $state(null);
   let searchInputEl: HTMLInputElement | null = $state(null);
 
-  let flyoutLeft = $state(346);
+  let flyoutLeft = $state(316);
   let flyoutTop = $state(0);
-  let flyoutWidth = $state(320);
-  let flyoutMaxHeight = $state(420);
+  let flyoutWidth = $state(340);
+  let flyoutMaxHeight = $state(440);
   let flyoutSide = $state<'right' | 'left' | 'overlay'>('right');
 
   let closeGraceTimer: ReturnType<typeof setTimeout> | null = null;
 
-  let filteredEntries = $derived(filterCatalog(query));
+  let filteredCategories = $derived(filterCatalogCategories(query));
+  let activeEntry = $derived<FilteredCategoryEntry | null>(filteredCategories[activeIdx] ?? null);
 
-  let groupedEntries = $derived.by(() => {
-    const groups: { title: string; entries: { entry: FilteredCatalogEntry; flatIdx: number }[] }[] = [];
-    const byTitle = new Map<
-      string,
-      { title: string; entries: { entry: FilteredCatalogEntry; flatIdx: number }[] }
-    >();
-    filteredEntries.forEach((entry, flatIdx) => {
-      let g = byTitle.get(entry.item.group);
-      if (!g) {
-        g = { title: entry.item.group, entries: [] };
-        byTitle.set(entry.item.group, g);
-        groups.push(g);
-      }
-      g.entries.push({ entry, flatIdx });
-    });
-    return groups;
-  });
-
-  let activeEntry = $derived<FilteredCatalogEntry | null>(filteredEntries[activeIdx] ?? null);
-
-  let flyoutEntry = $derived.by<FilteredCatalogEntry | null>(() => {
-    if (!flyoutAdapterId) return null;
-    const found = filteredEntries.find((e) => e.item.id === flyoutAdapterId) ?? null;
+  let flyoutEntry = $derived.by<FilteredCategoryEntry | null>(() => {
+    if (!flyoutCategoryId) return null;
+    const found = filteredCategories.find((e) => e.category.id === flyoutCategoryId) ?? null;
     if (!found || found.matchingSubGroups.length === 0) return null;
     return found;
   });
@@ -76,9 +57,9 @@
   let activeDescendantId = $derived.by((): string | undefined => {
     if (focusPane === 'flyout' && flyoutEntry) {
       const sub = flyoutEntry.matchingSubItems[activeSubIdx];
-      return sub ? `cat-sub-${flyoutEntry.item.id}-${sub.key}` : undefined;
+      return sub ? `cat-sub-${flyoutEntry.category.id}-${sub.key}` : undefined;
     }
-    return activeEntry ? `cat-item-${activeEntry.item.id}` : undefined;
+    return activeEntry ? `cat-item-${activeEntry.category.id}` : undefined;
   });
 
   function clearCloseTimer() {
@@ -92,10 +73,10 @@
     clearCloseTimer();
     closeGraceTimer = setTimeout(() => {
       closeGraceTimer = null;
-      if (focusPane !== 'flyout') {
-        flyoutAdapterId = null;
+      if (focusPane !== 'flyout' && !query.trim()) {
+        flyoutCategoryId = null;
       }
-    }, 140);
+    }, 150);
   }
 
   function handleShellMouseLeave() {
@@ -116,7 +97,7 @@
 
     const spaceRight = vw - mainRect.right - margin;
     const spaceLeft = mainRect.left - margin;
-    const preferredW = 328;
+    const preferredW = 340;
 
     let side: 'right' | 'left' | 'overlay' = 'right';
     let width = preferredW;
@@ -138,10 +119,10 @@
     }
 
     const availH = Math.max(180, vh - shellRect.top - margin);
-    const maxH = Math.min(440, availH);
+    const maxH = Math.min(460, availH);
 
     // Align vertically near the hovered/active row, clamped to viewport bottom
-    const rowEl = mainEl.querySelector<HTMLElement>(`[data-adapter-id="${flyoutEntry.item.id}"]`);
+    const rowEl = mainEl.querySelector<HTMLElement>(`[data-category-id="${flyoutEntry.category.id}"]`);
     let desiredTop = 0;
     if (rowEl) {
       const rowRect = rowEl.getBoundingClientRect();
@@ -157,7 +138,7 @@
     flyoutMaxHeight = Math.round(maxH);
   }
 
-  // Reset navigation & auto-open flyout on narrowed sub-item searches
+  // Reset navigation & auto-open flyout when searching
   $effect(() => {
     const q = query.trim();
     activeIdx = 0;
@@ -166,20 +147,20 @@
     flyoutFromKeyboard = false;
     clearCloseTimer();
     if (q) {
-      const top = filteredEntries[0];
-      if (top && top.hasNarrowedSubMatch && top.matchingSubItems.length > 0) {
-        flyoutAdapterId = top.item.id;
+      const top = filteredCategories[0];
+      if (top && top.matchingSubItems.length > 0) {
+        flyoutCategoryId = top.category.id;
       } else {
-        flyoutAdapterId = null;
+        flyoutCategoryId = null;
       }
     } else {
-      flyoutAdapterId = null;
+      flyoutCategoryId = null;
     }
   });
 
   // Clamp indices if filtered lists shrink
   $effect(() => {
-    if (filteredEntries.length === 0 || activeIdx >= filteredEntries.length) {
+    if (filteredCategories.length === 0 || activeIdx >= filteredCategories.length) {
       activeIdx = 0;
     }
   });
@@ -243,28 +224,32 @@
     });
   }
 
-  function handleRowHover(entry: FilteredCatalogEntry, flatIdx: number) {
+  function handleCategoryHover(entry: FilteredCategoryEntry, flatIdx: number) {
     activeIdx = flatIdx;
     focusPane = 'main';
     flyoutFromKeyboard = false;
-    if (entry.matchingSubGroups.length > 0) {
-      clearCloseTimer();
-      if (flyoutAdapterId !== entry.item.id) {
-        activeSubIdx = 0;
-      }
-      flyoutAdapterId = entry.item.id;
-    } else {
-      scheduleFlyoutClose();
+    clearCloseTimer();
+    if (flyoutCategoryId !== entry.category.id) {
+      activeSubIdx = 0;
     }
+    flyoutCategoryId = entry.category.id;
   }
 
-  function handleInsertParent(entry: FilteredCatalogEntry) {
+  function handleCategoryClick(entry: FilteredCategoryEntry, flatIdx: number) {
     if (disabled) return;
-    if (entry.hasNarrowedSubMatch && entry.matchingSubItems.length > 0) {
+    activeIdx = flatIdx;
+    // If single option (e.g. Evaluation -> scRMSD/scTM) or narrowed search -> insert directly!
+    if (entry.matchingSubItems.length === 1 || (query.trim() && entry.hasNarrowedSubMatch && entry.matchingSubItems.length > 0)) {
       onInsert(entry.matchingSubItems[0].insert);
-    } else {
-      onInsert({ adapterId: entry.item.id });
+      return;
     }
+    // Otherwise open & focus its right-hand flyout so touch/click users can pick cleanly
+    clearCloseTimer();
+    flyoutCategoryId = entry.category.id;
+    focusPane = 'flyout';
+    flyoutFromKeyboard = true;
+    activeSubIdx = 0;
+    scrollFlyoutItemIntoView(0);
   }
 
   function handleInsertSubItem(sub: CatalogSubItem) {
@@ -285,12 +270,12 @@
       if (focusPane === 'flyout' && flyoutEntry && flyoutEntry.matchingSubItems.length > 0) {
         activeSubIdx = (activeSubIdx + 1) % flyoutEntry.matchingSubItems.length;
         scrollFlyoutItemIntoView(activeSubIdx);
-      } else if (filteredEntries.length > 0) {
-        activeIdx = (activeIdx + 1) % filteredEntries.length;
+      } else if (filteredCategories.length > 0) {
+        activeIdx = (activeIdx + 1) % filteredCategories.length;
         scrollActiveIntoView(activeIdx);
-        const nextEntry = filteredEntries[activeIdx];
-        if (flyoutAdapterId !== null) {
-          flyoutAdapterId = nextEntry && nextEntry.matchingSubGroups.length > 0 ? nextEntry.item.id : null;
+        const nextEntry = filteredCategories[activeIdx];
+        if (flyoutCategoryId !== null && nextEntry) {
+          flyoutCategoryId = nextEntry.category.id;
           activeSubIdx = 0;
         }
       }
@@ -303,12 +288,12 @@
         const len = flyoutEntry.matchingSubItems.length;
         activeSubIdx = (activeSubIdx - 1 + len) % len;
         scrollFlyoutItemIntoView(activeSubIdx);
-      } else if (filteredEntries.length > 0) {
-        activeIdx = (activeIdx - 1 + filteredEntries.length) % filteredEntries.length;
+      } else if (filteredCategories.length > 0) {
+        activeIdx = (activeIdx - 1 + filteredCategories.length) % filteredCategories.length;
         scrollActiveIntoView(activeIdx);
-        const prevEntry = filteredEntries[activeIdx];
-        if (flyoutAdapterId !== null) {
-          flyoutAdapterId = prevEntry && prevEntry.matchingSubGroups.length > 0 ? prevEntry.item.id : null;
+        const prevEntry = filteredCategories[activeIdx];
+        if (flyoutCategoryId !== null && prevEntry) {
+          flyoutCategoryId = prevEntry.category.id;
           activeSubIdx = 0;
         }
       }
@@ -317,13 +302,12 @@
 
     if (ev.key === 'ArrowRight') {
       if (focusPane === 'main' && activeEntry && activeEntry.matchingSubItems.length > 0) {
-        // Only intercept ArrowRight if cursor is at end of search input (or query empty)
         const inp = searchInputEl;
         const atEnd = !inp || inp.selectionStart === inp.value.length;
         if (atEnd) {
           ev.preventDefault();
           clearCloseTimer();
-          flyoutAdapterId = activeEntry.item.id;
+          flyoutCategoryId = activeEntry.category.id;
           focusPane = 'flyout';
           flyoutFromKeyboard = true;
           activeSubIdx = 0;
@@ -356,7 +340,7 @@
         }
       }
       if (activeEntry) {
-        handleInsertParent(activeEntry);
+        handleCategoryClick(activeEntry, activeIdx);
       }
     }
   }
@@ -380,7 +364,7 @@
         bind:this={searchInputEl}
         type="text"
         class="search-input"
-        placeholder="Search blocks, models, or design tasks…"
+        placeholder="Search models, blocks, or tasks…"
         bind:value={query}
         aria-label="Filter blocks"
         aria-activedescendant={activeDescendantId}
@@ -388,70 +372,62 @@
       <kbd class="esc-kbd">Esc</kbd>
     </div>
 
-    <div class="catalog-list" role="listbox" aria-label="Workflow blocks">
-      {#if groupedEntries.length === 0}
+    <div class="catalog-list" role="listbox" aria-label="Workflow categories">
+      {#if filteredCategories.length === 0}
         <div class="empty">No blocks match “{query}”.</div>
       {:else}
-        {#each groupedEntries as grp (grp.title)}
-          <div class="group-hdr">{grp.title}</div>
-          {#each grp.entries as { entry, flatIdx } (entry.item.id)}
-            {@const item = entry.item}
-            {@const stageColor = STAGE_COLORS[item.stage] ?? '#64748b'}
-            {@const hasSub = entry.matchingSubGroups.length > 0}
-            {@const isFlyoutOpen = flyoutEntry?.item.id === item.id}
-            <button
-              id={`cat-item-${item.id}`}
-              type="button"
-              class="cat-item"
-              class:active={flatIdx === activeIdx && focusPane === 'main'}
-              class:flyout-open={isFlyoutOpen}
-              data-cat-idx={flatIdx}
-              data-adapter-id={item.id}
-              role="option"
-              aria-selected={flatIdx === activeIdx}
-              tabindex="-1"
-              draggable={!disabled}
-              {disabled}
-              onmouseenter={() => handleRowHover(entry, flatIdx)}
-              ondragstart={(e) => {
-                searchInputEl?.focus();
-                const req =
-                  entry.hasNarrowedSubMatch && entry.matchingSubItems.length > 0
-                    ? entry.matchingSubItems[0].insert
-                    : { adapterId: item.id };
-                onDragStart?.(e, req);
-              }}
-              onclick={() => {
-                searchInputEl?.focus();
-                handleInsertParent(entry);
-              }}
-            >
-              <span class="stage-dot" style="background: {stageColor}"></span>
-              <span class="item-body">
-                <span class="item-name">{item.shortName}</span>
-                <span class="item-role">{item.role}</span>
-              </span>
-              {#if hasSub}
-                <span class="sub-trigger" title="Hover or press → to pick a model or variant">
-                  {entry.hasNarrowedSubMatch
-                    ? `${entry.matchingSubItems.length} match${entry.matchingSubItems.length === 1 ? '' : 'es'}`
-                    : item.subCountLabel}
-                  <span class="chev" aria-hidden="true">›</span>
-                </span>
-              {/if}
-            </button>
-          {/each}
+        {#each filteredCategories as entry, flatIdx (entry.category.id)}
+          {@const cat = entry.category}
+          {@const stageColor = STAGE_COLORS[cat.stage] ?? '#64748b'}
+          {@const isFlyoutOpen = flyoutEntry?.category.id === cat.id}
+          {@const singleSub = entry.matchingSubItems.length === 1 ? entry.matchingSubItems[0] : null}
+          <button
+            id={`cat-item-${cat.id}`}
+            type="button"
+            class="cat-item"
+            class:active={flatIdx === activeIdx && focusPane === 'main'}
+            class:flyout-open={isFlyoutOpen}
+            data-cat-idx={flatIdx}
+            data-category-id={cat.id}
+            role="option"
+            aria-selected={flatIdx === activeIdx}
+            tabindex="-1"
+            draggable={!disabled && Boolean(singleSub)}
+            {disabled}
+            onmouseenter={() => handleCategoryHover(entry, flatIdx)}
+            ondragstart={(e) => {
+              if (!singleSub) return;
+              searchInputEl?.focus();
+              onDragStart?.(e, singleSub.insert);
+            }}
+            onclick={() => {
+              searchInputEl?.focus();
+              handleCategoryClick(entry, flatIdx);
+            }}
+          >
+            <span class="stage-dot" style="background: {stageColor}"></span>
+            <span class="item-body">
+              <span class="item-name">{cat.title}</span>
+              <span class="item-role">{cat.subtitle}</span>
+            </span>
+            <span class="sub-trigger" title="Hover or press → to choose">
+              {entry.hasNarrowedSubMatch
+                ? `${entry.matchingSubItems.length} match${entry.matchingSubItems.length === 1 ? '' : 'es'}`
+                : cat.countLabel}
+              <span class="chev" aria-hidden="true">›</span>
+            </span>
+          </button>
         {/each}
       {/if}
     </div>
 
     <div class="catalog-foot">
-      <span><kbd>↑↓</kbd> navigate · <kbd>→</kbd> variants · <kbd>↵</kbd> insert &amp; connect · drag to place</span>
+      <span><kbd>↑↓</kbd> categories · <kbd>→</kbd> models · <kbd>↵</kbd> select · drag to place</span>
     </div>
   </div>
 
   {#if flyoutEntry}
-    {@const stageColor = STAGE_COLORS[flyoutEntry.item.stage] ?? '#64748b'}
+    {@const stageColor = STAGE_COLORS[flyoutEntry.category.stage] ?? '#64748b'}
     {@const flatSubs = flyoutEntry.matchingSubItems}
     <div
       class="catalog-flyout"
@@ -461,12 +437,12 @@
       style="left: {flyoutLeft}px; top: {flyoutTop}px; width: {flyoutWidth}px; max-height: {flyoutMaxHeight}px;"
       role="listbox"
       tabindex="-1"
-      aria-label={`${flyoutEntry.item.shortName} variants`}
+      aria-label={`${flyoutEntry.category.title} options`}
       onmouseenter={clearCloseTimer}
     >
       <div class="flyout-hdr">
         <span class="stage-dot" style="background: {stageColor}"></span>
-        <span class="flyout-title">{flyoutEntry.item.shortName}</span>
+        <span class="flyout-title">{flyoutEntry.category.title}</span>
         <span class="flyout-sub">{flatSubs.length} option{flatSubs.length === 1 ? '' : 's'}</span>
       </div>
 
@@ -477,9 +453,9 @@
             {@const subIdx = flatSubs.indexOf(sub)}
             {@const isSubActive =
               (focusPane === 'flyout' && subIdx === activeSubIdx) ||
-              (focusPane === 'main' && flyoutEntry.hasNarrowedSubMatch && subIdx === 0)}
+              (focusPane === 'main' && Boolean(query.trim()) && flyoutEntry.hasNarrowedSubMatch && subIdx === 0)}
             <button
-              id={`cat-sub-${flyoutEntry.item.id}-${sub.key}`}
+              id={`cat-sub-${flyoutEntry.category.id}-${sub.key}`}
               type="button"
               class="flyout-item"
               class:active={isSubActive}
@@ -522,6 +498,10 @@
           {/each}
         {/each}
       </div>
+
+      {#if flyoutEntry.category.footnote}
+        <div class="flyout-foot">{flyoutEntry.category.footnote}</div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -536,9 +516,8 @@
     outline: none;
   }
   .catalog-main {
-    width: 340px;
+    width: 310px;
     max-width: calc(100vw - 24px);
-    max-height: min(410px, 70vh);
     background: var(--bg-surface);
     border: 1px solid var(--border-strong);
     border-radius: 10px;
@@ -585,9 +564,6 @@
     padding: 1px 4px;
   }
   .catalog-list {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
     padding: 6px;
     display: flex;
     flex-direction: column;
@@ -614,7 +590,7 @@
     background: transparent;
     border: 1px solid transparent;
     border-radius: 6px;
-    padding: 6px 8px;
+    padding: 7px 8px;
     color: var(--text-body);
     cursor: pointer;
     font-family: inherit;
@@ -644,7 +620,7 @@
     gap: 1px;
   }
   .item-name {
-    font-size: 12px;
+    font-size: 12.5px;
     font-weight: 600;
     color: var(--text-primary);
     line-height: 1.25;
@@ -661,7 +637,7 @@
     align-items: center;
     gap: 4px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 9.5px;
+    font-size: 10px;
     color: var(--text-muted);
     background: var(--bg-surface-2);
     border: 1px solid var(--border);
@@ -748,6 +724,13 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+  .flyout-foot {
+    padding: 6px 10px;
+    border-top: 1px solid var(--border-subtle);
+    background: var(--bg-surface-2);
+    font-size: 10px;
+    color: var(--text-dim);
     border-radius: 0 0 9px 9px;
   }
   .flyout-item {

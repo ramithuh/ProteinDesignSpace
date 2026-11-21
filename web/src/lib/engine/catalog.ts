@@ -273,6 +273,248 @@ export const CATALOG_ITEMS: CatalogItem[] = CATALOG_STAGE_GROUPS.flatMap((grp) =
     .filter((x): x is CatalogItem => x !== null),
 );
 
+export interface CatalogCategory {
+  id: string;
+  title: string;
+  stage: string;
+  subtitle: string;
+  countLabel: string;
+  footnote?: string;
+  subGroups: CatalogSubGroup[];
+  identityBlob: string;
+  searchBlob: string;
+}
+
+export interface FilteredCategoryEntry {
+  category: CatalogCategory;
+  matchingSubGroups: CatalogSubGroup[];
+  matchingSubItems: CatalogSubItem[];
+  hasNarrowedSubMatch: boolean;
+}
+
+export const CATALOG_CATEGORIES: CatalogCategory[] = [
+  (() => {
+    const pdb = ADAPTER_REGISTRY['pdb-input'];
+    const seq = ADAPTER_REGISTRY['sequence-input'];
+    const items: CatalogSubItem[] = [
+      {
+        key: 'pdb-input',
+        label: pdb.shortName,
+        subtitle: CONCISE_BLOCK_ROLES['pdb-input'],
+        insert: { adapterId: 'pdb-input' },
+        searchBlob: `${pdb.id} ${pdb.shortName} ${pdb.displayName} ${CONCISE_BLOCK_ROLES['pdb-input']} pdb mmcif structure upload template input`.toLowerCase(),
+      },
+      {
+        key: 'sequence-input',
+        label: seq.shortName,
+        subtitle: CONCISE_BLOCK_ROLES['sequence-input'],
+        insert: { adapterId: 'sequence-input' },
+        searchBlob: `${seq.id} ${seq.shortName} ${seq.displayName} ${CONCISE_BLOCK_ROLES['sequence-input']} fasta amino acid sequence input`.toLowerCase(),
+      },
+    ];
+    const subGroups: CatalogSubGroup[] = [{ title: 'Starting Inputs', items }];
+    const identityBlob = 'inputs input source pdb sequence fasta mmcif';
+    const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
+    return {
+      id: 'inputs',
+      title: 'Inputs',
+      stage: 'source',
+      subtitle: 'PDB / mmCIF structures & FASTA sequences',
+      countLabel: `${items.length}`,
+      subGroups,
+      identityBlob,
+      searchBlob,
+    };
+  })(),
+  (() => {
+    const cond = buildSubGroupsForAdapter('rfd4-conditioner');
+    const total = cond.subGroups.reduce((a, g) => a + g.items.length, 0);
+    const identityBlob = 'conditioning condition rfd4 hotspots motif binder cath';
+    const searchBlob = `${identityBlob} ${cond.subGroups.flatMap((g) => [g.title.toLowerCase(), ...g.items.map((i) => i.searchBlob)]).join(' ')}`;
+    return {
+      id: 'conditioning',
+      title: 'Conditioning',
+      stage: 'condition',
+      subtitle: 'Binding hotspots, motifs, H-bonds & CATH folds',
+      countLabel: `${total}`,
+      footnote: 'Powered by RFD4-Proteina conditioning',
+      subGroups: cond.subGroups,
+      identityBlob,
+      searchBlob,
+    };
+  })(),
+  (() => {
+    const rfd4 = ADAPTER_REGISTRY['rfd4-proteina'];
+    const g3 = ADAPTER_REGISTRY.genie3;
+    const items: CatalogSubItem[] = [
+      {
+        key: 'rfd4-proteina',
+        label: rfd4.shortName,
+        subtitle: CONCISE_BLOCK_ROLES['rfd4-proteina'],
+        meta: `~${rfd4.approxWeightsMB} MB`,
+        insert: { adapterId: 'rfd4-proteina' },
+        searchBlob: `${rfd4.id} ${rfd4.shortName} ${rfd4.displayName} ${CONCISE_BLOCK_ROLES['rfd4-proteina']} rfdiffusion4 rfd4 proteina generate de novo backbone co-design`.toLowerCase(),
+      },
+      {
+        key: 'genie3',
+        label: g3.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.genie3,
+        meta: `~${g3.approxWeightsMB} MB · Apache-2.0`,
+        insert: { adapterId: 'genie3' },
+        searchBlob: `${g3.id} ${g3.shortName} ${g3.displayName} ${CONCISE_BLOCK_ROLES.genie3} genie genie3 diffusion generate de novo backbone`.toLowerCase(),
+      },
+    ];
+    const subGroups: CatalogSubGroup[] = [{ title: 'De Novo Generators', items }];
+    const identityBlob = 'structure generation generate generator de novo backbone diffusion';
+    const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
+    return {
+      id: 'generation',
+      title: 'Structure Generation',
+      stage: 'generate',
+      subtitle: 'RFD4-Proteina & Genie 3 de novo design',
+      countLabel: `${items.length}`,
+      subGroups,
+      identityBlob,
+      searchBlob,
+    };
+  })(),
+  (() => {
+    const mpnn = buildSubGroupsForAdapter('web-protein-mpnn');
+    const total = mpnn.subGroups.reduce((a, g) => a + g.items.length, 0);
+    const identityBlob = 'sequence design inverse fold folding proteinmpnn mpnn';
+    const searchBlob = `${identityBlob} ${mpnn.subGroups.flatMap((g) => [g.title.toLowerCase(), ...g.items.map((i) => i.searchBlob)]).join(' ')}`;
+    return {
+      id: 'sequence-design',
+      title: 'Sequence Design',
+      stage: 'inverse-fold',
+      subtitle: 'SolubleMPNN, ProteinMPNN & Cα-only',
+      countLabel: `${total}`,
+      footnote: 'Powered by webProteinMPNN (MurrellGroup)',
+      subGroups: mpnn.subGroups,
+      identityBlob,
+      searchBlob,
+    };
+  })(),
+  (() => {
+    const lf = buildSubGroupsForAdapter('localfold-af2');
+    const total = lf.subGroups.reduce((a, g) => a + g.items.length, 0);
+    const identityBlob = 'structure prediction folding fold localfold predict';
+    const searchBlob = `${identityBlob} ${lf.subGroups.flatMap((g) => [g.title.toLowerCase(), ...g.items.map((i) => i.searchBlob)]).join(' ')}`;
+    return {
+      id: 'prediction',
+      title: 'Structure Prediction',
+      stage: 'fold',
+      subtitle: 'AlphaFold2, RoseTTAFold3, Boltz-2, AlphaFold 3…',
+      countLabel: `${total}`,
+      footnote: 'Powered by LocalFold (sokrypton/localfold)',
+      subGroups: lf.subGroups,
+      identityBlob,
+      searchBlob,
+    };
+  })(),
+  (() => {
+    const sc = ADAPTER_REGISTRY['designability-scorer'];
+    const items: CatalogSubItem[] = [
+      {
+        key: 'designability-scorer',
+        label: sc.shortName,
+        subtitle: CONCISE_BLOCK_ROLES['designability-scorer'],
+        insert: { adapterId: 'designability-scorer' },
+        searchBlob: `${sc.id} ${sc.shortName} ${sc.displayName} ${CONCISE_BLOCK_ROLES['designability-scorer']} score evaluation designability kabsch scrmsd sctm plddt`.toLowerCase(),
+      },
+    ];
+    const subGroups: CatalogSubGroup[] = [{ title: 'Designability Metrics', items }];
+    const identityBlob = 'evaluation score scoring metrics designability scrmsd sctm';
+    const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
+    return {
+      id: 'evaluation',
+      title: 'Evaluation',
+      stage: 'score',
+      subtitle: 'Kabsch scRMSD, scTM & pLDDT pass rate',
+      countLabel: `${items.length}`,
+      subGroups,
+      identityBlob,
+      searchBlob,
+    };
+  })(),
+];
+
+export function filterCatalogCategories(
+  query: string,
+  categories: CatalogCategory[] = CATALOG_CATEGORIES,
+): FilteredCategoryEntry[] {
+  const q = query.trim().toLowerCase();
+  if (!q) {
+    return categories.map((category) => ({
+      category,
+      matchingSubGroups: category.subGroups,
+      matchingSubItems: category.subGroups.flatMap((g) => g.items),
+      hasNarrowedSubMatch: false,
+    }));
+  }
+
+  const terms = q.split(/\s+/).filter(Boolean);
+  const results: FilteredCategoryEntry[] = [];
+
+  for (const category of categories) {
+    if (!terms.every((t) => category.searchBlob.includes(t))) continue;
+    const totalSubCount = category.subGroups.reduce((a, g) => a + g.items.length, 0);
+
+    // Pure category-level match (e.g. "prediction", "localfold", "generation") -> show all sub-items
+    if (terms.every((t) => category.identityBlob.includes(t))) {
+      results.push({
+        category,
+        matchingSubGroups: category.subGroups,
+        matchingSubItems: category.subGroups.flatMap((g) => g.items),
+        hasNarrowedSubMatch: false,
+      });
+      continue;
+    }
+
+    const subTargetTerms = terms.filter(
+      (t) =>
+        !category.identityBlob.includes(t) &&
+        category.subGroups.some((sg) => {
+          const titleL = sg.title.toLowerCase();
+          return sg.items.some((sub) => `${titleL} ${sub.searchBlob}`.includes(t));
+        }),
+    );
+
+    if (subTargetTerms.length > 0) {
+      const narrowed: CatalogSubGroup[] = [];
+      for (const sg of category.subGroups) {
+        const titleL = sg.title.toLowerCase();
+        const matched = sg.items.filter((sub) => {
+          const hay = `${titleL} ${sub.searchBlob}`;
+          return subTargetTerms.every((t) => hay.includes(t));
+        });
+        if (matched.length > 0) {
+          narrowed.push({ title: sg.title, items: matched });
+        }
+      }
+      if (narrowed.length > 0) {
+        const matchingSubItems = narrowed.flatMap((g) => g.items);
+        results.push({
+          category,
+          matchingSubGroups: narrowed,
+          matchingSubItems,
+          hasNarrowedSubMatch: matchingSubItems.length < totalSubCount || totalSubCount === 1,
+        });
+        continue;
+      }
+    }
+
+    results.push({
+      category,
+      matchingSubGroups: category.subGroups,
+      matchingSubItems: category.subGroups.flatMap((g) => g.items),
+      hasNarrowedSubMatch: false,
+    });
+  }
+
+  return results;
+}
+
 export function filterCatalog(query: string, items: CatalogItem[] = CATALOG_ITEMS): FilteredCatalogEntry[] {
   const q = query.trim().toLowerCase();
   if (!q) {
