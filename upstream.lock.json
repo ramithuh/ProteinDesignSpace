@@ -26,7 +26,8 @@
         "webgpu",
         "shared",
         "cpu/rfd4p",
-        "vendor/localfold-1edc50a7"
+        "vendor/localfold-1edc50a7/LICENSE",
+        "vendor/localfold-1edc50a7/webgpu/runtime"
       ]
     }
   ]

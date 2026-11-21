@@ -34,6 +34,19 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['onnxruntime-web'],
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Keep Svelte Flow in its own hashed immutable chunk while letting Vite naturally
+        // code-split Mol*'s lazy dynamic imports.
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (id.includes('/@xyflow/')) return 'vendor-xyflow';
+          return undefined;
+        },
+      },
+    },
+  },
   worker: {
     format: 'es',
     plugins: () => [stripUnusedOrtWasm()],

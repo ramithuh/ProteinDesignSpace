@@ -13,6 +13,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:deploy": "node ../tools/check-deploy.mjs",
     "sync:upstream": "node ../tools/sync-upstream.mjs"
   },
   "devDependencies": {
