@@ -79,25 +79,6 @@ export interface PreviewIssue {
   fix?: BioCompatibilityFix;
 }
 
-export interface DevelopabilityLiability {
-  kind: 'cys' | 'nglyc' | 'deamidation' | 'isomerization' | 'hydrophobic-patch';
-  severity: 'warn' | 'info';
-  label: string;
-  detail: string;
-  /** 0-based indices into the analyzed chain sequence. */
-  indices: number[];
-}
-
-export interface DevelopabilitySummary {
-  length: number;
-  mwKda: number;
-  pI: number;
-  netCharge74: number;
-  extCoeff280: number;
-  cysCount: number;
-  liabilities: DevelopabilityLiability[];
-}
-
 export interface ResidueHighlightLayer {
   id: string;
   role: ResidueRole;

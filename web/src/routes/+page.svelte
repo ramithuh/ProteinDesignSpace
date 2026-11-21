@@ -2805,7 +2805,6 @@
             </span>
             <span>L = <b>{viewerStructureMeta.length} aa</b></span>
             <span>R<sub>g</sub> = <b>{viewerStructureMeta.geometry.rg.toFixed(1)} Å</b></span>
-            <span>α <b>{viewerStructureMeta.geometry.helixPct.toFixed(0)}%</b> · β <b>{viewerStructureMeta.geometry.sheetPct.toFixed(0)}%</b></span>
             <span>Cα breaks: <b>{viewerStructureMeta.geometry.chainBreaks}</b></span>
             <span>Clashes: <b>{viewerStructureMeta.geometry.clashes}</b></span>
             {#if totalElapsedMs !== null}

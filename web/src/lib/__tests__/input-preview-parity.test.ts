@@ -20,7 +20,6 @@ import {
 } from '$lib/engine/mpnn-spec';
 import {
   compactResidueTokens,
-  computeDevelopability,
   formatMultiChainFasta,
   formatOrderReadyAa,
   toggleResidueTokens,
@@ -792,25 +791,6 @@ describe('residue-tokens utilities round-trip', () => {
       'remove',
     );
     expect(split).toBe('A10, A11, A13, A14');
-  });
-
-  it('computeDevelopability flags Cys, N-Glyc, NG deamidation, DG isomerization, and hydrophobic patches', () => {
-    const seq = 'MNATCNGDGAVILMFWYYK';
-    const dev = computeDevelopability(seq);
-    expect(dev.length).toBe(seq.length);
-    expect(dev.mwKda).toBeGreaterThan(2.0);
-    expect(dev.pI).toBeGreaterThan(3);
-    expect(dev.pI).toBeLessThan(12);
-    expect(dev.extCoeff280).toBe(5500 + 2 * 1490); // 1 W + 2 Y + 0 disulfide pairs (1 Cys)
-    expect(dev.cysCount).toBe(1);
-    const kinds = dev.liabilities.map((l) => l.kind);
-    expect(kinds).toEqual(
-      expect.arrayContaining(['cys', 'nglyc', 'deamidation', 'isomerization', 'hydrophobic-patch']),
-    );
-    expect(dev.liabilities.find((l) => l.kind === 'cys')!.severity).toBe('warn');
-    expect(dev.liabilities.find((l) => l.kind === 'nglyc')!.indices).toEqual([1]);
-    expect(dev.liabilities.find((l) => l.kind === 'deamidation')!.indices).toEqual([5]);
-    expect(dev.liabilities.find((l) => l.kind === 'isomerization')!.indices).toEqual([7]);
   });
 
   it('formatMultiChainFasta and formatOrderReadyAa produce clean wet-lab exports', () => {

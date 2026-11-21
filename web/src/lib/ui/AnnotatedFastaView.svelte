@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import {
-    computeDevelopability,
     expandResidueTokenList,
     formatMultiChainFasta,
     formatOrderReadyAa,
@@ -9,7 +8,6 @@
     toggleResidueTokens,
   } from '$lib/engine/residue-tokens';
   import type {
-    DevelopabilitySummary,
     FastaPreviewEntry,
     NodeInputPreview,
     PreviewChainTrack,
@@ -83,13 +81,6 @@
   let copiedKey = $state<string | null>(null);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Clicked developability liability highlight: key = `${chainId}:${liabilityKind}`
-  let activeLiability = $state<{
-    chainId: string;
-    kind: string;
-    indices: Set<number>;
-  } | null>(null);
-
   // Local hover state + floating tooltip position
   let localHoveredRes = $state<PreviewResidue | null>(null);
   let tooltipPos = $state<{ x: number; y: number } | null>(null);
@@ -113,13 +104,6 @@
     }
   });
 
-  // Reset active liability when chains change significantly
-  let chainsSig = $derived(chains.map((c) => `${c.chainId}:${c.sequence.length}`).join('|'));
-  $effect(() => {
-    void chainsSig;
-    activeLiability = null;
-  });
-
   // Total residues across all chains
   let totalResidues = $derived(
     chains.reduce((acc, ch) => acc + (ch.residues.length || ch.sequence.length), 0),
@@ -131,7 +115,6 @@
     chain: PreviewChainTrack;
     residues: PreviewResidue[];
     rows: PreviewResidue[][];
-    dev: DevelopabilitySummary | null;
     refSequence: string;
   }
 
@@ -162,13 +145,8 @@
         rows.push(residues.slice(i, i + CHUNK_SIZE));
       }
 
-      const dev =
-        chain.entityKind === 'protein' && chain.sequence.trim().length > 0
-          ? computeDevelopability(chain.sequence)
-          : null;
-
       const refSequence = refParts[cIdx] ?? (chains.length === 1 ? refEntrySeq : '') ?? '';
-      return { chain, residues, rows, dev, refSequence };
+      return { chain, residues, rows, refSequence };
     });
   });
 
@@ -516,20 +494,6 @@
     if (!scrollEl) return;
     scrollTop = scrollEl.scrollTop;
     viewportHeight = scrollEl.clientHeight || 360;
-  }
-
-  function toggleLiability(chainId: string, kind: string, indices: number[]) {
-    if (activeLiability && activeLiability.chainId === chainId && activeLiability.kind === kind) {
-      activeLiability = null;
-      return;
-    }
-    activeLiability = { chainId, kind, indices: new Set(indices) };
-    // Focus first matching residue in 3D if available
-    const nc = normalizedChains.find((c) => c.chain.chainId === chainId);
-    const firstIdx = indices[0];
-    if (nc && firstIdx !== undefined && nc.residues[firstIdx]) {
-      onFocusToken?.(nc.residues[firstIdx].token);
-    }
   }
 
   // Color resolvers
@@ -926,40 +890,9 @@
               {/if}
               <span class="len-pill">{nc.residues.length} aa</span>
             </div>
-
-            {#if nc.dev}
-              <div class="biophys-row">
-                <span class="bp-chip" title="Molecular weight (kDa)">MW {nc.dev.mwKda} kDa</span>
-                <span class="bp-chip" title="Calculated isoelectric point">pI {nc.dev.pI.toFixed(2)}</span>
-                <span class="bp-chip" title="Estimated net charge at pH 7.4">
-                  q(7.4) {nc.dev.netCharge74 >= 0 ? '+' : ''}{nc.dev.netCharge74.toFixed(1)}
-                </span>
-                <span class="bp-chip" title="Reduced extinction coefficient at 280 nm (M⁻¹ cm⁻¹)">
-                  ε₂₈₀ {nc.dev.extCoeff280.toLocaleString()}
-                </span>
-                {#each nc.dev.liabilities as liab (liab.kind)}
-                  {@const isLiabActive =
-                    activeLiability?.chainId === ch.chainId &&
-                    activeLiability?.kind === liab.kind}
-                  <button
-                    type="button"
-                    class="liab-pill sev-{liab.severity}"
-                    class:active={isLiabActive}
-                    title={`${liab.detail} (click to highlight positions)`}
-                    onclick={(e) => {
-                      e.stopPropagation();
-                      toggleLiability(ch.chainId, liab.kind, liab.indices);
-                    }}
-                  >
-                    {liab.label}
-                  </button>
-                {/each}
-              </div>
-            {/if}
           </div>
         {:else}
           {@const nc = normalizedChains[item.chainIdx]}
-          {@const ch = nc.chain}
           <div class="seq-row">
             {#each item.residues as res, localIdx (res.token + ':' + localIdx)}
               {@const absIdx = item.startOffset + localIdx}
@@ -967,8 +900,6 @@
               {@const hasGap = (res.gapBefore ?? 0) > 0}
               {@const glyph = getRoleGlyph(res)}
               {@const isHovered = hoveredToken === res.token || localHoveredRes?.token === res.token}
-              {@const isLiabHit =
-                activeLiability?.chainId === ch.chainId && activeLiability.indices.has(absIdx)}
               {@const isDragHit = dragPreviewTokens.has(res.token)}
               {#if hasGap}
                 <span
@@ -983,7 +914,6 @@
                 class="res-cell {colorMode === 'role' ? getRoleClass(res) : ''}"
                 class:block-start={localIdx > 0 && localIdx % 10 === 0}
                 class:is-hovered={isHovered}
-                class:is-liab={isLiabHit}
                 class:is-drag-add={isDragHit && dragMode === 'add'}
                 class:is-drag-rm={isDragHit && dragMode === 'remove'}
                 data-chain-idx={item.chainIdx}
@@ -1411,46 +1341,6 @@
     margin-left: auto;
     color: var(--text-secondary);
   }
-  .biophys-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 4px;
-  }
-  .bp-chip {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 9.5px;
-    color: var(--text-muted);
-    background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: 4px;
-    padding: 1px 5px;
-  }
-  .liab-pill {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 9.5px;
-    font-weight: 600;
-    padding: 1px 6px;
-    border-radius: 999px;
-    cursor: pointer;
-    border: 1px solid var(--border-strong);
-    background: var(--bg-surface);
-    color: var(--text-secondary);
-  }
-  .liab-pill.sev-warn {
-    background: var(--warn-bg);
-    border-color: var(--warn-border);
-    color: var(--warn-text);
-  }
-  .liab-pill.sev-info {
-    background: var(--bg-pill);
-    border-color: var(--border-strong);
-    color: var(--accent-soft);
-  }
-  .liab-pill.active {
-    box-shadow: 0 0 0 2px var(--accent);
-    font-weight: 700;
-  }
   .seq-row {
     display: flex;
     flex-wrap: nowrap;
@@ -1614,11 +1504,6 @@
     outline: 1.5px solid var(--accent-bright);
     z-index: 2;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
-  }
-  .res-cell.is-liab {
-    outline: 1.5px solid #f59e0b;
-    background: rgba(245, 158, 11, 0.24);
-    z-index: 2;
   }
   .res-cell.is-drag-add {
     outline: 1.5px solid #22c55e;
