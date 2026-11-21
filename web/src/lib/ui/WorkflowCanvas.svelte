@@ -45,6 +45,7 @@
     disabled?: boolean;
     isRunning?: boolean;
     fillHeight?: boolean;
+    autoCommitProposed?: boolean;
     onGraphChange: (next: WorkflowGraph) => void;
     onSelectNode: (nodeId: string) => void;
     onSelectNodes?: (nodeIds: string[]) => void;
@@ -65,6 +66,7 @@
     disabled = false,
     isRunning = false,
     fillHeight = false,
+    autoCommitProposed = false,
     onGraphChange,
     onSelectNode,
     onSelectNodes = undefined,
@@ -541,7 +543,7 @@
       selectedNodeId || undefined,
       dropPos,
       {
-        autoCommit: false,
+        autoCommit: autoCommitProposed,
         params: normalized.params,
         label: normalized.label,
       },
@@ -549,8 +551,8 @@
     catalogOpen = false;
     // Guard against Enter keystroke from BlockCatalogPopover immediately auto-committing
     blockAcceptUntil = performance.now() + 180;
-    proposedEdges = nextProposals;
-    proposedForNodeId = nextProposals.length > 0 ? nodeId : null;
+    proposedEdges = autoCommitProposed ? [] : nextProposals;
+    proposedForNodeId = !autoCommitProposed && nextProposals.length > 0 ? nodeId : null;
     onGraphChange(nextGraph);
     if (onBlockAdded) {
       onBlockAdded(nodeId);
@@ -659,6 +661,7 @@
       type="button"
       class="add-block-btn"
       class:open={catalogOpen}
+      data-tour="add-block-btn"
       {disabled}
       onclick={() => {
         wireLegendOpen = false;

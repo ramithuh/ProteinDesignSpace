@@ -3,7 +3,7 @@
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import { ExecutionScheduler, attachProgrammaticApi } from '$lib/engine/scheduler';
   import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from '$lib/engine/registry';
-  import { autoLayoutGraph, validateGraph } from '$lib/engine/graph-utils';
+  import { autoLayoutGraph, defaultParamsForAdapter, insertBlockSmart, validateGraph } from '$lib/engine/graph-utils';
   import {
     extractSubgraphUpTo,
     findContextStructure,
@@ -67,6 +67,7 @@
   let moreWrapEl: HTMLDivElement | null = $state(null);
   let firstRunAck = $state(false);
   let showOnboarding = $state(false);
+  let onboardingInteractive = $state(false);
   let showSeqParentBackbone = $state(false);
   let pendingRun = $state<{
     bypassCache: boolean;
@@ -215,7 +216,7 @@
   }
 
   function handleWindowKeydown(ev: KeyboardEvent) {
-    if (pendingRun || showOnboarding) return;
+    if (pendingRun || (showOnboarding && !onboardingInteractive)) return;
     if (ev.key === 'Escape') {
       sysMenuOpen = false;
       moreMenuOpen = false;
@@ -361,6 +362,7 @@
 
   function dismissOnboarding() {
     showOnboarding = false;
+    onboardingInteractive = false;
     try {
       localStorage.setItem('denovo-onboarding-seen', '1');
     } catch {
@@ -371,6 +373,57 @@
   function selectOnboardingPreset(presetId: string) {
     dismissOnboarding();
     selectPreset(presetId);
+  }
+
+  function prepareTourStarter() {
+    if (isRunning) return;
+    selectedPresetId = 'tour-starter';
+    graph = autoLayoutGraph({
+      id: 'tour-starter',
+      name: 'First Designability Pipeline',
+      nodes: [
+        {
+          id: 'pdb_1',
+          adapterId: 'pdb-input',
+          label: 'PDB Input',
+          params: defaultParamsForAdapter('pdb-input'),
+          position: { x: 60, y: 120 },
+        },
+      ],
+      edges: [],
+    });
+    setSingleSelection('pdb_1');
+    nodeStates = {};
+    outputsByNode = {};
+    runError = null;
+    rightPanelTab = 'params';
+  }
+
+  function autoStepTourBlock(adapterId: 'web-protein-mpnn' | 'localfold-af2' | 'designability-scorer') {
+    if (isRunning) return;
+    const opts =
+      adapterId === 'web-protein-mpnn'
+        ? { autoCommit: true, params: { family: 'solublempnn', modelName: 'v_48_020' }, label: 'SolubleMPNN' }
+        : adapterId === 'localfold-af2'
+          ? { autoCommit: true, params: { model: 'monomer' }, label: 'LocalFold (AF2 Model 1)' }
+          : { autoCommit: true, label: 'scRMSD / scTM' };
+    const anchorId =
+      adapterId === 'designability-scorer'
+        ? (graph.nodes.find((n) => n.adapterId === 'localfold-af2')?.id ?? selectedNodeId)
+        : adapterId === 'localfold-af2'
+          ? (graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn')?.id ?? selectedNodeId)
+          : (graph.nodes.find((n) => n.adapterId === 'pdb-input')?.id ?? selectedNodeId);
+
+    const { graph: nextGraph, nodeId } = insertBlockSmart(
+      $state.snapshot(graph) as WorkflowGraph,
+      adapterId,
+      anchorId || undefined,
+      undefined,
+      opts,
+    );
+    graph = autoLayoutGraph(nextGraph);
+    setSingleSelection(nodeId);
+    runError = null;
   }
 
   function handleSelectNode(nodeId: string) {
@@ -1023,7 +1076,7 @@
   <div class="hdr-left">
     <h1 class="brand-logo"><span class="accent">denovo</span>.run</h1>
 
-    <label class="example-picker" class:disabled={isRunning}>
+    <label class="example-picker" class:disabled={isRunning} data-tour="preset-select">
       <span class="example-lbl">Example Workflow</span>
       <select
         class="preset-select"
@@ -1208,6 +1261,7 @@
       type="button"
       class="btn-primary"
       class:is-running={isRunning}
+      data-tour="run-btn"
       disabled={isRunning || validationErrors.length > 0}
       onclick={() => runWorkflow(false)}
       title="Run workflow (R or ⌘↵ / Ctrl+Enter)"
@@ -1245,6 +1299,7 @@
           disabled={isRunning}
           {isRunning}
           fillHeight={splitMode === 'horizontal'}
+          autoCommitProposed={showOnboarding && onboardingInteractive}
           onGraphChange={handleGraphChange}
           onSelectNode={handleSelectNode}
           onSelectNodes={handleSelectNodes}
@@ -1456,7 +1511,7 @@
         {/if}
       </div>
 
-      <div class="right-panel">
+      <div class="right-panel" data-tour="inspector-panel">
         <div class="right-tabs" role="tablist" aria-label="Block inspector tabs">
           <button
             type="button"
@@ -1571,8 +1626,13 @@
 
 {#if showOnboarding}
   <OnboardingModal
+    {graph}
+    {isRunning}
     onDismiss={dismissOnboarding}
     onSelectPreset={selectOnboardingPreset}
+    onPrepareTourStarter={prepareTourStarter}
+    onAutoStepBlock={autoStepTourBlock}
+    onInteractiveChange={(active) => (onboardingInteractive = active)}
   />
 {/if}
 
