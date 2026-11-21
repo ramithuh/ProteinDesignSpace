@@ -263,6 +263,10 @@ export function graphToYamlRecipe(graph: WorkflowGraph): string {
     const { diff } = diffParams(n.adapterId, n.params);
     const kv: Record<string, unknown> = { model: n.adapterId };
     if (n.label && n.label !== ADAPTER_REGISTRY[n.adapterId]?.shortName) kv.label = n.label;
+    if (n.adapterId === 'localfold-af2' && 'model' in diff) {
+      diff.foldModel = diff.model;
+      delete diff.model;
+    }
     Object.assign(kv, diff);
     lines.push(`  ${n.id}: ${JSON.stringify(kv)}`);
   }
@@ -346,7 +350,7 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
       const id = line.slice(0, colon).trim();
       const bodyStr = line.slice(colon + 1).trim();
       const obj = JSON.parse(bodyStr) as Record<string, unknown>;
-      const adapterId = String(obj.model ?? obj.adapterId ?? '');
+      const adapterId = String(obj.adapterId ?? obj.model ?? '');
       if (!ADAPTER_REGISTRY[adapterId]) {
         throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
       }
@@ -355,6 +359,16 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
       delete rest.model;
       delete rest.adapterId;
       delete rest.label;
+      if (adapterId === 'localfold-af2') {
+        const foldModel = obj.foldModel ?? obj.checkpoint;
+        if (typeof foldModel === 'string' && foldModel) {
+          rest.model = foldModel;
+        } else if (obj.adapterId && typeof obj.model === 'string' && obj.model && obj.model !== adapterId) {
+          rest.model = obj.model;
+        }
+        delete rest.foldModel;
+        delete rest.checkpoint;
+      }
       nodes.push({
         id,
         adapterId,

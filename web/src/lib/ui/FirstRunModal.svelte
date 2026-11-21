@@ -51,12 +51,12 @@
     aria-labelledby="first-run-title"
   >
     <div class="modal-hdr">
-      <div class="hdr-badge">LOCAL WEBGPU RUN</div>
+      <div class="hdr-badge">LOCAL BROWSER RUN</div>
       <h2 id="first-run-title">Before your first run</h2>
       <p class="hdr-sub">
         {isPartialRun
-          ? 'This partial run will download the required model weights and run inference directly on your GPU.'
-          : 'This workflow downloads model weights once into your browser and runs inference directly on your GPU.'}
+          ? 'This partial run will download the required model weights and run protein design & folding locally on your device\'s GPU.'
+          : 'This workflow downloads model weights once into your browser and runs protein design & folding locally on your device\'s GPU.'}
       </p>
     </div>
 
@@ -75,9 +75,9 @@
         <strong class="stat-val">{formatApproxSize(preflight.totalDownloadMB)}</strong>
       </div>
       <div class="stat-box">
-        <span class="stat-lbl">Compute &amp; peak VRAM</span>
+        <span class="stat-lbl">Peak GPU memory</span>
         <strong class="stat-val">
-          WebGPU · {formatApproxSize(preflight.peakVramMB)}
+          {formatApproxSize(preflight.peakVramMB)}
         </strong>
       </div>
     </div>
@@ -104,10 +104,10 @@
         <strong>100% local &amp; private:</strong> Nothing is uploaded — sequences and structures stay in your browser.
       </li>
       <li>
-        <strong>Cached in browser storage (OPFS):</strong> Weights download once and are reused automatically on future runs.
+        <strong>Cached locally in your browser:</strong> Weights download once and are reused automatically on future runs.
       </li>
       <li>
-        <strong>GPU heads-up:</strong> First shader compile + diffusion/folding may take a moment and use GPU memory; you can click <b>Stop</b> anytime.
+        <strong>GPU heads-up:</strong> Initial model setup and structure prediction may take a moment and use GPU memory; weights stay cached for future runs.
       </li>
     </ul>
 
@@ -297,8 +297,7 @@
     color: var(--text-secondary);
   }
 
-  .notes strong,
-  .notes b {
+  .notes strong {
     color: var(--text-primary);
   }
 

@@ -5,7 +5,7 @@
     LOCALFOLD_MODEL_OPTIONS,
     RFD4_BENCHMARK_OPTIONS,
   } from '$lib/engine/registry';
-  import { PORT_COLORS, STAGE_COLORS } from '$lib/engine/graph-utils';
+  import { PORT_COLORS, STAGE_COLORS, STAGE_LABELS } from '$lib/engine/graph-utils';
   import type { CanonicalArtifact, NodeProgressEvent } from '$lib/engine/types';
 
   export interface ProteinNodeData {
@@ -37,6 +37,16 @@
   let inputs = $derived(Object.entries(manifest?.inputs ?? {}));
   let outputs = $derived(Object.entries(manifest?.outputs ?? {}));
   let stageColor = $derived(STAGE_COLORS[manifest?.stage ?? 'source'] ?? '#64748b');
+  let stageLabel = $derived(STAGE_LABELS[manifest?.stage ?? ''] ?? manifest?.stage ?? 'node');
+  let runtimeLabel = $derived(manifest?.runtime === 'cpu-ts' ? 'CPU' : 'GPU');
+  let activeWeightsMB = $derived.by((): number => {
+    if (data.adapterId === 'localfold-af2') {
+      const modelId = String(data.params?.model ?? 'monomer');
+      const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
+      return meta.approxMB;
+    }
+    return manifest?.approxWeightsMB ?? 0;
+  });
   let st = $derived(data.state);
   let isPipelineRunning = $derived(Boolean(data.isPipelineRunning));
   let isNodeRunning = $derived(st?.status === 'running' || st?.status === 'loading');
@@ -51,7 +61,7 @@
           const fname = String(p.filename ?? '').trim();
           return fname || 'custom PDB';
         }
-        return '53 aa demo';
+        return '53 aa 3-helix demo';
       }
       case 'sequence-input': {
         const raw = String(p.sequence ?? '');
@@ -68,7 +78,7 @@
         const tp = String(p.taskPreset ?? 'custom');
         if (tp !== 'custom') {
           const opt = RFD4_BENCHMARK_OPTIONS.find((o) => o.id === tp);
-          return opt ? `${opt.category} · ${tp}` : tp;
+          return opt ? opt.label : tp;
         }
         const bits: string[] = [];
         const contig = String(p.contig ?? '').trim();
@@ -76,33 +86,36 @@
         const hotCount = String(p.hotspots ?? '')
           .split(/[,\s]+/)
           .filter(Boolean).length;
-        if (hotCount > 0) bits.push(`${hotCount} hot`);
+        if (hotCount > 0) bits.push(`${hotCount} hotspot${hotCount === 1 ? '' : 's'}`);
         const motif = String(p.motifSpan ?? '').trim();
         if (motif) bits.push('motif');
         const cath = String(p.cathCode ?? '').trim();
         if (cath) bits.push(`CATH ${cath}`);
-        return bits.join(' · ') || 'custom spec';
+        return bits.join(' · ') || 'custom constraints';
       }
       case 'rfd4-proteina': {
         const mode = String(p.mode ?? 'unconditional');
         const steps = Number(p.nsteps ?? 60);
-        if (mode === 'conditioned') return `INT8 · conditioned · ${steps} steps`;
-        if (mode === 'preset') return `INT8 · ${String(p.presetId ?? 'preset')} · ${steps} steps`;
-        if (mode === 'partial') return `INT8 · partial ${Number(p.partialFraction ?? 0.5)} · ${steps} steps`;
-        if (mode === 'inverse-folding') return `INT8 · inv-fold · ${steps} steps`;
-        return `INT8 · ${Number(p.length ?? 70)} aa · ${steps} steps`;
+        if (mode === 'conditioned') return `Conditioned · ${steps} steps`;
+        if (mode === 'preset') {
+          const opt = RFD4_BENCHMARK_OPTIONS.find((o) => o.id === String(p.presetId ?? ''));
+          return `${opt?.label ?? 'Preset task'} · ${steps} steps`;
+        }
+        if (mode === 'partial') return `Partial diffusion (${Number(p.partialFraction ?? 0.5)}) · ${steps} steps`;
+        if (mode === 'inverse-folding') return `Inverse folding · ${steps} steps`;
+        return `${Number(p.length ?? 70)} aa · ${steps} steps`;
       }
       case 'genie3': {
         const len = Number(p.length ?? 80);
         const steps = Number(p.nSampleStep ?? 100);
-        return `FP16 · ${len} aa · ${steps} DDIM`;
+        return `${len} aa · ${steps} steps`;
       }
       case 'web-protein-mpnn': {
         const fam =
           p.family === 'proteinmpnn'
             ? 'ProteinMPNN'
             : p.family === 'ca'
-              ? 'Cα-MPNN'
+              ? 'Cα-ProteinMPNN'
               : 'SolubleMPNN';
         const ckpt = String(p.modelName ?? 'v_48_020');
         const n = Number(p.numSequences ?? 2);
@@ -117,7 +130,8 @@
           const steps = Number(p.diffusionSteps ?? 25);
           return `${meta.shortLabel} · ${steps} steps · ${rec} rec`;
         }
-        return `${meta.shortLabel} · ${rec} rec · ×${Number(p.maxSequences ?? 2)}`;
+        const maxSeq = Number(p.maxSequences ?? 2);
+        return `${meta.shortLabel} · ${rec} rec · ${maxSeq} seq`;
       }
       case 'designability-scorer': {
         return `scRMSD < ${Number(p.scRmsdThreshold ?? 2.0).toFixed(1)} Å · pLDDT ≥ ${Number(p.plddtThreshold ?? 70)}`;
@@ -194,8 +208,8 @@
   {/if}
 
   <div class="header">
-    <span class="stage">{manifest?.stage ?? 'node'}</span>
-    <span class="rt">{manifest?.runtime ?? 'cpu'}</span>
+    <span class="stage">{stageLabel}</span>
+    <span class="rt">{runtimeLabel}</span>
   </div>
 
   <div class="title">{data.label || manifest?.shortName || data.adapterId}</div>
@@ -209,6 +223,7 @@
     <div class="col in-col">
       {#each inputs as [portName, spec] (portName)}
         {@const color = PORT_COLORS[spec.type]?.bg ?? '#94a3b8'}
+        {@const portLabel = PORT_COLORS[spec.type]?.label ?? spec.type}
         {@const connected = Boolean(data.inputPortsConnected?.[portName])}
         {@const ready = Boolean(data.inputPortsReady?.[portName])}
         <div class="port-row left">
@@ -224,7 +239,7 @@
             type="button"
             class="port-label port-btn"
             class:ready
-            title={`Click to peek input "${portName}" (${spec.type})${spec.required === false ? ' [optional]' : ''}`}
+            title={`Click to inspect input "${portName}" (${portLabel})${spec.required === false ? ' [optional]' : ''}`}
             onclick={(e) => {
               e.stopPropagation();
               data.onPeekPort?.(id, 'in', portName);
@@ -239,13 +254,14 @@
     <div class="col out-col">
       {#each outputs as [portName, spec] (portName)}
         {@const color = PORT_COLORS[spec.type]?.bg ?? '#94a3b8'}
+        {@const portLabel = PORT_COLORS[spec.type]?.label ?? spec.type}
         {@const ready = Boolean(data.outputPortsReady?.[portName])}
         <div class="port-row right">
           <button
             type="button"
             class="port-label port-btn"
             class:ready
-            title={`Click to peek output "${portName}" (${spec.type})`}
+            title={`Click to inspect output "${portName}" (${portLabel})`}
             onclick={(e) => {
               e.stopPropagation();
               data.onPeekPort?.(id, 'out', portName);
@@ -282,7 +298,7 @@
       <div class="status-line queued-text">queued…</div>
     {:else}
       <div class="status-line muted">
-        {manifest?.approxWeightsMB ? `~${manifest.approxWeightsMB} MB` : 'ready'}
+        {activeWeightsMB > 0 ? `~${activeWeightsMB} MB` : 'ready'}
       </div>
     {/if}
   </div>

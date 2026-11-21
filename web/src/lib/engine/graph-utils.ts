@@ -9,9 +9,9 @@ export const PORT_COLORS: Record<PortType, { bg: string; label: string; short: s
   StructureArtifact: { bg: '#3b82f6', label: 'Structure (3D)', short: 'Structure' },
   TrajectoryFrames: { bg: '#06b6d4', label: 'Trajectory', short: 'Trajectory' },
   SequenceSet: { bg: '#a855f7', label: 'Sequences (AA)', short: 'Sequences' },
-  FoldedStructure: { bg: '#10b981', label: 'Refold (AF2)', short: 'Folds' },
-  DesignabilityMetrics: { bg: '#f59e0b', label: 'Metrics (scRMSD)', short: 'Metrics' },
-  ConditionSpec: { bg: '#f43f5e', label: 'Conditioning (RFD4)', short: 'Condition' },
+  FoldedStructure: { bg: '#10b981', label: 'Predicted Structure', short: 'Predicted' },
+  DesignabilityMetrics: { bg: '#f59e0b', label: 'Designability Scores', short: 'Scores' },
+  ConditionSpec: { bg: '#f43f5e', label: 'Design Constraints', short: 'Constraints' },
 };
 
 export const STAGE_COLORS: Record<string, string> = {
@@ -21,6 +21,15 @@ export const STAGE_COLORS: Record<string, string> = {
   'inverse-fold': '#a855f7',
   fold: '#10b981',
   score: '#f59e0b',
+};
+
+export const STAGE_LABELS: Record<string, string> = {
+  source: 'Input',
+  condition: 'Conditioning',
+  generate: 'Generation',
+  'inverse-fold': 'Sequence Design',
+  fold: 'Prediction',
+  score: 'Evaluation',
 };
 
 export function defaultParamsForAdapter(adapterId: string): Record<string, unknown> {
@@ -146,9 +155,11 @@ export function validateConnection(
   if (!inSpec) return { valid: false, reason: `Unknown input port "${toPort}"` };
 
   if (outSpec.type !== inSpec.type) {
+    const outLabel = PORT_COLORS[outSpec.type]?.label ?? outSpec.type;
+    const inLabel = PORT_COLORS[inSpec.type]?.label ?? inSpec.type;
     return {
       valid: false,
-      reason: `Type mismatch: ${outSpec.type} cannot wire into ${inSpec.type}`,
+      reason: `Type mismatch: ${outLabel} cannot connect to ${inLabel}`,
     };
   }
   if (wouldCreateCycle(graph.nodes, graph.edges, fromNode, toNode)) {
@@ -217,8 +228,10 @@ export function validateGraph(graph: WorkflowGraph): string[] {
         edgePortsOk = false;
       }
       if (outSpec && inSpec && outSpec.type !== inSpec.type) {
+        const outLabel = PORT_COLORS[outSpec.type]?.label ?? outSpec.type;
+        const inLabel = PORT_COLORS[inSpec.type]?.label ?? inSpec.type;
         errors.push(
-          `Type mismatch on wire ${src.id}.${e.fromPort} -> ${dst.id}.${e.toPort} (${outSpec.type} vs ${inSpec.type}).`,
+          `Type mismatch on connection ${src.label ?? src.id}.${e.fromPort} → ${dst.label ?? dst.id}.${e.toPort} (${outLabel} vs ${inLabel}).`,
         );
         edgePortsOk = false;
       }
@@ -245,8 +258,9 @@ export function validateGraph(graph: WorkflowGraph): string[] {
     for (const [portName, spec] of Object.entries(manifest.inputs)) {
       if (spec.required === false) continue;
       if (!validConnectedTargets.has(`${node.id}:${portName}`)) {
+        const portLabel = PORT_COLORS[spec.type]?.label ?? spec.type;
         errors.push(
-          `"${node.label ?? manifest.shortName}" is missing required input "${portName}" (${spec.type}).`,
+          `"${node.label ?? manifest.shortName}" is missing required input "${portName}" (${portLabel}).`,
         );
       }
     }
@@ -446,6 +460,10 @@ export interface InsertBlockResult {
 export interface InsertBlockOptions {
   /** If true (default for backwards-compat), immediately commit proposed edges to graph.edges. Set false for ghost preview UX. */
   autoCommit?: boolean;
+  /** Optional parameter overrides merged onto defaultParamsForAdapter(adapterId). */
+  params?: Record<string, unknown>;
+  /** Optional display label override (deduplicated with #2, #3, ... if already used). */
+  label?: string;
 }
 
 /**
@@ -629,8 +647,22 @@ export function insertBlockSmart(
     nodeId = `${prefix}_${seq}`;
   }
 
-  const sameCount = graph.nodes.filter((n) => n.adapterId === adapterId).length;
-  const label = sameCount > 0 ? `${manifest.shortName} #${sameCount + 1}` : manifest.shortName;
+  const customLabel = options?.label?.trim();
+  const baseLabel = customLabel || manifest.shortName;
+  let label: string;
+  if (customLabel) {
+    const existingLabels = new Set(graph.nodes.map((n) => n.label).filter(Boolean));
+    if (!existingLabels.has(baseLabel)) {
+      label = baseLabel;
+    } else {
+      let idx = 2;
+      while (existingLabels.has(`${baseLabel} #${idx}`)) idx++;
+      label = `${baseLabel} #${idx}`;
+    }
+  } else {
+    const sameCount = graph.nodes.filter((n) => n.adapterId === adapterId).length;
+    label = sameCount > 0 ? `${baseLabel} #${sameCount + 1}` : baseLabel;
+  }
 
   const selectedNode = selectedNodeId
     ? graph.nodes.find((n) => n.id === selectedNodeId)
@@ -665,11 +697,14 @@ export function insertBlockSmart(
     position = { x: px, y: py };
   }
 
+  const baseParams = defaultParamsForAdapter(adapterId);
+  const mergedParams = options?.params ? { ...baseParams, ...options.params } : baseParams;
+
   const newNode: WorkflowNode = {
     id: nodeId,
     adapterId,
     label,
-    params: defaultParamsForAdapter(adapterId),
+    params: mergedParams,
     position,
   };
 

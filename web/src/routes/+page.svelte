@@ -47,6 +47,9 @@
   let webgpuDetail = $state<string>('checking…');
   let webMcpReady = $state(false);
   let activeGpuWorker = $state<string | null>(null);
+  let activeGpuWorkerLabel = $derived(
+    activeGpuWorker ? (ADAPTER_REGISTRY[activeGpuWorker]?.shortName ?? activeGpuWorker) : null,
+  );
   let cacheUsedMB = $state<number>(0);
 
   // Header popovers & first-run confirmation dialog
@@ -665,7 +668,7 @@
       if (updated !== null) {
         updateNodeParams(mpnnTarget.id, { ...mpnnTarget.params, fixedPositions: updated });
       }
-      lastPickedResidue = `${baseLabel} → Fix MPNN`;
+      lastPickedResidue = `${baseLabel} → Fix Positions (MPNN)`;
       return;
     }
 
@@ -690,7 +693,7 @@
       if (updated !== null) {
         updateNodeParams(selectedNode.id, { ...selectedNode.params, fixedPositions: updated });
       }
-      lastPickedResidue = `${baseLabel} → Fix MPNN`;
+      lastPickedResidue = `${baseLabel} → Fix Positions (MPNN)`;
       return;
     }
 
@@ -962,7 +965,7 @@
         title="WebGPU status, VRAM & weight cache"
       >
         <span class="status-dot"></span>
-        {activeGpuWorker ? `GPU: ${activeGpuWorker}` : 'WebGPU'}
+        {activeGpuWorkerLabel ? `GPU: ${activeGpuWorkerLabel}` : 'WebGPU'}
       </button>
 
       {#if sysMenuOpen}
@@ -979,7 +982,7 @@
               <span class="badge-ok">WebMCP active</span>
             </div>
           {/if}
-          {#if activeGpuWorker}
+          {#if activeGpuWorkerLabel}
             <div class="pop-row">
               <span class="pop-k">Active worker</span>
               <button
@@ -988,7 +991,7 @@
                 disabled={isRunning}
                 onclick={freeVram}
               >
-                Free VRAM ({activeGpuWorker})
+                Free VRAM ({activeGpuWorkerLabel})
               </button>
             </div>
           {/if}
@@ -999,7 +1002,7 @@
               class="pop-action danger"
               disabled={isRunning}
               onclick={handleClearCache}
-              title="Clear OPFS & CacheStorage weight caches"
+              title="Clear cached model weights from browser storage"
             >
               Clear
             </button>
@@ -1155,7 +1158,7 @@
 
       {#if validationErrors.length > 0}
         <div class="warn-banner">
-          <b>Wire check:</b> {validationErrors.join(' · ')}
+          <b>Workflow check:</b> {validationErrors.join(' · ')}
         </div>
       {/if}
 
@@ -1254,7 +1257,7 @@
             {/if}
 
             {#if hasConditionerNode || hasMpnnNode}
-              <label class="pick-mode" title="Choose what clicking a 3D residue in Mol* modifies">
+              <label class="pick-mode" title="Choose what clicking a 3D residue modifies">
                 Pick:
                 <select class="pick-select" bind:value={molPickMode}>
                   <option value="auto">Auto</option>
@@ -1264,7 +1267,7 @@
                     <option value="motif">Motif</option>
                   {/if}
                   {#if hasMpnnNode}
-                    <option value="mpnn">Fix MPNN</option>
+                    <option value="mpnn">Fix Positions (MPNN)</option>
                   {/if}
                 </select>
               </label>
@@ -1328,7 +1331,7 @@
             class:active={rightPanelTab === 'peek'}
             onclick={() => (rightPanelTab = 'peek')}
           >
-            {isCompareMode ? `Compare (${selectedNodeIds.length})` : 'Peek'}
+            {isCompareMode ? `Compare (${selectedNodeIds.length})` : 'Outputs'}
             {#if hasPeekData || isCompareMode}
               <span class="live-dot" title="Outputs or comparison ready"></span>
             {/if}

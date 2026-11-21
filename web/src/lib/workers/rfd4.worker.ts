@@ -77,7 +77,7 @@ async function ensureLoaded(id: number, needEncoder: boolean) {
       type: 'progress',
       phase: 'weights',
       progress: 0.05,
-      detail: 'Fetching RFD4-Proteina INT8 shards (~330 MB, cached after first run)...',
+      detail: 'Fetching RFD4-Proteina weights (~330 MB, cached after first run)...',
     });
     shardedBundle = await rfd4Mod.fetchShardedWeights(RFD4_SHARDED_URL, {
       includeEncoder: needEncoder,
@@ -92,7 +92,7 @@ async function ensureLoaded(id: number, needEncoder: boolean) {
           type: 'progress',
           phase: 'weights',
           progress: Math.min(0.95, frac),
-          detail: p.message || `RFD4 INT8 weights: ${mb} / ${totMb} MB`,
+          detail: p.message || `RFD4-Proteina weights: ${mb} / ${totMb} MB`,
         });
       },
     });
@@ -123,7 +123,7 @@ async function ensureLoaded(id: number, needEncoder: boolean) {
       type: 'progress',
       phase: 'init',
       progress: 0.96,
-      detail: 'Uploading RFD4-Proteina FP16 weights to WebGPU...',
+      detail: 'Uploading RFD4-Proteina weights to GPU...',
     });
     // Match upstream web.rfd4-proteina.org: always use packed FP16 weights ({ half: true })
     // for half the VRAM, 2-3x faster kernels, and exact parity with upstream WebGPU CI gates.
@@ -467,7 +467,7 @@ self.onmessage = async (ev: MessageEvent) => {
         const errHint = gpuValErr ? ` (WebGPU validation error: ${gpuValErr.message})` : '';
         const stepHint =
           nsteps < 58
-            ? ` Steps=${nsteps} is below the stable floor (~58) for RFD4's vf_tsr schedule — set Steps to 60 and use Recycle=none for speed.`
+            ? ` Steps=${nsteps} is below the recommended minimum (58) — set Steps to 60 and Recycle to none for reliable convergence.`
             : ' Try reloading the page or switching browser/GPU backend.';
         throw new Error(
           `RFD4-Proteina produced a degenerate single-residue sequence (${finalSeq.slice(0, 12)}…, logits nz=${logitsNonZero}, nan=${logitsNan})${errHint}.${stepHint}`,

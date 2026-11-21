@@ -34,7 +34,7 @@ export const NUMERIC_SPECS: Record<string, Record<string, NumericFieldSpec>> = {
       defaultValue: 60,
       warnBelow: {
         threshold: 58,
-        message: 'Below 58 steps can destabilize RFD4 (vf_tsr); use Recycle = none for speed.',
+        message: 'Fewer than 58 steps may reduce structure quality in RFD4-Proteina; set Recycle to None if you need faster sampling.',
       },
     },
     seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 42 },

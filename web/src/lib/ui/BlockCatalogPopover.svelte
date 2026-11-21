@@ -1,12 +1,18 @@
 <script lang="ts">
-  import { ADAPTER_REGISTRY } from '$lib/engine/registry';
-  import { PORT_COLORS, STAGE_COLORS } from '$lib/engine/graph-utils';
+  import { tick } from 'svelte';
+  import {
+    filterCatalog,
+    type CatalogInsertRequest,
+    type CatalogSubItem,
+    type FilteredCatalogEntry,
+  } from '$lib/engine/catalog';
+  import { STAGE_COLORS } from '$lib/engine/graph-utils';
 
   interface Props {
     disabled?: boolean;
     triggerEl?: HTMLElement | null;
-    onInsert: (adapterId: string) => void;
-    onDragStart?: (ev: DragEvent, adapterId: string) => void;
+    onInsert: (req: CatalogInsertRequest) => void;
+    onDragStart?: (ev: DragEvent, req: CatalogInsertRequest) => void;
     onClose: () => void;
   }
 
@@ -18,112 +24,189 @@
     onClose,
   }: Props = $props();
 
-  const STAGE_GROUPS = [
-    { title: 'Inputs', ids: ['pdb-input', 'sequence-input'] },
-    { title: 'Conditioning', ids: ['rfd4-conditioner'] },
-    { title: 'Generate', ids: ['rfd4-proteina', 'genie3'] },
-    { title: 'Inverse Fold', ids: ['web-protein-mpnn'] },
-    { title: 'Fold', ids: ['localfold-af2'] },
-    { title: 'Evaluate', ids: ['designability-scorer'] },
-  ];
-
-  const CONCISE_ROLES: Record<string, string> = {
-    'pdb-input': 'Built-in 3-helix demo or upload/paste PDB & mmCIF',
-    'sequence-input': 'Paste amino acid sequences (plain or FASTA)',
-    'rfd4-conditioner': 'Contigs, hotspots, motifs, H-bonds & CATH folds',
-    'rfd4-proteina': 'All-atom sequence + backbone diffusion (WebGPU INT8)',
-    genie3: 'Fast SE(3)-equivariant protein diffusion (~45 MB WebGPU FP16)',
-    'web-protein-mpnn': 'Inverse-fold sequences with Soluble / Protein / Cα MPNN',
-    'localfold-af2': 'Fold with AF2, RoseTTAFold3, Boltz-2, OpenBind-0, AF3 (WebGPU)',
-    'designability-scorer': 'Kabsch superposition, scRMSD, scTM & pLDDT pass rate',
-  };
-
   let query = $state('');
   let activeIdx = $state(0);
-  let popoverEl: HTMLDivElement | null = $state(null);
+  let activeSubIdx = $state(0);
+  let focusPane = $state<'main' | 'flyout'>('main');
+  let flyoutFromKeyboard = $state(false);
+  let flyoutAdapterId = $state<string | null>(null);
+
+  let shellEl: HTMLDivElement | null = $state(null);
+  let mainEl: HTMLDivElement | null = $state(null);
+  let flyoutEl: HTMLDivElement | null = $state(null);
   let searchInputEl: HTMLInputElement | null = $state(null);
 
-  interface CatalogItem {
-    id: string;
-    group: string;
-    shortName: string;
-    displayName: string;
-    stage: string;
-    role: string;
-    weightLabel: string;
-    searchBlob: string;
-  }
+  let flyoutLeft = $state(346);
+  let flyoutTop = $state(0);
+  let flyoutWidth = $state(320);
+  let flyoutMaxHeight = $state(420);
+  let flyoutSide = $state<'right' | 'left' | 'overlay'>('right');
 
-  const ALL_ITEMS: CatalogItem[] = STAGE_GROUPS.flatMap((grp) =>
-    grp.ids
-      .map((id): CatalogItem | null => {
-        const m = ADAPTER_REGISTRY[id];
-        if (!m) return null;
-        const portTokens = [
-          ...Object.values(m.inputs),
-          ...Object.values(m.outputs),
-        ].flatMap((spec) => {
-          const pc = PORT_COLORS[spec.type];
-          return pc ? [spec.type, pc.label, pc.short] : [spec.type];
-        });
-        return {
-          id,
-          group: grp.title,
-          shortName: m.shortName,
-          displayName: m.displayName,
-          stage: m.stage,
-          role: CONCISE_ROLES[id] ?? m.description,
-          weightLabel: m.approxWeightsMB > 0 ? `~${m.approxWeightsMB} MB` : 'CPU',
-          searchBlob: [
-            m.id,
-            m.displayName,
-            m.shortName,
-            m.stage,
-            grp.title,
-            m.description,
-            CONCISE_ROLES[id] ?? '',
-            ...portTokens,
-          ]
-            .join(' ')
-            .toLowerCase(),
-        };
-      })
-      .filter((x): x is CatalogItem => x !== null),
-  );
+  let closeGraceTimer: ReturnType<typeof setTimeout> | null = null;
 
-  let filteredItems = $derived.by(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return ALL_ITEMS;
-    const terms = q.split(/\s+/).filter(Boolean);
-    return ALL_ITEMS.filter((item) => terms.every((t) => item.searchBlob.includes(t)));
-  });
+  let filteredEntries = $derived(filterCatalog(query));
 
-  let groupedItems = $derived.by(() => {
-    const groups: { title: string; items: { item: CatalogItem; flatIdx: number }[] }[] = [];
-    const byTitle = new Map<string, { title: string; items: { item: CatalogItem; flatIdx: number }[] }>();
-    filteredItems.forEach((item, flatIdx) => {
-      let g = byTitle.get(item.group);
+  let groupedEntries = $derived.by(() => {
+    const groups: { title: string; entries: { entry: FilteredCatalogEntry; flatIdx: number }[] }[] = [];
+    const byTitle = new Map<
+      string,
+      { title: string; entries: { entry: FilteredCatalogEntry; flatIdx: number }[] }
+    >();
+    filteredEntries.forEach((entry, flatIdx) => {
+      let g = byTitle.get(entry.item.group);
       if (!g) {
-        g = { title: item.group, items: [] };
-        byTitle.set(item.group, g);
+        g = { title: entry.item.group, entries: [] };
+        byTitle.set(entry.item.group, g);
         groups.push(g);
       }
-      g.items.push({ item, flatIdx });
+      g.entries.push({ entry, flatIdx });
     });
     return groups;
   });
 
-  // Reset active index to the top match whenever the search query changes
-  $effect(() => {
-    void query;
-    activeIdx = 0;
+  let activeEntry = $derived<FilteredCatalogEntry | null>(filteredEntries[activeIdx] ?? null);
+
+  let flyoutEntry = $derived.by<FilteredCatalogEntry | null>(() => {
+    if (!flyoutAdapterId) return null;
+    const found = filteredEntries.find((e) => e.item.id === flyoutAdapterId) ?? null;
+    if (!found || found.matchingSubGroups.length === 0) return null;
+    return found;
   });
 
-  // Clamp active index if filtered list shrinks
+  let activeDescendantId = $derived.by((): string | undefined => {
+    if (focusPane === 'flyout' && flyoutEntry) {
+      const sub = flyoutEntry.matchingSubItems[activeSubIdx];
+      return sub ? `cat-sub-${flyoutEntry.item.id}-${sub.key}` : undefined;
+    }
+    return activeEntry ? `cat-item-${activeEntry.item.id}` : undefined;
+  });
+
+  function clearCloseTimer() {
+    if (closeGraceTimer !== null) {
+      clearTimeout(closeGraceTimer);
+      closeGraceTimer = null;
+    }
+  }
+
+  function scheduleFlyoutClose() {
+    clearCloseTimer();
+    closeGraceTimer = setTimeout(() => {
+      closeGraceTimer = null;
+      if (focusPane !== 'flyout') {
+        flyoutAdapterId = null;
+      }
+    }, 140);
+  }
+
+  function handleShellMouseLeave() {
+    if (!flyoutFromKeyboard) {
+      focusPane = 'main';
+    }
+    scheduleFlyoutClose();
+  }
+
+  function updateFlyoutGeometry() {
+    if (typeof window === 'undefined' || !shellEl || !mainEl || !flyoutEntry) return;
+    const shellRect = shellEl.getBoundingClientRect();
+    const mainRect = mainEl.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const margin = 12;
+    const gap = 6;
+
+    const spaceRight = vw - mainRect.right - margin;
+    const spaceLeft = mainRect.left - margin;
+    const preferredW = 328;
+
+    let side: 'right' | 'left' | 'overlay' = 'right';
+    let width = preferredW;
+    let left = mainRect.width + gap;
+
+    if (spaceRight >= 250) {
+      side = 'right';
+      width = Math.min(preferredW, spaceRight);
+      left = mainRect.width + gap;
+    } else if (spaceLeft >= 250) {
+      side = 'left';
+      width = Math.min(preferredW, spaceLeft);
+      left = -(width + gap);
+    } else {
+      side = 'overlay';
+      width = Math.min(preferredW, Math.max(220, vw - margin * 2));
+      const desiredGlobalLeft = Math.max(margin, vw - margin - width);
+      left = desiredGlobalLeft - shellRect.left;
+    }
+
+    const availH = Math.max(180, vh - shellRect.top - margin);
+    const maxH = Math.min(440, availH);
+
+    // Align vertically near the hovered/active row, clamped to viewport bottom
+    const rowEl = mainEl.querySelector<HTMLElement>(`[data-adapter-id="${flyoutEntry.item.id}"]`);
+    let desiredTop = 0;
+    if (rowEl) {
+      const rowRect = rowEl.getBoundingClientRect();
+      desiredTop = rowRect.top - shellRect.top - 8;
+    }
+    const maxTop = Math.max(0, vh - shellRect.top - maxH - margin);
+    const clampedTop = Math.max(0, Math.min(desiredTop, maxTop));
+
+    flyoutSide = side;
+    flyoutWidth = Math.round(width);
+    flyoutLeft = Math.round(left);
+    flyoutTop = Math.round(clampedTop);
+    flyoutMaxHeight = Math.round(maxH);
+  }
+
+  // Reset navigation & auto-open flyout on narrowed sub-item searches
   $effect(() => {
-    if (filteredItems.length === 0 || activeIdx >= filteredItems.length) {
+    const q = query.trim();
+    activeIdx = 0;
+    activeSubIdx = 0;
+    focusPane = 'main';
+    flyoutFromKeyboard = false;
+    clearCloseTimer();
+    if (q) {
+      const top = filteredEntries[0];
+      if (top && top.hasNarrowedSubMatch && top.matchingSubItems.length > 0) {
+        flyoutAdapterId = top.item.id;
+      } else {
+        flyoutAdapterId = null;
+      }
+    } else {
+      flyoutAdapterId = null;
+    }
+  });
+
+  // Clamp indices if filtered lists shrink
+  $effect(() => {
+    if (filteredEntries.length === 0 || activeIdx >= filteredEntries.length) {
       activeIdx = 0;
     }
+  });
+
+  $effect(() => {
+    const subs = flyoutEntry?.matchingSubItems ?? [];
+    if (subs.length === 0 || activeSubIdx >= subs.length) {
+      activeSubIdx = 0;
+    }
+  });
+
+  // Recompute flyout geometry whenever open target or viewport changes
+  $effect(() => {
+    if (!flyoutEntry) return;
+    void query;
+    void tick().then(() => updateFlyoutGeometry());
+  });
+
+  $effect(() => {
+    function onResize() {
+      if (flyoutEntry) updateFlyoutGeometry();
+    }
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      clearCloseTimer();
+    };
   });
 
   // Autofocus search input on mount
@@ -136,7 +219,7 @@
     function handlePointerDown(ev: PointerEvent) {
       const target = ev.target as Node | null;
       if (!target) return;
-      if (popoverEl?.contains(target)) return;
+      if (shellEl?.contains(target)) return;
       if (triggerEl?.contains(target)) return;
       onClose();
     }
@@ -148,9 +231,45 @@
 
   function scrollActiveIntoView(idx: number) {
     requestAnimationFrame(() => {
-      const el = popoverEl?.querySelector<HTMLElement>(`[data-cat-idx="${idx}"]`);
+      const el = mainEl?.querySelector<HTMLElement>(`[data-cat-idx="${idx}"]`);
       el?.scrollIntoView({ block: 'nearest' });
     });
+  }
+
+  function scrollFlyoutItemIntoView(idx: number) {
+    requestAnimationFrame(() => {
+      const el = flyoutEl?.querySelector<HTMLElement>(`[data-sub-idx="${idx}"]`);
+      el?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  function handleRowHover(entry: FilteredCatalogEntry, flatIdx: number) {
+    activeIdx = flatIdx;
+    focusPane = 'main';
+    flyoutFromKeyboard = false;
+    if (entry.matchingSubGroups.length > 0) {
+      clearCloseTimer();
+      if (flyoutAdapterId !== entry.item.id) {
+        activeSubIdx = 0;
+      }
+      flyoutAdapterId = entry.item.id;
+    } else {
+      scheduleFlyoutClose();
+    }
+  }
+
+  function handleInsertParent(entry: FilteredCatalogEntry) {
+    if (disabled) return;
+    if (entry.hasNarrowedSubMatch && entry.matchingSubItems.length > 0) {
+      onInsert(entry.matchingSubItems[0].insert);
+    } else {
+      onInsert({ adapterId: entry.item.id });
+    }
+  }
+
+  function handleInsertSubItem(sub: CatalogSubItem) {
+    if (disabled) return;
+    onInsert(sub.insert);
   }
 
   function handleKeydown(ev: KeyboardEvent) {
@@ -160,25 +279,84 @@
       onClose();
       return;
     }
+
     if (ev.key === 'ArrowDown') {
       ev.preventDefault();
-      if (filteredItems.length === 0) return;
-      activeIdx = (activeIdx + 1) % filteredItems.length;
-      scrollActiveIntoView(activeIdx);
+      if (focusPane === 'flyout' && flyoutEntry && flyoutEntry.matchingSubItems.length > 0) {
+        activeSubIdx = (activeSubIdx + 1) % flyoutEntry.matchingSubItems.length;
+        scrollFlyoutItemIntoView(activeSubIdx);
+      } else if (filteredEntries.length > 0) {
+        activeIdx = (activeIdx + 1) % filteredEntries.length;
+        scrollActiveIntoView(activeIdx);
+        const nextEntry = filteredEntries[activeIdx];
+        if (flyoutAdapterId !== null) {
+          flyoutAdapterId = nextEntry && nextEntry.matchingSubGroups.length > 0 ? nextEntry.item.id : null;
+          activeSubIdx = 0;
+        }
+      }
       return;
     }
+
     if (ev.key === 'ArrowUp') {
       ev.preventDefault();
-      if (filteredItems.length === 0) return;
-      activeIdx = (activeIdx - 1 + filteredItems.length) % filteredItems.length;
-      scrollActiveIntoView(activeIdx);
+      if (focusPane === 'flyout' && flyoutEntry && flyoutEntry.matchingSubItems.length > 0) {
+        const len = flyoutEntry.matchingSubItems.length;
+        activeSubIdx = (activeSubIdx - 1 + len) % len;
+        scrollFlyoutItemIntoView(activeSubIdx);
+      } else if (filteredEntries.length > 0) {
+        activeIdx = (activeIdx - 1 + filteredEntries.length) % filteredEntries.length;
+        scrollActiveIntoView(activeIdx);
+        const prevEntry = filteredEntries[activeIdx];
+        if (flyoutAdapterId !== null) {
+          flyoutAdapterId = prevEntry && prevEntry.matchingSubGroups.length > 0 ? prevEntry.item.id : null;
+          activeSubIdx = 0;
+        }
+      }
       return;
     }
+
+    if (ev.key === 'ArrowRight') {
+      if (focusPane === 'main' && activeEntry && activeEntry.matchingSubItems.length > 0) {
+        // Only intercept ArrowRight if cursor is at end of search input (or query empty)
+        const inp = searchInputEl;
+        const atEnd = !inp || inp.selectionStart === inp.value.length;
+        if (atEnd) {
+          ev.preventDefault();
+          clearCloseTimer();
+          flyoutAdapterId = activeEntry.item.id;
+          focusPane = 'flyout';
+          flyoutFromKeyboard = true;
+          activeSubIdx = 0;
+          scrollFlyoutItemIntoView(0);
+          searchInputEl?.focus();
+        }
+      }
+      return;
+    }
+
+    if (ev.key === 'ArrowLeft') {
+      if (focusPane === 'flyout') {
+        ev.preventDefault();
+        focusPane = 'main';
+        flyoutFromKeyboard = false;
+        searchInputEl?.focus();
+      }
+      return;
+    }
+
     if (ev.key === 'Enter') {
       ev.preventDefault();
-      const target = filteredItems[activeIdx];
-      if (target && !disabled) {
-        onInsert(target.id);
+      ev.stopPropagation();
+      if (disabled) return;
+      if (focusPane === 'flyout' && flyoutEntry) {
+        const sub = flyoutEntry.matchingSubItems[activeSubIdx];
+        if (sub) {
+          onInsert(sub.insert);
+          return;
+        }
+      }
+      if (activeEntry) {
+        handleInsertParent(activeEntry);
       }
     }
   }
@@ -186,73 +364,181 @@
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
-  class="catalog-popover"
-  bind:this={popoverEl}
+  class="catalog-shell"
+  bind:this={shellEl}
   role="dialog"
   aria-label="Add workflow block"
   tabindex="-1"
   onkeydown={handleKeydown}
+  onmouseleave={handleShellMouseLeave}
+  onmouseenter={clearCloseTimer}
 >
-  <div class="search-row">
-    <span class="search-icon" aria-hidden="true">⌕</span>
-    <input
-      bind:this={searchInputEl}
-      type="text"
-      class="search-input"
-      placeholder="Search blocks, stages, or port types…"
-      bind:value={query}
-      aria-label="Filter blocks"
-    />
-    <kbd class="esc-kbd">Esc</kbd>
-  </div>
+  <div class="catalog-main" bind:this={mainEl}>
+    <div class="search-row">
+      <span class="search-icon" aria-hidden="true">⌕</span>
+      <input
+        bind:this={searchInputEl}
+        type="text"
+        class="search-input"
+        placeholder="Search blocks, models, or design tasks…"
+        bind:value={query}
+        aria-label="Filter blocks"
+        aria-activedescendant={activeDescendantId}
+      />
+      <kbd class="esc-kbd">Esc</kbd>
+    </div>
 
-  <div class="catalog-list" role="listbox">
-    {#if groupedItems.length === 0}
-      <div class="empty">No blocks match “{query}”.</div>
-    {:else}
-      {#each groupedItems as grp (grp.title)}
-        <div class="group-hdr">{grp.title}</div>
-        {#each grp.items as { item, flatIdx } (item.id)}
-          {@const stageColor = STAGE_COLORS[item.stage] ?? '#64748b'}
-          <button
-            type="button"
-            class="cat-item"
-            class:active={flatIdx === activeIdx}
-            data-cat-idx={flatIdx}
-            role="option"
-            aria-selected={flatIdx === activeIdx}
-            draggable={!disabled}
-            {disabled}
-            onmouseenter={() => (activeIdx = flatIdx)}
-            ondragstart={(e) => onDragStart?.(e, item.id)}
-            onclick={() => onInsert(item.id)}
-          >
-            <span class="stage-dot" style="background: {stageColor}"></span>
-            <span class="item-body">
-              <span class="item-name">{item.shortName}</span>
-              <span class="item-role">{item.role}</span>
-            </span>
-            <span class="wt-pill">{item.weightLabel}</span>
-          </button>
+    <div class="catalog-list" role="listbox" aria-label="Workflow blocks">
+      {#if groupedEntries.length === 0}
+        <div class="empty">No blocks match “{query}”.</div>
+      {:else}
+        {#each groupedEntries as grp (grp.title)}
+          <div class="group-hdr">{grp.title}</div>
+          {#each grp.entries as { entry, flatIdx } (entry.item.id)}
+            {@const item = entry.item}
+            {@const stageColor = STAGE_COLORS[item.stage] ?? '#64748b'}
+            {@const hasSub = entry.matchingSubGroups.length > 0}
+            {@const isFlyoutOpen = flyoutEntry?.item.id === item.id}
+            <button
+              id={`cat-item-${item.id}`}
+              type="button"
+              class="cat-item"
+              class:active={flatIdx === activeIdx && focusPane === 'main'}
+              class:flyout-open={isFlyoutOpen}
+              data-cat-idx={flatIdx}
+              data-adapter-id={item.id}
+              role="option"
+              aria-selected={flatIdx === activeIdx}
+              tabindex="-1"
+              draggable={!disabled}
+              {disabled}
+              onmouseenter={() => handleRowHover(entry, flatIdx)}
+              ondragstart={(e) => {
+                searchInputEl?.focus();
+                const req =
+                  entry.hasNarrowedSubMatch && entry.matchingSubItems.length > 0
+                    ? entry.matchingSubItems[0].insert
+                    : { adapterId: item.id };
+                onDragStart?.(e, req);
+              }}
+              onclick={() => {
+                searchInputEl?.focus();
+                handleInsertParent(entry);
+              }}
+            >
+              <span class="stage-dot" style="background: {stageColor}"></span>
+              <span class="item-body">
+                <span class="item-name">{item.shortName}</span>
+                <span class="item-role">{item.role}</span>
+              </span>
+              {#if hasSub}
+                <span class="sub-trigger" title="Hover or press → to pick a model or variant">
+                  {entry.hasNarrowedSubMatch
+                    ? `${entry.matchingSubItems.length} match${entry.matchingSubItems.length === 1 ? '' : 'es'}`
+                    : item.subCountLabel}
+                  <span class="chev" aria-hidden="true">›</span>
+                </span>
+              {/if}
+            </button>
+          {/each}
         {/each}
-      {/each}
-    {/if}
+      {/if}
+    </div>
+
+    <div class="catalog-foot">
+      <span><kbd>↑↓</kbd> navigate · <kbd>→</kbd> variants · <kbd>↵</kbd> insert &amp; connect · drag to place</span>
+    </div>
   </div>
 
-  <div class="catalog-foot">
-    <span><kbd>↑↓</kbd> navigate · <kbd>↵</kbd> insert &amp; auto-wire · drag to place</span>
-  </div>
+  {#if flyoutEntry}
+    {@const stageColor = STAGE_COLORS[flyoutEntry.item.stage] ?? '#64748b'}
+    {@const flatSubs = flyoutEntry.matchingSubItems}
+    <div
+      class="catalog-flyout"
+      class:side-left={flyoutSide === 'left'}
+      class:side-overlay={flyoutSide === 'overlay'}
+      bind:this={flyoutEl}
+      style="left: {flyoutLeft}px; top: {flyoutTop}px; width: {flyoutWidth}px; max-height: {flyoutMaxHeight}px;"
+      role="listbox"
+      tabindex="-1"
+      aria-label={`${flyoutEntry.item.shortName} variants`}
+      onmouseenter={clearCloseTimer}
+    >
+      <div class="flyout-hdr">
+        <span class="stage-dot" style="background: {stageColor}"></span>
+        <span class="flyout-title">{flyoutEntry.item.shortName}</span>
+        <span class="flyout-sub">{flatSubs.length} option{flatSubs.length === 1 ? '' : 's'}</span>
+      </div>
+
+      <div class="flyout-list">
+        {#each flyoutEntry.matchingSubGroups as subGrp (subGrp.title)}
+          <div class="group-hdr">{subGrp.title}</div>
+          {#each subGrp.items as sub (sub.key)}
+            {@const subIdx = flatSubs.indexOf(sub)}
+            {@const isSubActive =
+              (focusPane === 'flyout' && subIdx === activeSubIdx) ||
+              (focusPane === 'main' && flyoutEntry.hasNarrowedSubMatch && subIdx === 0)}
+            <button
+              id={`cat-sub-${flyoutEntry.item.id}-${sub.key}`}
+              type="button"
+              class="flyout-item"
+              class:active={isSubActive}
+              data-sub-idx={subIdx}
+              role="option"
+              aria-selected={isSubActive}
+              tabindex="-1"
+              draggable={!disabled}
+              {disabled}
+              onmouseenter={() => {
+                clearCloseTimer();
+                flyoutFromKeyboard = false;
+                focusPane = 'flyout';
+                activeSubIdx = subIdx;
+              }}
+              ondragstart={(e) => {
+                searchInputEl?.focus();
+                onDragStart?.(e, sub.insert);
+              }}
+              onclick={() => {
+                searchInputEl?.focus();
+                handleInsertSubItem(sub);
+              }}
+            >
+              <div class="sub-main">
+                <div class="sub-top">
+                  <span class="sub-label">{sub.label}</span>
+                  {#if sub.badge}
+                    <span class="sub-badge" class:warn={sub.nonCommercial}>{sub.badge}</span>
+                  {/if}
+                </div>
+                {#if sub.subtitle}
+                  <div class="sub-desc">{sub.subtitle}</div>
+                {/if}
+                {#if sub.meta}
+                  <div class="sub-meta">{sub.meta}</div>
+                {/if}
+              </div>
+            </button>
+          {/each}
+        {/each}
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
-  .catalog-popover {
+  .catalog-shell {
     position: absolute;
     top: 44px;
     left: 10px;
     z-index: 45;
+    overflow: visible;
+    outline: none;
+  }
+  .catalog-main {
     width: 340px;
-    max-width: calc(100% - 20px);
-    max-height: min(380px, 70vh);
+    max-width: calc(100vw - 24px);
+    max-height: min(410px, 70vh);
     background: var(--bg-surface);
     border: 1px solid var(--border-strong);
     border-radius: 10px;
@@ -334,11 +620,13 @@
     font-family: inherit;
   }
   .cat-item:hover:not(:disabled),
-  .cat-item.active:not(:disabled) {
+  .cat-item.active:not(:disabled),
+  .cat-item.flyout-open:not(:disabled) {
     background: var(--bg-surface-selected);
     border-color: var(--border-strong);
   }
-  .cat-item:disabled {
+  .cat-item:disabled,
+  .flyout-item:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
@@ -368,16 +656,28 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .wt-pill {
+  .sub-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 9.5px;
     color: var(--text-muted);
     background: var(--bg-surface-2);
     border: 1px solid var(--border);
     border-radius: 999px;
-    padding: 1px 6px;
+    padding: 1px 6px 1px 7px;
     flex-shrink: 0;
     white-space: nowrap;
+  }
+  .cat-item.flyout-open .sub-trigger {
+    border-color: var(--accent);
+    color: var(--accent-soft);
+  }
+  .chev {
+    font-size: 12px;
+    line-height: 1;
+    font-weight: 700;
   }
   .empty {
     padding: 18px 12px;
@@ -390,6 +690,127 @@
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-surface-2);
     font-size: 10px;
+    color: var(--text-dim);
+  }
+
+  /* Right-hand hover flyout with invisible hover bridge */
+  .catalog-flyout {
+    position: absolute;
+    z-index: 46;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.42), var(--node-shadow);
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+  }
+  .catalog-flyout::before {
+    content: '';
+    position: absolute;
+    top: -12px;
+    bottom: -12px;
+    left: -14px;
+    width: 14px;
+  }
+  .catalog-flyout.side-left::before {
+    left: auto;
+    right: -14px;
+  }
+  .catalog-flyout.side-overlay::before {
+    display: none;
+  }
+  .flyout-hdr {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-surface-2);
+    border-radius: 9px 9px 0 0;
+  }
+  .flyout-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .flyout-sub {
+    margin-left: auto;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+  .flyout-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-radius: 0 0 9px 9px;
+  }
+  .flyout-item {
+    display: flex;
+    align-items: flex-start;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: var(--text-body);
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .flyout-item:hover:not(:disabled),
+  .flyout-item.active:not(:disabled) {
+    background: var(--bg-surface-selected);
+    border-color: var(--border-strong);
+  }
+  .sub-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .sub-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .sub-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.25;
+  }
+  .sub-badge {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9px;
+    color: var(--text-muted);
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .sub-badge.warn {
+    color: var(--warn-text);
+    background: var(--warn-bg);
+    border-color: var(--warn-border);
+  }
+  .sub-desc {
+    font-size: 10.5px;
+    color: var(--text-muted);
+    line-height: 1.3;
+  }
+  .sub-meta {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
     color: var(--text-dim);
   }
 </style>

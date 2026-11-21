@@ -60,7 +60,7 @@ async function ensureLoaded(id: number) {
       type: 'progress',
       phase: 'weights',
       progress: 0.05,
-      detail: 'Fetching Genie 3 V1 FP16 shards (~45 MB, cached after first run)...',
+      detail: 'Fetching Genie 3 weights (~45 MB, cached after first run)...',
     });
     const envWeightsUrl = (import.meta.env.VITE_GENIE3_WEIGHTS_URL as string | undefined)?.trim();
     const weightsUrl =
@@ -78,7 +78,7 @@ async function ensureLoaded(id: number) {
           type: 'progress',
           phase: 'weights',
           progress: Math.min(0.92, frac),
-          detail: `Genie 3 FP16 weights: ${mb} / ${totMb} MB`,
+          detail: `Genie 3 weights: ${mb} / ${totMb} MB`,
         });
       },
     });
@@ -90,7 +90,7 @@ async function ensureLoaded(id: number) {
       type: 'progress',
       phase: 'init',
       progress: 0.94,
-      detail: 'Uploading Genie 3 FP16 weights to WebGPU...',
+      detail: 'Uploading Genie 3 weights to GPU...',
     });
     generator = await genie3Mod.Genie3GeneratorGpu.create(
       gpuDevice,

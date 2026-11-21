@@ -1,6 +1,13 @@
 <script lang="ts">
+  import { ADAPTER_REGISTRY } from '$lib/engine/registry';
   import { PORT_COLORS } from '$lib/engine/graph-utils';
-  import { analyzeSequence, previewTextLines, type PeekSlot } from '$lib/engine/peek';
+  import {
+    analyzeSequence,
+    foldModelSlug,
+    formatFoldModelName,
+    previewTextLines,
+    type PeekSlot,
+  } from '$lib/engine/peek';
   import type {
     ConditionSpecArtifact,
     DesignabilityMetrics,
@@ -80,6 +87,24 @@
   let activeRow = $derived(metricsArt?.rows[selectedRowIdx] ?? metricsArt?.best ?? null);
   let activeFold = $derived(foldArt?.folds[selectedFoldIdx] ?? foldArt?.folds[0] ?? null);
 
+  function formatAdapterName(sourceModelId: string): string {
+    return ADAPTER_REGISTRY[sourceModelId]?.shortName ?? sourceModelId;
+  }
+
+  const CONDITION_KEY_LABELS: Record<string, string> = {
+    C_HOT: 'Binding Hotspots',
+    C_CRDGRP: 'Fixed Motif',
+    C_IDX: 'Unindexed Motif',
+    C_HB: 'H-Bond Constraint',
+    C_CATH: 'CATH Fold',
+    C_CRD: 'Locked Backbone',
+    C_SEQ: 'Locked Sequence',
+  };
+
+  function formatConditionKey(key: string): string {
+    return CONDITION_KEY_LABELS[key] ?? key;
+  }
+
   function formatFasta(seqSet: SequenceSet): string {
     return seqSet.candidates.map((c) => `>${c.id}\n${c.sequence}`).join('\n') + '\n';
   }
@@ -110,7 +135,7 @@
   <div class="panel-head">
     <div class="head-left">
       <span class="section-title">
-        {node ? `PEEK · ${node.label ?? node.adapterId}` : 'PIPELINE PEEK'}
+        {node ? `OUTPUTS · ${node.label ?? node.adapterId}` : 'PIPELINE OUTPUTS'}
       </span>
       {#if activeSlot}
         <span class="dir-badge" class:is-in={activeSlot.direction === 'in'}>
@@ -137,6 +162,7 @@
           <span class="grp-lbl">IN</span>
           {#each inSlots as slot (slot.id)}
             {@const col = PORT_COLORS[slot.portType]?.bg ?? '#64748b'}
+            {@const typeLabel = PORT_COLORS[slot.portType]?.label ?? slot.portType}
             <button
               class="slot-pill"
               class:active={activeSlot?.id === slot.id}
@@ -144,8 +170,8 @@
               class:unwired={!slot.wired}
               onclick={() => onSelectSlot(slot.id)}
               title={slot.wired
-                ? `Peek input "${slot.portName}" (${slot.portType}) from ${slot.peerNodeLabel ?? slot.peerNodeId}`
-                : `Optional input "${slot.portName}" (${slot.portType}) is not connected`}
+                ? `Inspect input "${slot.portName}" (${typeLabel}) from ${slot.peerNodeLabel ?? slot.peerNodeId}`
+                : `Optional input "${slot.portName}" (${typeLabel}) is not connected`}
             >
               <span class="pdot" style="background: {col}"></span>
               <span>{slot.portName}</span>
@@ -164,12 +190,13 @@
           <span class="grp-lbl">OUT</span>
           {#each outSlots as slot (slot.id)}
             {@const col = PORT_COLORS[slot.portType]?.bg ?? '#64748b'}
+            {@const typeLabel = PORT_COLORS[slot.portType]?.label ?? slot.portType}
             <button
               class="slot-pill"
               class:active={activeSlot?.id === slot.id}
               class:has-data={slot.artifact !== null}
               onclick={() => onSelectSlot(slot.id)}
-              title={`Peek output "${slot.portName}" (${slot.portType})`}
+              title={`Inspect output "${slot.portName}" (${typeLabel})`}
             >
               <span class="pdot" style="background: {col}"></span>
               <span>{slot.portName}</span>
@@ -284,14 +311,14 @@
       {@const pStats = plddtSummary(activeFold.plddt)}
       <div class="seq-box">
         <div class="seq-head">
-          <span>{activeFold.sequenceId} · {activeFold.foldModelId}</span>
+          <span>{activeFold.sequenceId} · {formatFoldModelName(activeFold.foldModelId)}</span>
           <div class="dl-links">
             <button class="link-btn" onclick={() => copyText(activeFold.sequence, 'fold-seq')}>
               {copiedKey === 'fold-seq' ? '✓ Copied' : 'Copy seq'}
             </button>
             <button
               class="link-btn"
-              onclick={() => onDownloadText(activeFold.pdbText, `${activeFold.sequenceId}_af2.pdb`)}
+              onclick={() => onDownloadText(activeFold.pdbText, `${activeFold.sequenceId}_${foldModelSlug(activeFold.foldModelId)}.pdb`)}
             >
               ↓ Folded PDB
             </button>
@@ -317,7 +344,7 @@
     {/if}
   {:else if seqArt}
     <div class="meta-bar">
-      <span><b>{seqArt.candidates.length}</b> sequence{seqArt.candidates.length === 1 ? '' : 's'} · <code>{seqArt.sourceModelId}</code></span>
+      <span><b>{seqArt.candidates.length}</b> sequence{seqArt.candidates.length === 1 ? '' : 's'} · <span>{formatAdapterName(seqArt.sourceModelId)}</span></span>
       <div class="dl-links">
         <button class="link-btn" onclick={() => copyText(formatFasta(seqArt), 'all-fasta')}>
           {copiedKey === 'all-fasta' ? '✓ Copied FASTA' : 'Copy FASTA'}
@@ -376,7 +403,7 @@
     {@const st = analyzeSequence(structArt.sequence)}
     {@const rawPrev = previewTextLines(structArt.pdbText, 36)}
     <div class="meta-bar">
-      <span><b>{structArt.label}</b> · <code>{structArt.sourceModelId}</code></span>
+      <span><b>{structArt.label}</b> · <span>{formatAdapterName(structArt.sourceModelId)}</span></span>
       <div class="dl-links">
         <button class="link-btn" onclick={() => onDownloadText(structArt.pdbText, `${structArt.id}.pdb`)}>
           ↓ PDB
@@ -461,16 +488,19 @@
         <span class="stat-chip">template: inline ({(condArt.inputCif.length / 1024).toFixed(1)} KB)</span>
       {/if}
       {#each condKeys as k (k)}
-        <span class="stat-chip cond-key">{k}</span>
+        <span class="stat-chip cond-key">{formatConditionKey(k)}</span>
       {/each}
     </div>
 
-    <pre class="raw-pre">{condJson}</pre>
+    <details class="raw-details">
+      <summary>Raw constraint spec JSON</summary>
+      <pre class="raw-pre">{condJson}</pre>
+    </details>
   {:else}
     <div class="placeholder-box">
       {#if activeSlot && !activeSlot.wired}
         <p class="placeholder-msg">
-          Optional input <code>{activeSlot.portName}</code> (<code>{activeSlot.portType}</code>) is not connected.
+          Optional input <code>{activeSlot.portName}</code> ({PORT_COLORS[activeSlot.portType]?.label ?? activeSlot.portType}) is not connected.
           Drag a matching colored wire into this port on the canvas to pass data in.
         </p>
       {:else if activeSlot}

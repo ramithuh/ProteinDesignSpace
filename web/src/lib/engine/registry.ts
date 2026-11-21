@@ -5,15 +5,15 @@ import type { AdapterManifest, CampaignState, WorkflowGraph } from './types';
 export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
   'pdb-input': {
     id: 'pdb-input',
-    displayName: 'Load PDB / mmCIF',
+    displayName: 'Load Structure (PDB / mmCIF)',
     shortName: 'PDB Input',
     stage: 'source',
     runtime: 'cpu-ts',
     estimatedVramMB: 0,
     approxWeightsMB: 0,
-    licenseNote: 'Built-in parser',
+    licenseNote: 'Built-in structure parser',
     description:
-      'Use a built-in 53 aa 3-helix bundle demo, paste/upload any PDB or mmCIF (e.g., from web.rfd4-proteina.org or RFdiffusion), and pipe it into inverse folding & refolding.',
+      'Start with the built-in 53-residue 3-helix bundle or upload/paste any PDB or mmCIF structure for sequence design and structure validation.',
     inputs: {},
     outputs: {
       structure: { type: 'StructureArtifact' },
@@ -29,7 +29,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 0,
     licenseNote: 'Built-in sequence parser',
     description:
-      'Paste one or more amino acid sequences (plain or FASTA) to fold directly with LocalFold AF2 without running an upstream generator.',
+      'Paste one or more amino acid sequences (plain text or FASTA) to fold directly with LocalFold without running an upstream backbone generator.',
     inputs: {},
     outputs: {
       sequences: { type: 'SequenceSet' },
@@ -43,9 +43,9 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'cpu-ts',
     estimatedVramMB: 0,
     approxWeightsMB: 0,
-    licenseNote: 'RFD4-Proteina condition_spec DSL compiler',
+    licenseNote: 'RFD4-Proteina constraint builder',
     description:
-      'Compose RFD4 contigs, PPI hotspots (C_HOT), indexed/unindexed motifs (C_CRDGRP/C_IDX), H-bond targets (C_HB), CATH folds, or 1-click official RFD4 benchmark contexts.',
+      'Define target binding hotspots, fixed structural motifs (indexed or unindexed), hydrogen-bond contacts, CATH fold topology, or benchmark design tasks.',
     inputs: {
       template: { type: 'StructureArtifact', required: false },
     },
@@ -55,7 +55,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
   },
   'rfd4-proteina': {
     id: 'rfd4-proteina',
-    displayName: 'RFD4-Proteina (WebGPU INT8)',
+    displayName: 'RFD4-Proteina',
     shortName: 'RFD4-Proteina',
     stage: 'generate',
     runtime: 'wgsl-custom',
@@ -63,7 +63,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 330,
     licenseNote: 'MIT code (sokrypton/rfd4-proteina-webgpu); NVIDIA RFD4-Proteina weights',
     description:
-      'All-atom sequence-structure co-design flow matching (Baker Lab / NVIDIA) running via custom WGSL INT8 kernels. Supports unconditional monomers, partial diffusion, inverse folding, and full AtomWorks/RFD4 conditioning.',
+      'All-atom backbone and sequence co-design via flow matching (Baker Lab / NVIDIA). Supports unconditional monomers, conditioned design, partial diffusion, and inverse folding.',
     inputs: {
       template: { type: 'StructureArtifact', required: false },
       condition: { type: 'ConditionSpec', required: false },
@@ -75,7 +75,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
   },
   genie3: {
     id: 'genie3',
-    displayName: 'Genie 3 (WebGPU FP16)',
+    displayName: 'Genie 3',
     shortName: 'Genie 3',
     stage: 'generate',
     runtime: 'wgsl-custom',
@@ -83,7 +83,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 45,
     licenseNote: 'Apache-2.0 (aqlaboratory/genie3 · WebGPU port ramithuh/genie3-webgpu)',
     description:
-      'Fast SE(3)-equivariant protein diffusion (AlQuraishi Lab · 23.3M params) running natively on WebGPU via custom WGSL FP16 kernels (~45 MB). Reconstructs ideal N/CA/C/O backbones + optional 1-step native sequence.',
+      'Fast de novo protein backbone diffusion (AlQuraishi Lab · 23.3M parameters). Reconstructs ideal N/Cα/C/O backbones with optional single-step sequence prediction.',
     inputs: {},
     outputs: {
       structure: { type: 'StructureArtifact' },
@@ -92,7 +92,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
   },
   'web-protein-mpnn': {
     id: 'web-protein-mpnn',
-    displayName: 'ProteinMPNN / SolubleMPNN (ONNX)',
+    displayName: 'ProteinMPNN',
     shortName: 'ProteinMPNN',
     stage: 'inverse-fold',
     runtime: 'ort-webgpu',
@@ -100,7 +100,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 10,
     licenseNote: 'MIT (MurrellGroup/webProteinMPNN & dauparas/ProteinMPNN)',
     description:
-      'Client-side inverse folding via ONNX Runtime Web (~9.5 MB from HF MurrellLab/webports). Supports ProteinMPNN, SolubleMPNN, and CA-only models with temperature & fixed-position controls.',
+      'Structure-conditioned inverse folding supporting SolubleMPNN, ProteinMPNN, and Cα-only models with sampling temperature and fixed-residue controls.',
     inputs: {
       structure: { type: 'StructureArtifact' },
     },
@@ -110,7 +110,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
   },
   'localfold-af2': {
     id: 'localfold-af2',
-    displayName: 'LocalFold (AF2 / RF3 / Boltz-2 / AF3)',
+    displayName: 'LocalFold',
     shortName: 'LocalFold',
     stage: 'fold',
     runtime: 'wgsl-custom',
@@ -118,7 +118,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 97,
     licenseNote: 'Beerware engine (sokrypton/localfold); model weights fetched per-checkpoint from Hugging Face (AF2 CC-BY-4.0, RF3 BSD-3, Boltz-2 MIT, OpenBind-0/Protenix-2/OpenDDE/Mol-1/IF2 Apache-2.0, AF3 Non-Commercial)',
     description:
-      'Client-side WebGPU structure prediction powered by sokrypton/localfold. Choose AlphaFold2 (models 1–5), RoseTTAFold3 (RF3), Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, or AlphaFold 3.',
+      'In-browser protein structure prediction supporting AlphaFold2 (models 1–5), RoseTTAFold3, Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, and AlphaFold 3.',
     inputs: {
       sequences: { type: 'SequenceSet' },
     },
@@ -134,9 +134,9 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'cpu-ts',
     estimatedVramMB: 0,
     approxWeightsMB: 0,
-    licenseNote: 'Built-in pure-TS Kabsch & geometry engine',
+    licenseNote: 'Built-in Kabsch superposition & geometry analysis',
     description:
-      'Aligns every refolded structure onto the designed backbone via exact Kabsch SVD superposition and computes scRMSD (Å), scTM, mean pLDDT, pTM, Rg, clashes, and pass rate.',
+      'Superimposes each predicted structure onto the designed backbone via exact Kabsch alignment and computes scRMSD (Å), scTM, mean pLDDT, pTM, radius of gyration (Rg), steric clashes, and pass rate.',
     inputs: {
       structure: { type: 'StructureArtifact' },
       folds: { type: 'FoldedStructure' },
@@ -155,15 +155,59 @@ export interface Rfd4BenchmarkMeta {
 }
 
 export const RFD4_BENCHMARK_OPTIONS: Rfd4BenchmarkMeta[] = [
-  { id: 'custom_cath_monomer', label: 'CATH 3.40.50 Rossmann (54 aa, α/β SS)', category: 'Fold' },
+  { id: 'custom_cath_monomer', label: 'CATH 3.40.50 Rossmann Fold (54 aa, α/β)', category: 'Fold' },
   { id: 'uncond_short', label: 'Unconditional Monomer (100 aa)', category: 'Unconditional' },
   { id: 'motif_idx_1prw', label: 'Indexed Motif — 1PRW EF-Hand (76 aa)', category: 'Motif' },
-  { id: 'motif_unidx_1prw', label: 'Unindexed Motif — 1PRW + Hungarian Insertion', category: 'Motif' },
-  { id: 'ppi_pdl1', label: 'PD-L1 PPI Binder w/ Hotspots (208 tokens)', category: 'Binder' },
-  { id: 'sm_sam', label: 'SAM Small-Molecule Pocket w/ H-Bonds', category: 'Ligand' },
+  { id: 'motif_unidx_1prw', label: 'Unindexed Motif — 1PRW EF-Hand', category: 'Motif' },
+  { id: 'ppi_pdl1', label: 'PD-L1 PPI Binder with Hotspots', category: 'Binder' },
+  { id: 'sm_sam', label: 'SAM Small-Molecule Pocket with H-Bonds', category: 'Ligand' },
   { id: 'dna_7m5w', label: 'DNA-Binding Protein Complex (B-DNA)', category: 'Nucleic Acid' },
-  { id: 'partial_diffusion_1prw', label: 'Partial Diffusion — 1PRW (frac=0.5, +138 MB enc)', category: 'Partial', needsEncoder: true },
-  { id: 'inverse_folding_1prw', label: 'RFD4 Inverse Folding — 1PRW (+138 MB enc)', category: 'InvFold', needsEncoder: true },
+  { id: 'partial_diffusion_1prw', label: 'Partial Diffusion — 1PRW (50% noise)', category: 'Partial', needsEncoder: true },
+  { id: 'inverse_folding_1prw', label: 'RFD4 Inverse Folding — 1PRW', category: 'InvFold', needsEncoder: true },
+];
+
+export interface MpnnVariantMeta {
+  id: 'solublempnn' | 'proteinmpnn' | 'ca';
+  family: 'solublempnn' | 'proteinmpnn' | 'ca';
+  modelName: string;
+  label: string;
+  shortLabel: string;
+  description: string;
+  approxMB: number;
+  license: string;
+}
+
+export const MPNN_VARIANT_OPTIONS: MpnnVariantMeta[] = [
+  {
+    id: 'solublempnn',
+    family: 'solublempnn',
+    modelName: 'v_48_020',
+    label: 'SolubleMPNN',
+    shortLabel: 'SolubleMPNN',
+    description: 'Soluble-surface optimized sequence design (recommended)',
+    approxMB: 10,
+    license: 'MIT',
+  },
+  {
+    id: 'proteinmpnn',
+    family: 'proteinmpnn',
+    modelName: 'v_48_020',
+    label: 'ProteinMPNN',
+    shortLabel: 'ProteinMPNN',
+    description: 'Standard backbone-conditioned sequence design',
+    approxMB: 10,
+    license: 'MIT',
+  },
+  {
+    id: 'ca',
+    family: 'ca',
+    modelName: 'v_48_020',
+    label: 'ProteinMPNN (Cα-only)',
+    shortLabel: 'Cα-ProteinMPNN',
+    description: 'Sequence design from Cα backbone coordinates only',
+    approxMB: 10,
+    license: 'MIT',
+  },
 ];
 
 export interface LocalFoldModelMeta {
@@ -177,11 +221,11 @@ export interface LocalFoldModelMeta {
 }
 
 export const LOCALFOLD_MODEL_OPTIONS: LocalFoldModelMeta[] = [
-  { id: 'monomer', label: 'AlphaFold2 · model_1_ptm', shortLabel: 'AF2 m1_ptm', family: 'af2', approxMB: 97, license: 'CC-BY-4.0' },
-  { id: 'monomer-2', label: 'AlphaFold2 · model_2_ptm (delta)', shortLabel: 'AF2 m2_ptm', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
-  { id: 'monomer-3', label: 'AlphaFold2 · model_3_ptm (template-free)', shortLabel: 'AF2 m3_ptm', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
-  { id: 'monomer-4', label: 'AlphaFold2 · model_4_ptm (template-free)', shortLabel: 'AF2 m4_ptm', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
-  { id: 'monomer-5', label: 'AlphaFold2 · model_5_ptm (template-free)', shortLabel: 'AF2 m5_ptm', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
+  { id: 'monomer', label: 'AlphaFold2 · Model 1 (pTM)', shortLabel: 'AF2 Model 1', family: 'af2', approxMB: 97, license: 'CC-BY-4.0' },
+  { id: 'monomer-2', label: 'AlphaFold2 · Model 2 (pTM)', shortLabel: 'AF2 Model 2', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
+  { id: 'monomer-3', label: 'AlphaFold2 · Model 3 (pTM, template-free)', shortLabel: 'AF2 Model 3', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
+  { id: 'monomer-4', label: 'AlphaFold2 · Model 4 (pTM, template-free)', shortLabel: 'AF2 Model 4', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
+  { id: 'monomer-5', label: 'AlphaFold2 · Model 5 (pTM, template-free)', shortLabel: 'AF2 Model 5', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
   { id: 'rosettafold3', label: 'RoseTTAFold3 (RF3)', shortLabel: 'RF3', family: 'af3', approxMB: 266, license: 'BSD-3-Clause' },
   { id: 'boltz2', label: 'Boltz-2', shortLabel: 'Boltz-2', family: 'af3', approxMB: 364, license: 'MIT' },
   { id: 'openbind0', label: 'OpenBind-0 (OpenFold3 v0.5.0)', shortLabel: 'OpenBind-0', family: 'af3', approxMB: 265, license: 'Apache-2.0' },
@@ -203,13 +247,13 @@ export interface PresetDefinition {
 export const WORKFLOW_PRESETS: PresetDefinition[] = [
   {
     id: 'rfd4-refold-native',
-    name: 'RFD4-Proteina → LocalFold AF2',
+    name: 'RFD4-Proteina → LocalFold',
     badge: 'All-Atom Co-Design + Designability',
     summary:
-      'Generate a de novo protein (sequence + structure) on WebGPU with RFD4-Proteina INT8 (~330 MB), then immediately refold its native designed sequence with LocalFold AF2 and measure scRMSD.',
+      'Generate a de novo protein (backbone and sequence) with RFD4-Proteina, fold its native designed sequence with LocalFold (AlphaFold2), and score scRMSD.',
     graph: {
       id: 'rfd4-refold-native',
-      name: 'RFD4-Proteina → LocalFold AF2',
+      name: 'RFD4-Proteina → LocalFold',
       nodes: [
         {
           id: 'gen',
@@ -227,7 +271,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold',
           adapterId: 'localfold-af2',
-          label: 'LocalFold AF2',
+          label: 'LocalFold',
           params: { recycles: 1, maxSequences: 1, seed: 0 },
         },
         {
@@ -246,13 +290,13 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
   },
   {
     id: 'genie3-mpnn-af2',
-    name: 'Genie 3 → ProteinMPNN → LocalFold AF2',
-    badge: 'Fast SE(3) Diffusion (~45 MB)',
+    name: 'Genie 3 → ProteinMPNN → LocalFold',
+    badge: 'Fast Backbone Diffusion',
     summary:
-      'Generate a de novo protein backbone in-browser with Genie 3 WebGPU FP16 (~45 MB, 23.3M params), inverse-fold with SolubleMPNN, refold with LocalFold AF2, and score scRMSD/scTM.',
+      'Generate a de novo protein backbone with Genie 3 (23.3M parameters), design sequences with SolubleMPNN, fold with LocalFold, and score scRMSD and scTM.',
     graph: {
       id: 'genie3-mpnn-af2',
-      name: 'Genie 3 → ProteinMPNN → LocalFold AF2',
+      name: 'Genie 3 → ProteinMPNN → LocalFold',
       nodes: [
         {
           id: 'gen',
@@ -276,7 +320,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold',
           adapterId: 'localfold-af2',
-          label: 'LocalFold AF2',
+          label: 'LocalFold',
           params: { model: 'monomer', recycles: 1, maxSequences: 2, seed: 0 },
         },
         {
@@ -296,13 +340,13 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
   },
   {
     id: 'pdb-refold-qc',
-    name: 'PDB → ProteinMPNN → LocalFold AF2',
-    badge: 'Fastest Test (~107 MB)',
+    name: 'PDB → ProteinMPNN → LocalFold',
+    badge: 'Quick Start Pipeline',
     summary:
-      'Start from the built-in 53 aa 3-helix bundle (or drop any PDB/mmCIF), design sequences with SolubleMPNN, refold in WebGPU with LocalFold AF2, and inspect live Kabsch scRMSD + Mol* superposition.',
+      'Start from the built-in 53-residue 3-helix bundle (or any uploaded PDB/mmCIF), design sequences with SolubleMPNN, fold with LocalFold, and inspect Kabsch superposition and scRMSD.',
     graph: {
       id: 'pdb-refold-qc',
-      name: 'PDB → ProteinMPNN → LocalFold AF2',
+      name: 'PDB → ProteinMPNN → LocalFold',
       nodes: [
         {
           id: 'src',
@@ -326,7 +370,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold',
           adapterId: 'localfold-af2',
-          label: 'LocalFold AF2',
+          label: 'LocalFold',
           params: { recycles: 1, maxSequences: 2, seed: 0 },
         },
         {
@@ -349,7 +393,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
     name: 'RFD4-Proteina → SolubleMPNN → LocalFold',
     badge: 'Full 3-Model Loop',
     summary:
-      'Generate backbone with RFD4-Proteina, re-sequence with SolubleMPNN, refold with LocalFold AF2, and compare Kabsch superposition & pLDDT — all 3 heterogeneous WebGPU runtimes in one sequential pipeline.',
+      'Generate a backbone with RFD4-Proteina, re-sequence with SolubleMPNN, fold with LocalFold, and evaluate Kabsch superposition and pLDDT.',
     graph: {
       id: 'rfd4-mpnn-refold',
       name: 'RFD4-Proteina → SolubleMPNN → LocalFold',
@@ -383,7 +427,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold',
           adapterId: 'localfold-af2',
-          label: 'LocalFold AF2',
+          label: 'LocalFold',
           params: { recycles: 1, maxSequences: 2, seed: 0 },
         },
         {
@@ -404,9 +448,9 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
   {
     id: 'rfd4-branch-compare',
     name: 'RFD4 Fork: Native vs SolubleMPNN',
-    badge: 'Branched DAG',
+    badge: 'Branched Comparison',
     summary:
-      'Fork one RFD4-Proteina backbone into two parallel scoring arms: native co-designed sequence vs. SolubleMPNN re-sequencing, both refolded by LocalFold AF2.',
+      'Fork one RFD4-Proteina backbone into two parallel evaluation branches: native co-designed sequence vs. SolubleMPNN re-sequencing, both folded by LocalFold.',
     graph: {
       id: 'rfd4-branch-compare',
       name: 'RFD4 Fork: Native vs SolubleMPNN',
@@ -470,7 +514,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
     name: 'Conditioned RFD4 (CATH / Motif / Hotspots) → LocalFold',
     badge: 'Conditioning Block',
     summary:
-      'Compose RFD4 conditioning (CATH fold + α/β secondary structure, or switch to PD-L1 hotspots / 1PRW motif / SAM H-bond pocket) into RFD4-Proteina and refold with LocalFold AF2.',
+      'Compose RFD4 design constraints (CATH fold topology, binding hotspots, fixed motifs, or H-bond targets) into RFD4-Proteina and fold with LocalFold.',
     graph: {
       id: 'rfd4-conditioned-cath',
       name: 'Conditioned RFD4 → LocalFold',
@@ -514,7 +558,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
         {
           id: 'fold',
           adapterId: 'localfold-af2',
-          label: 'LocalFold AF2',
+          label: 'LocalFold',
           params: { recycles: 1, maxSequences: 1, seed: 0 },
           position: { x: 640, y: 194 },
         },
@@ -536,13 +580,13 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
   },
   {
     id: 'rfd4-af2-vs-rf3',
-    name: 'RFD4 Fork: AF2 vs RoseTTAFold3',
-    badge: 'Cross-Folder Check',
+    name: 'RFD4 Fork: AlphaFold2 vs RoseTTAFold3',
+    badge: 'Cross-Folder Comparison',
     summary:
-      'Generate one de novo protein with RFD4-Proteina, then cross-validate its native sequence with both AlphaFold2 (model_1_ptm) and RoseTTAFold3 (RF3) in parallel branches.',
+      'Generate one de novo protein with RFD4-Proteina, then cross-validate its native sequence with both AlphaFold2 (Model 1) and RoseTTAFold3 (RF3) in parallel branches.',
     graph: {
       id: 'rfd4-af2-vs-rf3',
-      name: 'RFD4 Fork: AF2 vs RoseTTAFold3',
+      name: 'RFD4 Fork: AlphaFold2 vs RoseTTAFold3',
       nodes: [
         {
           id: 'gen',
@@ -601,15 +645,15 @@ export const SAMPLE_CAMPAIGN: CampaignState = {
   assay: {
     scRmsdThreshold: 2.0,
     plddtThreshold: 70,
-    targetName: 'De novo monomer (single-seq AF2)',
+    targetName: 'De novo monomer (single-sequence folding)',
   },
   rounds: [
     {
       round: 1,
       timestamp: '2026-11-20T12:00:00Z',
       label: 'Round 1 — Unconditional baseline (T=0.2)',
-      generator: 'RFD4-Proteina (WebGPU INT8, 40 steps)',
-      folder: 'LocalFold AF2 (single-seq, 1 recycle)',
+      generator: 'RFD4-Proteina (40 steps)',
+      folder: 'LocalFold · AlphaFold2 (single-sequence, 1 recycle)',
       nDesigned: 4,
       nPassed: 1,
       hitRate: 0.25,
@@ -623,8 +667,8 @@ export const SAMPLE_CAMPAIGN: CampaignState = {
       round: 2,
       timestamp: '2026-11-20T12:14:00Z',
       label: 'Round 2 — SolubleMPNN T=0.1 core tightening',
-      generator: 'RFD4-Proteina (WebGPU INT8, 60 steps)',
-      folder: 'LocalFold AF2 (single-seq, 2 recycles)',
+      generator: 'RFD4-Proteina (60 steps)',
+      folder: 'LocalFold · AlphaFold2 (single-sequence, 2 recycles)',
       nDesigned: 4,
       nPassed: 3,
       hitRate: 0.75,
@@ -638,14 +682,14 @@ export const SAMPLE_CAMPAIGN: CampaignState = {
       round: 3,
       timestamp: '2026-11-20T12:28:00Z',
       label: 'Round 3 — RFD4-Proteina all-atom co-design',
-      generator: 'RFD4-Proteina (WebGPU INT8, 60 steps)',
-      folder: 'LocalFold AF2 (single-seq, 2 recycles)',
+      generator: 'RFD4-Proteina (60 steps)',
+      folder: 'LocalFold · AlphaFold2 (single-sequence, 2 recycles)',
       nDesigned: 4,
       nPassed: 4,
       hitRate: 1.0,
       bestScRmsd: 0.84,
       bestPlddt: 91.2,
-      conditioningSummary: 'contig: 70-70 (native co-designed sequence)',
+      conditioningSummary: '70-residue monomer (native co-designed sequence)',
       agentNotes:
         'All 4 candidates passed scRMSD < 1.5 Å and pLDDT > 88. Campaign goal met.',
     },

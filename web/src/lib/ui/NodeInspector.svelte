@@ -2,6 +2,7 @@
   import {
     ADAPTER_REGISTRY,
     LOCALFOLD_MODEL_OPTIONS,
+    MPNN_VARIANT_OPTIONS,
     RFD4_BENCHMARK_OPTIONS,
   } from '$lib/engine/registry';
   import { STAGE_COLORS } from '$lib/engine/graph-utils';
@@ -34,14 +35,17 @@
   let manifest = $derived(ADAPTER_REGISTRY[node.adapterId]);
   let stageColor = $derived(STAGE_COLORS[manifest?.stage ?? 'source'] ?? '#64748b');
 
+  let selectedLocalFoldMeta = $derived.by(() => {
+    if (node.adapterId !== 'localfold-af2') return null;
+    const modelId = String(node.params?.model ?? 'monomer');
+    return LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
+  });
+
   let activeModelBadge = $derived.by((): string => {
     const p = node.params ?? {};
     switch (node.adapterId) {
-      case 'localfold-af2': {
-        const modelId = String(p.model ?? 'monomer');
-        const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
-        return `${meta.label} · INT5 (~${meta.approxMB} MB · ${meta.license})`;
-      }
+      case 'localfold-af2':
+        return selectedLocalFoldMeta?.label ?? LOCALFOLD_MODEL_OPTIONS[0].label;
       case 'rfd4-proteina': {
         const mode = String(p.mode ?? 'unconditional');
         const needsEnc =
@@ -50,29 +54,25 @@
           (mode === 'preset' &&
             Boolean(RFD4_BENCHMARK_OPTIONS.find((o) => o.id === String(p.presetId ?? ''))?.needsEncoder));
         return needsEnc
-          ? 'RFD4-Proteina · INT8 + 138M encoder'
-          : 'RFD4-Proteina · INT8 (FP16 compute)';
+          ? 'RFD4-Proteina · Conditioned + structure encoder'
+          : 'RFD4-Proteina · All-atom co-design';
       }
       case 'genie3':
-        return 'Genie 3 V1 · FP16 (~45 MB · Apache-2.0)';
+        return 'Genie 3 · Backbone diffusion';
       case 'web-protein-mpnn': {
-        const fam =
-          p.family === 'proteinmpnn'
-            ? 'ProteinMPNN'
-            : p.family === 'ca'
-              ? 'Cα-ProteinMPNN'
-              : 'SolubleMPNN';
+        const famMeta =
+          MPNN_VARIANT_OPTIONS.find((v) => v.family === p.family) ?? MPNN_VARIANT_OPTIONS[0];
         const ckpt = String(p.modelName ?? 'v_48_020');
-        return `${fam} · ${ckpt} (ONNX)`;
+        return `${famMeta.label} · ${ckpt}`;
       }
       case 'rfd4-conditioner':
-        return 'RFD4 condition_spec DSL';
+        return 'Hotspots, motifs, H-bonds & fold topology';
       case 'designability-scorer':
-        return 'Kabsch SVD · scRMSD / scTM';
+        return 'Kabsch alignment · scRMSD / scTM';
       case 'pdb-input':
-        return 'PDB / mmCIF parser';
+        return 'PDB / mmCIF structure input';
       case 'sequence-input':
-        return 'FASTA parser';
+        return 'FASTA sequence input';
       default:
         return manifest?.shortName ?? node.adapterId;
     }
@@ -215,11 +215,13 @@
     {:else if node.adapterId === 'rfd4-conditioner'}
       {@const hotspotTokens = parseResidueTokens(node.params.hotspots)}
       {@const motifTokens = parseResidueTokens(node.params.motifSpan)}
+      {@const taskPresetId = String(node.params.taskPreset ?? 'custom')}
+      {@const selectedPresetMeta = taskPresetId !== 'custom' ? RFD4_BENCHMARK_OPTIONS.find((o) => o.id === taskPresetId) : null}
       <label class="full">
-        Task / Benchmark Preset
+        Design Task / Preset
         <select
           {disabled}
-          value={String(node.params.taskPreset ?? 'custom')}
+          value={taskPresetId}
           onchange={(e) => setParam('taskPreset', e.currentTarget.value)}
         >
           <option value="custom">Custom Conditioning Builder</option>
@@ -227,9 +229,14 @@
             <option value={opt.id}>[{opt.category}] {opt.label}</option>
           {/each}
         </select>
+        {#if selectedPresetMeta}
+          <span class="field-hint">
+            Preset category: {selectedPresetMeta.category}{selectedPresetMeta.needsEncoder ? ' · uses structure encoder (~138 MB)' : ''}
+          </span>
+        {/if}
       </label>
 
-      {#if String(node.params.taskPreset ?? 'custom') === 'custom'}
+      {#if taskPresetId === 'custom'}
         {@const contigVal = String(node.params.contig ?? '70-70')}
         {@const rawJsonCheck = validateJsonOverride(String(node.params.rawJsonOverride ?? ''))}
         <label class="full">
@@ -242,13 +249,13 @@
             oninput={(e) => setParam('contig', e.currentTarget.value)}
           />
           {#if !contigVal.trim() && !String(node.params.rawJsonOverride ?? '').trim()}
-            <span class="field-hint err">Contig is required unless a raw JSON override is provided.</span>
+            <span class="field-hint err">Contig is required unless a JSON constraint override is provided.</span>
           {/if}
         </label>
 
         <div class="chip-field full">
           <label>
-            Hotspots (<code>C_HOT</code> — click in Mol* or type e.g. A54, A56)
+            Binding Hotspots (click residues in 3D viewer or enter e.g. A54, A56)
             <input
               type="text"
               {disabled}
@@ -278,7 +285,7 @@
 
         <div class="chip-field full">
           <label>
-            Fixed Motif (<code>C_CRDGRP</code> — e.g. A16-35, A52-71)
+            Fixed Structural Motif (e.g. A16-35, A52-71)
             <input
               type="text"
               {disabled}
@@ -338,8 +345,8 @@
                 value={String(node.params.paintBrush ?? 'hotspots')}
                 onchange={(e) => setParam('paintBrush', e.currentTarget.value)}
               >
-                <option value="hotspots">Paint Hotspots (C_HOT)</option>
-                <option value="motifSpan">Paint Motif (C_CRDGRP)</option>
+                <option value="hotspots">Paint Binding Hotspots</option>
+                <option value="motifSpan">Paint Fixed Motif</option>
               </select>
             </label>
             <label class="inline-check">
@@ -349,24 +356,24 @@
                 checked={Boolean(node.params.unindexedMotif)}
                 onchange={(e) => setParam('unindexedMotif', e.currentTarget.checked)}
               />
-              Unindexed Motif (<code>C_IDX=false</code>)
+              Unindexed Motif (auto-place sequence position)
             </label>
             <label>
-              H-Bond (<code>C_HB</code>)
+              Hydrogen-Bond Constraint
               <select
                 {disabled}
                 value={String(node.params.hbondMode ?? 'none')}
                 onchange={(e) => setParam('hbondMode', e.currentTarget.value)}
               >
                 <option value="none">None</option>
-                <option value="ACCEPTOR">ACCEPTOR</option>
-                <option value="DONOR">DONOR</option>
-                <option value="BOTH">BOTH</option>
+                <option value="ACCEPTOR">Acceptor</option>
+                <option value="DONOR">Donor</option>
+                <option value="BOTH">Both</option>
               </select>
             </label>
             {#if String(node.params.hbondMode ?? 'none') !== 'none'}
               <label class="full">
-                H-Bond Selection (<code>sel(...)</code>, e.g. <code>B/SAM/*/*</code>)
+                Target Atoms / Ligand for H-Bond (e.g. <code>B/SAM/*/*</code>)
                 <input
                   type="text"
                   {disabled}
@@ -377,12 +384,12 @@
               </label>
             {/if}
             <label class="full">
-              Raw RFD4 <code>condition_spec</code> JSON override
+              Advanced JSON Constraint Override
               <textarea
                 rows="3"
                 class:input-error={rawJsonCheck.status === 'error'}
                 {disabled}
-                placeholder={'{"contig": "70-70", "conditions": {"C_CATH": {"3.40.50": [{"select": "sel(\'*/*/*/*\')"}]}}}'}
+                placeholder={'{"contig": "70-70", "conditions": {}}'}
                 value={String(node.params.rawJsonOverride ?? '')}
                 oninput={(e) => setParam('rawJsonOverride', e.currentTarget.value)}
               ></textarea>
@@ -407,9 +414,9 @@
         >
           <option value="unconditional">Unconditional Monomer</option>
           <option value="conditioned">Conditioned (upstream block)</option>
-          <option value="preset">Official RFD4 Benchmark</option>
-          <option value="partial">Partial Diffusion (+138M enc)</option>
-          <option value="inverse-folding">Inverse Folding (+138M enc)</option>
+          <option value="preset">Preset Design Task</option>
+          <option value="partial">Partial Diffusion (refine input structure)</option>
+          <option value="inverse-folding">Inverse Folding (design sequence for backbone)</option>
         </select>
       </label>
       {#if rfdMode === 'unconditional'}
@@ -425,7 +432,7 @@
         </label>
       {:else if rfdMode === 'preset'}
         <label class="full">
-          Upstream Benchmark
+          Preset Design Task
           <select
             {disabled}
             value={String(node.params.presetId ?? 'custom_cath_monomer')}
@@ -438,10 +445,10 @@
         </label>
       {:else if rfdMode === 'partial'}
         <label>
-          Partial frac
+          Partial diffusion fraction
           <NumericInput
             {disabled}
-            ariaLabel="Partial fraction"
+            ariaLabel="Partial diffusion fraction"
             spec={NUMERIC_SPECS['rfd4-proteina'].partialFraction}
             value={Number(node.params.partialFraction ?? 0.5)}
             onChange={(v) => setParam('partialFraction', v)}
@@ -469,9 +476,9 @@
               value={String(node.params.recycleSchedule ?? 'low')}
               onchange={(e) => setParam('recycleSchedule', e.currentTarget.value)}
             >
-              <option value="none">none (fastest · 1×/step)</option>
-              <option value="low">low (balanced)</option>
-              <option value="medium">medium (higher quality)</option>
+              <option value="none">None (fastest)</option>
+              <option value="low">Low (balanced)</option>
+              <option value="medium">Medium (higher quality)</option>
             </select>
           </label>
           <label>
@@ -495,7 +502,7 @@
           </label>
           {#if rfdMode === 'unconditional'}
             <label class="full">
-              Inline RFD4 YAML/JSON spec
+              Custom constraint spec (YAML / JSON)
               <textarea
                 rows="3"
                 {disabled}
@@ -520,10 +527,10 @@
         />
       </label>
       <label>
-        DDIM steps
+        Diffusion steps
         <NumericInput
           {disabled}
-          ariaLabel="DDIM sampling steps"
+          ariaLabel="Diffusion sampling steps"
           spec={NUMERIC_SPECS.genie3.nSampleStep}
           value={Number(node.params.nSampleStep ?? 100)}
           onChange={(v) => setParam('nSampleStep', v)}
@@ -537,7 +544,7 @@
             Direction scale
             <NumericInput
               {disabled}
-              ariaLabel="DDIM direction scale"
+              ariaLabel="Diffusion direction scale"
               spec={NUMERIC_SPECS.genie3.directionScale}
               value={Number(node.params.directionScale ?? 0.8)}
               onChange={(v) => setParam('directionScale', v)}
@@ -547,7 +554,7 @@
             Noise scale
             <NumericInput
               {disabled}
-              ariaLabel="DDIM noise scale"
+              ariaLabel="Diffusion noise scale"
               spec={NUMERIC_SPECS.genie3.noiseScale}
               value={Number(node.params.noiseScale ?? 1.0)}
               onChange={(v) => setParam('noiseScale', v)}
@@ -578,15 +585,15 @@
     {:else if node.adapterId === 'web-protein-mpnn'}
       {@const fixedTokens = parseResidueTokens(node.params.fixedPositions)}
       <label class="wide">
-        Family
+        Model Variant
         <select
           {disabled}
           value={String(node.params.family ?? 'solublempnn')}
           onchange={(e) => setParam('family', e.currentTarget.value)}
         >
-          <option value="solublempnn">SolubleMPNN</option>
-          <option value="proteinmpnn">ProteinMPNN (vanilla)</option>
-          <option value="ca">ProteinMPNN (Cα-only)</option>
+          {#each MPNN_VARIANT_OPTIONS as v (v.id)}
+            <option value={v.family}>{v.label}</option>
+          {/each}
         </select>
       </label>
       <label>
@@ -612,7 +619,7 @@
 
       <div class="chip-field full">
         <label>
-          Fixed positions (click residues in Mol* or type e.g. A10, A12-15)
+          Fixed positions (click residues in 3D viewer or enter e.g. A10, A12-15)
           <input
             type="text"
             {disabled}
@@ -669,7 +676,7 @@
 
     {:else if node.adapterId === 'localfold-af2'}
       {@const lfModelId = String(node.params.model ?? 'monomer')}
-      {@const lfMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === lfModelId) ?? LOCALFOLD_MODEL_OPTIONS[0]}
+      {@const lfMeta = selectedLocalFoldMeta ?? LOCALFOLD_MODEL_OPTIONS[0]}
       <label class="wide">
         Model
         <select
@@ -677,17 +684,18 @@
           value={lfModelId}
           onchange={(e) => setParam('model', e.currentTarget.value)}
         >
-          <optgroup label="AlphaFold 2 (Monomer INT5)">
+          <optgroup label="AlphaFold2-Class (Monomer)">
             {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af2') as opt (opt.id)}
-              <option value={opt.id}>{opt.label} (~{opt.approxMB} MB)</option>
+              <option value={opt.id}>{opt.label}</option>
             {/each}
           </optgroup>
-          <optgroup label="All-Atom / AF3-Lineage (INT5)">
+          <optgroup label="AF3-Class (All-Atom)">
             {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af3') as opt (opt.id)}
-              <option value={opt.id}>{opt.label} (~{opt.approxMB} MB · {opt.license})</option>
+              <option value={opt.id}>{opt.label}</option>
             {/each}
           </optgroup>
         </select>
+        <span class="field-hint">Weights: ~{lfMeta.approxMB} MB · License: {lfMeta.license}</span>
       </label>
       <label>
         Recycles
@@ -771,12 +779,17 @@
     <footer class="info-footer">
       <p class="desc">{manifest.description}</p>
       <div class="foot-meta">
-        <span>{manifest.runtime}</span>
-        {#if manifest.approxWeightsMB > 0}
-          <span>· ~{manifest.approxWeightsMB} MB</span>
-        {/if}
-        {#if manifest.licenseNote}
-          <span>· {manifest.licenseNote}</span>
+        <span>{manifest.runtime === 'cpu-ts' ? 'Runs locally in browser (CPU)' : 'Runs locally in browser (WebGPU)'}</span>
+        {#if selectedLocalFoldMeta}
+          <span>· ~{selectedLocalFoldMeta.approxMB} MB ({selectedLocalFoldMeta.shortLabel})</span>
+          <span>· {selectedLocalFoldMeta.license}</span>
+        {:else}
+          {#if manifest.approxWeightsMB > 0}
+            <span>· ~{manifest.approxWeightsMB} MB</span>
+          {/if}
+          {#if manifest.licenseNote}
+            <span>· {manifest.licenseNote}</span>
+          {/if}
         {/if}
       </div>
     </footer>

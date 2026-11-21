@@ -1,7 +1,7 @@
 // Pure-TS helpers for inspecting ("peeking") intermediate node inputs/outputs,
 // extracting ancestor subgraphs for partial runs, and analyzing intermediate modalities.
 
-import { ADAPTER_REGISTRY } from './registry';
+import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import type {
   CanonicalArtifact,
   PortType,
@@ -271,4 +271,22 @@ export function previewTextLines(text: string, maxLines = 40): { preview: string
     totalLines,
     truncated: true,
   };
+}
+
+/** Normalize worker foldModelId values (e.g. `localfold-af2-monomer-int5`, `localfold-boltz2-int5`, `localfold-af2`) into a model slug. */
+export function foldModelSlug(foldModelId: string): string {
+  const clean = foldModelId
+    .trim()
+    .replace(/^localfold-(?:af2-)?/i, '')
+    .replace(/-int5$/i, '')
+    .trim();
+  return clean || 'folded';
+}
+
+/** Format a worker foldModelId into a human-readable folding model name. */
+export function formatFoldModelName(foldModelId: string): string {
+  const slug = foldModelSlug(foldModelId);
+  if (slug.toLowerCase() === 'af2') return 'AlphaFold2';
+  const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === slug);
+  return meta ? meta.label : slug;
 }

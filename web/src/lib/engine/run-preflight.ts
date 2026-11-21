@@ -29,7 +29,13 @@ function rfd4NeedsEncoder(graph: WorkflowGraph, nodeId: string): boolean {
   const node = graph.nodes.find((n) => n.id === nodeId);
   if (!node) return false;
   const mode = String(node.params.mode ?? '');
-  if (mode === 'partial' || mode === 'inverse_fold') return true;
+  if (mode === 'partial' || mode === 'inverse-folding') return true;
+  if (mode === 'preset') {
+    const presetId = String(node.params.presetId ?? '');
+    if (RFD4_BENCHMARK_OPTIONS.find((b) => b.id === presetId)?.needsEncoder) {
+      return true;
+    }
+  }
 
   // Check if a connected rfd4-conditioner node selects a benchmark that requires the encoder
   const condEdge = graph.edges.find((e) => e.toNode === nodeId && e.toPort === 'condition');
@@ -85,7 +91,7 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
       if (needsEnc && !byKey.has('rfd4-proteina:encoder')) {
         byKey.set('rfd4-proteina:encoder', {
           key: 'rfd4-proteina:encoder',
-          label: 'RFD4-Proteina Atom Encoder (Partial / InvFold)',
+          label: 'RFD4-Proteina Structure Encoder (Partial / Inverse Folding)',
           approxMB: 138,
           estimatedVramMB: 400,
           runtime: manifest.runtime,
@@ -100,8 +106,8 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
       const familyLabel =
         family === 'solublempnn'
           ? 'SolubleMPNN'
-          : family === 'ca_mpnn'
-            ? 'Cα-ProteinMPNN'
+          : family === 'ca'
+            ? 'Cα-only ProteinMPNN'
             : 'ProteinMPNN';
       const key = `mpnn:${family}:${modelName}`;
       if (!byKey.has(key)) {

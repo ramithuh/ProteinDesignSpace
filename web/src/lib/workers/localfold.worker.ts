@@ -188,13 +188,13 @@ async function ensureModelLoaded(id: number, modelKey: string) {
       baseStore = await lfCore.HttpTensorStore.fromManifest(
         lfCore.bundleBaseUrl(baseKey),
         baseManifest,
-        makeWeightProgress('LocalFold AF2 base'),
+        makeWeightProgress('AlphaFold2 base'),
       );
       baseStore.prefetch?.();
       const deltaStore = await lfCore.HttpTensorStore.fromManifest(
         lfCore.bundleBaseUrl(modelKey),
         deltaManifest,
-        makeWeightProgress(`LocalFold ${modelKey} delta`),
+        makeWeightProgress(`AlphaFold2 (${modelKey})`),
       );
       deltaStore.prefetch?.();
       store = new lfCore.DeltaTensorStore(baseStore, deltaStore);
@@ -203,7 +203,7 @@ async function ensureModelLoaded(id: number, modelKey: string) {
       store = await lfCore.HttpTensorStore.fromManifest(
         lfCore.bundleBaseUrl(modelKey),
         manifest,
-        makeWeightProgress('LocalFold AF2 INT5'),
+        makeWeightProgress('AlphaFold2'),
       );
       store.prefetch?.();
     }
@@ -260,7 +260,7 @@ async function ensureModelLoaded(id: number, modelKey: string) {
     const store = await lfCore.HttpTensorStore.fromManifest(
       base,
       manifest,
-      makeWeightProgress(`LocalFold ${modelKey} INT5`),
+      makeWeightProgress(`LocalFold ${modelKey}`),
     );
     store.prefetch?.();
 

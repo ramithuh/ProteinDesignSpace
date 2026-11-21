@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { WORKFLOW_PRESETS } from '$lib/engine/registry';
+import { LOCALFOLD_MODEL_OPTIONS, WORKFLOW_PRESETS } from '$lib/engine/registry';
 import { defaultParamsForAdapter } from '$lib/engine/graph-utils';
 import {
   decodeHashToGraph,
@@ -255,5 +255,61 @@ describe('engine/share', () => {
     expect(() =>
       parseRecipeToGraph(JSON.stringify({ nodes: [{ id: '', adapterId: 'pdb-input', params: {} }], edges: [] })),
     ).toThrow(/missing an id/);
+  });
+
+  it('round-trips all 7 WORKFLOW_PRESETS and all 13 LocalFold models through YAML recipes without model key collision', () => {
+    for (const preset of WORKFLOW_PRESETS) {
+      const yaml = graphToYamlRecipe(preset.graph);
+      const parsed = parseRecipeToGraph(yaml);
+      expect(parsed.nodes.map((n) => [n.id, n.adapterId])).toEqual(
+        preset.graph.nodes.map((n) => [n.id, n.adapterId]),
+      );
+      expect(parsed.edges).toEqual(preset.graph.edges);
+      for (let i = 0; i < preset.graph.nodes.length; i++) {
+        expect(parsed.nodes[i].params).toMatchObject(preset.graph.nodes[i].params);
+      }
+    }
+
+    for (const opt of LOCALFOLD_MODEL_OPTIONS) {
+      const graph: WorkflowGraph = {
+        id: `lf-${opt.id}`,
+        name: `LocalFold ${opt.shortLabel}`,
+        nodes: [
+          {
+            id: 'seq',
+            adapterId: 'sequence-input',
+            params: defaultParamsForAdapter('sequence-input'),
+          },
+          {
+            id: 'fold',
+            adapterId: 'localfold-af2',
+            label: `LocalFold (${opt.shortLabel})`,
+            params: { ...defaultParamsForAdapter('localfold-af2'), model: opt.id },
+          },
+        ],
+        edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+      };
+      const yaml = graphToYamlRecipe(graph);
+      const parsed = parseRecipeToGraph(yaml);
+      const foldNode = parsed.nodes.find((n) => n.id === 'fold')!;
+      expect(foldNode.adapterId).toBe('localfold-af2');
+      expect(foldNode.label).toBe(`LocalFold (${opt.shortLabel})`);
+      expect(foldNode.params.model).toBe(opt.id);
+    }
+
+    // Also accept checkpoint and adapterId+model aliases in hand-written YAML recipes
+    const aliasYaml = [
+      'denovo: v1',
+      'name: "Alias Check"',
+      'nodes:',
+      '  f1: {"model":"localfold-af2","checkpoint":"boltz2"}',
+      '  f2: {"adapterId":"localfold-af2","model":"rosettafold3"}',
+      'wires:',
+    ].join('\n');
+    const aliasParsed = parseRecipeToGraph(aliasYaml);
+    expect(aliasParsed.nodes[0].adapterId).toBe('localfold-af2');
+    expect(aliasParsed.nodes[0].params.model).toBe('boltz2');
+    expect(aliasParsed.nodes[1].adapterId).toBe('localfold-af2');
+    expect(aliasParsed.nodes[1].params.model).toBe('rosettafold3');
   });
 });

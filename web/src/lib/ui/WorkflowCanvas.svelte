@@ -15,6 +15,7 @@
   } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import { ADAPTER_REGISTRY } from '$lib/engine/registry';
+  import type { CatalogInsertRequest } from '$lib/engine/catalog';
   import { makeEdgeId } from '$lib/engine/peek';
   import {
     PORT_COLORS,
@@ -529,15 +530,21 @@
     if (selectedNodeId === nodeId) onSelectNode(nextNodes[0]?.id ?? '');
   }
 
-  function addBlock(adapterId: string, dropPos?: { x: number; y: number }) {
+  function addBlock(req: string | CatalogInsertRequest, dropPos?: { x: number; y: number }) {
     if (disabled) return;
-    if (!ADAPTER_REGISTRY[adapterId]) return;
+    const normalized: CatalogInsertRequest =
+      typeof req === 'string' ? { adapterId: req } : req;
+    if (!ADAPTER_REGISTRY[normalized.adapterId]) return;
     const { graph: nextGraph, nodeId, proposedEdges: nextProposals } = insertBlockSmart(
       graph,
-      adapterId,
+      normalized.adapterId,
       selectedNodeId || undefined,
       dropPos,
-      { autoCommit: false },
+      {
+        autoCommit: false,
+        params: normalized.params,
+        label: normalized.label,
+      },
     );
     catalogOpen = false;
     // Guard against Enter keystroke from BlockCatalogPopover immediately auto-committing
@@ -553,16 +560,32 @@
     scheduleFitView(220);
   }
 
-  function handleDragStart(ev: DragEvent, adapterId: string) {
-    ev.dataTransfer?.setData('application/denovo-adapter', adapterId);
+  function handleDragStart(ev: DragEvent, req: CatalogInsertRequest) {
+    ev.dataTransfer?.setData('application/denovo-adapter', req.adapterId);
+    ev.dataTransfer?.setData('application/denovo-config', JSON.stringify(req));
     if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'copy';
   }
 
   function handleDrop(ev: DragEvent) {
     ev.preventDefault();
     if (disabled) return;
+    const rawConfig = ev.dataTransfer?.getData('application/denovo-config');
     const adapterId = ev.dataTransfer?.getData('application/denovo-adapter');
-    if (!adapterId || !canvasEl) return;
+    let req: CatalogInsertRequest | null = null;
+    if (rawConfig) {
+      try {
+        const parsed = JSON.parse(rawConfig) as CatalogInsertRequest;
+        if (parsed && typeof parsed.adapterId === 'string') {
+          req = parsed;
+        }
+      } catch {
+        /* fallback to adapterId */
+      }
+    }
+    if (!req && adapterId) {
+      req = { adapterId };
+    }
+    if (!req || !canvasEl) return;
     let dropPos: { x: number; y: number };
     if (flowApi) {
       const flowPos = flowApi.screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
@@ -574,7 +597,7 @@
         y: Math.max(20, Math.round(ev.clientY - rect.top - 40)),
       };
     }
-    addBlock(adapterId, dropPos);
+    addBlock(req, dropPos);
   }
 
   function handlePaneDblClick(ev: MouseEvent) {
@@ -582,7 +605,7 @@
     const target = ev.target as HTMLElement | null;
     if (
       target?.closest(
-        '.svelte-flow__node, .svelte-flow__edge, .canvas-overlay, .svelte-flow__controls, .catalog-popover, .wire-popover',
+        '.svelte-flow__node, .svelte-flow__edge, .canvas-overlay, .svelte-flow__controls, .catalog-shell, .catalog-popover, .catalog-flyout, .wire-popover',
       )
     ) {
       return;
@@ -652,7 +675,7 @@
     <BlockCatalogPopover
       {disabled}
       triggerEl={addBtnEl}
-      onInsert={(aid) => addBlock(aid)}
+      onInsert={(req) => addBlock(req)}
       onDragStart={handleDragStart}
       onClose={() => (catalogOpen = false)}
     />
@@ -691,7 +714,7 @@
           <span>{item.label}</span>
         </div>
       {/each}
-      <div class="wire-pop-hint">Only matching port types connect. Click any wire or port label to peek data.</div>
+      <div class="wire-pop-hint">Only matching data types connect. Click any wire or port label to inspect outputs.</div>
     </div>
   {/if}
 

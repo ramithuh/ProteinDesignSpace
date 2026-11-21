@@ -3,11 +3,13 @@ import {
   analyzeSequence,
   extractSubgraphUpTo,
   findContextStructure,
+  foldModelSlug,
+  formatFoldModelName,
   getNodePeekSlots,
   pickDefaultPeekSlot,
   previewTextLines,
 } from '$lib/engine/peek';
-import { WORKFLOW_PRESETS } from '$lib/engine/registry';
+import { LOCALFOLD_MODEL_OPTIONS, WORKFLOW_PRESETS } from '$lib/engine/registry';
 import type { CanonicalArtifact, SequenceSet, StructureArtifact } from '$lib/engine/types';
 
 function makeDummyStructure(id: string, sequence = 'MKTAYIAKQRQISFVKSHFSRQ'): StructureArtifact {
@@ -147,5 +149,19 @@ describe('peek helpers', () => {
     expect(res.totalLines).toBe(60);
     expect(res.truncated).toBe(true);
     expect(res.preview.split('\n')).toHaveLength(10);
+  });
+
+  it('foldModelSlug and formatFoldModelName format all 13 worker foldModelId values and bare localfold-af2', () => {
+    expect(LOCALFOLD_MODEL_OPTIONS).toHaveLength(13);
+    for (const opt of LOCALFOLD_MODEL_OPTIONS) {
+      const workerId =
+        opt.family === 'af2' ? `localfold-af2-${opt.id}-int5` : `localfold-${opt.id}-int5`;
+      expect(foldModelSlug(workerId)).toBe(opt.id);
+      expect(formatFoldModelName(workerId)).toBe(opt.label);
+    }
+    expect(foldModelSlug('localfold-af2')).toBe('af2');
+    expect(formatFoldModelName('localfold-af2')).toBe('AlphaFold2');
+    expect(foldModelSlug('')).toBe('folded');
+    expect(formatFoldModelName('')).toBe('folded');
   });
 });

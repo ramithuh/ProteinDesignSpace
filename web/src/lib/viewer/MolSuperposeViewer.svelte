@@ -473,7 +473,7 @@
     </div>
   {/if}
   {#if initError}
-    <div class="err-overlay">Mol* error: {initError}</div>
+    <div class="err-overlay">3D viewer error: {initError}</div>
   {/if}
 </div>
 
