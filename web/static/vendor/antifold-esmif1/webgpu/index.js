@@ -13,7 +13,7 @@ export async function requestWebGPU({useF16=false}={}){
 async function outputStats(ops,logits,p){
  const tokens=ops.tensor(p.tokens,[p.L,1]);
  const packed=await ops.elem([p.L,22],`let r=i/22u;let j=i%22u;var m=-3.402823e38;for(var t=0u;t<35u;t++){m=max(m,x0[r*35u+t]);}var s=0.0;for(var t=0u;t<35u;t++){s+=exp(x0[r*35u+t]-m);}if(j==0u){y[i]=x0[r*35u+u32(x1[r])]-m-log(s);return;}
- const aa=array<u32,20>(${Array.from(CANONICAL_TOKENS,t=>t+'u').join(',')});var cm=-3.402823e38;for(var t=0u;t<20u;t++){cm=max(cm,x0[r*35u+aa[t]]);}var cs=0.0;for(var t=0u;t<20u;t++){cs+=exp(x0[r*35u+aa[t]]-cm);}if(j>=2u){y[i]=exp(x0[r*35u+aa[j-2u]]-cm)/cs;return;}var entropy=0.0;for(var t=0u;t<20u;t++){let prob=exp(x0[r*35u+aa[t]]-cm)/cs;entropy-=prob*log(max(prob,1e-30));}y[i]=exp(entropy);`,[logits,tokens]);
+ var aa:array<u32,20>=array<u32,20>(${Array.from(CANONICAL_TOKENS,t=>t+'u').join(',')});var cm=-3.402823e38;for(var t=0u;t<20u;t++){cm=max(cm,x0[r*35u+aa[t]]);}var cs=0.0;for(var t=0u;t<20u;t++){cs+=exp(x0[r*35u+aa[t]]-cm);}if(j>=2u){y[i]=exp(x0[r*35u+aa[j-2u]]-cm)/cs;return;}var entropy=0.0;for(var t=0u;t<20u;t++){let prob=exp(x0[r*35u+aa[t]]-cm)/cs;entropy-=prob*log(max(prob,1e-30));}y[i]=exp(entropy);`,[logits,tokens]);
  const mask=ops.tensor(Int32Array.from(p.residues,(r,i)=>r&&p.tokens[i]!==30&&p.tokens[i]!==1&&(!p.targetChain||r.chain===p.targetChain)?1:0),[p.L,1]),cm=ops.tensor(p.coordMask.slice(1,-1),[p.L,1]);
  const scores=await ops.elem([1,8],`var sum=0.0;var count=0.0;for(var r=0u;r<${p.L}u;r++){if(x1[r]!=0&&(i%4u<2u||x2[r]!=0)){sum+=x0[r*22u];count+=1.0;}}let mean=sum/max(count,1.0);y[i]=select(select(mean,exp(-mean),i%2u==1u),count,i>=4u);`,[packed,mask,cm]);
  return {packed,scores};
@@ -56,7 +56,7 @@ export async function createGVPTransformerEngine({baseUrl,variant='antifold',pre
  engine.sampleIndependent=async(input,options={})=>{
   const plan=independentPlan(input,options),result=await engine.predict(input,options);enter();
   try{const x=ops.tensor(result.logits,[plan.p.L,35]),u=ops.tensor(Float32Array.from(plan.uniforms),[plan.p.L,1]);
-   const draws=await ops.elem([plan.p.L,2],`let r=i/2u;const aa=array<u32,20>(${Array.from(CANONICAL_TOKENS,t=>t+'u').join(',')});var m=-3.402823e38;var arg=0u;for(var j=0u;j<20u;j++){let v=x0[r*35u+aa[j]];if(v>m){m=v;arg=j;}}if(i%2u==1u){y[i]=f32(arg);return;}var sum=0.0;for(var j=0u;j<20u;j++){sum+=exp((x0[r*35u+aa[j]]-m)/${plan.temperature});}var c=0.0;var token=19u;for(var j=0u;j<20u;j++){c+=exp((x0[r*35u+aa[j]]-m)/${plan.temperature})/sum;if(x1[r]<c){token=j;break;}}y[i]=f32(token);`,[x,u]);
+   const draws=await ops.elem([plan.p.L,2],`let r=i/2u;var aa:array<u32,20>=array<u32,20>(${Array.from(CANONICAL_TOKENS,t=>t+'u').join(',')});var m=-3.402823e38;var arg=0u;for(var j=0u;j<20u;j++){let v=x0[r*35u+aa[j]];if(v>m){m=v;arg=j;}}if(i%2u==1u){y[i]=f32(arg);return;}var sum=0.0;for(var j=0u;j<20u;j++){sum+=exp((x0[r*35u+aa[j]]-m)/${plan.temperature});}var c=0.0;var token=19u;for(var j=0u;j<20u;j++){c+=exp((x0[r*35u+aa[j]]-m)/${plan.temperature})/sum;if(x1[r]<c){token=j;break;}}y[i]=f32(token);`,[x,u]);
    const values=await ops.read(draws);options.signal?.throwIfAborted();return {...finishIndependent(plan,values,options),timingMs:result.timingMs};
   }finally{try{await ops.finish();}finally{busy=false;}}
  };

@@ -57,7 +57,7 @@ export function gpuRawFeatures(ops, p) {
     [3, 4],
     [2, 3],
   ];
-  const pairConst = `const pairs=array<vec2<u32>,25>(${pairs.map(([a, b]) => `vec2<u32>(${a}u,${b}u)`).join(",")});`;
+  const pairConst = `var<private> pairs:array<vec2<u32>,25>=array<vec2<u32>,25>(${pairs.map(([a, b]) => `vec2<u32>(${a}u,${b}u)`).join(",")});`;
   const rbf = kernel(
     ["X", "CB", "idx", "mask"],
     [X, CB, idx, mask],
@@ -65,7 +65,7 @@ export function gpuRawFeatures(ops, p) {
     XYZ + RBF + pairConst,
     `let row=i/400u;let a=row/${K}u;let b=u32(idx[row]);let pair=(i%400u)/16u;let d=atom(a,pairs[pair].x)-atom(b,pairs[pair].y);var dist=sqrt(dot(d,d)+0.000001);if(pair==0u&&mask[a]*mask[b]==0.0){dist=0.0;for(var j=0u;j<${L}u;j++){let v=atom(a,1u)-atom(j,1u);dist=max(dist,mask[a]*mask[j]*sqrt(dot(v,v)+0.000001));}}out[i]=rbf(dist,i%16u);`,
   );
-  const typeHelpers = `const groups=array<u32,119>(${PERIODIC_TABLE[1].map((x) => x + "u").join(",")});const periods=array<u32,119>(${PERIODIC_TABLE[2].map((x) => x + "u").join(",")});`;
+  const typeHelpers = `var<private> groups:array<u32,119>=array<u32,119>(${PERIODIC_TABLE[1].map((x) => x + "u").join(",")});var<private> periods:array<u32,119>=array<u32,119>(${PERIODIC_TABLE[2].map((x) => x + "u").join(",")});`;
   const typeFeatures = kernel(
     ["types"],
     [types],

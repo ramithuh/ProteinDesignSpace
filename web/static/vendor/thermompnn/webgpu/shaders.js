@@ -15,7 +15,7 @@ export function denseShader(I, O, dtype, gelu, preRelu, useF16) {
         ? half
           ? "return f32(w[i]);"
           : "let v=unpack2x16float(w[i/2u]);return v[i%2u];"
-        : "let shift=(i%4u)*8u;let v=i32(w[i/4u]<< (24u-shift))>>24;return f32(v)*scale[row];";
+        : "let shift=(i%4u)*8u;let v=i32(w[i/4u]<< (24u-shift))>>24u;return f32(v)*scale[row];";
   return `${half ? "enable f16;" : ""}
 ${bind(0, "x")}${bind(1, "w", half ? "f16" : "u32")}${bind(2, "bias")}${bind(3, "scale")}${bind(4, "y", "f32", true)}
 fn weight(i:u32,row:u32)->f32{${load}}
@@ -77,7 +77,8 @@ fn median(out:u32,a:u32,b:u32,c:u32){
 }
 fn splitRange(lo:u32,hi:u32)->u32{
  median(lo,lo+1u,lo+(hi-lo)/2u,hi-1u);let pivot=q[lo];var a=lo+1u;var b=hi;
- loop{while(less(q[a],pivot)){a++;}b--;while(less(pivot,q[b])){b--;}if(a>=b){return a;}swap(a,b);a++;}
+ loop{while(less(q[a],pivot)){a++;}b--;while(less(pivot,q[b])){b--;}if(a>=b){break;}swap(a,b);a++;}
+ return a;
 }
 fn insertion(lo:u32,hi:u32){for(var i=lo+1u;i<hi;i++){let value=q[i];var j=i;while(j>lo){if(!less(value,q[j-1u])){break;}q[j]=q[j-1u];j--;}q[j]=value;}}
 fn adjust(lo:u32,h:u32,len:u32,value:u32){
@@ -107,8 +108,8 @@ fn heapsort(lo:u32,hi:u32){heap(lo,hi);var end=hi;while(end-lo>1u){let v=q[end-1
 }
 export function geometryShader(L, K) {
   return `${bind(0, "xyz")}${bind(1, "dist")}${bind(2, "idx", "u32")}${bind(3, "residue", "i32")}${bind(4, "chain", "i32")}${bind(5, "w")}${bind(6, "b")}${bind(7, "out", "f32", true)}
-const aa=array<u32,25>(1,0,2,3,4,1,1,1,1,0,0,0,4,4,3,0,2,3,4,2,3,4,2,3,2);
-const bb=array<u32,25>(1,0,2,3,4,0,2,3,4,2,3,4,2,3,2,1,1,1,1,0,0,0,4,4,3);
+var<private> aa:array<u32,25>=array<u32,25>(1u,0u,2u,3u,4u,1u,1u,1u,1u,0u,0u,0u,4u,4u,3u,0u,2u,3u,4u,2u,3u,4u,2u,3u,2u);
+var<private> bb:array<u32,25>=array<u32,25>(1u,0u,2u,3u,4u,0u,2u,3u,4u,2u,3u,4u,2u,3u,2u,1u,1u,1u,1u,0u,0u,0u,4u,4u,3u);
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id:vec3<u32>){
  let x=id.x;if(x>=${L * K * 416}u){return;}let r=x/416u;let c=x%416u;let i=r/${K}u;let j=idx[r];
  if(c<16u){let offset=select(65u,u32(clamp(residue[i]-residue[j]+32,0,64)),chain[i]==chain[j]);out[x]=w[c*66u+offset]+b[c];return;}

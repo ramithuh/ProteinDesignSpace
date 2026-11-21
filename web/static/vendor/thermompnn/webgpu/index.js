@@ -49,6 +49,7 @@ export async function createThermoMPNNEngine(options = {}) {
   } else assertHardware(device);
   const owned = new Map(),
     pipelines = new Map(),
+    modules = new Map(),
     zeros = new Map();
   let destroyed = false,
     busy = false,
@@ -101,6 +102,7 @@ export async function createThermoMPNNEngine(options = {}) {
     pipeline(code) {
       if (!pipelines.has(code)) {
         const module = device.createShaderModule({ code });
+        modules.set(code, module);
         const entries = [
           ...code.matchAll(/@binding\((\d+)\) var<storage,(read_write|read)>/g),
         ].map((m) => ({
@@ -125,6 +127,7 @@ export async function createThermoMPNNEngine(options = {}) {
   function cleanup() {
     for (const b of owned.keys()) engine.release(b);
     pipelines.clear();
+    modules.clear();
     zeros.clear();
     engine.w = {};
     if (ownsDevice) device.destroy();
@@ -225,8 +228,29 @@ export async function createThermoMPNNEngine(options = {}) {
           try {
             const validation = await device.popErrorScope(),
               memory = await device.popErrorScope();
-            if (!failure && (validation || memory))
-              failure = new Error((validation ?? memory).message);
+            if (!failure && (validation || memory)) {
+              let detail = (validation ?? memory).message;
+              if (validation && /get_compilation_info|shader/i.test(detail)) {
+                const shaderErrors = [];
+                for (const mod of modules.values()) {
+                  if (typeof mod.getCompilationInfo !== "function") continue;
+                  try {
+                    const info = await mod.getCompilationInfo();
+                    for (const m of info.messages ?? []) {
+                      if (m.type === "error") {
+                        shaderErrors.push(`${m.lineNum}:${m.linePos} ${m.message}`);
+                      }
+                    }
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                if (shaderErrors.length > 0) {
+                  detail = `${detail}\nWGSL compilation errors:\n${shaderErrors.join("\n")}`;
+                }
+              }
+              failure = new Error(detail);
+            }
           } finally {
             busy = false;
           }

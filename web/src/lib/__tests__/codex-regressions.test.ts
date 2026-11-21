@@ -450,4 +450,26 @@ describe('Codex computer-use regression suite', () => {
     expect(cmpSrc).toContain('min-width: 0;');
     expect(cmpSrc).toContain('max-width: 100%;');
   });
+
+  it('guards Wave-7A WGSL shaders against Firefox wgpu/Naga const-array runtime indexing and surfaces ThermoMPNN getCompilationInfo', () => {
+    const shaderFiles = [
+      'static/vendor/thermompnn/webgpu/shaders.js',
+      'static/vendor/ligandmpnn/webgpu/ligandmpnn/geometry.js',
+      'static/vendor/ligandmpnn/webgpu/ligandmpnn/shaders.js',
+      'static/vendor/lasermpnn/webgpu/lasermpnn/shaders.js',
+      'static/vendor/antifold-esmif1/webgpu/index.js',
+      'static/vendor/antifold-esmif1/webgpu/shaders.js',
+    ];
+    for (const rel of shaderFiles) {
+      const src = readFileSync(resolve(process.cwd(), rel), 'utf8');
+      expect(src, `${rel} must not dynamically index const/let array<...>`).not.toMatch(
+        /\b(?:const|let)\s+[A-Za-z0-9_]+\s*=\s*array</,
+      );
+    }
+    const thermoIndex = readFileSync(
+      resolve(process.cwd(), 'static/vendor/thermompnn/webgpu/index.js'),
+      'utf8',
+    );
+    expect(thermoIndex).toContain('getCompilationInfo');
+  });
 });
