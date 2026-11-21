@@ -52,6 +52,7 @@
     onBlockAdded?: (nodeId: string) => void;
     onSelectEdge?: (edge: WorkflowEdge) => void;
     onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
+    onOpenTour?: () => void;
   }
 
   let {
@@ -73,7 +74,10 @@
     onBlockAdded = undefined,
     onSelectEdge = undefined,
     onPeekPort = undefined,
+    onOpenTour = undefined,
   }: Props = $props();
+
+  let canvasHintDismissed = $state(false);
 
   const nodeTypes: NodeTypes = {
     protein: ProteinNode as unknown as NodeTypes[string],
@@ -734,6 +738,40 @@
         Dismiss <kbd>Esc</kbd>
       </button>
     </div>
+  {:else if !isRunning && !canvasHintDismissed && !autoCommitProposed}
+    <div class="canvas-dock canvas-overlay" role="region" aria-label="Canvas quick tips">
+      <button
+        type="button"
+        class="dock-action"
+        {disabled}
+        onclick={() => {
+          wireLegendOpen = false;
+          catalogOpen = true;
+        }}
+        title="Open block catalog (/)"
+      >
+        <kbd>/</kbd> Add block
+      </button>
+      <span class="dock-sep" aria-hidden="true">·</span>
+      <span class="dock-tip">Click wire to peek</span>
+      <span class="dock-sep" aria-hidden="true">·</span>
+      <span class="dock-tip"><kbd>⌘</kbd>-click to compare 3D</span>
+      {#if onOpenTour}
+        <span class="dock-sep" aria-hidden="true">·</span>
+        <button type="button" class="dock-action accent" onclick={onOpenTour}>
+          Quick Tour
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="dock-x"
+        onclick={() => (canvasHintDismissed = true)}
+        aria-label="Hide canvas tips"
+        title="Hide tips"
+      >
+        ×
+      </button>
+    </div>
   {/if}
 
   <div class="flow-inner">
@@ -833,6 +871,89 @@
     height: 100%;
     border-radius: 7px;
     overflow: hidden;
+  }
+  .canvas-dock {
+    position: absolute;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 16;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px 5px 11px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-surface) 84%, transparent);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    max-width: calc(100% - 96px);
+    overflow: hidden;
+  }
+  .canvas-dock kbd {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    padding: 0 4px;
+    border-radius: 3px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface-2);
+    color: var(--text-primary);
+  }
+  .dock-tip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    user-select: none;
+  }
+  .dock-sep {
+    color: var(--text-dim);
+    opacity: 0.6;
+    user-select: none;
+  }
+  .dock-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    padding: 1px 4px;
+    border-radius: 5px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .dock-action:hover:not(:disabled) {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+  }
+  .dock-action.accent {
+    color: var(--accent-bright);
+    font-weight: 600;
+  }
+  .dock-x {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 3px;
+    margin-left: 2px;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .dock-x:hover {
+    color: var(--text-primary);
+    background: var(--bg-surface-hover);
+  }
+  @media (max-width: 720px) {
+    .canvas-dock {
+      display: none;
+    }
   }
   @media (max-width: 1024px) {
     .flow-wrap.fill-height {

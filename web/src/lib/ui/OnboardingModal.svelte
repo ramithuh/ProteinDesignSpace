@@ -6,7 +6,6 @@
     graph: WorkflowGraph;
     isRunning: boolean;
     onDismiss: () => void;
-    onSelectPreset: (presetId: string) => void;
     onPrepareTourStarter: () => void;
     onAutoStepBlock: (adapterId: 'web-protein-mpnn' | 'localfold-af2' | 'designability-scorer') => void;
     onInteractiveChange?: (active: boolean) => void;
@@ -16,7 +15,6 @@
     graph,
     isRunning,
     onDismiss,
-    onSelectPreset,
     onPrepareTourStarter,
     onAutoStepBlock,
     onInteractiveChange = undefined,
@@ -426,28 +424,6 @@
         </div>
       </div>
 
-      <div class="quick-starts">
-        <span class="qs-lbl">Or jump straight into a preset</span>
-        <div class="qs-row">
-          <button
-            type="button"
-            class="qs-btn"
-            onclick={() => onSelectPreset('pdb-refold-qc')}
-          >
-            <span class="qs-title">Fastest Test</span>
-            <span class="qs-meta">PDB → SolubleMPNN → AF2 · ~107 MB</span>
-          </button>
-          <button
-            type="button"
-            class="qs-btn"
-            onclick={() => onSelectPreset('genie3-mpnn-af2')}
-          >
-            <span class="qs-title">De Novo with Genie 3</span>
-            <span class="qs-meta">Genie 3 → SolubleMPNN → AF2 · ~152 MB</span>
-          </button>
-        </div>
-      </div>
-
       <div class="onb-footer">
         <button type="button" class="btn-skip" onclick={onDismiss}>
           Skip &amp; explore
@@ -460,7 +436,7 @@
           Build your first workflow (30s) →
         </button>
       </div>
-      <div class="reopen-foot">Reopen anytime from <b>⋯ → Quick Tour</b></div>
+      <div class="reopen-foot">Reopen anytime from <b>Quick Tour</b></div>
     </div>
   </div>
 {:else}
@@ -713,56 +689,6 @@
     border-radius: 50%;
     flex-shrink: 0;
     margin-top: 5px;
-  }
-
-  .quick-starts {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .qs-lbl {
-    font-size: 10.5px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    color: var(--text-dim);
-  }
-
-  .qs-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-  }
-
-  .qs-btn {
-    text-align: left;
-    background: var(--bg-surface-2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 8px 10px;
-    cursor: pointer;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    transition: border-color 120ms ease, background 120ms ease;
-  }
-
-  .qs-btn:hover {
-    border-color: var(--accent);
-    background: var(--bg-surface-hover);
-  }
-
-  .qs-title {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .qs-meta {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10.5px;
-    color: var(--text-muted);
   }
 
   .onb-footer {

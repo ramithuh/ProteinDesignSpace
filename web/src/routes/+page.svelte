@@ -370,11 +370,6 @@
     }
   }
 
-  function selectOnboardingPreset(presetId: string) {
-    dismissOnboarding();
-    selectPreset(presetId);
-  }
-
   function prepareTourStarter() {
     if (isRunning) return;
     selectedPresetId = 'tour-starter';
@@ -1308,6 +1303,7 @@
           onBlockAdded={handleBlockAdded}
           onSelectEdge={handleSelectEdge}
           onPeekPort={handlePeekPort}
+          onOpenTour={() => (showOnboarding = true)}
         />
       </SvelteFlowProvider>
 
@@ -1631,7 +1627,6 @@
     {graph}
     {isRunning}
     onDismiss={dismissOnboarding}
-    onSelectPreset={selectOnboardingPreset}
     onPrepareTourStarter={prepareTourStarter}
     onAutoStepBlock={autoStepTourBlock}
     onInteractiveChange={(active) => (onboardingInteractive = active)}
