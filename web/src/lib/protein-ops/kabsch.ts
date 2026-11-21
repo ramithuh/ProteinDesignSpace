@@ -132,7 +132,7 @@ function weightedKabsch(
   target: Float32Array,
   weights?: Float64Array,
 ): { R: Float64Array; t: Float64Array } {
-  const n = Math.min(mobile.length, target.length) / 3;
+  const n = Math.floor(Math.min(mobile.length, target.length) / 3);
   let wSum = 0;
   let mx = 0, my = 0, mz = 0;
   let tx = 0, ty = 0, tz = 0;
@@ -244,11 +244,11 @@ function weightedKabsch(
  * Also computes sequence-order TM-score with iterative weighting refinement.
  */
 export function kabschAlign(mobile: Float32Array, target: Float32Array): KabschResult {
-  const n = Math.min(mobile.length, target.length) / 3;
+  const n = Math.floor(Math.min(mobile.length, target.length) / 3);
   if (n < 3) {
     return {
-      rmsd: 0,
-      tmScore: 1,
+      rmsd: Number.NaN,
+      tmScore: Number.NaN,
       rotation: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
       translation: new Float64Array([0, 0, 0]),
       transform4x4: new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
@@ -329,36 +329,87 @@ export interface SubstructureKabschResult extends KabschResult {
   isSubstructure: true;
 }
 
+export interface SubstructureAlignOptions {
+  shortChainIds?: readonly string[] | null;
+  longChainIds?: readonly string[] | null;
+  /** Known 0-based indices in `longCoords` matching `shortCoords` 1-to-1. */
+  knownIndices?: readonly number[] | null;
+}
+
+interface MotifIsland {
+  start: number;
+  len: number;
+}
+
 /**
  * Align a shorter structure (`shortCoords`, length m) onto the best-matching segment(s) of a
- * longer structure (`longCoords`, length n >= m) via sliding-window / multi-island Kabsch alignment.
- * Enables overlaying a cropped motif (e.g. 19-aa 5TPN or twin 1PRW EF-hands) onto a 74-aa scaffold!
+ * longer structure (`longCoords`, length n >= m) via rigid-body-consistent multi-island /
+ * distance-matrix Kabsch alignment (or direct alignment when `options.knownIndices` is provided).
+ * Supports single-island motifs (5TPN), multi-island/symmetric/permuted motifs (1PRW, 1BCF, 5YUI),
+ * and sparse catalytic motifs (4XOJ, 1CTT, 1OS7) without collapsing discontinuous islands.
  */
 export function kabschAlignSubstructure(
   shortCoords: Float32Array,
   longCoords: Float32Array,
   shortResNums?: readonly number[] | null,
+  options?: SubstructureAlignOptions | null,
 ): SubstructureKabschResult {
   const m = Math.floor(shortCoords.length / 3);
   const n = Math.floor(longCoords.length / 3);
   if (m < 3 || n < m) {
     return { ...kabschAlign(shortCoords, longCoords), alignedResidues: Math.min(m, n), isSubstructure: true };
   }
+
+  // 1. Direct alignment when known motif indices in longCoords are explicitly provided
+  const knownIndices = options?.knownIndices;
+  if (knownIndices && knownIndices.length > 0) {
+    const validPairs: Array<[number, number]> = [];
+    const limit = Math.min(m, knownIndices.length);
+    for (let i = 0; i < limit; i++) {
+      const li = knownIndices[i];
+      if (Number.isInteger(li) && li >= 0 && li < n) {
+        validPairs.push([i, li]);
+      }
+    }
+    if (validPairs.length >= 3) {
+      const subMob = new Float32Array(validPairs.length * 3);
+      const subTgt = new Float32Array(validPairs.length * 3);
+      for (let i = 0; i < validPairs.length; i++) {
+        const si = validPairs[i][0] * 3;
+        const li = validPairs[i][1] * 3;
+        subMob[i * 3 + 0] = shortCoords[si + 0];
+        subMob[i * 3 + 1] = shortCoords[si + 1];
+        subMob[i * 3 + 2] = shortCoords[si + 2];
+        subTgt[i * 3 + 0] = longCoords[li + 0];
+        subTgt[i * 3 + 1] = longCoords[li + 1];
+        subTgt[i * 3 + 2] = longCoords[li + 2];
+      }
+      const joint = kabschAlign(subMob, subTgt);
+      return { ...joint, alignedResidues: validPairs.length, isSubstructure: true };
+    }
+  }
+
   if (m === n) {
     return { ...kabschAlign(shortCoords, longCoords), alignedResidues: m, isSubstructure: true };
   }
 
-  // Partition shortCoords into contiguous islands (splitting on resNum gap > 1 or Cα distance > 6.5 Å)
-  const islands: Array<{ start: number; len: number }> = [];
+  const shortChainIds =
+    options?.shortChainIds && options.shortChainIds.length === m ? options.shortChainIds : null;
+  const longChainIds =
+    options?.longChainIds && options.longChainIds.length === n ? options.longChainIds : null;
+
+  // 2. Partition shortCoords into contiguous islands (splitting on chain change, resNum gap, or Cα > 6.5 Å)
+  const islands: MotifIsland[] = [];
   let islStart = 0;
   for (let i = 1; i < m; i++) {
+    const chainGap = shortChainIds ? shortChainIds[i] !== shortChainIds[i - 1] : false;
     const resGap =
       shortResNums && shortResNums.length === m ? shortResNums[i] !== shortResNums[i - 1] + 1 : false;
     const dx = shortCoords[i * 3] - shortCoords[(i - 1) * 3];
     const dy = shortCoords[i * 3 + 1] - shortCoords[(i - 1) * 3 + 1];
     const dz = shortCoords[i * 3 + 2] - shortCoords[(i - 1) * 3 + 2];
     const distBreak = dx * dx + dy * dy + dz * dz > 6.5 * 6.5;
-    if (resGap || distBreak) {
+    if (chainGap || resGap || distBreak) {
       islands.push({ start: islStart, len: i - islStart });
       islStart = i;
     }
@@ -368,63 +419,383 @@ export function kabschAlignSubstructure(
   const sliceCoords = (coords: Float32Array, start: number, len: number): Float32Array =>
     coords.subarray(start * 3, (start + len) * 3);
 
-  const validIslands = islands.filter((isl) => isl.len >= 3);
-  const useIslands = validIslands.length > 1 ? validIslands : [{ start: 0, len: m }];
+  // Check whether a contiguous window [off .. off + len - 1] in longCoords stays on one chain
+  const isSameChainLongWindow = (off: number, len: number): boolean => {
+    if (!longChainIds || len <= 1) return true;
+    const ch = longChainIds[off];
+    for (let k = 1; k < len; k++) {
+      if (longChainIds[off + k] !== ch) return false;
+    }
+    return true;
+  };
 
-  // Match each island in order to its minimum-RMSD non-overlapping window in longCoords
-  const matchedShortIdx: number[] = [];
-  const matchedLongIdx: number[] = [];
-  let searchCursor = 0;
-
-  for (let k = 0; k < useIslands.length; k++) {
-    const isl = useIslands[k];
-    const remainingAfter = useIslands.slice(k + 1).reduce((s, x) => s + x.len, 0);
-    const maxStart = n - isl.len - remainingAfter;
-    if (maxStart < searchCursor) break;
-
+  const evaluateWindowRmsd = (isl: MotifIsland, off: number): { rmsd: number; R: Float64Array; t: Float64Array } => {
     const islMob = sliceCoords(shortCoords, isl.start, isl.len);
-    let bestOffset = searchCursor;
-    let bestRmsd = Infinity;
-
-    for (let off = searchCursor; off <= maxStart; off++) {
-      const winTgt = sliceCoords(longCoords, off, isl.len);
-      const { R, t } = weightedKabsch(islMob, winTgt);
-      let sq = 0;
-      for (let i = 0; i < isl.len; i++) {
-        const x = islMob[i * 3], y = islMob[i * 3 + 1], z = islMob[i * 3 + 2];
-        const ax = R[0] * x + R[1] * y + R[2] * z + t[0] - winTgt[i * 3];
-        const ay = R[3] * x + R[4] * y + R[5] * z + t[1] - winTgt[i * 3 + 1];
-        const az = R[6] * x + R[7] * y + R[8] * z + t[2] - winTgt[i * 3 + 2];
-        sq += ax * ax + ay * ay + az * az;
-      }
-      const rmsd = Math.sqrt(sq / isl.len);
-      if (rmsd < bestRmsd) {
-        bestRmsd = rmsd;
-        bestOffset = off;
-      }
-    }
-
+    const winTgt = sliceCoords(longCoords, off, isl.len);
+    const { R, t } = weightedKabsch(islMob, winTgt);
+    let sq = 0;
     for (let i = 0; i < isl.len; i++) {
-      matchedShortIdx.push(isl.start + i);
-      matchedLongIdx.push(bestOffset + i);
+      const x = islMob[i * 3], y = islMob[i * 3 + 1], z = islMob[i * 3 + 2];
+      const ax = R[0] * x + R[1] * y + R[2] * z + t[0] - winTgt[i * 3];
+      const ay = R[3] * x + R[4] * y + R[5] * z + t[1] - winTgt[i * 3 + 1];
+      const az = R[6] * x + R[7] * y + R[8] * z + t[2] - winTgt[i * 3 + 2];
+      sq += ax * ax + ay * ay + az * az;
     }
-    searchCursor = bestOffset + isl.len;
+    return { rmsd: Math.sqrt(sq / isl.len), R, t };
+  };
+
+  // 3. Single contiguous island: exact sliding-window Kabsch
+  if (islands.length === 1) {
+    const isl = islands[0];
+    let bestOffset = -1;
+    let bestRmsd = Infinity;
+    for (let pass = 0; pass < 2; pass++) {
+      const enforceChain = pass === 0 && longChainIds !== null;
+      for (let off = 0; off <= n - isl.len; off++) {
+        if (enforceChain && !isSameChainLongWindow(off, isl.len)) continue;
+        const { rmsd } = evaluateWindowRmsd(isl, off);
+        if (rmsd < bestRmsd) {
+          bestRmsd = rmsd;
+          bestOffset = off;
+        }
+      }
+      if (bestOffset >= 0) break;
+    }
+    const winTgt = sliceCoords(longCoords, Math.max(0, bestOffset), isl.len);
+    const joint = kabschAlign(shortCoords, winTgt);
+    return { ...joint, alignedResidues: isl.len, isSubstructure: true };
   }
 
-  const pairCount = matchedShortIdx.length;
-  if (pairCount < 3) {
+  // 4. Multi-island or sparse motif: NEVER collapse discontinuous islands into one contiguous window.
+  // Rigid-body consensus assignment: given a candidate transform (R, t), project all shortCoords
+  // into longCoords space, assign every island (longest first; single-residue islands by min-distance
+  // greedy assignment) to non-overlapping windows, and perform 1 iterative joint Kabsch refinement.
+  const predBuf = new Float32Array(m * 3);
+  const usedBuf = new Uint8Array(n);
+  const islandsByLenDesc = islands
+    .map((isl, idx) => ({ isl, idx }))
+    .sort((a, b) => b.isl.len - a.isl.len || a.idx - b.idx);
+  const multiLenIslands = islandsByLenDesc.filter((x) => x.isl.len >= 2);
+  const singleLenIslands = islandsByLenDesc.filter((x) => x.isl.len === 1);
+
+  const assignWithRigidTransform = (
+    R0: Float64Array,
+    t0: Float64Array,
+  ): { rmsd: number; shortIdx: Int32Array; longIdx: Int32Array; count: number } | null => {
+    let curR = R0;
+    let curT = t0;
+    let bestShortIdx = new Int32Array(m);
+    let bestLongIdx = new Int32Array(m);
+    let bestCount = 0;
+    let bestRmsd = Infinity;
+
+    for (let iter = 0; iter < 2; iter++) {
+      // Transform all shortCoords by (curR, curT)
+      for (let i = 0; i < m; i++) {
+        const x = shortCoords[i * 3 + 0];
+        const y = shortCoords[i * 3 + 1];
+        const z = shortCoords[i * 3 + 2];
+        predBuf[i * 3 + 0] = curR[0] * x + curR[1] * y + curR[2] * z + curT[0];
+        predBuf[i * 3 + 1] = curR[3] * x + curR[4] * y + curR[5] * z + curT[1];
+        predBuf[i * 3 + 2] = curR[6] * x + curR[7] * y + curR[8] * z + curT[2];
+      }
+
+      usedBuf.fill(0);
+      const assignedOff = new Int32Array(islands.length).fill(-1);
+
+      // Assign multi-residue islands first (longest first)
+      for (const { isl, idx } of multiLenIslands) {
+        let winBest = -1;
+        let winSse = Infinity;
+        for (let pass = 0; pass < 2; pass++) {
+          const enforceChain = pass === 0 && longChainIds !== null;
+          for (let off = 0; off <= n - isl.len; off++) {
+            if (enforceChain && !isSameChainLongWindow(off, isl.len)) continue;
+            let overlap = false;
+            for (let k = 0; k < isl.len; k++) {
+              if (usedBuf[off + k]) {
+                overlap = true;
+                break;
+              }
+            }
+            if (overlap) continue;
+            let sse = 0;
+            for (let k = 0; k < isl.len; k++) {
+              const pi = (isl.start + k) * 3;
+              const li = (off + k) * 3;
+              const dx = predBuf[pi + 0] - longCoords[li + 0];
+              const dy = predBuf[pi + 1] - longCoords[li + 1];
+              const dz = predBuf[pi + 2] - longCoords[li + 2];
+              sse += dx * dx + dy * dy + dz * dz;
+              if (sse >= winSse) break;
+            }
+            if (sse < winSse) {
+              winSse = sse;
+              winBest = off;
+            }
+          }
+          if (winBest >= 0) break;
+        }
+        if (winBest >= 0) {
+          assignedOff[idx] = winBest;
+          for (let k = 0; k < isl.len; k++) usedBuf[winBest + k] = 1;
+        }
+      }
+
+      // Assign single-residue islands by greedy minimum-distance-first so closer residues aren't stolen
+      if (singleLenIslands.length > 0) {
+        const remaining = singleLenIslands.slice();
+        while (remaining.length > 0) {
+          let bestRemPos = -1;
+          let bestLong = -1;
+          let bestD2 = Infinity;
+          for (let r = 0; r < remaining.length; r++) {
+            const si = remaining[r].isl.start * 3;
+            const px = predBuf[si + 0];
+            const py = predBuf[si + 1];
+            const pz = predBuf[si + 2];
+            for (let j = 0; j < n; j++) {
+              if (usedBuf[j]) continue;
+              const dx = px - longCoords[j * 3 + 0];
+              const dy = py - longCoords[j * 3 + 1];
+              const dz = pz - longCoords[j * 3 + 2];
+              const d2 = dx * dx + dy * dy + dz * dz;
+              if (d2 < bestD2) {
+                bestD2 = d2;
+                bestRemPos = r;
+                bestLong = j;
+              }
+            }
+          }
+          if (bestRemPos < 0 || bestLong < 0) break;
+          const chosen = remaining.splice(bestRemPos, 1)[0];
+          assignedOff[chosen.idx] = bestLong;
+          usedBuf[bestLong] = 1;
+        }
+      }
+
+      // Build matched pairs in original island order
+      const sIdx = new Int32Array(m);
+      const lIdx = new Int32Array(m);
+      let count = 0;
+      for (let idx = 0; idx < islands.length; idx++) {
+        const off = assignedOff[idx];
+        if (off < 0) continue;
+        const isl = islands[idx];
+        for (let k = 0; k < isl.len; k++) {
+          sIdx[count] = isl.start + k;
+          lIdx[count] = off + k;
+          count++;
+        }
+      }
+      if (count < 3) return null;
+
+      const subMob = new Float32Array(count * 3);
+      const subTgt = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        const si = sIdx[i] * 3;
+        const li = lIdx[i] * 3;
+        subMob[i * 3 + 0] = shortCoords[si + 0];
+        subMob[i * 3 + 1] = shortCoords[si + 1];
+        subMob[i * 3 + 2] = shortCoords[si + 2];
+        subTgt[i * 3 + 0] = longCoords[li + 0];
+        subTgt[i * 3 + 1] = longCoords[li + 1];
+        subTgt[i * 3 + 2] = longCoords[li + 2];
+      }
+      const fit = weightedKabsch(subMob, subTgt);
+      let sq = 0;
+      for (let i = 0; i < count; i++) {
+        const x = subMob[i * 3 + 0];
+        const y = subMob[i * 3 + 1];
+        const z = subMob[i * 3 + 2];
+        const dx = fit.R[0] * x + fit.R[1] * y + fit.R[2] * z + fit.t[0] - subTgt[i * 3 + 0];
+        const dy = fit.R[3] * x + fit.R[4] * y + fit.R[5] * z + fit.t[1] - subTgt[i * 3 + 1];
+        const dz = fit.R[6] * x + fit.R[7] * y + fit.R[8] * z + fit.t[2] - subTgt[i * 3 + 2];
+        sq += dx * dx + dy * dy + dz * dz;
+      }
+      const rmsd = Math.sqrt(sq / count);
+      if (count > bestCount || (count === bestCount && rmsd < bestRmsd)) {
+        bestRmsd = rmsd;
+        bestShortIdx = sIdx;
+        bestLongIdx = lIdx;
+        bestCount = count;
+      }
+      curR = fit.R;
+      curT = fit.t;
+    }
+
+    return bestCount >= 3
+      ? { rmsd: bestRmsd, shortIdx: bestShortIdx, longIdx: bestLongIdx, count: bestCount }
+      : null;
+  };
+
+  let bestMatch: { rmsd: number; shortIdx: Int32Array; longIdx: Int32Array; count: number } | null = null;
+  const considerMatch = (cand: { rmsd: number; shortIdx: Int32Array; longIdx: Int32Array; count: number } | null) => {
+    if (!cand) return;
+    if (
+      !bestMatch ||
+      cand.count > bestMatch.count ||
+      (cand.count === bestMatch.count && cand.rmsd < bestMatch.rmsd)
+    ) {
+      bestMatch = cand;
+    }
+  };
+
+  const maxIslandLen = islandsByLenDesc[0]?.isl.len ?? 0;
+
+  // Regime A: Seed from up to the 2 longest islands with len >= 3 (handles 1PRW, 1BCF, 5YUI, permuted motifs, mixed 1,1,3)
+  const seedIslands = islandsByLenDesc.filter((x) => x.isl.len >= 3).slice(0, 2);
+  for (const { isl } of seedIslands) {
+    const candidates: Array<{ rmsd: number; R: Float64Array; t: Float64Array }> = [];
+    for (let pass = 0; pass < 2; pass++) {
+      const enforceChain = pass === 0 && longChainIds !== null;
+      for (let off = 0; off <= n - isl.len; off++) {
+        if (enforceChain && !isSameChainLongWindow(off, isl.len)) continue;
+        candidates.push(evaluateWindowRmsd(isl, off));
+      }
+      if (candidates.length > 0) break;
+    }
+    candidates.sort((a, b) => a.rmsd - b.rmsd);
+    const topK = Math.min(24, candidates.length);
+    for (let k = 0; k < topK; k++) {
+      considerMatch(assignWithRigidTransform(candidates[k].R, candidates[k].t));
+    }
+  }
+
+  // Regime B: Distance-matrix anchor-triple rigid-body consensus (handles sparse catalytic motifs
+  // like 4XOJ, 1CTT, 1OS7, Trypsin triad, and refines short-island motifs where maxIslandLen <= 4)
+  if (maxIslandLen < 3 || (maxIslandLen <= 4 && m <= 32) || !bestMatch) {
+    // Pick maximally non-collinear anchor triple (a, b, c) in shortCoords
+    let anchorA = 0;
+    let anchorB = 1;
+    let maxDab = -1;
+    for (let i = 0; i < m; i++) {
+      for (let j = i + 1; j < m; j++) {
+        const d = dist(shortCoords, i, j);
+        if (d > maxDab) {
+          maxDab = d;
+          anchorA = i;
+          anchorB = j;
+        }
+      }
+    }
+    const abx = shortCoords[anchorB * 3 + 0] - shortCoords[anchorA * 3 + 0];
+    const aby = shortCoords[anchorB * 3 + 1] - shortCoords[anchorA * 3 + 1];
+    const abz = shortCoords[anchorB * 3 + 2] - shortCoords[anchorA * 3 + 2];
+    let anchorC = -1;
+    let bestArea2 = -1;
+    for (let i = 0; i < m; i++) {
+      if (i === anchorA || i === anchorB) continue;
+      const acx = shortCoords[i * 3 + 0] - shortCoords[anchorA * 3 + 0];
+      const acy = shortCoords[i * 3 + 1] - shortCoords[anchorA * 3 + 1];
+      const acz = shortCoords[i * 3 + 2] - shortCoords[anchorA * 3 + 2];
+      const cx = aby * acz - abz * acy;
+      const cy = abz * acx - abx * acz;
+      const cz = abx * acy - aby * acx;
+      const area2 = cx * cx + cy * cy + cz * cz;
+      if (area2 > bestArea2) {
+        bestArea2 = area2;
+        anchorC = i;
+      }
+    }
+    if (anchorC < 0) {
+      anchorC = anchorA !== 0 && anchorB !== 0 ? 0 : anchorA !== 1 && anchorB !== 1 ? 1 : 2;
+    }
+
+    const dab = dist(shortCoords, anchorA, anchorB);
+    const dac = dist(shortCoords, anchorA, anchorC);
+    const dbc = dist(shortCoords, anchorB, anchorC);
+
+    // Precompute pairwise distance matrix for longCoords (bounded for very large complexes)
+    const dLong = n <= 1600 ? new Float32Array(n * n) : null;
+    if (dLong) {
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const d = dist(longCoords, i, j);
+          dLong[i * n + j] = d;
+          dLong[j * n + i] = d;
+        }
+      }
+    }
+    const getLongDist = (i: number, j: number): number =>
+      dLong ? dLong[i * n + j] : dist(longCoords, i, j);
+
+    const anchorMob = new Float32Array([
+      shortCoords[anchorA * 3 + 0], shortCoords[anchorA * 3 + 1], shortCoords[anchorA * 3 + 2],
+      shortCoords[anchorB * 3 + 0], shortCoords[anchorB * 3 + 1], shortCoords[anchorB * 3 + 2],
+      shortCoords[anchorC * 3 + 0], shortCoords[anchorC * 3 + 1], shortCoords[anchorC * 3 + 2],
+    ]);
+    const anchorTgt = new Float32Array(9);
+
+    const tolerances = [1.5, 3.0, 6.0];
+    for (const tol of tolerances) {
+      const topTriples: Array<{ u: number; v: number; w: number; err: number }> = [];
+      let checks = 0;
+      const MAX_CHECKS = 150000;
+
+      for (let u = 0; u < n && checks < MAX_CHECKS; u++) {
+        const vList: number[] = [];
+        const wList: number[] = [];
+        for (let j = 0; j < n; j++) {
+          if (j === u) continue;
+          const d = getLongDist(u, j);
+          if (Math.abs(d - dab) <= tol) vList.push(j);
+          if (Math.abs(d - dac) <= tol) wList.push(j);
+        }
+        for (let vi = 0; vi < vList.length && checks < MAX_CHECKS; vi++) {
+          const v = vList[vi];
+          const ev = Math.abs(getLongDist(u, v) - dab);
+          for (let wi = 0; wi < wList.length; wi++) {
+            const w = wList[wi];
+            if (w === v) continue;
+            checks++;
+            const ew2 = Math.abs(getLongDist(v, w) - dbc);
+            if (ew2 <= tol) {
+              const err = ev + Math.abs(getLongDist(u, w) - dac) + ew2;
+              topTriples.push({ u, v, w, err });
+            }
+          }
+        }
+      }
+
+      if (topTriples.length > 0) {
+        topTriples.sort((x, y) => x.err - y.err);
+        const evalLimit = Math.min(48, topTriples.length);
+        for (let k = 0; k < evalLimit; k++) {
+          const { u, v, w } = topTriples[k];
+          anchorTgt[0] = longCoords[u * 3 + 0]; anchorTgt[1] = longCoords[u * 3 + 1]; anchorTgt[2] = longCoords[u * 3 + 2];
+          anchorTgt[3] = longCoords[v * 3 + 0]; anchorTgt[4] = longCoords[v * 3 + 1]; anchorTgt[5] = longCoords[v * 3 + 2];
+          anchorTgt[6] = longCoords[w * 3 + 0]; anchorTgt[7] = longCoords[w * 3 + 1]; anchorTgt[8] = longCoords[w * 3 + 2];
+          const { R, t } = weightedKabsch(anchorMob, anchorTgt);
+          considerMatch(assignWithRigidTransform(R, t));
+        }
+        if (bestMatch && (bestMatch as { rmsd: number }).rmsd < tol) break;
+      }
+    }
+  }
+
+  // Final fallback if completely unrelated geometry produced 0 triangle matches
+  if (!bestMatch) {
+    const idR = new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    const zeroT = new Float64Array([0, 0, 0]);
+    considerMatch(assignWithRigidTransform(idR, zeroT));
+  }
+
+  if (!bestMatch) {
     return { ...kabschAlign(shortCoords, longCoords.subarray(0, m * 3)), alignedResidues: m, isSubstructure: true };
   }
 
+  const finalMatch = bestMatch as { rmsd: number; shortIdx: Int32Array; longIdx: Int32Array; count: number };
+  const pairCount = finalMatch.count;
   const subMob = new Float32Array(pairCount * 3);
   const subTgt = new Float32Array(pairCount * 3);
   for (let i = 0; i < pairCount; i++) {
-    const si = matchedShortIdx[i] * 3;
-    const li = matchedLongIdx[i] * 3;
-    subMob[i * 3] = shortCoords[si];
+    const si = finalMatch.shortIdx[i] * 3;
+    const li = finalMatch.longIdx[i] * 3;
+    subMob[i * 3 + 0] = shortCoords[si + 0];
     subMob[i * 3 + 1] = shortCoords[si + 1];
     subMob[i * 3 + 2] = shortCoords[si + 2];
-    subTgt[i * 3] = longCoords[li];
+    subTgt[i * 3 + 0] = longCoords[li + 0];
     subTgt[i * 3 + 1] = longCoords[li + 1];
     subTgt[i * 3 + 2] = longCoords[li + 2];
   }
@@ -437,6 +808,26 @@ function padLeft(s: string, width: number): string {
   return s.length >= width ? s : ' '.repeat(width - s.length) + s;
 }
 
+/**
+ * Format a coordinate strictly within PDB's 8-character fixed column width.
+ * Uses %8.3f for normal range [-999.999, 9999.999], gracefully reduces precision
+ * for moderate overflows so columns 55+ (occupancy/B-factor/element) never shift,
+ * and clamps extreme values as a last resort.
+ */
+function formatPdbCoord8(v: number): string {
+  if (!Number.isFinite(v)) return '   0.000';
+  const s3 = v.toFixed(3);
+  if (s3.length <= 8) return padLeft(s3, 8);
+  const s2 = v.toFixed(2);
+  if (s2.length <= 8) return padLeft(s2, 8);
+  const s1 = v.toFixed(1);
+  if (s1.length <= 8) return padLeft(s1, 8);
+  const s0 = Math.round(v).toString();
+  if (s0.length <= 8) return padLeft(s0, 8);
+  const clamped = Math.max(-9999999, Math.min(99999999, Math.round(v)));
+  return padLeft(String(clamped), 8);
+}
+
 /** Apply rigid rotation R (row-major 3x3) + translation t to every ATOM/HETATM line of a PDB. */
 export function applyTransformToPdb(
   pdbText: string,
@@ -444,7 +835,12 @@ export function applyTransformToPdb(
   t: Float64Array,
 ): string {
   const lines = pdbText.split('\n');
-  const out = new Array<string>(lines.length);
+  const transformed: Array<{ lineIdx: number; nx: number; ny: number; nz: number }> = [];
+  let sumX = 0;
+  let sumY = 0;
+  let sumZ = 0;
+  let extremeOverflow = false;
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if ((line.startsWith('ATOM  ') || line.startsWith('HETATM')) && line.length >= 54) {
@@ -455,28 +851,54 @@ export function applyTransformToPdb(
         const nx = R[0] * x + R[1] * y + R[2] * z + t[0];
         const ny = R[3] * x + R[4] * y + R[5] * z + t[1];
         const nz = R[6] * x + R[7] * y + R[8] * z + t[2];
-        out[i] =
-          line.slice(0, 30) +
-          padLeft(nx.toFixed(3), 8) +
-          padLeft(ny.toFixed(3), 8) +
-          padLeft(nz.toFixed(3), 8) +
-          line.slice(54);
-        continue;
+        transformed.push({ lineIdx: i, nx, ny, nz });
+        sumX += nx;
+        sumY += ny;
+        sumZ += nz;
+        if (
+          nx < -9999999 || nx > 99999999 ||
+          ny < -9999999 || ny > 99999999 ||
+          nz < -9999999 || nz > 99999999
+        ) {
+          extremeOverflow = true;
+        }
       }
     }
-    out[i] = line;
+  }
+
+  // Re-center only if coordinates exceed even integer 8-char PDB bounds (preserving relative geometry)
+  const offX = extremeOverflow && transformed.length > 0 ? sumX / transformed.length : 0;
+  const offY = extremeOverflow && transformed.length > 0 ? sumY / transformed.length : 0;
+  const offZ = extremeOverflow && transformed.length > 0 ? sumZ / transformed.length : 0;
+
+  const out = lines.slice();
+  for (const item of transformed) {
+    const line = lines[item.lineIdx];
+    out[item.lineIdx] =
+      line.slice(0, 30) +
+      formatPdbCoord8(item.nx - offX) +
+      formatPdbCoord8(item.ny - offY) +
+      formatPdbCoord8(item.nz - offZ) +
+      line.slice(54);
   }
   return out.join('\n');
 }
 
 /** Fast Cα-only geometric quality & secondary structure estimator (P-SEA-inspired). */
-export function computeGeometryStats(caCoords: Float32Array, chainIds?: string[]): GeometryStats {
+export function computeGeometryStats(
+  caCoords: Float32Array,
+  chainIds?: readonly string[],
+  resNums?: readonly number[],
+): GeometryStats {
   const L = Math.floor(caCoords.length / 3);
   if (L === 0) {
     return { length: 0, rg: 0, meanCaDist: 0, chainBreaks: 0, clashes: 0, helixPct: 0, sheetPct: 0, coilPct: 100 };
   }
   const hasChains = Boolean(chainIds && chainIds.length === L);
+  const hasResNums = Boolean(resNums && resNums.length === L);
   const sameChain = (i: number, j: number): boolean => !hasChains || chainIds![i] === chainIds![j];
+  const isBonded = (i: number): boolean =>
+    sameChain(i, i + 1) && (!hasResNums || resNums![i + 1] === resNums![i] + 1);
 
   let cx = 0, cy = 0, cz = 0;
   for (let i = 0; i < L; i++) {
@@ -499,7 +921,7 @@ export function computeGeometryStats(caCoords: Float32Array, chainIds?: string[]
   let bondedPairs = 0;
   let chainBreaks = 0;
   for (let i = 0; i + 1 < L; i++) {
-    if (!sameChain(i, i + 1)) continue;
+    if (!isBonded(i)) continue;
     const d = Math.hypot(
       caCoords[(i + 1) * 3 + 0] - caCoords[i * 3 + 0],
       caCoords[(i + 1) * 3 + 1] - caCoords[i * 3 + 1],
@@ -514,7 +936,7 @@ export function computeGeometryStats(caCoords: Float32Array, chainIds?: string[]
   let clashes = 0;
   for (let i = 0; i < L; i++) {
     for (let j = i + 1; j < L; j++) {
-      if (j === i + 1 && sameChain(i, j)) continue;
+      if (j === i + 1 && isBonded(i)) continue;
       const d = Math.hypot(
         caCoords[j * 3 + 0] - caCoords[i * 3 + 0],
         caCoords[j * 3 + 1] - caCoords[i * 3 + 1],
@@ -524,14 +946,21 @@ export function computeGeometryStats(caCoords: Float32Array, chainIds?: string[]
     }
   }
 
+  // Contiguous bonded run length forward from each residue (prevents SS windows from bridging
+  // chain boundaries or motif/missing-density residue numbering gaps).
+  const contigRun = new Int32Array(L);
+  for (let i = L - 2; i >= 0; i--) {
+    contigRun[i] = isBonded(i) ? contigRun[i + 1] + 1 : 0;
+  }
+
   // Fast Cα distance-based SS estimate: i..i+3 ~5.0-6.0Å & i..i+4 ~5.5-7.0Å => helix;
   // extended i..i+2 ~6.0-7.4Å & i..i+3 ~8.8-11.2Å => strand.
   let helix = 0;
   let sheet = 0;
   for (let i = 0; i < L; i++) {
-    const d2 = i + 2 < L && sameChain(i, i + 2) ? dist(caCoords, i, i + 2) : 0;
-    const d3 = i + 3 < L && sameChain(i, i + 3) ? dist(caCoords, i, i + 3) : 0;
-    const d4 = i + 4 < L && sameChain(i, i + 4) ? dist(caCoords, i, i + 4) : 0;
+    const d2 = contigRun[i] >= 2 ? dist(caCoords, i, i + 2) : 0;
+    const d3 = contigRun[i] >= 3 ? dist(caCoords, i, i + 3) : 0;
+    const d4 = contigRun[i] >= 4 ? dist(caCoords, i, i + 4) : 0;
     if (d3 >= 4.6 && d3 <= 6.2 && d4 >= 5.2 && d4 <= 7.2) {
       helix++;
     } else if (d2 >= 5.9 && d2 <= 7.5 && d3 >= 8.5 && d3 <= 11.4) {

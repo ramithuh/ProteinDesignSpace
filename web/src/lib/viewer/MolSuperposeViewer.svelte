@@ -23,7 +23,12 @@
     emptyMessage?: string;
     emptyActionLabel?: string;
     onEmptyAction?: () => void;
-    onResidueClick?: (info: { chain: string; seqId: number; compId: string }) => void;
+    onResidueClick?: (info: {
+      chain: string;
+      seqId: number;
+      compId: string;
+      isNonPolymer?: boolean;
+    }) => void;
     onToggleModelVisibility?: (modelId: string) => void;
     onSoloModel?: (modelId: string) => void;
   }
@@ -59,7 +64,7 @@
   let pluginPromise: Promise<any> | null = null;
   let destroyed = false;
   let trajModelRef = $state<string | null>(null);
-  let modelRefs = new Map<string, string>();
+  let modelRefs = new Map<string, string[]>();
   let loadSeq = 0;
   let initError = $state<string | null>(null);
 
@@ -142,7 +147,13 @@
         const chain = StructureProperties.chain.auth_asym_id(loc) || 'A';
         const seqId = StructureProperties.residue.auth_seq_id(loc);
         const compId = StructureProperties.atom.label_comp_id(loc) || 'UNK';
-        onResidueClick({ chain, seqId, compId });
+        let isNonPolymer = false;
+        try {
+          isNonPolymer = StructureProperties.entity.type(loc) !== 'polymer';
+        } catch {
+          isNonPolymer = false;
+        }
+        onResidueClick({ chain, seqId, compId, isNonPolymer });
       });
 
       plugin = ctx;
@@ -154,6 +165,56 @@
     } finally {
       pluginPromise = null;
     }
+  }
+
+  /**
+   * Add ligand (ball-and-stick), ion (spacefill), and sparse theozyme (<= 280 atoms, ball-and-stick)
+   * representations to a Mol* structure and return their state refs for visibility toggling.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function addAccessoryRepresentations(ctx: any, struct: any): Promise<string[]> {
+    const refs: string[] = [];
+    const sData = struct.data;
+    const totalAtoms = sData?.elementCount ?? 0;
+    const isSparseTheozyme = totalAtoms > 0 && totalAtoms <= 280;
+    try {
+      const ligComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ligand');
+      if (ligComp) {
+        const ligRepr = await ctx.builders.structure.representation.addRepresentation(ligComp, {
+          type: 'ball-and-stick',
+          color: 'element-symbol',
+        });
+        if (ligRepr?.ref) refs.push(ligRepr.ref);
+        else if (ligComp.ref) refs.push(ligComp.ref);
+      }
+    } catch {
+      /* ignore if no ligand component */
+    }
+    try {
+      const ionComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ion');
+      if (ionComp) {
+        const ionRepr = await ctx.builders.structure.representation.addRepresentation(ionComp, {
+          type: 'spacefill',
+          color: 'element-symbol',
+        });
+        if (ionRepr?.ref) refs.push(ionRepr.ref);
+        else if (ionComp.ref) refs.push(ionComp.ref);
+      }
+    } catch {
+      /* ignore if no ion component */
+    }
+    if (isSparseTheozyme) {
+      try {
+        const sparseRepr = await ctx.builders.structure.representation.addRepresentation(struct, {
+          type: 'ball-and-stick',
+          color: 'element-symbol',
+        });
+        if (sparseRepr?.ref) refs.push(sparseRepr.ref);
+      } catch {
+        /* ignore */
+      }
+    }
+    return refs;
   }
 
   async function renderScene(
@@ -199,7 +260,10 @@
         const model = await ctx.builders.structure.createModel(traj, { modelIndex: targetIdx });
         if (destroyed || mySeq !== loadSeq) return;
         if (useTraj) trajModelRef = model.ref;
-        const struct = await ctx.builders.structure.createStructure(model);
+        const struct = await ctx.builders.structure.createStructure(model, {
+          name: 'model',
+          params: {},
+        });
         // Color multi-chain complexes (e.g. binder + target) by chain so binder and target
         // stand apart clearly in 3D without needing an overlay/scRMSD block.
         let isMultiChain = false;
@@ -216,10 +280,19 @@
               }
             }
           } else {
-            // mmCIF: check Mol* structure units/chains directly
+            // mmCIF: count distinct polymer units in the asymmetric/cropped model
             const sData = struct.data;
-            if (sData && sData.units.length > 1) {
-              isMultiChain = true;
+            if (sData) {
+              let polymerUnits = 0;
+              for (const u of sData.units) {
+                if (u.polymerElements.length > 0) {
+                  polymerUnits++;
+                  if (polymerUnits >= 2) {
+                    isMultiChain = true;
+                    break;
+                  }
+                }
+              }
             }
           }
         }
@@ -231,62 +304,31 @@
             : {}),
           typeParams: { alpha: hasOverlay ? 0.45 : 1.0 },
         });
-        // Also render ligands/metals/ions and sparse catalytic theozymes (e.g. AME 4-residue motifs,
-        // Trypsin triad, SAM pocket, B-DNA) as ball-and-stick so isolated residues & cofactors are clearly visible!
-        if (!hasOverlay) {
-          const sData = struct.data;
-          const totalAtoms = sData?.elementCount ?? 0;
-          const isSparseTheozyme = totalAtoms > 0 && totalAtoms <= 280;
-          try {
-            const ligComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ligand');
-            if (ligComp) {
-              await ctx.builders.structure.representation.addRepresentation(ligComp, {
-                type: 'ball-and-stick',
-                color: 'element-symbol',
-              });
-            }
-          } catch {
-            /* ignore if no ligand component */
-          }
-          try {
-            const ionComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ion');
-            if (ionComp) {
-              await ctx.builders.structure.representation.addRepresentation(ionComp, {
-                type: 'spacefill',
-                color: 'element-symbol',
-              });
-            }
-          } catch {
-            /* ignore if no ion component */
-          }
-          if (isSparseTheozyme) {
-            try {
-              await ctx.builders.structure.representation.addRepresentation(struct, {
-                type: 'ball-and-stick',
-                color: 'element-symbol',
-              });
-            } catch {
-              /* ignore */
-            }
-          }
-        }
+        // Render ligands/metals/ions and sparse catalytic theozymes (<= 280 atoms) in both
+        // single-structure and overlay modes so cofactors & catalytic residues remain visible.
+        await addAccessoryRepresentations(ctx, struct);
       }
 
       if (destroyed || mySeq !== loadSeq) return;
 
       // 2. Kabsch-aligned refolded structure colored by pLDDT (B-factor)
       if (sRefold && rPdb && !useTraj) {
+        const rFmt = /^\s*(data_|loop_|_atom_site\.)/m.test(rPdb) ? 'mmcif' : 'pdb';
         const data = await ctx.builders.data.rawData({
           data: rPdb,
           label: 'LocalFold Refold (pLDDT)',
         });
-        const traj = await ctx.builders.structure.parseTrajectory(data, 'pdb');
+        const traj = await ctx.builders.structure.parseTrajectory(data, rFmt);
         const model = await ctx.builders.structure.createModel(traj, { modelIndex: 0 });
-        const struct = await ctx.builders.structure.createStructure(model);
+        const struct = await ctx.builders.structure.createStructure(model, {
+          name: 'model',
+          params: {},
+        });
         await ctx.builders.structure.representation.addRepresentation(struct, {
           type: 'cartoon',
           color: 'plddt-confidence',
         });
+        await addAccessoryRepresentations(ctx, struct);
       }
 
       if (destroyed || mySeq !== loadSeq) return;
@@ -383,7 +425,7 @@
       ]);
       if (destroyed || mySeq !== loadSeq) return;
 
-      const nextRefs = new Map<string, string>();
+      const nextRefs = new Map<string, string[]>();
       for (const m of specs) {
         const fmt = /^\s*(data_|loop_|_atom_site\.)/m.test(m.pdbText) ? 'mmcif' : 'pdb';
         const data = await ctx.builders.data.rawData({
@@ -393,7 +435,10 @@
         const traj = await ctx.builders.structure.parseTrajectory(data, fmt);
         const model = await ctx.builders.structure.createModel(traj, { modelIndex: 0 });
         if (destroyed || mySeq !== loadSeq) return;
-        const struct = await ctx.builders.structure.createStructure(model);
+        const struct = await ctx.builders.structure.createStructure(model, {
+          name: 'model',
+          params: {},
+        });
         const repr = await ctx.builders.structure.representation.addRepresentation(
           struct,
           m.colorByPlddt
@@ -410,10 +455,16 @@
               },
         );
         if (destroyed || mySeq !== loadSeq) return;
-        const ref = repr?.ref ?? struct.ref;
-        nextRefs.set(m.id, ref);
+        const extraRefs = await addAccessoryRepresentations(ctx, struct);
+        if (destroyed || mySeq !== loadSeq) return;
+        const refs = [repr?.ref ?? struct.ref, ...extraRefs];
+        nextRefs.set(m.id, refs);
         if (!m.visible) {
-          setSubtreeVisibility(ctx.state.data, ref, true);
+          for (const ref of refs) {
+            if (ctx.state?.data?.cells?.has(ref)) {
+              setSubtreeVisibility(ctx.state.data, ref, true);
+            }
+          }
         }
       }
 
@@ -434,10 +485,13 @@
       const { setSubtreeVisibility } = await import('molstar/lib/mol-plugin/behavior/static/state');
       if (destroyed || !plugin) return;
       for (const m of specs) {
-        const ref = modelRefs.get(m.id);
-        if (ref && plugin.state?.data?.cells?.has(ref)) {
-          // Mol* setSubtreeVisibility(state, ref, isHidden): true hides, false shows
-          setSubtreeVisibility(plugin.state.data, ref, !m.visible);
+        const refs = modelRefs.get(m.id);
+        if (!refs) continue;
+        for (const ref of refs) {
+          if (plugin.state?.data?.cells?.has(ref)) {
+            // Mol* setSubtreeVisibility(state, ref, isHidden): true hides, false shows
+            setSubtreeVisibility(plugin.state.data, ref, !m.visible);
+          }
         }
       }
     } catch {

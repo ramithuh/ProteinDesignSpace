@@ -438,23 +438,33 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
   const ligandSet = new Set<string>();
   const nucleicChains = new Set<string>();
   for (const line of lines) {
-    if (line.startsWith('ENDMDL') && residues.length > 0) break;
-    if ((line.startsWith('ATOM  ') || line.startsWith('HETATM')) && line.length >= 11) {
+    if (
+      line.startsWith('ENDMDL') &&
+      (residues.length > 0 || ligandSet.size > 0 || nucleicChains.size > 0)
+    ) {
+      break;
+    }
+    const isAtom = line.startsWith('ATOM  ');
+    const isHet = line.startsWith('HETATM');
+    if ((isAtom || isHet) && line.length >= 11) {
       const serial = parseInt(line.slice(6, 11).trim(), 10);
       if (Number.isFinite(serial) && serial > maxSerial) maxSerial = serial;
     }
-    if (line.startsWith('HETATM') && line.length >= 22) {
+    if (isHet && line.length >= 22) {
       const hetRes = line.slice(17, 20).trim().toUpperCase();
-      if (hetRes && !WATER_RESNAMES.has(hetRes) && !AA3_TO_AA1[hetRes]) {
-        if (NUCLEIC_RESNAMES.has(hetRes)) {
-          nucleicChains.add(line[21]?.trim() || 'A');
-        } else {
-          ligandSet.add(hetRes);
+      if (hetRes !== 'MSE') {
+        if (hetRes && !WATER_RESNAMES.has(hetRes) && !AA3_TO_AA1[hetRes]) {
+          if (NUCLEIC_RESNAMES.has(hetRes)) {
+            nucleicChains.add(line[21]?.trim() || 'A');
+          } else {
+            ligandSet.add(hetRes);
+          }
         }
+        continue;
       }
-      continue;
+      // Fall through for HETATM MSE so selenomethionine is parsed as protein residue M
     }
-    if (!line.startsWith('ATOM  ') || line.length < 54) continue;
+    if ((!isAtom && !isHet) || line.length < 54) continue;
     const rawResName = line.slice(17, 20).trim().toUpperCase();
     if (NUCLEIC_RESNAMES.has(rawResName)) {
       nucleicChains.add(line[21]?.trim() || 'A');
@@ -549,7 +559,10 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
         inModel1 = false;
         continue;
       }
-      if (!inModel1 || !line.startsWith('ATOM  ') || line.length < 54) continue;
+      const isAtomOrMse =
+        line.startsWith('ATOM  ') ||
+        (line.startsWith('HETATM') && line.slice(17, 20).trim().toUpperCase() === 'MSE');
+      if (!inModel1 || !isAtomOrMse || line.length < 54) continue;
       seenAtoms = true;
       const altLoc = line[16];
       if (altLoc !== ' ' && altLoc !== 'A' && altLoc !== '1') continue;
@@ -562,10 +575,11 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
       if (oCoord) {
         missingOByKey.delete(key);
         nextSerial = Math.min(99999, nextSerial + 1);
+        const recType = line.slice(0, 6);
         const resMeta = line.slice(17, 27); // resName + space + chain + resSeq + iCode
         const bFactorTail = line.length >= 66 ? line.slice(54, 66) : '  1.00  0.00';
         patchedLines.push(
-          `ATOM  ${pad(String(nextSerial), 5)}  ${padR('O', 3)} ${resMeta}   ` +
+          `${recType}${pad(String(nextSerial), 5)}  ${padR('O', 3)} ${resMeta}   ` +
             `${pad(oCoord[0].toFixed(3), 8)}${pad(oCoord[1].toFixed(3), 8)}${pad(oCoord[2].toFixed(3), 8)}` +
             `${bFactorTail}           O  `,
         );
@@ -610,53 +624,111 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
   const lines = cifText.split('\n');
   const cols: string[] = [];
   let inAtomSite = false;
+  let seenAtomSiteRow = false;
   let firstModelNum: string | null = null;
   const residues: CifRes[] = [];
   const byKey = new Map<string, CifRes>();
+  const ligandSet = new Set<string>();
+  const nucleicChains = new Set<string>();
+
+  // Resolved _atom_site column indices (populated lazily once header finishes)
+  let colMapReady = false;
+  let iGroup = -1;
+  let iModel = -1;
+  let iAlt = -1;
+  let iLabelAtom = -1;
+  let iAuthAtom = -1;
+  let iAuthAsym = -1;
+  let iLabelAsym = -1;
+  let iAuthSeq = -1;
+  let iLabelSeq = -1;
+  let iIns = -1;
+  let iLabelComp = -1;
+  let iAuthComp = -1;
+  let iX = -1;
+  let iY = -1;
+  let iZ = -1;
 
   for (const raw of lines) {
     const line = raw.trim();
     if (line.startsWith('_atom_site.')) {
       inAtomSite = true;
+      colMapReady = false;
       cols.push(line.slice('_atom_site.'.length));
       continue;
     }
     if (inAtomSite && (line === '' || line.startsWith('#') || line.startsWith('loop_') || line.startsWith('_'))) {
-      if (residues.length > 0) break;
+      if (seenAtomSiteRow) break;
       continue;
     }
     if (!inAtomSite) continue;
     const toks = tokenizeCifLine(line);
     if (toks.length < cols.length) continue;
+    seenAtomSiteRow = true;
 
-    const get = (name: string) => {
-      const idx = cols.indexOf(name);
-      return idx >= 0 ? toks[idx] : '';
-    };
-    const group = get('group_PDB');
-    if (group && group !== 'ATOM') continue;
+    if (!colMapReady) {
+      iGroup = cols.indexOf('group_PDB');
+      iModel = cols.indexOf('pdbx_PDB_model_num');
+      iAlt = cols.indexOf('label_alt_id');
+      iLabelAtom = cols.indexOf('label_atom_id');
+      iAuthAtom = cols.indexOf('auth_atom_id');
+      iAuthAsym = cols.indexOf('auth_asym_id');
+      iLabelAsym = cols.indexOf('label_asym_id');
+      iAuthSeq = cols.indexOf('auth_seq_id');
+      iLabelSeq = cols.indexOf('label_seq_id');
+      iIns = cols.indexOf('pdbx_PDB_ins_code');
+      iLabelComp = cols.indexOf('label_comp_id');
+      iAuthComp = cols.indexOf('auth_comp_id');
+      iX = cols.indexOf('Cartn_x');
+      iY = cols.indexOf('Cartn_y');
+      iZ = cols.indexOf('Cartn_z');
+      colMapReady = true;
+    }
 
-    // Filter to first model only
-    const modelNum = get('pdbx_PDB_model_num');
+    const get = (idx: number): string => (idx >= 0 ? toks[idx] : '');
+
+    // Filter to first model only (for both protein and ligand/nucleic diagnostics)
+    const modelNum = get(iModel);
     if (modelNum && modelNum !== '.' && modelNum !== '?') {
       if (firstModelNum === null) firstModelNum = modelNum;
       else if (modelNum !== firstModelNum) continue;
     }
 
     // Filter to primary altLoc only
-    const altId = get('label_alt_id');
+    const altId = get(iAlt);
     if (altId && altId !== '.' && altId !== '?' && altId !== 'A' && altId !== '1') continue;
 
-    const atomName = get('label_atom_id') || get('auth_atom_id');
+    const group = (get(iGroup) || 'ATOM').toUpperCase();
+    const rawComp = get(iLabelComp) || get(iAuthComp) || 'UNK';
+    const comp = rawComp.toUpperCase();
+    const chain = get(iAuthAsym) || get(iLabelAsym) || 'A';
+
+    // Detect nucleic acid chains (ATOM or HETATM) via resolved column indices
+    if (NUCLEIC_RESNAMES.has(comp)) {
+      nucleicChains.add(chain);
+      continue;
+    }
+
+    // Detect HETATM ligands, while allowing HETATM MSE (selenomethionine) as protein residue M
+    if (group === 'HETATM') {
+      if (comp !== 'MSE') {
+        if (comp && comp !== '.' && comp !== '?' && !WATER_RESNAMES.has(comp) && !AA3_TO_AA1[comp]) {
+          ligandSet.add(comp);
+        }
+        continue;
+      }
+    } else if (group !== 'ATOM') {
+      continue;
+    }
+
+    const atomName = get(iLabelAtom) || get(iAuthAtom);
     if (atomName !== 'N' && atomName !== 'CA' && atomName !== 'C' && atomName !== 'O') continue;
-    const chain = get('auth_asym_id') || get('label_asym_id') || 'A';
-    const seqId = get('auth_seq_id') || get('label_seq_id');
-    const rawIns = get('pdbx_PDB_ins_code');
+    const seqId = get(iAuthSeq) || get(iLabelSeq);
+    const rawIns = get(iIns);
     const insCode = rawIns && rawIns !== '.' && rawIns !== '?' ? rawIns : '';
-    const comp = get('label_comp_id') || get('auth_comp_id') || 'UNK';
-    const x = parseFloat(get('Cartn_x'));
-    const y = parseFloat(get('Cartn_y'));
-    const z = parseFloat(get('Cartn_z'));
+    const x = parseFloat(get(iX));
+    const y = parseFloat(get(iY));
+    const z = parseFloat(get(iZ));
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
 
     const key = `${chain}:${seqId}:${insCode}`;
@@ -713,26 +785,6 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     resSeqs,
     caOnly: L > 0 && !anyHasNC,
   });
-  // Scan mmCIF for HETATM ligands and nucleic acid residues
-  const ligandSet = new Set<string>();
-  const nucleicChains = new Set<string>();
-  for (const rawLine of cifText.split('\n')) {
-    const line = rawLine.trim();
-    if (line.startsWith('HETATM')) {
-      const toks = tokenizeCifLine(line);
-      const comp = (toks[5] ?? '').toUpperCase();
-      if (comp && !WATER_RESNAMES.has(comp) && !AA3_TO_AA1[comp]) {
-        if (NUCLEIC_RESNAMES.has(comp)) nucleicChains.add(toks[6] ?? 'A');
-        else ligandSet.add(comp);
-      }
-    } else if (line.startsWith('ATOM')) {
-      const toks = tokenizeCifLine(line);
-      const comp = (toks[5] ?? '').toUpperCase();
-      if (NUCLEIC_RESNAMES.has(comp)) {
-        nucleicChains.add(toks[6] ?? 'A');
-      }
-    }
-  }
   const chainLengths = computeChainLengthsFromIds(chainIds);
   return {
     sequence: seq,
@@ -772,8 +824,8 @@ function parseRawCropRules(segmentSpec: string): RawCropRule[] {
     .filter(Boolean);
   const rules: RawCropRule[] = [];
   for (const tok of tokens) {
-    // Chain + ligand comp_id e.g. "A:ZN", "A:DHZ", "A:SAM", "A:FE2"
-    const chainLig = /^([A-Za-z]):([A-Za-z0-9]{2,5})$/.exec(tok);
+    // Chain + ligand comp_id e.g. "A:ZN", "A:DHZ", "A:SAM", "A:FE2", "A:CIT", "A:K"
+    const chainLig = /^([A-Za-z]):([A-Za-z0-9]{1,5})$/.exec(tok);
     if (chainLig && !/^\d+$/.test(chainLig[2])) {
       rules.push({ kind: 'ligand', chain: chainLig[1].toUpperCase(), compId: chainLig[2].toUpperCase() });
       continue;
@@ -812,11 +864,16 @@ function matchesRawCropRule(
 ): boolean {
   const ch = chain.toUpperCase();
   const comp = compId.toUpperCase();
-  if (WATER_RESNAMES.has(comp)) return false;
+  // Check explicit ligand rules BEFORE WATER_RESNAMES filter so explicitly requested
+  // ions/buffers like CIT, PO4, NA, K, CL (e.g. "A:CIT", "A:PO4", "A:K") are retained.
   for (const r of rules) {
     if (r.kind === 'ligand') {
       if (comp === r.compId && (!r.chain || r.chain === ch)) return true;
-    } else if (r.kind === 'chain') {
+    }
+  }
+  if (WATER_RESNAMES.has(comp)) return false;
+  for (const r of rules) {
+    if (r.kind === 'chain') {
       // Whole-chain crop keeps polymer ATOM records (protein + nucleic acids) on that chain
       if (group === 'ATOM' && ch === r.chain) return true;
     } else if (r.kind === 'range') {
@@ -832,6 +889,11 @@ function matchesRawCropRule(
     }
   }
   return false;
+}
+
+/** Match mmCIF biological assembly / symmetry operator categories to strip from cropped mmCIFs. */
+function isAssemblyCategoryTag(trimmedLine: string): boolean {
+  return /^_pdbx_struct_(?:assembly|oper_list)(?:[._]|$)/i.test(trimmedLine);
 }
 
 /**
@@ -854,48 +916,142 @@ export function cropRawAllAtomStructure(
     const out: string[] = [];
     const cols: string[] = [];
     let inAtomSite = false;
+    let colMapReady = false;
+    let iModel = -1;
+    let iAlt = -1;
+    let iGroup = -1;
+    let iAuthAsym = -1;
+    let iLabelAsym = -1;
+    let iAuthSeq = -1;
+    let iLabelSeq = -1;
+    let iLabelComp = -1;
+    let iAuthComp = -1;
     let firstModelNum: string | null = null;
     let kept = 0;
 
-    for (const raw of lines) {
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i];
       const tr = raw.trim();
+
       if (tr.startsWith('_atom_site.')) {
         inAtomSite = true;
+        colMapReady = false;
         cols.push(tr.slice('_atom_site.'.length));
         out.push(raw);
         continue;
       }
+
       if (inAtomSite) {
         if (tr === '' || tr.startsWith('#') || tr.startsWith('loop_') || tr.startsWith('_')) {
           inAtomSite = false;
-          out.push(raw);
+          // Re-process loop_ or assembly tags so they get stripped if needed
+          if (tr === 'loop_' || isAssemblyCategoryTag(tr)) {
+            i--;
+          } else {
+            out.push(raw);
+          }
           continue;
         }
         const toks = tokenizeCifLine(tr);
         if (toks.length < cols.length) continue;
-        const get = (name: string) => {
-          const idx = cols.indexOf(name);
-          return idx >= 0 ? toks[idx] : '';
-        };
-        const modelNum = get('pdbx_PDB_model_num');
+        if (!colMapReady) {
+          iModel = cols.indexOf('pdbx_PDB_model_num');
+          iAlt = cols.indexOf('label_alt_id');
+          iGroup = cols.indexOf('group_PDB');
+          iAuthAsym = cols.indexOf('auth_asym_id');
+          iLabelAsym = cols.indexOf('label_asym_id');
+          iAuthSeq = cols.indexOf('auth_seq_id');
+          iLabelSeq = cols.indexOf('label_seq_id');
+          iLabelComp = cols.indexOf('label_comp_id');
+          iAuthComp = cols.indexOf('auth_comp_id');
+          colMapReady = true;
+        }
+        const get = (idx: number): string => (idx >= 0 ? toks[idx] : '');
+        const modelNum = get(iModel);
         if (modelNum && modelNum !== '.' && modelNum !== '?') {
           if (firstModelNum === null) firstModelNum = modelNum;
           else if (modelNum !== firstModelNum) continue;
         }
-        const altId = get('label_alt_id');
+        const altId = get(iAlt);
         if (altId && altId !== '.' && altId !== '?' && altId !== 'A' && altId !== '1') continue;
 
-        const grp = (get('group_PDB') || 'ATOM').toUpperCase();
-        const ch = get('auth_asym_id') || get('label_asym_id') || 'A';
-        const seqStr = get('auth_seq_id') || get('label_seq_id');
+        const grp = (get(iGroup) || 'ATOM').toUpperCase();
+        const ch = get(iAuthAsym) || get(iLabelAsym) || 'A';
+        const seqStr = get(iAuthSeq) || get(iLabelSeq);
         const rn = parseInt(seqStr, 10);
-        const comp = get('label_comp_id') || get('auth_comp_id') || '';
+        const comp = get(iLabelComp) || get(iAuthComp) || '';
         if (matchesRawCropRule(rules, grp, ch, Number.isFinite(rn) ? rn : null, comp)) {
           out.push(raw);
           kept++;
         }
         continue;
       }
+
+      // Strip looped _pdbx_struct_assembly* / _pdbx_struct_oper_list* categories
+      if (tr === 'loop_') {
+        let j = i + 1;
+        while (j < lines.length && (lines[j].trim() === '' || lines[j].trim().startsWith('#'))) {
+          j++;
+        }
+        if (j < lines.length && isAssemblyCategoryTag(lines[j].trim())) {
+          // Skip all header tags in this loop
+          while (j < lines.length && lines[j].trim().startsWith('_')) {
+            j++;
+          }
+          // Skip loop data rows until '#', 'loop_', new tag '_', or data_/save_/stop_/global_
+          let inSemicolon = false;
+          while (j < lines.length) {
+            const curRaw = lines[j];
+            const curTr = curRaw.trim();
+            if (inSemicolon) {
+              if (curRaw.startsWith(';')) inSemicolon = false;
+              j++;
+              continue;
+            }
+            if (curRaw.startsWith(';')) {
+              inSemicolon = true;
+              j++;
+              continue;
+            }
+            if (curTr === '#') {
+              j++; // consume trailing delimiter
+              break;
+            }
+            if (
+              curTr === 'loop_' ||
+              curTr.startsWith('_') ||
+              /^(?:data_|save_|stop_|global_)/i.test(curTr)
+            ) {
+              break;
+            }
+            j++;
+          }
+          i = j - 1;
+          continue;
+        }
+      }
+
+      // Strip single-row (key-value) _pdbx_struct_assembly* / _pdbx_struct_oper_list* items
+      if (isAssemblyCategoryTag(tr)) {
+        if (tokenizeCifLine(tr).length === 1 && i + 1 < lines.length) {
+          const nextRaw = lines[i + 1];
+          const nextTr = nextRaw.trim();
+          if (nextRaw.startsWith(';')) {
+            i += 2;
+            while (i < lines.length && !lines[i].startsWith(';')) i++;
+          } else if (
+            nextTr !== '' &&
+            !nextTr.startsWith('#') &&
+            nextTr !== 'loop_' &&
+            !nextTr.startsWith('_') &&
+            !/^(?:data_|save_|stop_|global_)/i.test(nextTr)
+          ) {
+            i++;
+          }
+        }
+        continue;
+      }
+
       out.push(raw);
     }
 

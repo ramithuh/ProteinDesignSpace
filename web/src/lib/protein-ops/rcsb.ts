@@ -91,8 +91,12 @@ export async function fetchStructureByPdbId(
         continue;
       }
       const parsed = parseStructureText(text);
-      if (parsed.nResidues < 3) {
-        lastStatus = 'no protein backbone Cα atoms found';
+      if (
+        parsed.nResidues < 3 &&
+        !parsed.diagnostics.hasLigands &&
+        !parsed.diagnostics.hasNucleicAcids
+      ) {
+        lastStatus = 'no protein, nucleic-acid, or ligand atoms found';
         continue;
       }
       const entry: FetchedPdbStructure = {

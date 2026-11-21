@@ -136,4 +136,53 @@ describe('RCSB PDB ID input', () => {
     expect(decoded!.nodes[0].params.pdbId).toBe('5O45');
     expect(decoded!.nodes[0].params.pdbText).toBe('');
   });
+
+  it('accepts pure-DNA/RNA PDB IDs (e.g. 1BNA, 1EHZ) and ligand-only entries while rejecting water-only responses', async () => {
+    const pureDnaCif = [
+      'data_1BNA',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      'ATOM 1 P DC A 1 1.000 2.000 3.000',
+      'ATOM 2 P DG A 2 4.000 5.000 6.000',
+      'ATOM 3 P DC B 13 7.000 8.000 9.000',
+      '#',
+    ].join('\n');
+
+    const dnaFetch = vi.fn(async () => new Response(pureDnaCif, { status: 200 })) as unknown as typeof fetch;
+    const dnaRes = await fetchStructureByPdbId('1BNA', dnaFetch);
+    expect(dnaRes.pdbId).toBe('1BNA');
+    expect(dnaRes.nResidues).toBe(0);
+    expect(dnaRes.nucleicAcidChains).toEqual(['A', 'B']);
+
+    const pureRnaPdb = [
+      'ATOM      1  P     G A   1       1.000   2.000   3.000  1.00 20.00           P  ',
+      'ATOM      2  P     C A   2       4.000   5.000   6.000  1.00 20.00           P  ',
+      'END',
+    ].join('\n');
+    const rnaFetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('.cif')) return new Response('Not Found', { status: 404 });
+      return new Response(pureRnaPdb, { status: 200 });
+    }) as unknown as typeof fetch;
+    const rnaRes = await fetchStructureByPdbId('1EHZ', rnaFetch);
+    expect(rnaRes.pdbId).toBe('1EHZ');
+    expect(rnaRes.nResidues).toBe(0);
+    expect(rnaRes.nucleicAcidChains).toEqual(['A']);
+
+    // Water-only structure with 0 protein/nucleic/ligand atoms is still rejected
+    const waterOnlyPdb = [
+      'HETATM    1  O   HOH A 101       1.000   2.000   3.000  1.00 10.00           O  ',
+      'HETATM    2  O   HOH A 102       4.000   5.000   6.000  1.00 10.00           O  ',
+      'END',
+    ].join('\n');
+    const waterFetch = vi.fn(async () => new Response(waterOnlyPdb, { status: 200 })) as unknown as typeof fetch;
+    await expect(fetchStructureByPdbId('9WAT', waterFetch)).rejects.toThrow(/Could not fetch PDB entry "9WAT"/);
+  });
 });

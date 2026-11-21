@@ -3,6 +3,7 @@ import {
   applyTransformToPdb,
   computeGeometryStats,
   kabschAlign,
+  kabschAlignSubstructure,
 } from '$lib/protein-ops/kabsch';
 import { generateSampleHelixBundlePdb, parsePdbBackbone } from '$lib/protein-ops/pdb';
 
@@ -114,12 +115,18 @@ describe('protein-ops/kabsch', () => {
     expect(res.rmsd).toBeGreaterThan(1.0);
   });
 
-  it('handles < 3 points safely without NaN', () => {
+  it('handles < 3 points safely by returning NaN metrics and identity transform (including non-multiple-of-3 buffers)', () => {
     const tiny = new Float32Array([1, 2, 3, 4, 5, 6]);
     const res = kabschAlign(tiny, tiny);
-    expect(res.rmsd).toBe(0);
-    expect(res.tmScore).toBe(1);
+    expect(Number.isNaN(res.rmsd)).toBe(true);
+    expect(Number.isNaN(res.tmScore)).toBe(true);
     expect(det3(res.rotation)).toBe(1);
+
+    // 8 floats = floor(8 / 3) = 2 points (< 3)
+    const oddLen = new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    const resOdd = kabschAlign(oddLen, oddLen);
+    expect(Number.isNaN(resOdd.rmsd)).toBe(true);
+    expect(Number.isNaN(resOdd.tmScore)).toBe(true);
   });
 
   it('satisfies scRMSD / scTM bounds, symmetry, rigid-motion invariance, and perturbation monotonicity', () => {
@@ -310,5 +317,156 @@ describe('protein-ops/kabsch', () => {
     const clashStats = computeGeometryStats(interClash, chainIds);
     expect(clashStats.chainBreaks).toBe(0);
     expect(clashStats.clashes).toBeGreaterThanOrEqual(1);
+  });
+
+  it('computeGeometryStats with resNums ignores motif/missing-density gaps for breaks, meanCaDist, and SS% while still catching true breaks & clashes', () => {
+    // Two 10-aa ideal alpha-helices on chain A with a residue-numbering gap (16..25, 52..61) separated by +30 A
+    const twist = (100 * Math.PI) / 180;
+    const coords = new Float32Array(20 * 3);
+    const chainIds: string[] = [];
+    const resNums: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      coords[i * 3 + 0] = 2.3 * Math.cos(i * twist);
+      coords[i * 3 + 1] = 2.3 * Math.sin(i * twist);
+      coords[i * 3 + 2] = i * 1.5;
+      chainIds.push('A');
+      resNums.push(16 + i);
+    }
+    for (let i = 0; i < 10; i++) {
+      const idx = 10 + i;
+      coords[idx * 3 + 0] = 30 + 2.3 * Math.cos(i * twist);
+      coords[idx * 3 + 1] = 2.3 * Math.sin(i * twist);
+      coords[idx * 3 + 2] = i * 1.5;
+      chainIds.push('A');
+      resNums.push(52 + i);
+    }
+
+    const withResNums = computeGeometryStats(coords, chainIds, resNums);
+    const withoutResNums = computeGeometryStats(coords, chainIds);
+    expect(withResNums.chainBreaks).toBe(0);
+    expect(withResNums.meanCaDist).toBeCloseTo(3.8, 1);
+    expect(withoutResNums.chainBreaks).toBe(1);
+    expect(withoutResNums.meanCaDist).toBeGreaterThan(4.5);
+
+    // True intra-segment covalent break (consecutive resNums) is still detected
+    const brokenSeg = new Float32Array(coords);
+    brokenSeg[4 * 3 + 2] += 12.0; // break between res 19 and 20 (and 20->21)
+    expect(computeGeometryStats(brokenSeg, chainIds, resNums).chainBreaks).toBe(2);
+
+    // Steric clash (< 3.0 A) across a residue-number gap IS detected as a clash
+    const gapClash = new Float32Array(coords);
+    gapClash[10 * 3 + 0] = coords[9 * 3 + 0] + 1.5;
+    gapClash[10 * 3 + 1] = coords[9 * 3 + 1];
+    gapClash[10 * 3 + 2] = coords[9 * 3 + 2];
+    expect(computeGeometryStats(gapClash, chainIds, resNums).clashes).toBeGreaterThanOrEqual(1);
+  });
+
+  it('applyTransformToPdb guards 8-char coordinate column width on moderate and extreme overflows', () => {
+    const idR = new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    // Moderate overflow beyond [-999.999, 9999.999]
+    const modT = new Float64Array([12345.678, -1500.25, 99999.12]);
+    const modPdb = applyTransformToPdb(samplePdb, idR, modT);
+    const firstAtomMod = modPdb.split('\n').find((l) => l.startsWith('ATOM  '))!;
+    expect(firstAtomMod.slice(54, 66)).toBe('  1.00  0.00'); // columns 55-66 preserved intact!
+    expect(firstAtomMod.slice(30, 38).length).toBe(8);
+    expect(firstAtomMod.slice(38, 46).length).toBe(8);
+    expect(firstAtomMod.slice(46, 54).length).toBe(8);
+    expect(parseFloat(firstAtomMod.slice(30, 38))).toBeCloseTo(
+      parseFloat(samplePdb.split('\n')[0].slice(30, 38)) + 12345.678,
+      1,
+    );
+
+    // Extreme overflow (> 1e8): re-centered around centroid while preserving internal geometry & column alignment
+    const extT = new Float64Array([1e9, -2e9, 5e8]);
+    const extPdb = applyTransformToPdb(samplePdb, idR, extT);
+    const firstAtomExt = extPdb.split('\n').find((l) => l.startsWith('ATOM  '))!;
+    expect(firstAtomExt.slice(54, 66)).toBe('  1.00  0.00');
+    const reparsedExt = parsePdbBackbone(extPdb);
+    expect(reparsedExt.nResidues).toBe(sampleParsed.nResidues);
+    expect(kabschAlign(reparsedExt.caCoords, sampleCa).rmsd).toBeLessThan(2e-3);
+  });
+
+  it('kabschAlignSubstructure aligns sparse catalytic motifs (1,1,1,1 & 1,1,3), symmetric multi-island motifs, permuted motifs, and knownIndices without collapsing discontinuous islands', () => {
+    const Rtrue = axisAngleRotation([0.4, -0.7, 0.6], 1.9);
+    const tTrue = new Float64Array([-18.5, 31.2, 44.8]);
+    const extractSubset = (src: Float32Array, indices: number[]): Float32Array => {
+      const out = new Float32Array(indices.length * 3);
+      for (let i = 0; i < indices.length; i++) {
+        out[i * 3 + 0] = src[indices[i] * 3 + 0];
+        out[i * 3 + 1] = src[indices[i] * 3 + 1];
+        out[i * 3 + 2] = src[indices[i] * 3 + 2];
+      }
+      return out;
+    };
+
+    // 1. Sparse 4-residue catalytic motif (1,1,1,1 like 1CTT/1OS7/4XOJ) at discontinuous non-adjacent indices
+    const sparseIdx = [3, 17, 31, 47];
+    const sparseMob = transformCoords(extractSubset(sampleCa, sparseIdx), Rtrue, tTrue);
+    const sparseRes = kabschAlignSubstructure(sparseMob, sampleCa, [102, 104, 129, 202]);
+    expect(sparseRes.alignedResidues).toBe(4);
+    expect(sparseRes.rmsd).toBeLessThan(1e-3);
+
+    // 2. Permuted sparse motif (reverse order) still aligns via distance-matrix rigid-body consensus
+    const permIdx = [47, 17, 3, 31];
+    const permMob = transformCoords(extractSubset(sampleCa, permIdx), Rtrue, tTrue);
+    const permRes = kabschAlignSubstructure(permMob, sampleCa, [202, 130, 101, 132]);
+    expect(permRes.alignedResidues).toBe(4);
+    expect(permRes.rmsd).toBeLessThan(1e-3);
+
+    // 3. Mixed sparse motif (1, 1, 3 — previously collapsed into 1 contiguous 5-aa window!)
+    const mixedIdx = [4, 22, 38, 39, 40];
+    const mixedMob = transformCoords(extractSubset(sampleCa, mixedIdx), Rtrue, tTrue);
+    const mixedRes = kabschAlignSubstructure(mixedMob, sampleCa, [10, 50, 100, 101, 102]);
+    expect(mixedRes.alignedResidues).toBe(5);
+    expect(mixedRes.rmsd).toBeLessThan(1e-3);
+
+    // 4. Symmetric multi-island motif (4 identical 6-aa helices embedded at distinct 3D positions like 1BCF)
+    const twist = (100 * Math.PI) / 180;
+    const makeHelixPts = (cx: number, cy: number, cz: number, len: number): number[] => {
+      const pts: number[] = [];
+      for (let i = 0; i < len; i++) {
+        pts.push(cx + 2.3 * Math.cos(i * twist), cy + 2.3 * Math.sin(i * twist), cz + i * 1.5);
+      }
+      return pts;
+    };
+    const longPts = [
+      ...makeHelixPts(0, 0, 0, 10),
+      ...makeHelixPts(12, 0, 3, 10),
+      ...makeHelixPts(12, 14, -2, 10),
+      ...makeHelixPts(-2, 15, 5, 10),
+    ];
+    const longSym = new Float32Array(longPts);
+    // Extract 4 symmetric 6-aa islands in permuted order (helix 2, helix 0, helix 3, helix 1)
+    const symIndices = [
+      22, 23, 24, 25, 26, 27,
+      2, 3, 4, 5, 6, 7,
+      32, 33, 34, 35, 36, 37,
+      12, 13, 14, 15, 16, 17,
+    ];
+    const symResNums = [
+      18, 19, 20, 21, 22, 23,
+      47, 48, 49, 50, 51, 52,
+      92, 93, 94, 95, 96, 97,
+      123, 124, 125, 126, 127, 128,
+    ];
+    const symMob = transformCoords(extractSubset(longSym, symIndices), Rtrue, tTrue);
+    const symRes = kabschAlignSubstructure(symMob, longSym, symResNums);
+    expect(symRes.alignedResidues).toBe(24);
+    expect(symRes.rmsd).toBeLessThan(1e-3);
+
+    // 5. Known motif indices option aligns directly
+    const directRes = kabschAlignSubstructure(sparseMob, sampleCa, null, {
+      knownIndices: sparseIdx,
+    });
+    expect(directRes.alignedResidues).toBe(4);
+    expect(directRes.rmsd).toBeLessThan(1e-4);
+
+    // 6. shortChainIds splits discontinuous chains even if resNums are consecutive (e.g. 1OS7 B/C)
+    const multiChainMob = transformCoords(extractSubset(sampleCa, [5, 6, 7, 35, 36, 37]), Rtrue, tTrue);
+    const multiChainRes = kabschAlignSubstructure(multiChainMob, sampleCa, [1, 2, 3, 4, 5, 6], {
+      shortChainIds: ['B', 'B', 'B', 'C', 'C', 'C'],
+    });
+    expect(multiChainRes.alignedResidues).toBe(6);
+    expect(multiChainRes.rmsd).toBeLessThan(1e-3);
   });
 });

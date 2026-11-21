@@ -6,6 +6,7 @@ import {
   atom37ToPdb,
   coordsToBackbonePdb,
   coordsToMultiModelPdb,
+  cropRawAllAtomStructure,
   extractCaFromBackbone,
   generateSampleHelixBundlePdb,
   parsePdbBackbone,
@@ -205,6 +206,9 @@ describe('protein-ops/pdb', () => {
     expect(parsed.caCoords[6]).toBeCloseTo(11.45, 3);
     expect(parsed.caCoords[8]).toBeCloseTo(2.1, 3);
     expect(parsed.backbone4Coords.length).toBe(3 * 4 * 3);
+    // Ligand detected via resolved _atom_site columns ('LIG', NOT hardcoded toks[5] === '1')
+    expect(parsed.diagnostics.hasLigands).toBe(true);
+    expect(parsed.diagnostics.ligandNames).toEqual(['LIG']);
     // Converted pdbText is parseable back identically
     const reparsed = parsePdbBackbone(parsed.pdbText);
     expect(reparsed.sequence).toBe('MKW');
@@ -456,5 +460,153 @@ describe('protein-ops/pdb', () => {
     expect(parsed.pdbText).toContain('TER');
     expect(parsed.pdbText).toContain('A  10A');
     expect(parsed.pdbText).toContain('B   5 ');
+  });
+
+  it('parseMmcifBackbone & parsePdbBackbone parse HETATM MSE as protein M and detect ligands/nucleic acids via resolved columns (model 1 + primary altLoc)', () => {
+    const cif = [
+      'data_mse_lig_dna',
+      'loop_',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      '_atom_site.group_PDB',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_alt_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.pdbx_PDB_model_num',
+      // Reordered columns: comp_id is NOT toks[5], chain is NOT toks[6]
+      '0.000 0.000 0.000 HETATM N . MSE A 1 1',
+      '1.458 0.000 0.000 HETATM CA . MSE A 1 1',
+      '2.009 1.420 0.000 HETATM C . MSE A 1 1',
+      '3.320 1.500 0.000 ATOM N . ALA A 2 1',
+      '4.000 2.800 0.000 ATOM CA . ALA A 2 1',
+      '5.500 2.600 0.000 ATOM C . ALA A 2 1',
+      '10.000 10.000 10.000 HETATM ZN . ZN A 201 1',
+      '12.000 12.000 12.000 HETATM C1 A DHZ A 202 1',
+      // Secondary altLoc B ligand must be ignored
+      '13.000 13.000 13.000 HETATM C1 B IGN A 203 1',
+      // Model 2 ligand must be ignored
+      '14.000 14.000 14.000 HETATM C1 . M2L A 204 2',
+      // Nucleic acid chain D
+      '20.000 0.000 0.000 ATOM P . DA D 1 1',
+      '23.000 0.000 0.000 ATOM P . DT D 2 1',
+      '#',
+    ].join('\n');
+
+    const parsedCif = parseStructureText(cif);
+    expect(parsedCif.format).toBe('mmcif');
+    expect(parsedCif.nResidues).toBe(2);
+    expect(parsedCif.sequence).toBe('MA');
+    expect(parsedCif.diagnostics.hasLigands).toBe(true);
+    expect(parsedCif.diagnostics.ligandNames).toEqual(['ZN', 'DHZ']);
+    expect(parsedCif.diagnostics.hasNucleicAcids).toBe(true);
+    expect(parsedCif.diagnostics.nucleicAcidChains).toEqual(['D']);
+
+    // PDB format also parses HETATM MSE as protein residue M (not dropped or flagged as ligand)
+    const pdbWithHetMse = [
+      'HETATM    1  N   MSE A   1       0.000   0.000   0.000  1.00 50.00           N  ',
+      'HETATM    2  CA  MSE A   1       1.458   0.000   0.000  1.00 50.00           C  ',
+      'HETATM    3  C   MSE A   1       2.009   1.420   0.000  1.00 50.00           C  ',
+      'ATOM      4  N   GLY A   2       3.320   1.500   0.000  1.00 50.00           N  ',
+      'ATOM      5  CA  GLY A   2       4.000   2.800   0.000  1.00 50.00           C  ',
+      'ATOM      6  C   GLY A   2       5.500   2.600   0.000  1.00 50.00           C  ',
+      'HETATM    7 ZN    ZN A 200      10.000  10.000  10.000  1.00 20.00          ZN  ',
+      'END',
+    ].join('\n');
+    const parsedPdb = parsePdbBackbone(pdbWithHetMse);
+    expect(parsedPdb.nResidues).toBe(2);
+    expect(parsedPdb.sequence).toBe('MG');
+    expect(parsedPdb.diagnostics.hasLigands).toBe(true);
+    expect(parsedPdb.diagnostics.ligandNames).toEqual(['ZN']);
+    // Missing O for HETATM MSE should also be patched cleanly
+    expect(parsedPdb.pdbText).toContain(' O   MSE A   1');
+  });
+
+  it('cropRawAllAtomStructure strips _pdbx_struct_assembly* and _pdbx_struct_oper_list* from cropped mmCIFs', () => {
+    const cif = [
+      'data_1CTT',
+      '_entry.id 1CTT',
+      '#',
+      '_pdbx_struct_assembly.id 1',
+      '_pdbx_struct_assembly.details author_and_software_defined_assembly',
+      '_pdbx_struct_assembly.oligomeric_details',
+      ';dimeric',
+      'assembly',
+      ';',
+      '#',
+      'loop_',
+      '_pdbx_struct_assembly_gen.assembly_id',
+      '_pdbx_struct_assembly_gen.oper_expression',
+      '_pdbx_struct_assembly_gen.asym_id_list',
+      '1 (1,2) A,B,C',
+      '#',
+      'loop_',
+      '_pdbx_struct_oper_list.id',
+      '_pdbx_struct_oper_list.type',
+      '_pdbx_struct_oper_list.name',
+      '1 "identity operation" 1_555',
+      '2 "crystal symmetry operation" 2_555',
+      '#',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      'ATOM 1 CA ALA A 102 1.000 2.000 3.000',
+      'ATOM 2 CA HIS A 104 4.000 5.000 6.000',
+      'ATOM 3 CA CYS A 129 7.000 8.000 9.000',
+      'HETATM 4 ZN ZN A 296 2.000 3.000 4.000',
+      'ATOM 5 CA GLY B 10 20.000 20.000 20.000',
+      '#',
+    ].join('\n');
+
+    const cropped = cropRawAllAtomStructure(cif, 'A102, A104, A129, A:ZN');
+    expect(cropped.format).toBe('mmcif');
+    expect(cropped.keptAtomLines).toBe(4);
+    expect(cropped.text).toContain('_entry.id 1CTT');
+    expect(cropped.text).not.toContain('_pdbx_struct_assembly');
+    expect(cropped.text).not.toContain('_pdbx_struct_oper_list');
+    expect(cropped.text).not.toContain('crystal symmetry operation');
+    expect(cropped.text).not.toContain('oligomeric_details');
+    expect(cropped.text).toContain('ATOM 1 CA ALA A 102');
+    expect(cropped.text).toContain('HETATM 4 ZN ZN A 296');
+    expect(cropped.text).not.toContain('ATOM 5 CA GLY B 10');
+  });
+
+  it('cropRawAllAtomStructure retains explicitly requested WATER_RESNAMES ligands (CIT, PO4, NA, K, CL) while dropping unrequested ones', () => {
+    const pdb = [
+      'ATOM      1  CA  ALA A  10       0.000   0.000   0.000  1.00 50.00           C  ',
+      'HETATM    2  C1  CIT A 201       2.000   2.000   2.000  1.00 20.00           C  ',
+      'HETATM    3  P   PO4 A 202       4.000   4.000   4.000  1.00 20.00           P  ',
+      'HETATM    4 NA    NA A 203       6.000   6.000   6.000  1.00 20.00          NA  ',
+      'HETATM    5  K     K A 204       8.000   8.000   8.000  1.00 20.00           K  ',
+      'HETATM    6 CL    CL B 205      10.000  10.000  10.000  1.00 20.00          CL  ',
+      'HETATM    7  O   HOH A 300      12.000  12.000  12.000  1.00 20.00           O  ',
+      'END',
+    ].join('\n');
+
+    const cropped = cropRawAllAtomStructure(pdb, 'A10, A:CIT, A:PO4, A:NA, A:K, CL');
+    expect(cropped.keptAtomLines).toBe(6);
+    expect(cropped.text).toContain('CIT A 201');
+    expect(cropped.text).toContain('PO4 A 202');
+    expect(cropped.text).toContain('NA A 203');
+    expect(cropped.text).toContain('K A 204');
+    expect(cropped.text).toContain('CL B 205');
+    expect(cropped.text).not.toContain('HOH A 300');
+
+    // Whole-chain crop without explicit ligand rule still excludes crystallization buffers/waters
+    const chainOnly = cropRawAllAtomStructure(pdb, 'A');
+    expect(chainOnly.keptAtomLines).toBe(1);
+    expect(chainOnly.text).toContain('ALA A  10');
+    expect(chainOnly.text).not.toContain('CIT');
+    expect(chainOnly.text).not.toContain('PO4');
+    expect(chainOnly.text).not.toContain('HOH');
   });
 });
