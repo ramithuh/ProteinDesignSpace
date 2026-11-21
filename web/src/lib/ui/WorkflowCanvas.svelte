@@ -49,6 +49,7 @@
     isRunning?: boolean;
     fillHeight?: boolean;
     autoCommitProposed?: boolean;
+    fitViewTrigger?: number;
     onGraphChange: (next: WorkflowGraph) => void;
     onSelectNode: (nodeId: string) => void;
     onSelectNodes?: (nodeIds: string[]) => void;
@@ -74,6 +75,7 @@
     isRunning = false,
     fillHeight = false,
     autoCommitProposed = false,
+    fitViewTrigger = 0,
     onGraphChange,
     onSelectNode,
     onSelectNodes = undefined,
@@ -205,17 +207,24 @@
   }
 
   function getFitViewOpts(duration = 220) {
-    // Reserve extra bottom padding on compact/mobile viewports so the floating
-    // bottom-center Add Block / Auto Layout dock never overlaps fitted node cards.
+    // Reserve extra bottom padding on compact/mobile viewports (and during the
+    // interactive walkthrough) so the floating dock / coachmark never cover fitted cards.
     const compact =
       (canvasEl?.clientWidth ?? (typeof window !== 'undefined' ? window.innerWidth : 1200)) < 640 ||
       (canvasEl?.clientHeight ?? 480) < 380;
+    const bottomPad = autoCommitProposed
+      ? compact
+        ? 0.42
+        : 0.34
+      : compact
+        ? 0.36
+        : 0.22;
     return {
       padding: {
         top: 0.12,
         left: 0.1,
         right: 0.1,
-        bottom: compact ? 0.36 : 0.22,
+        bottom: bottomPad,
       },
       maxZoom: 1,
       duration,
@@ -253,7 +262,7 @@
           fitTimer = setTimeout(() => {
             fitTimer = null;
             void flowApi?.fitView(getFitViewOpts(duration));
-          }, 80);
+          }, 140);
         });
       });
     });
@@ -299,21 +308,25 @@
 
   let lastGraphId = '';
   let lastFillHeight: boolean | undefined;
+  let lastFitViewTrigger = 0;
 
-  // Fit the entire workflow & clear stale proposals ONLY when switching presets/graphs
-  // or toggling split layout — never on ordinary param edits, drags, or block additions.
+  // Fit the entire workflow & clear stale proposals when switching presets/graphs,
+  // toggling split layout, or receiving an explicit fitViewTrigger (e.g. walkthrough auto-step or undo/redo).
   $effect(() => {
     const gid = graph.id;
     const fh = fillHeight;
+    const fvt = fitViewTrigger;
     const graphChanged = gid !== lastGraphId;
     const layoutChanged = fh !== lastFillHeight;
-    if (!graphChanged && !layoutChanged) return;
+    const triggerChanged = fvt !== lastFitViewTrigger;
+    if (!graphChanged && !layoutChanged && !triggerChanged) return;
     lastGraphId = gid;
     lastFillHeight = fh;
+    lastFitViewTrigger = fvt;
     if (graphChanged) {
       clearProposals();
     }
-    scheduleFitView(220);
+    scheduleFitView(triggerChanged ? 260 : 220);
   });
 
   // Close wire legend on click-outside

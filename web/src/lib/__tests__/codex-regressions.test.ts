@@ -471,5 +471,13 @@ describe('Codex computer-use regression suite', () => {
       'utf8',
     );
     expect(thermoIndex).toContain('getCompilationInfo');
+
+    // Walkthrough auto-step and undo/redo must re-fit the canvas via fitViewTrigger
+    const pageSrc = readFileSync(resolve(process.cwd(), 'src/routes/+page.svelte'), 'utf8');
+    expect(pageSrc).toContain('fitViewTrigger={canvasFitViewTrigger}');
+    expect(pageSrc).toContain('canvasFitViewTrigger += 1;');
+    const canvasSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/WorkflowCanvas.svelte'), 'utf8');
+    expect(canvasSrc).toContain('fitViewTrigger = 0');
+    expect(canvasSrc).toContain('triggerChanged');
   });
 });

@@ -104,6 +104,7 @@
   let firstRunAck = $state(false);
   let showOnboarding = $state(false);
   let onboardingInteractive = $state(false);
+  let canvasFitViewTrigger = $state(0);
   let showSeqParentBackbone = $state(false);
   let pendingRun = $state<{
     bypassCache: boolean;
@@ -680,6 +681,7 @@
     failedInputSigs.clear();
     runError = null;
     rightPanelTab = 'params';
+    canvasFitViewTrigger += 1;
   }
 
   function autoStepTourBlock(adapterId: 'web-protein-mpnn' | 'localfold-af2' | 'designability-scorer') {
@@ -712,6 +714,7 @@
     scheduler.invalidateEditedGraph(prevGraph, laid);
     setSingleSelection(nodeId);
     runError = null;
+    canvasFitViewTrigger += 1;
   }
 
   function handleSelectNode(nodeId: string) {
@@ -828,6 +831,7 @@
       graphRedoStack.shift();
     }
     handleGraphChange(prev, { recordHistory: false });
+    canvasFitViewTrigger += 1;
     showToastMessage('Undid graph edit', 1800);
   }
 
@@ -839,6 +843,7 @@
       graphUndoStack.shift();
     }
     handleGraphChange(next, { recordHistory: false });
+    canvasFitViewTrigger += 1;
     showToastMessage('Redid graph edit', 1800);
   }
 
@@ -2713,6 +2718,7 @@
           {isRunning}
           fillHeight={splitMode === 'horizontal'}
           autoCommitProposed={showOnboarding && onboardingInteractive}
+          fitViewTrigger={canvasFitViewTrigger}
           onGraphChange={handleGraphChange}
           onSelectNode={handleSelectNode}
           onSelectNodes={handleSelectNodes}
