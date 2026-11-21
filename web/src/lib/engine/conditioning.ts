@@ -4,7 +4,14 @@
 // 3. Compiles canonical intent + template structure -> Genie 3 `createFeaturesFromSpec(...)` batch
 //    for both protein motif scaffolding and PPI binder design!
 
-import { parseStructureText } from '$lib/protein-ops/pdb';
+import {
+  AA1_TO_AA3,
+  AA3_TO_AA1,
+  parseStructureText,
+  projectChainIdsToPdb,
+  type ParsedStructure,
+  type SourceResidueId,
+} from '$lib/protein-ops/pdb';
 import { getBenchmarkById } from './benchmarks';
 import type {
   CanonicalConditionIntent,
@@ -16,20 +23,52 @@ export interface ResidueRangeToken {
   chain: string;
   start: number;
   end: number;
+  startInsCode?: string;
+  endInsCode?: string;
+}
+
+/**
+ * Explicit correspondence linking a selected motif/target residue in a compiled conditioning spec
+ * back to its original source structure residue (preserving multi-char chains & insertion codes).
+ */
+export interface SelectedMotifSourceResidue {
+  /** 0-based index in the compiled output sequence/coords (or 0-based selection order for standalone resolution). */
+  outputIndex: number;
+  /** 0-based index in the parsed template structure (`parsed.sourceResidues[templateIndex]`). */
+  templateIndex: number;
+  /** Original author chain ID (`auth_asym_id` / PDB col 22). */
+  authChainId: string;
+  /** Optional mmCIF `label_asym_id` when present in template. */
+  labelChainId?: string;
+  /** Original author residue sequence number (`auth_seq_id` / PDB cols 23-26). */
+  resNum: number;
+  /** Optional mmCIF `label_seq_id` when present and numeric. */
+  labelSeqId?: number;
+  /** Original insertion code (`''` when absent, e.g. `'A'`, `'B'`). */
+  insCode: string;
+  /** Original 3-letter residue name (e.g. `'ALA'`, `'HIS'`, `'MSE'`). */
+  resName: string;
+  /** 1-letter residue code. */
+  aa1: string;
+  /** Deterministic bijective 1-char PDB chain ID assigned for PDB projection. */
+  projectedChainId: string;
 }
 
 const GENIE3_RESTYPE_1 = 'ARNDCQEGHILKMFPSTWYV';
 const WATER_COMP_IDS = new Set(['HOH', 'DOD', 'WAT', 'H2O']);
-const DNA_COMP_IDS = new Set(['DA', 'DC', 'DG', 'DT', 'DI', 'DU']);
-const RNA_COMP_IDS = new Set(['A', 'C', 'G', 'U', 'I']);
+const DNA_COMP_IDS = new Set(['DA', 'DC', 'DG', 'DT', 'DI', 'DU', 'T', 'THY']);
+const RNA_COMP_IDS = new Set(['A', 'C', 'G', 'U', 'I', 'ADE', 'CYT', 'GUA', 'URA']);
 
 export interface Rfd4PolymerResidueEntry {
   authChain: string;
   authSeqId: number;
+  insCode: string;
   labelChain: string;
   labelSeqId: number;
   compId: string;
   isNucleic: boolean;
+  /** 0-based polymer residue order in the template structure. */
+  templateIndex: number;
 }
 
 export interface Rfd4PolymerChainInfo {
@@ -69,6 +108,8 @@ export interface Rfd4TemplateContext {
     chain: string,
     start: number,
     end: number,
+    startInsCode?: string,
+    endInsCode?: string,
   ) => { labelChain: string; start: number; end: number };
   remapContig: (contig: string) => string;
   remapResidueList: (tokens: string[]) => string[];
@@ -151,9 +192,15 @@ export function pdbTextToSplitCifText(pdbText: string): string {
   const lines = pdbText.split(/\r?\n/);
   const parsed: RawAtomLine[] = [];
   const polymerChains = new Set<string>();
+  const reconstructedOKeys = new Set<string>();
   let seenAtom = false;
 
   for (const line of lines) {
+    if (line.startsWith('REMARK 250 RECONSTRUCTED_O ')) {
+      const keys = line.slice('REMARK 250 RECONSTRUCTED_O '.length).trim().split(/\s+/).filter(Boolean);
+      for (const k of keys) reconstructedOKeys.add(k);
+      continue;
+    }
     if (line.startsWith('ENDMDL') && seenAtom) break;
     if (!line.startsWith('ATOM  ') && !line.startsWith('HETATM')) continue;
     seenAtom = true;
@@ -164,7 +211,10 @@ export function pdbTextToSplitCifText(pdbText: string): string {
     if (WATER_COMP_IDS.has(resName)) continue;
     const authChain = line.slice(21, 22).trim() || 'A';
     const authSeq = line.slice(22, 26).trim() || '1';
-    const insCode = line.slice(26, 27).trim() || '.';
+    const rawIns = line.slice(26, 27).trim();
+    const insCode = rawIns || '.';
+    // Never emit parser-reconstructed O atoms into mmCIF as if they were observed coordinates
+    if (atomName === 'O' && reconstructedOKeys.has(`${authChain}:${authSeq}:${rawIns}`)) continue;
     const x = line.slice(30, 38).trim() || '0.0';
     const y = line.slice(38, 46).trim() || '0.0';
     const z = line.slice(46, 54).trim() || '0.0';
@@ -318,6 +368,7 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
   const cols: string[] = [];
   let inAtomSite = false;
   let firstModelNum: string | null = null;
+  const hasObservedCaByLabelKey = new Set<string>();
 
   for (const raw of lines) {
     const tr = raw.trim();
@@ -355,6 +406,8 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
     const authChain = get('auth_asym_id') || labelChain;
     const labelSeqRaw = get('label_seq_id');
     const authSeqRaw = get('auth_seq_id') || labelSeqRaw;
+    const rawIns = get('pdbx_PDB_ins_code');
+    const insCode = rawIns && rawIns !== '.' && rawIns !== '?' ? rawIns : '';
     const labelSeq = parseInt(labelSeqRaw, 10);
     const authSeq = parseInt(authSeqRaw, 10);
 
@@ -367,19 +420,38 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
 
     if (isPolymer) {
       const resolvedAuthSeq = Number.isFinite(authSeq) ? authSeq : labelSeq;
-      const authKey = `${authChain}:${resolvedAuthSeq}`;
+      const authKeyWithIns = `${authChain}:${resolvedAuthSeq}:${insCode}`;
+      const authKeyPlain = `${authChain}:${resolvedAuthSeq}`;
       const labelKey = `${labelChain}:${labelSeq}`;
+      if (!isNucleic) {
+        const rawAtom = get('label_atom_id') || get('auth_atom_id');
+        if (rawAtom === 'CA') {
+          const hasCoordCols =
+            cols.includes('Cartn_x') && cols.includes('Cartn_y') && cols.includes('Cartn_z');
+          if (
+            !hasCoordCols ||
+            (Number.isFinite(parseFloat(get('Cartn_x'))) &&
+              Number.isFinite(parseFloat(get('Cartn_y'))) &&
+              Number.isFinite(parseFloat(get('Cartn_z'))))
+          ) {
+            hasObservedCaByLabelKey.add(labelKey);
+          }
+        }
+      }
       if (!byLabelRes.has(labelKey)) {
         const entry: Rfd4PolymerResidueEntry = {
           authChain,
           authSeqId: resolvedAuthSeq,
+          insCode,
           labelChain,
           labelSeqId: labelSeq,
           compId: comp,
           isNucleic,
+          templateIndex: -1,
         };
         byLabelRes.set(labelKey, entry);
-        if (!byAuthRes.has(authKey)) byAuthRes.set(authKey, entry);
+        if (!byAuthRes.has(authKeyWithIns)) byAuthRes.set(authKeyWithIns, entry);
+        if (insCode === '' && !byAuthRes.has(authKeyPlain)) byAuthRes.set(authKeyPlain, entry);
 
         let authInfo = polymerByAuthChain.get(authChain);
         if (!authInfo) {
@@ -431,26 +503,50 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
     }
   }
 
+  // Align protein templateIndex 1:1 with `parseStructureText` (non-nucleic residues with observed finite CA)
+  let nextProteinIdx = 0;
+  for (const [labelKey, entry] of byLabelRes.entries()) {
+    if (!entry.isNucleic && hasObservedCaByLabelKey.has(labelKey)) {
+      entry.templateIndex = nextProteinIdx++;
+    } else {
+      entry.templateIndex = -1;
+    }
+  }
+
   const nucleicChains = [...polymerByLabelChain.values()].filter((c) => c.isNucleic);
 
+  const lookupAuthChain = (chain: string): Rfd4PolymerChainInfo | undefined => {
+    const t = chain.trim();
+    return polymerByAuthChain.get(t) ?? polymerByAuthChain.get(t.toUpperCase());
+  };
+  const lookupLabelChain = (chain: string): Rfd4PolymerChainInfo | undefined => {
+    const t = chain.trim();
+    return polymerByLabelChain.get(t) ?? polymerByLabelChain.get(t.toUpperCase());
+  };
+
   const remapPolymerChain = (chain: string): string => {
-    const ch = chain.trim().toUpperCase();
-    const byAuth = polymerByAuthChain.get(ch);
+    const t = chain.trim();
+    const byAuth = lookupAuthChain(t);
     if (byAuth) return byAuth.labelChain;
-    const byLabel = polymerByLabelChain.get(ch);
+    const byLabel = lookupLabelChain(t);
     if (byLabel) return byLabel.labelChain;
-    return ch;
+    return t;
   };
 
   const remapPolymerRange = (
     chain: string,
     start: number,
     end: number,
+    startInsCode?: string,
+    endInsCode?: string,
   ): { labelChain: string; start: number; end: number } => {
-    const ch = chain.trim().toUpperCase();
-    const authInfo = polymerByAuthChain.get(ch);
+    const t = chain.trim();
+    const hasExplicitIns = Boolean(startInsCode || endInsCode);
+    const authInfo = lookupAuthChain(t);
     if (authInfo) {
-      const hits = authInfo.residues.filter((r) => r.authSeqId >= start && r.authSeqId <= end);
+      const hits = authInfo.residues.filter((r) =>
+        matchesResNumInsBounds(r.authSeqId, r.insCode, start, end, startInsCode, endInsCode),
+      );
       if (hits.length > 0) {
         let minL = Infinity;
         let maxL = -Infinity;
@@ -460,27 +556,55 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
         }
         return { labelChain: authInfo.labelChain, start: minL, end: maxL };
       }
-    }
-    const labelInfo = polymerByLabelChain.get(ch);
-    if (labelInfo) {
-      const hits = labelInfo.residues.filter((r) => r.labelSeqId >= start && r.labelSeqId <= end);
-      if (hits.length > 0) {
-        let minL = Infinity;
-        let maxL = -Infinity;
-        for (const h of hits) {
-          if (h.labelSeqId < minL) minL = h.labelSeqId;
-          if (h.labelSeqId > maxL) maxL = h.labelSeqId;
-        }
-        return { labelChain: labelInfo.labelChain, start: minL, end: maxL };
+      // Never fall through to label_seq_id when an explicit insertion code missed in auth numbering!
+      if (hasExplicitIns) {
+        return { labelChain: authInfo.labelChain, start, end };
       }
     }
-    return { labelChain: remapPolymerChain(ch), start, end };
+    if (!hasExplicitIns) {
+      const labelInfo = lookupLabelChain(t);
+      if (labelInfo) {
+        const hits = labelInfo.residues.filter((r) => r.labelSeqId >= start && r.labelSeqId <= end);
+        if (hits.length > 0) {
+          let minL = Infinity;
+          let maxL = -Infinity;
+          for (const h of hits) {
+            if (h.labelSeqId < minL) minL = h.labelSeqId;
+            if (h.labelSeqId > maxL) maxL = h.labelSeqId;
+          }
+          return { labelChain: labelInfo.labelChain, start: minL, end: maxL };
+        }
+      }
+    }
+    return { labelChain: remapPolymerChain(t), start, end };
+  };
+
+  const hasExactAuthResidueMatch = (
+    chain: string,
+    start: number,
+    end: number,
+    startInsCode?: string,
+    endInsCode?: string,
+  ): boolean => {
+    const authInfo = lookupAuthChain(chain.trim());
+    if (!authInfo) return false;
+    return authInfo.residues.some((r) =>
+      matchesResNumInsBounds(r.authSeqId, r.insCode, start, end, startInsCode, endInsCode),
+    );
   };
 
   const remapResidueList = (tokens: string[]): string[] => {
     const out: string[] = [];
     for (const r of parseResidueRangeTokens(tokens.join(', '))) {
-      const mapped = remapPolymerRange(r.chain, r.start, r.end);
+      const hasExplicitIns = Boolean(r.startInsCode || r.endInsCode);
+      if (hasExplicitIns && !hasExactAuthResidueMatch(r.chain, r.start, r.end, r.startInsCode, r.endInsCode)) {
+        // Preserve absent insertion code token verbatim so it never silently aliases an unrelated label_seq_id
+        const startTok = `${r.start}${r.startInsCode ?? ''}`;
+        const endTok = `${r.end}${r.endInsCode ?? ''}`;
+        out.push(startTok === endTok ? `${r.chain}${startTok}` : `${r.chain}${startTok}-${endTok}`);
+        continue;
+      }
+      const mapped = remapPolymerRange(r.chain, r.start, r.end, r.startInsCode, r.endInsCode);
       out.push(
         mapped.start === mapped.end
           ? `${mapped.labelChain}${mapped.start}`
@@ -501,18 +625,32 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
         out.push('/0');
         continue;
       }
-      // Expandable segment (e.g. "70-70", "5-20", "h1:16-16P")
-      if (/^\d+(?:-\d+)?[PRDN]?$/i.test(tok) || /^[A-Za-z0-9_]+:\d+(?:-\d+)?[PRDN]?$/i.test(tok)) {
+      // Bare expandable segment (e.g. "70-70", "5-20")
+      if (/^\d+(?:-\d+)?[PRDN]?$/i.test(tok)) {
         out.push(tok);
         continue;
       }
+      // Named expandable segment (e.g. "h1:16-16P" or "h1:5-5") — check polymer match first so "AA:10D" / "AA:1-5" is not shadowed
+      if (/^[A-Za-z0-9_]+:\d+-\d+[PRDN]?$/i.test(tok)) {
+        const prefix = tok.slice(0, tok.indexOf(':'));
+        if (!lookupAuthChain(prefix) && !lookupLabelChain(prefix)) {
+          out.push(tok);
+          continue;
+        }
+      }
       // Explicit ligand selector like "A:SAM" or "A:ZN"
-      const chainLig = /^([A-Za-z]+):([A-Za-z0-9]{1,5})$/.exec(tok);
-      if (chainLig && !/^\d+$/.test(chainLig[2])) {
-        const ch = chainLig[1].toUpperCase();
+      const chainLig = /^([A-Za-z0-9_]+):([A-Za-z0-9]{1,5})$/.exec(tok);
+      if (chainLig && !/^\d+[A-Za-z]?$/.test(chainLig[2])) {
+        const ch = chainLig[1];
+        const chUpper = ch.toUpperCase();
         const comp = chainLig[2].toUpperCase();
         const matches = ligands.filter(
-          (l) => l.compId === comp && (l.authChain === ch || l.labelChain === ch),
+          (l) =>
+            l.compId === comp &&
+            (l.authChain === ch ||
+              l.labelChain === ch ||
+              l.authChain.toUpperCase() === chUpper ||
+              l.labelChain.toUpperCase() === chUpper),
         );
         const picked = matches.length > 0 ? matches : ligands.filter((l) => l.compId === comp);
         if (picked.length > 0) {
@@ -523,25 +661,40 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
           continue;
         }
       }
-      // Preserved residue/range token like "A17-132" or "A102" or "B296"
-      const preserved = /^([A-Za-z]+)(\d+)(?:-(\d+))?$/.exec(tok);
-      if (preserved) {
-        const ch = preserved[1].toUpperCase();
-        const start = parseInt(preserved[2], 10);
-        const end = preserved[3] ? parseInt(preserved[3], 10) : start;
-        // Check polymer match first
-        const authPoly = polymerByAuthChain.get(ch);
-        const labelPoly = polymerByLabelChain.get(ch);
-        const hasAuthHit = authPoly?.residues.some((r) => r.authSeqId >= start && r.authSeqId <= end);
-        const hasLabelHit = labelPoly?.residues.some((r) => r.labelSeqId >= start && r.labelSeqId <= end);
+      // Preserved residue/range token like "A17-132", "A102", "A10A", "AA1-5", "AA:1-5", "AA:10D"
+      const parsedTokens = /^[A-Za-z]/.test(tok) || tok.includes(':') ? parseResidueRangeTokens(tok) : [];
+      if (parsedTokens.length === 1) {
+        const pt = parsedTokens[0];
+        const ch = pt.chain;
+        const start = pt.start;
+        const end = pt.end;
+        const hasExplicitIns = Boolean(pt.startInsCode || pt.endInsCode);
+        // Check polymer match first (explicit insertion codes must ONLY match author numbering, never label_seq_id)
+        const authPoly = lookupAuthChain(ch);
+        const labelPoly = lookupLabelChain(ch);
+        const hasAuthHit = authPoly?.residues.some((r) =>
+          matchesResNumInsBounds(r.authSeqId, r.insCode, start, end, pt.startInsCode, pt.endInsCode),
+        );
+        const hasLabelHit = !hasExplicitIns && labelPoly?.residues.some((r) => r.labelSeqId >= start && r.labelSeqId <= end);
         if (hasAuthHit || hasLabelHit) {
-          const m = remapPolymerRange(ch, start, end);
+          const m = remapPolymerRange(ch, start, end, pt.startInsCode, pt.endInsCode);
           out.push(m.start === m.end ? `${m.labelChain}${m.start}` : `${m.labelChain}${m.start}-${m.end}`);
           continue;
         }
+        if (hasExplicitIns) {
+          out.push(tok);
+          continue;
+        }
         // Check ligand match by authChain/labelChain + resId
+        const chUpper = ch.toUpperCase();
         const ligHit = ligands.find(
-          (l) => (l.labelChain === ch || l.authChain === ch) && l.resId >= start && l.resId <= end,
+          (l) =>
+            (l.labelChain === ch ||
+              l.authChain === ch ||
+              l.labelChain.toUpperCase() === chUpper ||
+              l.authChain.toUpperCase() === chUpper) &&
+            l.resId >= start &&
+            l.resId <= end,
         );
         if (ligHit) {
           out.push(`${ligHit.labelChain}${ligHit.resId}`);
@@ -550,10 +703,9 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
         out.push(tok);
         continue;
       }
-      // Whole polymer chain letter like "B" or "C"
-      if (/^[A-Za-z]$/.test(tok)) {
-        const ch = tok.toUpperCase();
-        const info = polymerByAuthChain.get(ch) ?? polymerByLabelChain.get(ch);
+      // Whole polymer chain ID like "B", "C", "AA"
+      if (/^[A-Za-z][A-Za-z0-9]*$/.test(tok)) {
+        const info = lookupAuthChain(tok) ?? lookupLabelChain(tok);
         if (info) {
           out.push(`${info.labelChain}${info.minLabelSeq}-${info.maxLabelSeq}`);
           continue;
@@ -585,11 +737,20 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
       const resPart = parts[2]?.trim() ?? '*';
 
       if (compPart && compPart !== '*') {
-        const byAuth = ligands.filter(
+        const exactLig = ligands.filter(
           (l) =>
             l.compId === compPart &&
-            (chainPart === '*' || l.authChain === chainPart.toUpperCase() || l.labelChain === chainPart.toUpperCase()),
+            (chainPart === '*' || l.authChain === chainPart || l.labelChain === chainPart),
         );
+        const byAuth =
+          exactLig.length > 0
+            ? exactLig
+            : ligands.filter(
+                (l) =>
+                  l.compId === compPart &&
+                  (l.authChain.toUpperCase() === chainPart.toUpperCase() ||
+                    l.labelChain.toUpperCase() === chainPart.toUpperCase()),
+              );
         const matches = byAuth.length > 0 ? byAuth : ligands.filter((l) => l.compId === compPart);
         if (matches.length > 0) {
           const uniqueChains = [...new Set(matches.map((m) => m.labelChain))];
@@ -599,20 +760,27 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
       }
 
       if (chainPart && chainPart !== '*' && /^[A-Za-z]+$/.test(chainPart)) {
-        const origChain = chainPart.toUpperCase();
+        const origChain = chainPart;
         parts[0] = remapPolymerChain(origChain);
         if (resPart && resPart !== '*') {
           const inner = resPart.startsWith('[') && resPart.endsWith(']') ? resPart.slice(1, -1) : resPart;
           const remappedNums: string[] = [];
           for (const item of inner.split(',').map((s) => s.trim()).filter(Boolean)) {
-            const m = /^(\d+)(?:-(\d+))?$/.exec(item);
+            const m = /^(\d+)([A-Za-z])?(?:-(\d+)([A-Za-z])?)?$/.exec(item);
             if (!m) {
               remappedNums.push(item);
               continue;
             }
             const lo = parseInt(m[1], 10);
-            const hi = m[2] ? parseInt(m[2], 10) : lo;
-            const mapped = remapPolymerRange(origChain, lo, hi);
+            const loIns = m[2] || undefined;
+            const hasHi = m[3] !== undefined;
+            const hi = hasHi ? parseInt(m[3], 10) : lo;
+            const hiIns = hasHi ? m[4] || undefined : loIns;
+            if ((loIns || hiIns) && !hasExactAuthResidueMatch(origChain, lo, hi, loIns, hiIns)) {
+              remappedNums.push(item);
+              continue;
+            }
+            const mapped = remapPolymerRange(origChain, lo, hi, loIns, hiIns);
             remappedNums.push(mapped.start === mapped.end ? `${mapped.start}` : `${mapped.start}-${mapped.end}`);
           }
           parts[2] =
@@ -680,31 +848,153 @@ function contigHasPreservedResidues(contig: string): boolean {
   return contig
     .split(',')
     .map((s) => s.trim())
-    .some((tok) => /^[A-Za-z]+\d+(?:-\d+)?$/.test(tok));
+    .some(
+      (tok) =>
+        /^[A-Za-z]+\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?$/.test(tok) ||
+        (/^[A-Za-z0-9_]+:\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?$/.test(tok) &&
+          !/^[A-Za-z0-9_]+:\d+-\d+[PRDN]$/i.test(tok)),
+    );
 }
 
 function preservedChainsInContig(contig: string): Set<string> {
   const chains = new Set<string>();
   for (const raw of contig.split(',')) {
-    const m = /^([A-Za-z]+)\d+(?:-\d+)?$/.exec(raw.trim());
+    const t = raw.trim();
+    const m = /^([A-Za-z]+)\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?$/.exec(t);
     if (m) chains.add(m[1].toUpperCase());
   }
   return chains;
 }
 
-/** Parse comma/whitespace-separated tokens like "A54, A56, A16-35" into structured ranges. */
+function formatResidueRangeNumSpec(r: ResidueRangeToken): string {
+  const startTok = `${r.start}${r.startInsCode ?? ''}`;
+  const endTok = `${r.end}${r.endInsCode ?? ''}`;
+  return startTok === endTok ? startTok : `${startTok}-${endTok}`;
+}
+
+function matchesResNumInsBounds(
+  resNum: number,
+  insCode: string,
+  start: number,
+  end: number,
+  startInsCode?: string,
+  endInsCode?: string,
+): boolean {
+  if (start === end && !startInsCode && !endInsCode) {
+    return resNum === start && insCode === '';
+  }
+  if (start === end && startInsCode && endInsCode && startInsCode === endInsCode) {
+    return resNum === start && insCode === startInsCode;
+  }
+  const aboveLo =
+    resNum > start || (resNum === start && (startInsCode ? insCode >= startInsCode : true));
+  const belowHi =
+    resNum < end || (resNum === end && (endInsCode ? insCode <= endInsCode : true));
+  return aboveLo && belowHi;
+}
+
+function chainMatchesExactOrFallback(
+  candidateChain: string,
+  requestedChain: string,
+  exactChainsInStructure: ReadonlySet<string>,
+): boolean {
+  if (candidateChain === requestedChain) return true;
+  if (exactChainsInStructure.has(requestedChain)) return false;
+  return candidateChain.toUpperCase() === requestedChain.toUpperCase();
+}
+
+/**
+ * Parse comma/whitespace-separated tokens like `"A54, A56, A16-35"`, `"A10A, A10B"`,
+ * `"AA1, AB1"`, or `"AA:1-5"` into structured residue range tokens preserving multi-char
+ * chain IDs, exact chain case, and insertion codes.
+ */
 export function parseResidueRangeTokens(raw: string): ResidueRangeToken[] {
   const out: ResidueRangeToken[] = [];
   for (const tok of raw.split(/[,\s]+/).filter(Boolean)) {
-    const m = /^([A-Za-z])?:?(\d+)(?:-(\d+))?$/.exec(tok.trim());
+    const trimmed = tok.trim();
+    const colonMatch =
+      /^([A-Za-z0-9_]+):(-?\d+)([A-Za-z])?(?:-(-?\d+)([A-Za-z])?)?$/.exec(trimmed);
+    const bareMatch = !colonMatch
+      ? /^([A-Za-z]+)?(\d+)([A-Za-z])?(?:-(\d+)([A-Za-z])?)?$/.exec(trimmed)
+      : null;
+    const m = colonMatch ?? bareMatch;
     if (!m) continue;
-    const chain = (m[1] || 'A').toUpperCase();
+    const chain = m[1] || 'A';
     const start = parseInt(m[2], 10);
-    const end = m[3] ? parseInt(m[3], 10) : start;
+    const startInsCode = m[3] || undefined;
+    const hasEnd = m[4] !== undefined;
+    const end = hasEnd ? parseInt(m[4], 10) : start;
+    const endInsCode = hasEnd ? m[5] || undefined : startInsCode;
     if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
-    out.push({ chain, start, end });
+    if (end === start && startInsCode && endInsCode && endInsCode < startInsCode) continue;
+    out.push({
+      chain,
+      start,
+      end,
+      ...(startInsCode ? { startInsCode } : {}),
+      ...(endInsCode ? { endInsCode } : {}),
+    });
   }
   return out;
+}
+
+/**
+ * Resolve a motif selection specification (motif spans such as `"AA1, AB1, A10A-10B"` or a contig
+ * such as `"10-10,A10-20,10-10"`) against a `ParsedStructure`, returning the exact ordered list of
+ * `SelectedMotifSourceResidue` entries linking each selected motif residue back to its original
+ * `{ authChainId, resNum, insCode, resName }` identity.
+ */
+export function resolveMotifSourceResidues(
+  parsed: ParsedStructure,
+  selectionSpec: string | readonly string[],
+): SelectedMotifSourceResidue[] {
+  const rawTokens = (Array.isArray(selectionSpec) ? selectionSpec : [selectionSpec])
+    .flatMap((s) => String(s).split(/[,\s]+/))
+    .map((s) => s.trim())
+    .filter((s) => Boolean(s) && s !== '/0');
+
+  if (rawTokens.length === 0 || parsed.nResidues === 0) return [];
+
+  const hasChainPrefixedToken = rawTokens.some((t) => /^[A-Za-z]/.test(t) || t.includes(':'));
+  const filteredTokens = hasChainPrefixedToken
+    ? rawTokens.filter((t) => /^[A-Za-z]/.test(t) || t.includes(':'))
+    : rawTokens;
+  const ranges = parseResidueRangeTokens(filteredTokens.join(', '));
+  if (ranges.length === 0) return [];
+
+  const exactChains = new Set<string>(parsed.chainIds);
+  const selected: SelectedMotifSourceResidue[] = [];
+
+  for (const r of ranges) {
+    for (let i = 0; i < parsed.nResidues; i++) {
+      const src: SourceResidueId = parsed.sourceResidues?.[i] ?? {
+        index: i,
+        authChainId: parsed.chainIds[i] ?? 'A',
+        resNum: parsed.resNums[i] ?? i + 1,
+        insCode: parsed.insCodes?.[i] ?? '',
+        resName: AA1_TO_AA3[parsed.sequence[i]?.toUpperCase() ?? 'X'] ?? 'UNK',
+        projectedChainId: parsed.projectedChainIds?.[i] ?? (parsed.chainIds[i] ?? 'A')[0] ?? 'A',
+      };
+      if (
+        chainMatchesExactOrFallback(src.authChainId, r.chain, exactChains) &&
+        matchesResNumInsBounds(src.resNum, src.insCode, r.start, r.end, r.startInsCode, r.endInsCode)
+      ) {
+        selected.push({
+          outputIndex: selected.length,
+          templateIndex: src.index,
+          authChainId: src.authChainId,
+          ...(src.labelChainId ? { labelChainId: src.labelChainId } : {}),
+          resNum: src.resNum,
+          ...(src.labelSeqId !== undefined ? { labelSeqId: src.labelSeqId } : {}),
+          insCode: src.insCode,
+          resName: src.resName,
+          aa1: parsed.sequence[i] ?? AA3_TO_AA1[src.resName] ?? 'X',
+          projectedChainId: src.projectedChainId,
+        });
+      }
+    }
+  }
+  return selected;
 }
 
 /** Extract a clean, model-agnostic CanonicalConditionIntent from node params. */
@@ -712,7 +1002,7 @@ export function buildCanonicalConditionIntent(
   params: Record<string, unknown>,
 ): CanonicalConditionIntent {
   const contig = String(params.contig ?? '70-70').trim() || '70-70';
-  const lockChain = String(params.lockChain ?? '').trim().toUpperCase().slice(0, 1) || undefined;
+  const lockChain = String(params.lockChain ?? '').trim() || undefined;
   const hotspots = String(params.hotspots ?? '')
     .split(/[,\s]+/)
     .map((s) => s.trim())
@@ -759,6 +1049,7 @@ export function compileConditionToRfd4(
   contig: string;
   conditions: Record<string, unknown>;
   tags: string[];
+  selectedSourceResidues?: SelectedMotifSourceResidue[];
 } {
   let contig = intent.contig.trim() || '70-70';
   if (templateContext && !opts?.omitContig) {
@@ -768,7 +1059,7 @@ export function compileConditionToRfd4(
   const effectiveLockChain = intent.lockChain
     ? templateContext
       ? templateContext.remapPolymerChain(intent.lockChain)
-      : intent.lockChain[0].toUpperCase()
+      : intent.lockChain.trim().toUpperCase()
     : undefined;
 
   const effectiveHotspots =
@@ -790,9 +1081,7 @@ export function compileConditionToRfd4(
   if (!opts?.omitContig && effectiveMotifSpans.length > 0 && !contigHasPreservedResidues(contig)) {
     const parsedSpans = parseResidueRangeTokens(effectiveMotifSpans.join(', '));
     if (parsedSpans.length > 0) {
-      const spanTokens = parsedSpans.map((r) =>
-        r.start === r.end ? `${r.chain}${r.start}` : `${r.chain}${r.start}-${r.end}`,
-      );
+      const spanTokens = parsedSpans.map((r) => `${r.chain}${formatResidueRangeNumSpec(r)}`);
       const uniqueMotifChains = new Set(parsedSpans.map((r) => r.chain));
       if (intent.unindexedMotif) {
         if (uniqueMotifChains.size === 1) {
@@ -878,7 +1167,7 @@ export function compileConditionToRfd4(
     const byChain = new Map<string, string[]>();
     for (const r of parseResidueRangeTokens(effectiveHotspots.join(', '))) {
       const list = byChain.get(r.chain) ?? [];
-      list.push(r.start === r.end ? `${r.start}` : `${r.start}-${r.end}`);
+      list.push(formatResidueRangeNumSpec(r));
       byChain.set(r.chain, list);
     }
     const exprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/[${nums.join(',')}]/*')`);
@@ -893,7 +1182,7 @@ export function compileConditionToRfd4(
     const byChain = new Map<string, string[]>();
     for (const r of parseResidueRangeTokens(effectiveMotifSpans.join(', '))) {
       const list = byChain.get(r.chain) ?? [];
-      list.push(r.start === r.end ? `${r.start}` : `${r.start}-${r.end}`);
+      list.push(formatResidueRangeNumSpec(r));
       byChain.set(r.chain, list);
     }
     const exprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/[${nums.join(',')}]/*')`);
@@ -952,7 +1241,114 @@ export function compileConditionToRfd4(
     tags.push(`CATH:${intent.cathCode}`);
   }
 
-  return { contig, conditions, tags };
+  let selectedSourceResidues: SelectedMotifSourceResidue[] | undefined;
+  if (templateContext) {
+    const allPolyRes = [...templateContext.byLabelRes.values()].filter((r) => !r.isNucleic);
+    if (allPolyRes.length > 0) {
+      const exactAuthChains = new Set(allPolyRes.map((r) => r.authChain));
+      const exactLabelChains = new Set(allPolyRes.map((r) => r.labelChain));
+      const proj = projectChainIdsToPdb(allPolyRes.map((r) => r.authChain));
+      const makeEntry = (
+        entry: Rfd4PolymerResidueEntry,
+        outputIndex: number,
+      ): SelectedMotifSourceResidue => ({
+        outputIndex,
+        templateIndex: entry.templateIndex,
+        authChainId: entry.authChain,
+        labelChainId: entry.labelChain,
+        resNum: entry.authSeqId,
+        labelSeqId: entry.labelSeqId,
+        insCode: entry.insCode,
+        resName: entry.compId,
+        aa1: AA3_TO_AA1[entry.compId] ?? 'X',
+        projectedChainId: proj.sourceToProjected[entry.authChain] ?? entry.authChain[0] ?? 'A',
+      });
+
+      // Walk the compiled contig (in label_* space) to assign exact compiled outputIndex offsets
+      const compiledParts = contig
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const motifLabelKeys = new Set<string>();
+      if (intent.motifSpans && intent.motifSpans.length > 0) {
+        for (const r of parseResidueRangeTokens(intent.motifSpans.join(', '))) {
+          for (const entry of allPolyRes) {
+            if (
+              chainMatchesExactOrFallback(entry.authChain, r.chain, exactAuthChains) &&
+              matchesResNumInsBounds(entry.authSeqId, entry.insCode, r.start, r.end, r.startInsCode, r.endInsCode)
+            ) {
+              motifLabelKeys.add(`${entry.labelChain}:${entry.labelSeqId}`);
+            }
+          }
+        }
+      }
+
+      const resolved: SelectedMotifSourceResidue[] = [];
+      let cursor = 0;
+      const filterToMotif = motifLabelKeys.size > 0;
+      for (const tok of compiledParts) {
+        if (tok === '/0') continue;
+        const lenMid = parseLengthRangeMid(tok.replace(/[PRDN]$/i, ''));
+        if (lenMid !== null && /^\d+(?:-\d+)?[PRDN]?$/i.test(tok)) {
+          cursor += lenMid;
+          continue;
+        }
+        const namedExp = /^([A-Za-z0-9_]+):(\d+(?:-\d+)?)[PRDN]?$/i.exec(tok);
+        if (namedExp) {
+          const prefix = namedExp[1];
+          const isPolymerChain =
+            exactLabelChains.has(prefix) ||
+            exactAuthChains.has(prefix) ||
+            [...exactLabelChains].some((c) => c.toUpperCase() === prefix.toUpperCase()) ||
+            [...exactAuthChains].some((c) => c.toUpperCase() === prefix.toUpperCase());
+          if (!isPolymerChain) {
+            const mid = parseLengthRangeMid(namedExp[2]);
+            if (mid !== null) cursor += mid;
+            continue;
+          }
+        }
+        const ranges = parseResidueRangeTokens(tok);
+        for (const r of ranges) {
+          if (r.startInsCode || r.endInsCode) continue;
+          const hits = allPolyRes.filter(
+            (e) =>
+              chainMatchesExactOrFallback(e.labelChain, r.chain, exactLabelChains) &&
+              e.labelSeqId >= r.start &&
+              e.labelSeqId <= r.end,
+          );
+          for (const entry of hits) {
+            const labelKey = `${entry.labelChain}:${entry.labelSeqId}`;
+            if (!filterToMotif || motifLabelKeys.has(labelKey)) {
+              resolved.push(makeEntry(entry, cursor));
+            }
+            cursor++;
+          }
+        }
+      }
+
+      // Fallback when omitContig is true or motifSpans exist without compiled contig placement
+      if (resolved.length === 0 && intent.motifSpans && intent.motifSpans.length > 0) {
+        for (const r of parseResidueRangeTokens(intent.motifSpans.join(', '))) {
+          for (const entry of allPolyRes) {
+            if (
+              chainMatchesExactOrFallback(entry.authChain, r.chain, exactAuthChains) &&
+              matchesResNumInsBounds(entry.authSeqId, entry.insCode, r.start, r.end, r.startInsCode, r.endInsCode)
+            ) {
+              resolved.push(makeEntry(entry, resolved.length));
+            }
+          }
+        }
+      }
+      if (resolved.length > 0) selectedSourceResidues = resolved;
+    }
+  }
+
+  return {
+    contig,
+    conditions,
+    tags,
+    ...(selectedSourceResidues ? { selectedSourceResidues } : {}),
+  };
 }
 
 /**
@@ -1352,7 +1748,7 @@ export function buildDefaultGenie3ConditionFromTemplate(
   }
 
   // Generic template PDB: design a de novo binder against the template's first protein chain
-  const firstChain = (template.chainIds?.[0] || 'A').toUpperCase();
+  const firstChain = template.chainIds?.[0] || 'A';
   const intent = buildCanonicalConditionIntent({
     contig: `/0,${clampedLen}-${clampedLen}`,
     lockChain: firstChain,
@@ -1384,6 +1780,8 @@ export interface Genie3CompiledSpec {
   gtRestype: Float32Array;
   gtAtomPositions: Float32Array;
   chainLengths: number[];
+  /** Explicit correspondence linking each selected motif/target residue back to its original source residue. */
+  selectedSourceResidues: SelectedMotifSourceResidue[];
   summary: string;
 }
 
@@ -1419,9 +1817,11 @@ export function compileConditionToGenie3Spec(
   const intent = cond.intent!;
   const rawStructure = template?.cifText ?? template?.pdbText ?? cond.inputCif ?? '';
 
-  // Pure length contig (no lockChain, no motifSpans): unconditional monomer of requested length
+  // Pure length contig (no lockChain, no motifSpans, no preserved contig residues): unconditional monomer
   const hasLock = Boolean(intent.lockChain);
-  const hasMotif = Boolean(intent.motifSpans && intent.motifSpans.length > 0);
+  const hasMotif = Boolean(
+    (intent.motifSpans && intent.motifSpans.length > 0) || contigHasPreservedResidues(intent.contig),
+  );
   if (!hasLock && !hasMotif) {
     const len = parseLengthRangeMid(intent.contig) ?? defaultLength;
     const clamped = Math.max(30, Math.min(256, len));
@@ -1441,6 +1841,7 @@ export function compileConditionToGenie3Spec(
       gtRestype: new Float32Array(clamped * 20),
       gtAtomPositions: new Float32Array(clamped * 3),
       chainLengths: [clamped],
+      selectedSourceResidues: [],
       summary: `unconditional L=${clamped}`,
     };
   }
@@ -1456,33 +1857,75 @@ export function compileConditionToGenie3Spec(
     throw new Error('Template structure must contain at least 3 protein residues with Cα atoms.');
   }
 
-  // Index template residues by chain + residue number for exact canonical RCSB lookup
+  // Index template residues preserving full source identity (multi-char chains + insertion codes)
   interface TplRes {
+    templateIndex: number;
     chain: string;
+    labelChainId?: string;
     resNum: number;
+    labelSeqId?: number;
+    insCode: string;
+    resName: string;
+    projectedChainId: string;
     aa1: string;
     x: number;
     y: number;
     z: number;
   }
   const tplList: TplRes[] = [];
-  const tplMap = new Map<string, TplRes>();
+  const exactChains = new Set<string>();
   for (let i = 0; i < parsed.nResidues; i++) {
+    const src = parsed.sourceResidues[i];
+    const chain = src?.authChainId ?? parsed.chainIds[i] ?? 'A';
+    exactChains.add(chain);
     const entry: TplRes = {
-      chain: parsed.chainIds[i] || 'A',
-      resNum: parsed.resNums[i] ?? i + 1,
+      templateIndex: i,
+      chain,
+      ...(src?.labelChainId ? { labelChainId: src.labelChainId } : {}),
+      resNum: src?.resNum ?? parsed.resNums[i] ?? i + 1,
+      ...(src?.labelSeqId !== undefined ? { labelSeqId: src.labelSeqId } : {}),
+      insCode: src?.insCode ?? parsed.insCodes[i] ?? '',
+      resName: src?.resName ?? (AA1_TO_AA3[parsed.sequence[i]?.toUpperCase() ?? 'X'] ?? 'UNK'),
+      projectedChainId: src?.projectedChainId ?? parsed.projectedChainIds[i] ?? chain[0] ?? 'A',
       aa1: parsed.sequence[i] || 'A',
       x: parsed.caCoords[i * 3 + 0],
       y: parsed.caCoords[i * 3 + 1],
       z: parsed.caCoords[i * 3 + 2],
     };
     tplList.push(entry);
-    tplMap.set(`${entry.chain}:${entry.resNum}`, entry);
   }
+
+  const selectTemplateResidues = (ranges: readonly ResidueRangeToken[]): TplRes[] => {
+    const out: TplRes[] = [];
+    for (const r of ranges) {
+      for (const t of tplList) {
+        if (
+          chainMatchesExactOrFallback(t.chain, r.chain, exactChains) &&
+          matchesResNumInsBounds(t.resNum, t.insCode, r.start, r.end, r.startInsCode, r.endInsCode)
+        ) {
+          out.push(t);
+        }
+      }
+    }
+    return out;
+  };
+
+  const toSelectedSource = (t: TplRes, outputIndex: number): SelectedMotifSourceResidue => ({
+    outputIndex,
+    templateIndex: t.templateIndex,
+    authChainId: t.chain,
+    ...(t.labelChainId ? { labelChainId: t.labelChainId } : {}),
+    resNum: t.resNum,
+    ...(t.labelSeqId !== undefined ? { labelSeqId: t.labelSeqId } : {}),
+    insCode: t.insCode,
+    resName: t.resName,
+    aa1: t.aa1,
+    projectedChainId: t.projectedChainId,
+  });
 
   // ── Mode 1: PPI Binder Design (Genie 3 binder-first convention: chain 0 = binder, chain 1 = fixed target) ──
   if (hasLock) {
-    const lockChain = intent.lockChain!.toUpperCase();
+    const lockChain = intent.lockChain!.trim();
     const parts = intent.contig.split(/[,\s]+/).filter(Boolean);
     let binderLen = defaultLength;
     const targetRanges: ResidueRangeToken[] = [];
@@ -1490,7 +1933,7 @@ export function compileConditionToGenie3Spec(
     for (const part of parts) {
       if (part === '/0') continue;
       const rangeTokens = parseResidueRangeTokens(part);
-      if (rangeTokens.length > 0 && /^[A-Za-z]/.test(part)) {
+      if (rangeTokens.length > 0 && (/^[A-Za-z]/.test(part) || part.includes(':'))) {
         targetRanges.push(...rangeTokens);
       } else {
         const mid = parseLengthRangeMid(part);
@@ -1500,15 +1943,9 @@ export function compileConditionToGenie3Spec(
 
     let targetRes: TplRes[] = [];
     if (targetRanges.length > 0) {
-      for (const r of targetRanges) {
-        for (const t of tplList) {
-          if (t.chain === r.chain && t.resNum >= r.start && t.resNum <= r.end) {
-            targetRes.push(t);
-          }
-        }
-      }
+      targetRes = selectTemplateResidues(targetRanges);
     } else {
-      targetRes = tplList.filter((t) => t.chain === lockChain);
+      targetRes = tplList.filter((t) => chainMatchesExactOrFallback(t.chain, lockChain, exactChains));
     }
 
     if (targetRes.length < 3) {
@@ -1517,12 +1954,7 @@ export function compileConditionToGenie3Spec(
       );
     }
 
-    const hotspotSet = new Set<string>();
-    for (const h of parseResidueRangeTokens((intent.hotspots ?? []).join(', '))) {
-      for (let rn = h.start; rn <= h.end; rn++) {
-        hotspotSet.add(`${h.chain}:${rn}`);
-      }
-    }
+    const hotspotRanges = parseResidueRangeTokens((intent.hotspots ?? []).join(', '));
 
     const clampedBinder = Math.max(20, Math.min(256, binderLen));
     const totalLen = clampedBinder + targetRes.length;
@@ -1559,6 +1991,7 @@ export function compileConditionToGenie3Spec(
 
     // Chain 1: fixed target with hotspots
     let hotspotMatches = 0;
+    const selectedSourceResidues: SelectedMotifSourceResidue[] = [];
     for (let j = 0; j < targetRes.length; j++) {
       const idx = clampedBinder + j;
       const t = targetRes[j];
@@ -1568,7 +2001,12 @@ export function compileConditionToGenie3Spec(
       condGroup[idx] = 1;
       condStructMask[idx] = 1;
       condSeqMask[idx] = 1;
-      if (hotspotSet.has(`${t.chain}:${t.resNum}`)) {
+      const isHotspot = hotspotRanges.some(
+        (h) =>
+          chainMatchesExactOrFallback(t.chain, h.chain, exactChains) &&
+          matchesResNumInsBounds(t.resNum, t.insCode, h.start, h.end, h.startInsCode, h.endInsCode),
+      );
+      if (isHotspot) {
         condInterfaceMask[idx] = 1;
         hotspotMatches++;
       }
@@ -1576,6 +2014,7 @@ export function compileConditionToGenie3Spec(
       gtAtomPositions[idx * 3 + 0] = t.x - cx;
       gtAtomPositions[idx * 3 + 1] = t.y - cy;
       gtAtomPositions[idx * 3 + 2] = t.z - cz;
+      selectedSourceResidues.push(toSelectedSource(t, idx));
     }
 
     return {
@@ -1592,6 +2031,7 @@ export function compileConditionToGenie3Spec(
       gtRestype,
       gtAtomPositions,
       chainLengths: [clampedBinder, targetRes.length],
+      selectedSourceResidues,
       summary: `binder ${clampedBinder} aa + target ${targetRes.length} aa (${hotspotMatches} hotspots)`,
     };
   }
@@ -1603,15 +2043,9 @@ export function compileConditionToGenie3Spec(
   let hasExplicitMotifInContig = false;
 
   for (const part of contigParts) {
-    if (/^[A-Za-z]/.test(part)) {
+    if (/^[A-Za-z]/.test(part) || part.includes(':')) {
       const ranges = parseResidueRangeTokens(part);
-      const res: TplRes[] = [];
-      for (const r of ranges) {
-        for (let rn = r.start; rn <= r.end; rn++) {
-          const hit = tplMap.get(`${r.chain}:${rn}`);
-          if (hit) res.push(hit);
-        }
-      }
+      const res = selectTemplateResidues(ranges);
       if (res.length > 0) {
         hasExplicitMotifInContig = true;
         segments.push({ kind: 'motif', residues: res });
@@ -1628,11 +2062,7 @@ export function compileConditionToGenie3Spec(
     const motifGroups = parseResidueRangeTokens((intent.motifSpans ?? []).join(', '));
     const motifBlocks: TplRes[][] = [];
     for (const r of motifGroups) {
-      const res: TplRes[] = [];
-      for (let rn = r.start; rn <= r.end; rn++) {
-        const hit = tplMap.get(`${r.chain}:${rn}`);
-        if (hit) res.push(hit);
-      }
+      const res = selectTemplateResidues([r]);
       if (res.length > 0) motifBlocks.push(res);
     }
     if (motifBlocks.length === 0) {
@@ -1682,6 +2112,7 @@ export function compileConditionToGenie3Spec(
   const condInterfaceMask = new Float32Array(totalLen);
   const gtRestype = new Float32Array(totalLen * 20);
   const gtAtomPositions = new Float32Array(totalLen * 3);
+  const selectedSourceResidues: SelectedMotifSourceResidue[] = [];
 
   let cursor = 0;
   for (const seg of segments) {
@@ -1700,6 +2131,7 @@ export function compileConditionToGenie3Spec(
         gtAtomPositions[cursor * 3 + 0] = m.x - cx;
         gtAtomPositions[cursor * 3 + 1] = m.y - cy;
         gtAtomPositions[cursor * 3 + 2] = m.z - cz;
+        selectedSourceResidues.push(toSelectedSource(m, cursor));
         cursor++;
       }
     }
@@ -1719,6 +2151,7 @@ export function compileConditionToGenie3Spec(
     gtRestype,
     gtAtomPositions,
     chainLengths: [totalLen],
+    selectedSourceResidues,
     summary: `motif scaffold L=${totalLen} (${motifResAll.length} fixed motif aa)`,
   };
 }

@@ -5,6 +5,139 @@
 const ATOM_NAMES_3 = ['N', 'CA', 'C'] as const;
 const ATOM_NAMES_4 = ['N', 'CA', 'C', 'O'] as const;
 
+export const BACKBONE_MASK_N = 1 << 0;
+export const BACKBONE_MASK_CA = 1 << 1;
+export const BACKBONE_MASK_C = 1 << 2;
+export const BACKBONE_MASK_O = 1 << 3;
+
+export type BackboneAtomName = 'N' | 'CA' | 'C' | 'O';
+
+export interface BackboneAtomPresence {
+  hasN: boolean;
+  hasCA: boolean;
+  hasC: boolean;
+  hasO: boolean;
+  /** True when O in `backbone4Coords` was deterministically reconstructed from observed (N, CA, C). */
+  oReconstructed?: boolean;
+}
+
+export interface SourceResidueId {
+  /** 0-based index in the parsed residue arrays (`sequence`, `caCoords`, `backbone4Coords`, etc.). */
+  index: number;
+  /** Original author chain ID (mmCIF `auth_asym_id` or PDB column 22). */
+  authChainId: string;
+  /** Optional mmCIF `label_asym_id` when present in source mmCIF. */
+  labelChainId?: string;
+  /** Original author residue number (`auth_seq_id` or PDB columns 23-26). */
+  resNum: number;
+  /** Optional mmCIF `label_seq_id` when present and numeric in source mmCIF. */
+  labelSeqId?: number;
+  /** Insertion code (`''` when absent, e.g. `'A'`, `'B'`). */
+  insCode: string;
+  /** Original 3-letter residue name (e.g. `'ALA'`, `'MSE'`). */
+  resName: string;
+  /** Deterministic bijective 1-char PDB chain ID used when projecting to PDB format. */
+  projectedChainId: string;
+}
+
+export interface ChainProjectionResult {
+  /** Per-residue 1-char PDB chain IDs aligned with the input `chainIds` array. */
+  projectedChainIds: string[];
+  /** Bijective map from projected 1-char PDB chain ID -> original source chain ID (e.g. `{ A: 'AA', B: 'AB' }`). */
+  chainIdMap: Record<string, string>;
+  /** Bijective map from original source chain ID -> projected 1-char PDB chain ID (e.g. `{ AA: 'A', AB: 'B' }`). */
+  sourceToProjected: Record<string, string>;
+}
+
+const PDB_CHAIN_PROJECTION_ALPHABET =
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+-/:;<=>?@[]^_{|}~';
+
+/**
+ * Deterministically and bijectively project arbitrary source chain IDs (including multi-char mmCIF
+ * `auth_asym_id` values like `'AA'` and `'AB'` and case-sensitive IDs like `'A'` vs `'a'`) onto
+ * single-character PDB column-22 chain IDs without collisions.
+ *
+ * Existing valid 1-char chain IDs are preserved verbatim; multi-char chains receive the first
+ * unused single-char ID in `A-Z`, `a-z`, `0-9` order.
+ */
+export function projectChainIdsToPdb(chainIds: readonly string[]): ChainProjectionResult {
+  const normalized = chainIds.map((c) => {
+    const t = (c ?? '').trim();
+    return t || 'A';
+  });
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const ch of normalized) {
+    if (!seen.has(ch)) {
+      seen.add(ch);
+      unique.push(ch);
+    }
+  }
+
+  const used = new Set<string>();
+  const sourceMap = new Map<string, string>();
+  const projectedMap = new Map<string, string>();
+
+  // Pass 1: preserve any valid single-char chain ID verbatim
+  for (const ch of unique) {
+    if (ch.length === 1 && !/\s/.test(ch)) {
+      sourceMap.set(ch, ch);
+      projectedMap.set(ch, ch);
+      used.add(ch);
+    }
+  }
+
+  // Pass 2: assign deterministic unused 1-char IDs to multi-char chains in first-seen order
+  let cursor = 0;
+  for (const ch of unique) {
+    if (sourceMap.has(ch)) continue;
+    while (cursor < PDB_CHAIN_PROJECTION_ALPHABET.length && used.has(PDB_CHAIN_PROJECTION_ALPHABET[cursor])) {
+      cursor++;
+    }
+    if (cursor >= PDB_CHAIN_PROJECTION_ALPHABET.length) {
+      throw new Error(
+        `Too many distinct chains (${unique.length}) to project bijectively into 1-character PDB chain IDs.`,
+      );
+    }
+    const proj = PDB_CHAIN_PROJECTION_ALPHABET[cursor++];
+    sourceMap.set(ch, proj);
+    projectedMap.set(proj, ch);
+    used.add(proj);
+  }
+
+  // Use defineProperty so prototype-named chains like "constructor" or "__proto__" never collide
+  const sourceToProjected: Record<string, string> = {};
+  for (const [k, v] of sourceMap.entries()) {
+    Object.defineProperty(sourceToProjected, k, {
+      value: v,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  const chainIdMap: Record<string, string> = {};
+  for (const [k, v] of projectedMap.entries()) {
+    Object.defineProperty(chainIdMap, k, {
+      value: v,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  const projectedChainIds = normalized.map((ch) => sourceMap.get(ch)!);
+  return { projectedChainIds, chainIdMap, sourceToProjected };
+}
+
+function presenceToBitmask(p: BackboneAtomPresence): number {
+  let m = 0;
+  if (p.hasN) m |= BACKBONE_MASK_N;
+  if (p.hasCA) m |= BACKBONE_MASK_CA;
+  if (p.hasC) m |= BACKBONE_MASK_C;
+  if (p.hasO) m |= BACKBONE_MASK_O;
+  return m;
+}
+
 export const AA1_TO_AA3: Record<string, string> = {
   A: 'ALA', C: 'CYS', D: 'ASP', E: 'GLU', F: 'PHE',
   G: 'GLY', H: 'HIS', I: 'ILE', K: 'LYS', L: 'LEU',
@@ -63,33 +196,56 @@ export function reconstructBackboneOxygen(
     out[dst + 3] = cax; out[dst + 4] = cay; out[dst + 5] = caz;
     out[dst + 6] = cx; out[dst + 7] = cy; out[dst + 8] = cz;
 
+    // Never fabricate O when N, CA, or C is unobserved / non-finite
+    if (
+      !Number.isFinite(nx) || !Number.isFinite(ny) || !Number.isFinite(nz) ||
+      !Number.isFinite(cax) || !Number.isFinite(cay) || !Number.isFinite(caz) ||
+      !Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cz)
+    ) {
+      out[dst + 9] = Number.NaN;
+      out[dst + 10] = Number.NaN;
+      out[dst + 11] = Number.NaN;
+      continue;
+    }
+
     // Unit vector from C -> CA
     let v1x = cax - cx, v1y = cay - cy, v1z = caz - cz;
-    const l1 = Math.hypot(v1x, v1y, v1z) || 1;
+    const l1 = Math.hypot(v1x, v1y, v1z);
+    if (l1 < 1e-6) {
+      out[dst + 9] = Number.NaN;
+      out[dst + 10] = Number.NaN;
+      out[dst + 11] = Number.NaN;
+      continue;
+    }
     v1x /= l1; v1y /= l1; v1z /= l1;
 
     let ox: number, oy: number, oz: number;
     let usedPeptidePlane = false;
     if (r + 1 < nResidues && (!hasChains || chainIds![r] === chainIds![r + 1])) {
-      // Peptide plane bisector opposite to CA_i and N_{i+1} (only if peptide bond < 2.0 Å)
+      // Peptide plane bisector opposite to CA_i and N_{i+1} (only if next N is finite & peptide bond < 2.0 Å)
       const nextNOff = ((r + 1) * 3 + 0) * 3;
-      const dx = ncac[nextNOff] - cx;
-      const dy = ncac[nextNOff + 1] - cy;
-      const dz = ncac[nextNOff + 2] - cz;
-      const l2 = Math.hypot(dx, dy, dz);
-      if (l2 > 1e-6 && l2 < 2.0) {
-        const v2x = dx / l2;
-        const v2y = dy / l2;
-        const v2z = dz / l2;
-        const bx = -(v1x + v2x);
-        const by = -(v1y + v2y);
-        const bz = -(v1z + v2z);
-        const bl = Math.hypot(bx, by, bz);
-        if (bl > 1e-6) {
-          ox = cx + (bx / bl) * CO_LEN;
-          oy = cy + (by / bl) * CO_LEN;
-          oz = cz + (bz / bl) * CO_LEN;
-          usedPeptidePlane = true;
+      const nextNx = ncac[nextNOff];
+      const nextNy = ncac[nextNOff + 1];
+      const nextNz = ncac[nextNOff + 2];
+      if (Number.isFinite(nextNx) && Number.isFinite(nextNy) && Number.isFinite(nextNz)) {
+        const dx = nextNx - cx;
+        const dy = nextNy - cy;
+        const dz = nextNz - cz;
+        const l2 = Math.hypot(dx, dy, dz);
+        if (l2 > 1e-6 && l2 < 2.0) {
+          const v2x = dx / l2;
+          const v2y = dy / l2;
+          const v2z = dz / l2;
+          const bx = -(v1x + v2x);
+          const by = -(v1y + v2y);
+          const bz = -(v1z + v2z);
+          const bl = Math.hypot(bx, by, bz);
+          if (bl > 1e-6) {
+            ox = cx + (bx / bl) * CO_LEN;
+            oy = cy + (by / bl) * CO_LEN;
+            oz = cz + (bz / bl) * CO_LEN;
+            usedPeptidePlane = true;
+          }
         }
       }
     }
@@ -139,11 +295,21 @@ export function extractCaFromBackbone(
 }
 
 /** Format PDB residue number (cols 23-26) + insertion code (col 27) + 3 padding spaces. */
-function formatPdbResSeq(spec: number | string | undefined, fallbackNum: number): string {
+function formatPdbResSeq(
+  spec: number | string | undefined,
+  fallbackNum: number,
+  explicitInsCode?: string,
+): string {
+  const cleanIns = explicitInsCode ? explicitInsCode.trim().slice(0, 1) : '';
   if (spec === undefined || spec === '') {
-    return `${pad(String(fallbackNum), 4)}    `;
+    return `${pad(String(fallbackNum), 4)}${cleanIns || ' '}   `;
   }
   const s = String(spec).trim();
+  if (cleanIns) {
+    const numMatch = /^(-?\d+)/.exec(s);
+    const numPart = (numMatch ? numMatch[1] : String(fallbackNum)).slice(-4);
+    return `${pad(numPart, 4)}${cleanIns}   `;
+  }
   const m = /^(-?\d+)([A-Za-z])?$/.exec(s);
   if (!m) return `${pad(String(fallbackNum), 4)}    `;
   const numPart = m[1].slice(-4);
@@ -153,6 +319,8 @@ function formatPdbResSeq(spec: number | string | undefined, fallbackNum: number)
 
 /**
  * Convert backbone coords [nResidues * atomsPerRes, 3] into a single-model PDB string.
+ * Bijectively projects multi-character `chainIds` onto 1-char PDB chain IDs to prevent collisions,
+ * preserves insertion codes, and omits unobserved or non-finite atoms when a presence mask is supplied.
  */
 export function coordsToBackbonePdb(
   coords: Float32Array,
@@ -162,14 +330,27 @@ export function coordsToBackbonePdb(
     sequence?: string;
     bFactors?: Float32Array;
     chainId?: string;
-    chainIds?: string[];
+    chainIds?: readonly string[];
     resSeqs?: Array<number | string>;
+    insCodes?: readonly string[];
     caOnly?: boolean;
+    /** Compact per-residue observed atom bitmask (`BACKBONE_MASK_N/CA/C/O`). Unobserved atoms are skipped. */
+    observedBackboneMask?: ArrayLike<number>;
+    /** Per-residue observed atom presence flags. Unobserved atoms are skipped. */
+    atomPresence?: readonly BackboneAtomPresence[];
+    /** When true alongside `atomPresence`, allows emitting deterministically reconstructed O (`oReconstructed`). Defaults to false. */
+    includeReconstructedO?: boolean;
   } = {},
 ): string {
   const atomsPerRes = opts.atomsPerRes ?? 3;
   const names = atomsPerRes === 4 ? ATOM_NAMES_4 : ATOM_NAMES_3;
-  const defaultChain = (opts.chainId ?? 'A')[0] ?? 'A';
+  const defaultChain = (opts.chainId ?? 'A').trim() || 'A';
+  const projectedChains = opts.chainIds
+    ? projectChainIdsToPdb(
+        Array.from({ length: nResidues }, (_, r) => opts.chainIds![r] || defaultChain),
+      ).projectedChainIds
+    : null;
+  const fallbackChainChar = defaultChain[0] ?? 'A';
   const lines: string[] = [];
   let atomIdx = 1;
   let prevChain: string | null = null;
@@ -177,29 +358,50 @@ export function coordsToBackbonePdb(
   let prevResSeqField = `${pad('1', 4)}    `;
 
   for (let r = 0; r < nResidues; r++) {
-    const chain = (opts.chainIds?.[r] ?? defaultChain)[0] ?? defaultChain;
-    if (prevChain !== null && chain !== prevChain) {
-      lines.push(`TER   ${pad(String(atomIdx), 5)}      ${prevResName} ${prevChain}${prevResSeqField.slice(0, 5)}`);
-      atomIdx++;
-    }
+    const chain = projectedChains ? projectedChains[r] : fallbackChainChar;
     const aa1 = opts.sequence?.[r]?.toUpperCase() ?? 'G';
     const resName = AA1_TO_AA3[aa1] ?? 'GLY';
     const bVal = opts.bFactors ? opts.bFactors[r] : 0.0;
-    const resSeqField = formatPdbResSeq(opts.resSeqs?.[r], r + 1);
+    const resSeqField = formatPdbResSeq(opts.resSeqs?.[r], r + 1, opts.insCodes?.[r]);
     const atomSlots = opts.caOnly ? [1] : Array.from({ length: atomsPerRes }, (_, i) => i);
+    const maskVal = opts.observedBackboneMask ? Number(opts.observedBackboneMask[r] ?? 0) : null;
+    const presence = opts.atomPresence?.[r];
 
+    const emittedForRes: string[] = [];
     for (const a of atomSlots) {
+      if (maskVal !== null && (maskVal & (1 << a)) === 0) continue;
+      if (presence) {
+        const allow =
+          a === 0
+            ? presence.hasN
+            : a === 1
+              ? presence.hasCA
+              : a === 2
+                ? presence.hasC
+                : presence.hasO || Boolean(opts.includeReconstructedO && presence.oReconstructed);
+        if (!allow) continue;
+      }
       const flatIdx = r * atomsPerRes + a;
       const x = coords[flatIdx * 3 + 0];
       const y = coords[flatIdx * 3 + 1];
       const z = coords[flatIdx * 3 + 2];
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
       const name = names[a];
       const element = name[0];
-      lines.push(
-        `ATOM  ${pad(String(atomIdx), 5)}  ${padR(name, 3)} ${resName} ${chain}${resSeqField}` +
+      emittedForRes.push(
+        `  ${padR(name, 3)} ${resName} ${chain}${resSeqField}` +
           `${pad(x.toFixed(3), 8)}${pad(y.toFixed(3), 8)}${pad(z.toFixed(3), 8)}` +
           `  1.00${pad(bVal.toFixed(2), 6)}           ${element}  `,
       );
+    }
+
+    if (emittedForRes.length === 0) continue;
+    if (prevChain !== null && chain !== prevChain) {
+      lines.push(`TER   ${pad(String(atomIdx), 5)}      ${prevResName} ${prevChain}${prevResSeqField.slice(0, 5)}`);
+      atomIdx++;
+    }
+    for (const body of emittedForRes) {
+      lines.push(`ATOM  ${pad(String(atomIdx), 5)}${body}`);
       atomIdx++;
     }
     prevChain = chain;
@@ -274,7 +476,9 @@ export function atom37ToPdb(
 ): { pdbText: string; caCoords: Float32Array; backbone4Coords: Float32Array } {
   const L = sequence.length;
   const perResChains =
-    Array.isArray(chainIdOrIds) && chainIdOrIds.length === L ? chainIdOrIds : null;
+    Array.isArray(chainIdOrIds) && chainIdOrIds.length === L
+      ? projectChainIdsToPdb(chainIdOrIds).projectedChainIds
+      : null;
   const defaultChain = typeof chainIdOrIds === 'string' ? (chainIdOrIds[0] ?? 'A') : 'A';
   const lines: string[] = [];
   const caCoords = new Float32Array(L * 3);
@@ -284,7 +488,7 @@ export function atom37ToPdb(
   let chainResNum = 0;
 
   for (let r = 0; r < L; r++) {
-    const chain = (perResChains ? perResChains[r] : defaultChain)[0] ?? 'A';
+    const chain = perResChains ? perResChains[r] : defaultChain;
     if (prevChain !== null && chain !== prevChain) {
       lines.push(`TER   ${pad(String(atomIdx), 5)}      ${AA1_TO_AA3[sequence[r - 1].toUpperCase()] ?? 'ALA'} ${prevChain}${pad(String(chainResNum), 4)}`);
       atomIdx++;
@@ -373,9 +577,87 @@ export interface ParsedStructure {
   backbone4Coords: Float32Array;
   chainIds: string[];
   resNums: number[];
+  /** Per-residue insertion code (`''` when absent, e.g. `'A'`, `'B'`). */
+  insCodes: string[];
+  /** Per-residue source identity mapping each projected residue back to its source chain, resNum, insCode, and resName. */
+  sourceResidues: SourceResidueId[];
+  /** Per-residue deterministic bijective 1-char PDB chain IDs used in `pdbText`. */
+  projectedChainIds: string[];
+  /** Bijective map from projected 1-char PDB chain ID -> original source `authChainId` (e.g. `{ A: 'AA', B: 'AB' }`). */
+  chainIdMap: Record<string, string>;
+  /** Per-residue observed backbone atom presence flags (`hasN`, `hasCA`, `hasC`, `hasO`, `oReconstructed`). */
+  atomPresence: BackboneAtomPresence[];
+  /** Compact per-residue observed backbone bitmask (`BACKBONE_MASK_N/CA/C/O`). */
+  observedBackboneMask: Uint8Array;
   pdbText: string;
   format: 'pdb' | 'mmcif';
   diagnostics: StructureParseDiagnostics;
+}
+
+export interface MissingBackboneResidue {
+  /** 0-based index in `ParsedStructure`. */
+  index: number;
+  /** Original source identity for the incomplete residue. */
+  source: SourceResidueId;
+  /** Required backbone atoms that were NOT observed in the input structure. */
+  missingAtoms: BackboneAtomName[];
+}
+
+/**
+ * Validate a `ParsedStructure` against required observed backbone atoms (default `['N', 'CA', 'C', 'O']`).
+ * Returns every residue missing one or more required measured atoms so downstream models can fail
+ * fast BEFORE execution instead of silently running on fabricated coordinates.
+ *
+ * Pass `{ allowReconstructedO: true }` for consumers that accept deterministically reconstructed
+ * peptide-plane `O` when observed `(N, CA, C)` are all present.
+ */
+export function getMissingBackboneResidues(
+  parsed: Pick<
+    ParsedStructure,
+    'nResidues' | 'atomPresence' | 'observedBackboneMask' | 'sourceResidues' | 'chainIds' | 'resNums' | 'insCodes' | 'sequence' | 'projectedChainIds'
+  >,
+  requiredAtoms: readonly BackboneAtomName[] = ['N', 'CA', 'C', 'O'],
+  opts: { allowReconstructedO?: boolean } = {},
+): MissingBackboneResidue[] {
+  const missing: MissingBackboneResidue[] = [];
+  const allowReconO = Boolean(opts.allowReconstructedO);
+  for (let i = 0; i < parsed.nResidues; i++) {
+    const p = parsed.atomPresence?.[i];
+    const m = parsed.observedBackboneMask?.[i];
+    const absent: BackboneAtomName[] = [];
+    for (const atom of requiredAtoms) {
+      let ok = false;
+      if (p) {
+        if (atom === 'N') ok = p.hasN;
+        else if (atom === 'CA') ok = p.hasCA;
+        else if (atom === 'C') ok = p.hasC;
+        else if (atom === 'O') ok = p.hasO || (allowReconO && Boolean(p.oReconstructed));
+      } else if (m !== undefined) {
+        const bit =
+          atom === 'N'
+            ? BACKBONE_MASK_N
+            : atom === 'CA'
+              ? BACKBONE_MASK_CA
+              : atom === 'C'
+                ? BACKBONE_MASK_C
+                : BACKBONE_MASK_O;
+        ok = (m & bit) !== 0;
+      }
+      if (!ok) absent.push(atom);
+    }
+    if (absent.length > 0) {
+      const source: SourceResidueId = parsed.sourceResidues?.[i] ?? {
+        index: i,
+        authChainId: parsed.chainIds[i] ?? 'A',
+        resNum: parsed.resNums[i] ?? i + 1,
+        insCode: parsed.insCodes?.[i] ?? '',
+        resName: AA1_TO_AA3[parsed.sequence[i]?.toUpperCase() ?? 'X'] ?? 'UNK',
+        projectedChainId: parsed.projectedChainIds?.[i] ?? (parsed.chainIds[i] ?? 'A')[0] ?? 'A',
+      };
+      missing.push({ index: i, source, missingAtoms: absent });
+    }
+  }
+  return missing;
 }
 
 /**
@@ -427,7 +709,8 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
     resKey: string;
     aa1: string;
     resName: string;
-    resSeqCol: string;
+    resNumStr: string;
+    insCode: string;
     atoms: Record<string, [number, number, number]>;
   }
   const residues: ResAccum[] = [];
@@ -437,7 +720,13 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
   let maxSerial = 0;
   const ligandSet = new Set<string>();
   const nucleicChains = new Set<string>();
+  const reconstructedOKeys = new Set<string>();
   for (const line of lines) {
+    if (line.startsWith('REMARK 250 RECONSTRUCTED_O ')) {
+      const keys = line.slice('REMARK 250 RECONSTRUCTED_O '.length).trim().split(/\s+/).filter(Boolean);
+      for (const k of keys) reconstructedOKeys.add(k);
+      continue;
+    }
     if (
       line.startsWith('ENDMDL') &&
       (residues.length > 0 || ligandSet.size > 0 || nucleicChains.size > 0)
@@ -475,11 +764,11 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
     const atomName = line.slice(12, 16).trim();
     if (atomName !== 'N' && atomName !== 'CA' && atomName !== 'C' && atomName !== 'O') continue;
 
-    const resName = line.slice(17, 20).trim();
+    const resName = line.slice(17, 20).trim().toUpperCase();
     const chain = line[21]?.trim() || 'A';
-    const resSeqCol = line.slice(22, 27);
-    const resSeq = resSeqCol.trim();
-    const key = `${chain}:${resSeq}`;
+    const resNumStr = line.slice(22, 26).trim();
+    const insCode = (line[26] ?? ' ').trim();
+    const key = `${chain}:${resNumStr}:${insCode}`;
     const x = parseFloat(line.slice(30, 38));
     const y = parseFloat(line.slice(38, 46));
     const z = parseFloat(line.slice(46, 54));
@@ -492,7 +781,8 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
         resKey: key,
         aa1: AA3_TO_AA1[resName] ?? 'X',
         resName: resName || 'UNK',
-        resSeqCol,
+        resNumStr,
+        insCode,
         atoms: {},
       };
       byKey.set(key, entry);
@@ -510,23 +800,42 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
   const ncac = new Float32Array(L * 3 * 3);
   let seq = '';
   const chainIds: string[] = [];
+  const insCodes: string[] = [];
+  const atomPresence: BackboneAtomPresence[] = [];
+  const observedBackboneMask = new Uint8Array(L);
 
   for (let i = 0; i < L; i++) {
     const r = valid[i];
     seq += r.aa1;
     chainIds.push(r.chain);
+    insCodes.push(r.insCode);
+    const hasN = r.atoms.N !== undefined;
+    const hasCA = true;
+    const hasC = r.atoms.C !== undefined;
+    const isTaggedReconstructedO = reconstructedOKeys.has(r.resKey);
+    const hasO = r.atoms.O !== undefined && !isTaggedReconstructedO;
+    const oReconstructed =
+      (isTaggedReconstructedO && r.atoms.O !== undefined) || (!hasO && hasN && hasCA && hasC);
+    const presence: BackboneAtomPresence = { hasN, hasCA, hasC, hasO, oReconstructed };
+    atomPresence.push(presence);
+    observedBackboneMask[i] = presenceToBitmask(presence);
+
     const ca = r.atoms.CA;
-    const n = r.atoms.N ?? ca;
-    const c = r.atoms.C ?? ca;
+    const n = r.atoms.N;
+    const c = r.atoms.C;
     caCoords[i * 3 + 0] = ca[0]; caCoords[i * 3 + 1] = ca[1]; caCoords[i * 3 + 2] = ca[2];
-    ncac[(i * 3 + 0) * 3 + 0] = n[0]; ncac[(i * 3 + 0) * 3 + 1] = n[1]; ncac[(i * 3 + 0) * 3 + 2] = n[2];
+    // Never silently copy CA into missing N or C; preserve NaN for unobserved atoms
+    ncac[(i * 3 + 0) * 3 + 0] = n ? n[0] : Number.NaN;
+    ncac[(i * 3 + 0) * 3 + 1] = n ? n[1] : Number.NaN;
+    ncac[(i * 3 + 0) * 3 + 2] = n ? n[2] : Number.NaN;
     ncac[(i * 3 + 1) * 3 + 0] = ca[0]; ncac[(i * 3 + 1) * 3 + 1] = ca[1]; ncac[(i * 3 + 1) * 3 + 2] = ca[2];
-    ncac[(i * 3 + 2) * 3 + 0] = c[0]; ncac[(i * 3 + 2) * 3 + 1] = c[1]; ncac[(i * 3 + 2) * 3 + 2] = c[2];
+    ncac[(i * 3 + 2) * 3 + 0] = c ? c[0] : Number.NaN;
+    ncac[(i * 3 + 2) * 3 + 1] = c ? c[1] : Number.NaN;
+    ncac[(i * 3 + 2) * 3 + 2] = c ? c[2] : Number.NaN;
   }
 
-  // Reconstruct O with chain-break guard, then preserve every real parsed O coordinate
-  const reconstructed = reconstructBackboneOxygen(ncac, L, chainIds);
-  const backbone4Coords = reconstructed;
+  // Reconstruct O with chain-break guard (only when N/CA/C are all observed), then restore real parsed O
+  const backbone4Coords = reconstructBackboneOxygen(ncac, L, chainIds);
   const missingOByKey = new Map<string, [number, number, number]>();
 
   for (let i = 0; i < L; i++) {
@@ -536,19 +845,24 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
       backbone4Coords[(i * 4 + 3) * 3 + 1] = r.atoms.O[1];
       backbone4Coords[(i * 4 + 3) * 3 + 2] = r.atoms.O[2];
     } else if (r.atoms.N && r.atoms.C) {
-      // Only patch O into PDB when N & C are genuinely present (never synthesize for CA-only inputs)
-      missingOByKey.set(r.resKey, [
-        backbone4Coords[(i * 4 + 3) * 3 + 0],
-        backbone4Coords[(i * 4 + 3) * 3 + 1],
-        backbone4Coords[(i * 4 + 3) * 3 + 2],
-      ]);
+      const ox = backbone4Coords[(i * 4 + 3) * 3 + 0];
+      const oy = backbone4Coords[(i * 4 + 3) * 3 + 1];
+      const oz = backbone4Coords[(i * 4 + 3) * 3 + 2];
+      if (Number.isFinite(ox) && Number.isFinite(oy) && Number.isFinite(oz)) {
+        // Only patch O into PDB when N & C are genuinely observed (never synthesize for CA-only inputs)
+        missingOByKey.set(r.resKey, [ox, oy, oz]);
+      } else {
+        atomPresence[i].oReconstructed = false;
+      }
     }
   }
 
   // Patch only missing O atoms directly into the original PDB so multi-chain IDs,
-  // residue numbering, insertion codes, sidechains, and HETATM lines are preserved verbatim.
+  // residue numbering, insertion codes, sidechains, and HETATM lines are preserved verbatim,
+  // while tagging reconstructed O keys via REMARK 250 so PDB round-trips never misreport them as observed.
   let normalizedPdb = pdbText;
   if (missingOByKey.size > 0) {
+    const patchedKeys: string[] = [];
     const patchedLines: string[] = [];
     let nextSerial = maxSerial;
     let inModel1 = true;
@@ -569,11 +883,13 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
       const atomName = line.slice(12, 16).trim();
       if (atomName !== 'C') continue;
       const chain = line[21]?.trim() || 'A';
-      const resSeq = line.slice(22, 27).trim();
-      const key = `${chain}:${resSeq}`;
+      const resNumStr = line.slice(22, 26).trim();
+      const insCode = (line[26] ?? ' ').trim();
+      const key = `${chain}:${resNumStr}:${insCode}`;
       const oCoord = missingOByKey.get(key);
       if (oCoord) {
         missingOByKey.delete(key);
+        patchedKeys.push(key);
         nextSerial = Math.min(99999, nextSerial + 1);
         const recType = line.slice(0, 6);
         const resMeta = line.slice(17, 27); // resName + space + chain + resSeq + iCode
@@ -585,14 +901,32 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
         );
       }
     }
-    normalizedPdb = patchedLines.join('\n');
+    if (patchedKeys.length > 0) {
+      const remarkLines: string[] = [];
+      for (let k = 0; k < patchedKeys.length; k += 8) {
+        remarkLines.push(`REMARK 250 RECONSTRUCTED_O ${patchedKeys.slice(k, k + 8).join(' ')}`);
+      }
+      normalizedPdb = [...remarkLines, ...patchedLines].join('\n');
+    } else {
+      normalizedPdb = patchedLines.join('\n');
+    }
   }
 
   const chainLengths = computeChainLengthsFromIds(chainIds);
   const resNums = valid.map((r, i) => {
-    const parsedNum = parseInt(r.resSeqCol.trim(), 10);
+    const parsedNum = parseInt(r.resNumStr, 10);
     return Number.isFinite(parsedNum) ? parsedNum : i + 1;
   });
+  const { projectedChainIds, chainIdMap } = projectChainIdsToPdb(chainIds);
+  const sourceResidues: SourceResidueId[] = valid.map((r, i) => ({
+    index: i,
+    authChainId: r.chain,
+    resNum: resNums[i],
+    insCode: r.insCode,
+    resName: r.resName,
+    projectedChainId: projectedChainIds[i],
+  }));
+
   return {
     sequence: seq,
     nResidues: L,
@@ -600,6 +934,12 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
     backbone4Coords,
     chainIds,
     resNums,
+    insCodes,
+    sourceResidues,
+    projectedChainIds,
+    chainIdMap,
+    atomPresence,
+    observedBackboneMask,
     pdbText: normalizedPdb,
     format: 'pdb',
     diagnostics: {
@@ -616,9 +956,12 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
 function parseMmcifBackbone(cifText: string): ParsedStructure {
   interface CifRes {
     chain: string;
+    labelChain?: string;
     seqId: string;
+    labelSeqId?: number;
     insCode: string;
     aa1: string;
+    resName: string;
     atoms: Record<string, [number, number, number]>;
   }
   const lines = cifText.split('\n');
@@ -686,22 +1029,27 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     }
 
     const get = (idx: number): string => (idx >= 0 ? toks[idx] : '');
+    const cifVal = (idx: number): string => {
+      const v = idx >= 0 ? toks[idx] : '';
+      return v === '.' || v === '?' ? '' : v;
+    };
 
     // Filter to first model only (for both protein and ligand/nucleic diagnostics)
-    const modelNum = get(iModel);
-    if (modelNum && modelNum !== '.' && modelNum !== '?') {
+    const modelNum = cifVal(iModel);
+    if (modelNum) {
       if (firstModelNum === null) firstModelNum = modelNum;
       else if (modelNum !== firstModelNum) continue;
     }
 
     // Filter to primary altLoc only
-    const altId = get(iAlt);
-    if (altId && altId !== '.' && altId !== '?' && altId !== 'A' && altId !== '1') continue;
+    const altId = cifVal(iAlt);
+    if (altId && altId !== 'A' && altId !== '1') continue;
 
-    const group = (get(iGroup) || 'ATOM').toUpperCase();
-    const rawComp = get(iLabelComp) || get(iAuthComp) || 'UNK';
+    const group = (cifVal(iGroup) || 'ATOM').toUpperCase();
+    const rawComp = cifVal(iLabelComp) || cifVal(iAuthComp) || 'UNK';
     const comp = rawComp.toUpperCase();
-    const chain = get(iAuthAsym) || get(iLabelAsym) || 'A';
+    const labelChain = cifVal(iLabelAsym) || undefined;
+    const chain = cifVal(iAuthAsym) || labelChain || 'A';
 
     // Detect nucleic acid chains (ATOM or HETATM) via resolved column indices
     if (NUCLEIC_RESNAMES.has(comp)) {
@@ -712,7 +1060,7 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     // Detect HETATM ligands, while allowing HETATM MSE (selenomethionine) as protein residue M
     if (group === 'HETATM') {
       if (comp !== 'MSE') {
-        if (comp && comp !== '.' && comp !== '?' && !WATER_RESNAMES.has(comp) && !AA3_TO_AA1[comp]) {
+        if (comp && !WATER_RESNAMES.has(comp) && !AA3_TO_AA1[comp]) {
           ligandSet.add(comp);
         }
         continue;
@@ -721,11 +1069,12 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
       continue;
     }
 
-    const atomName = get(iLabelAtom) || get(iAuthAtom);
+    const atomName = cifVal(iLabelAtom) || cifVal(iAuthAtom);
     if (atomName !== 'N' && atomName !== 'CA' && atomName !== 'C' && atomName !== 'O') continue;
-    const seqId = get(iAuthSeq) || get(iLabelSeq);
-    const rawIns = get(iIns);
-    const insCode = rawIns && rawIns !== '.' && rawIns !== '?' ? rawIns : '';
+    const seqId = cifVal(iAuthSeq) || cifVal(iLabelSeq);
+    const labelSeqRaw = cifVal(iLabelSeq);
+    const parsedLabelSeq = labelSeqRaw ? parseInt(labelSeqRaw, 10) : Number.NaN;
+    const insCode = cifVal(iIns);
     const x = parseFloat(get(iX));
     const y = parseFloat(get(iY));
     const z = parseFloat(get(iZ));
@@ -734,7 +1083,16 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     const key = `${chain}:${seqId}:${insCode}`;
     let entry = byKey.get(key);
     if (!entry) {
-      entry = { chain, seqId, insCode, aa1: AA3_TO_AA1[comp] ?? 'X', atoms: {} };
+      entry = {
+        chain,
+        ...(labelChain ? { labelChain } : {}),
+        seqId,
+        ...(Number.isFinite(parsedLabelSeq) ? { labelSeqId: parsedLabelSeq } : {}),
+        insCode,
+        aa1: AA3_TO_AA1[comp] ?? 'X',
+        resName: comp,
+        atoms: {},
+      };
       byKey.set(key, entry);
       residues.push(entry);
     }
@@ -749,22 +1107,40 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
   const ncac = new Float32Array(L * 3 * 3);
   let seq = '';
   const chainIds: string[] = [];
-  const resSeqs: string[] = [];
-  let anyHasNC = false;
+  const resNums: number[] = [];
+  const insCodes: string[] = [];
+  const atomPresence: BackboneAtomPresence[] = [];
+  const observedBackboneMask = new Uint8Array(L);
 
   for (let i = 0; i < L; i++) {
     const r = valid[i];
     seq += r.aa1;
     chainIds.push(r.chain);
-    resSeqs.push(`${r.seqId}${r.insCode}`);
-    if (r.atoms.N && r.atoms.C) anyHasNC = true;
+    const parsedNum = parseInt(r.seqId, 10);
+    resNums.push(Number.isFinite(parsedNum) ? parsedNum : i + 1);
+    insCodes.push(r.insCode);
+
+    const hasN = r.atoms.N !== undefined;
+    const hasCA = true;
+    const hasC = r.atoms.C !== undefined;
+    const hasO = r.atoms.O !== undefined;
+    const oReconstructed = !hasO && hasN && hasCA && hasC;
+    const presence: BackboneAtomPresence = { hasN, hasCA, hasC, hasO, oReconstructed };
+    atomPresence.push(presence);
+    observedBackboneMask[i] = presenceToBitmask(presence);
+
     const ca = r.atoms.CA;
-    const n = r.atoms.N ?? ca;
-    const c = r.atoms.C ?? ca;
+    const n = r.atoms.N;
+    const c = r.atoms.C;
     caCoords[i * 3 + 0] = ca[0]; caCoords[i * 3 + 1] = ca[1]; caCoords[i * 3 + 2] = ca[2];
-    ncac[(i * 3 + 0) * 3 + 0] = n[0]; ncac[(i * 3 + 0) * 3 + 1] = n[1]; ncac[(i * 3 + 0) * 3 + 2] = n[2];
+    // Never silently copy CA into missing N or C; preserve NaN for unobserved atoms
+    ncac[(i * 3 + 0) * 3 + 0] = n ? n[0] : Number.NaN;
+    ncac[(i * 3 + 0) * 3 + 1] = n ? n[1] : Number.NaN;
+    ncac[(i * 3 + 0) * 3 + 2] = n ? n[2] : Number.NaN;
     ncac[(i * 3 + 1) * 3 + 0] = ca[0]; ncac[(i * 3 + 1) * 3 + 1] = ca[1]; ncac[(i * 3 + 1) * 3 + 2] = ca[2];
-    ncac[(i * 3 + 2) * 3 + 0] = c[0]; ncac[(i * 3 + 2) * 3 + 1] = c[1]; ncac[(i * 3 + 2) * 3 + 2] = c[2];
+    ncac[(i * 3 + 2) * 3 + 0] = c ? c[0] : Number.NaN;
+    ncac[(i * 3 + 2) * 3 + 1] = c ? c[1] : Number.NaN;
+    ncac[(i * 3 + 2) * 3 + 2] = c ? c[2] : Number.NaN;
   }
 
   const backbone4Coords = reconstructBackboneOxygen(ncac, L, chainIds);
@@ -775,15 +1151,34 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
       backbone4Coords[(i * 4 + 3) * 3 + 0] = o[0];
       backbone4Coords[(i * 4 + 3) * 3 + 1] = o[1];
       backbone4Coords[(i * 4 + 3) * 3 + 2] = o[2];
+    } else if (
+      atomPresence[i].oReconstructed &&
+      !Number.isFinite(backbone4Coords[(i * 4 + 3) * 3 + 0])
+    ) {
+      atomPresence[i].oReconstructed = false;
     }
   }
 
+  const { projectedChainIds, chainIdMap } = projectChainIdsToPdb(chainIds);
+  const sourceResidues: SourceResidueId[] = valid.map((r, i) => ({
+    index: i,
+    authChainId: r.chain,
+    ...(r.labelChain ? { labelChainId: r.labelChain } : {}),
+    resNum: resNums[i],
+    ...(r.labelSeqId !== undefined ? { labelSeqId: r.labelSeqId } : {}),
+    insCode: r.insCode,
+    resName: r.resName,
+    projectedChainId: projectedChainIds[i],
+  }));
+
+  // Emit ONLY strictly observed atoms with bijectively projected 1-char chain IDs & insertion codes
   const pdbText = coordsToBackbonePdb(backbone4Coords, L, {
     atomsPerRes: 4,
     sequence: seq,
-    chainIds,
-    resSeqs,
-    caOnly: L > 0 && !anyHasNC,
+    chainIds: projectedChainIds,
+    resSeqs: resNums,
+    insCodes,
+    observedBackboneMask,
   });
   const chainLengths = computeChainLengthsFromIds(chainIds);
   return {
@@ -792,10 +1187,13 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     caCoords,
     backbone4Coords,
     chainIds,
-    resNums: resSeqs.map((s, i) => {
-      const n = parseInt(s, 10);
-      return Number.isFinite(n) ? n : i + 1;
-    }),
+    resNums,
+    insCodes,
+    sourceResidues,
+    projectedChainIds,
+    chainIdMap,
+    atomPresence,
+    observedBackboneMask,
     pdbText,
     format: 'mmcif',
     diagnostics: {
@@ -814,45 +1212,106 @@ interface RawCropRule {
   chain?: string;
   start?: number;
   end?: number;
+  startIns?: string;
+  endIns?: string;
   compId?: string;
 }
 
-function parseRawCropRules(segmentSpec: string): RawCropRule[] {
+function parseCropRangeSpec(tok: string): {
+  chain: string;
+  start: number;
+  end: number;
+  startIns?: string;
+  endIns?: string;
+} | null {
+  const colonMatch = /^([A-Za-z0-9_]+):(-?\d+)([A-Za-z])?(?:-(-?\d+)([A-Za-z])?)?$/.exec(tok);
+  const bareMatch = !colonMatch
+    ? /^([A-Za-z]+)?(\d+)([A-Za-z])?(?:-(\d+)([A-Za-z])?)?$/.exec(tok)
+    : null;
+  const m = colonMatch ?? bareMatch;
+  if (!m) return null;
+  const chain = m[1] || 'A';
+  const start = parseInt(m[2], 10);
+  const startIns = m[3] || undefined;
+  const hasEnd = m[4] !== undefined;
+  const end = hasEnd ? parseInt(m[4], 10) : start;
+  const endIns = hasEnd ? m[5] || undefined : startIns;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  if (end < start) return null;
+  if (end === start && startIns && endIns && endIns < startIns) return null;
+  return { chain, start, end, ...(startIns ? { startIns } : {}), ...(endIns ? { endIns } : {}) };
+}
+
+function matchesResNumAndIns(
+  resNum: number,
+  insCode: string,
+  start: number,
+  end: number,
+  startIns?: string,
+  endIns?: string,
+): boolean {
+  if (start === end && !startIns && !endIns) {
+    return resNum === start && insCode === '';
+  }
+  if (start === end && startIns && endIns && startIns === endIns) {
+    return resNum === start && insCode === startIns;
+  }
+  const aboveLo = resNum > start || (resNum === start && (startIns ? insCode >= startIns : true));
+  const belowHi = resNum < end || (resNum === end && (endIns ? insCode <= endIns : true));
+  return aboveLo && belowHi;
+}
+
+function parseRawCropRules(segmentSpec: string): { rules: RawCropRule[]; invalidTokens: string[] } {
   const tokens = segmentSpec
     .split(/[,\s]+/)
     .map((s) => s.trim())
     .filter(Boolean);
   const rules: RawCropRule[] = [];
+  const invalidTokens: string[] = [];
   for (const tok of tokens) {
-    // Chain + ligand comp_id e.g. "A:ZN", "A:DHZ", "A:SAM", "A:FE2", "A:CIT", "A:K"
-    const chainLig = /^([A-Za-z]):([A-Za-z0-9]{1,5})$/.exec(tok);
-    if (chainLig && !/^\d+$/.test(chainLig[2])) {
-      rules.push({ kind: 'ligand', chain: chainLig[1].toUpperCase(), compId: chainLig[2].toUpperCase() });
-      continue;
-    }
-    // Single chain letter e.g. "A", "B", "C"
-    const chainOnly = /^([A-Za-z])$/.exec(tok);
-    if (chainOnly) {
-      rules.push({ kind: 'chain', chain: chainOnly[1].toUpperCase() });
-      continue;
-    }
-    // Residue or range e.g. "A102", "A163-181", "B19-27"
-    const rangeMatch = /^([A-Za-z])?:?(\d+)(?:-(\d+))?$/.exec(tok);
-    if (rangeMatch) {
-      const chain = (rangeMatch[1] || 'A').toUpperCase();
-      const start = parseInt(rangeMatch[2], 10);
-      const end = rangeMatch[3] ? parseInt(rangeMatch[3], 10) : start;
-      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
-        rules.push({ kind: 'range', chain, start, end });
+    // Chain + residue/range with colon e.g. "AA:1", "AA:1-5", "A:10A-10B"
+    if (tok.includes(':')) {
+      const range = parseCropRangeSpec(tok);
+      if (range) {
+        rules.push({ kind: 'range', ...range });
         continue;
       }
+      // Chain + ligand comp_id e.g. "A:ZN", "AA:DHZ", "A:SAM", "A:FE2", "A:CIT", "A:K"
+      const chainLig = /^([A-Za-z0-9_]+):([A-Za-z0-9]{1,5})$/.exec(tok);
+      if (chainLig && !/^-?\d+$/.test(chainLig[2])) {
+        rules.push({ kind: 'ligand', chain: chainLig[1], compId: chainLig[2].toUpperCase() });
+        continue;
+      }
+      invalidTokens.push(tok);
+      continue;
     }
-    // Bare ligand comp_id e.g. "SAM", "DHZ", "ZN", "FE2"
-    if (/^[A-Za-z][A-Za-z0-9]{1,4}$/.test(tok)) {
+    // Single chain character e.g. "A", "a", "B", "C" (case-sensitive!)
+    const chainOnly = /^([A-Za-z])$/.exec(tok);
+    if (chainOnly) {
+      rules.push({ kind: 'chain', chain: chainOnly[1] });
+      continue;
+    }
+    // Residue or range e.g. "A102", "A10A", "A10A-10B", "A163-181", "AA1-5", "B19-27"
+    // Also allow bare ligand comp_ids ending in digits like "FE2", "PO4", "SO4", "PG4", "P6G"
+    const range = parseCropRangeSpec(tok);
+    if (range) {
+      rules.push({ kind: 'range', ...range });
+      if (!tok.includes('-') && /^[A-Za-z][A-Za-z0-9]{1,4}$/.test(tok)) {
+        rules.push({ kind: 'ligand', compId: tok.toUpperCase() });
+      }
+      continue;
+    }
+    // Bare ligand comp_id or multi-char chain token e.g. "SAM", "DHZ", "ZN", "1PE", "AA"
+    if (/^[A-Za-z0-9]{2,5}$/.test(tok) && /[A-Za-z]/.test(tok)) {
       rules.push({ kind: 'ligand', compId: tok.toUpperCase() });
+      if (/^[A-Za-z]/.test(tok)) {
+        rules.push({ kind: 'chain', chain: tok });
+      }
+      continue;
     }
+    invalidTokens.push(tok);
   }
-  return rules;
+  return { rules, invalidTokens };
 }
 
 function matchesRawCropRule(
@@ -860,29 +1319,35 @@ function matchesRawCropRule(
   group: string,
   chain: string,
   resNum: number | null,
+  insCode: string,
   compId: string,
 ): boolean {
-  const ch = chain.toUpperCase();
   const comp = compId.toUpperCase();
   // Check explicit ligand rules BEFORE WATER_RESNAMES filter so explicitly requested
-  // ions/buffers like CIT, PO4, NA, K, CL (e.g. "A:CIT", "A:PO4", "A:K") are retained.
+  // ions/buffers like CIT, PO4, NA, K, CL, FE2 (e.g. "A:CIT", "PO4", "FE2") are retained.
+  // Guard against matching standard polymer amino-acid ATOM records as ligands.
   for (const r of rules) {
     if (r.kind === 'ligand') {
-      if (comp === r.compId && (!r.chain || r.chain === ch)) return true;
+      if (
+        comp === r.compId &&
+        (group === 'HETATM' || !AA3_TO_AA1[comp]) &&
+        (!r.chain || r.chain === chain)
+      ) {
+        return true;
+      }
     }
   }
   if (WATER_RESNAMES.has(comp)) return false;
   for (const r of rules) {
     if (r.kind === 'chain') {
-      // Whole-chain crop keeps polymer ATOM records (protein + nucleic acids) on that chain
-      if (group === 'ATOM' && ch === r.chain) return true;
+      // Whole-chain crop keeps polymer ATOM records (protein + nucleic acids) on that chain (case-sensitive!)
+      if (group === 'ATOM' && chain === r.chain) return true;
     } else if (r.kind === 'range') {
       if (
         (group === 'ATOM' || comp === 'MSE') &&
-        ch === r.chain &&
+        chain === r.chain &&
         resNum !== null &&
-        resNum >= (r.start ?? 0) &&
-        resNum <= (r.end ?? 0)
+        matchesResNumAndIns(resNum, insCode, r.start ?? 0, r.end ?? 0, r.startIns, r.endIns)
       ) {
         return true;
       }
@@ -905,10 +1370,16 @@ export function cropRawAllAtomStructure(
   rawText: string,
   segmentSpec: string,
 ): { text: string; format: 'mmcif' | 'pdb'; keptAtomLines: number } {
-  const rules = parseRawCropRules(segmentSpec);
+  const trimmedSpec = segmentSpec.trim();
   const isCif = /^\s*(data_|loop_|_atom_site\.)/m.test(rawText);
-  if (rules.length === 0) {
+  if (!trimmedSpec) {
     return { text: rawText, format: isCif ? 'mmcif' : 'pdb', keptAtomLines: 1 };
+  }
+  const { rules, invalidTokens } = parseRawCropRules(trimmedSpec);
+  if (invalidTokens.length > 0 || rules.length === 0) {
+    throw new Error(
+      `Invalid segment crop "${segmentSpec}": unrecognized token(s) ${invalidTokens.length > 0 ? invalidTokens.join(', ') : trimmedSpec}.`,
+    );
   }
 
   if (isCif) {
@@ -924,6 +1395,7 @@ export function cropRawAllAtomStructure(
     let iLabelAsym = -1;
     let iAuthSeq = -1;
     let iLabelSeq = -1;
+    let iIns = -1;
     let iLabelComp = -1;
     let iAuthComp = -1;
     let firstModelNum: string | null = null;
@@ -962,25 +1434,30 @@ export function cropRawAllAtomStructure(
           iLabelAsym = cols.indexOf('label_asym_id');
           iAuthSeq = cols.indexOf('auth_seq_id');
           iLabelSeq = cols.indexOf('label_seq_id');
+          iIns = cols.indexOf('pdbx_PDB_ins_code');
           iLabelComp = cols.indexOf('label_comp_id');
           iAuthComp = cols.indexOf('auth_comp_id');
           colMapReady = true;
         }
-        const get = (idx: number): string => (idx >= 0 ? toks[idx] : '');
-        const modelNum = get(iModel);
-        if (modelNum && modelNum !== '.' && modelNum !== '?') {
+        const cifVal = (idx: number): string => {
+          const v = idx >= 0 ? toks[idx] : '';
+          return v === '.' || v === '?' ? '' : v;
+        };
+        const modelNum = cifVal(iModel);
+        if (modelNum) {
           if (firstModelNum === null) firstModelNum = modelNum;
           else if (modelNum !== firstModelNum) continue;
         }
-        const altId = get(iAlt);
-        if (altId && altId !== '.' && altId !== '?' && altId !== 'A' && altId !== '1') continue;
+        const altId = cifVal(iAlt);
+        if (altId && altId !== 'A' && altId !== '1') continue;
 
-        const grp = (get(iGroup) || 'ATOM').toUpperCase();
-        const ch = get(iAuthAsym) || get(iLabelAsym) || 'A';
-        const seqStr = get(iAuthSeq) || get(iLabelSeq);
+        const grp = (cifVal(iGroup) || 'ATOM').toUpperCase();
+        const ch = cifVal(iAuthAsym) || cifVal(iLabelAsym) || 'A';
+        const seqStr = cifVal(iAuthSeq) || cifVal(iLabelSeq);
         const rn = parseInt(seqStr, 10);
-        const comp = get(iLabelComp) || get(iAuthComp) || '';
-        if (matchesRawCropRule(rules, grp, ch, Number.isFinite(rn) ? rn : null, comp)) {
+        const insCode = cifVal(iIns);
+        const comp = cifVal(iLabelComp) || cifVal(iAuthComp) || '';
+        if (matchesRawCropRule(rules, grp, ch, Number.isFinite(rn) ? rn : null, insCode, comp)) {
           out.push(raw);
           kept++;
         }
@@ -1063,12 +1540,21 @@ export function cropRawAllAtomStructure(
     return { text: out.join('\n'), format: 'mmcif', keptAtomLines: kept };
   }
 
-  // Raw PDB filter (preserves all sidechain ATOM & matching HETATM records verbatim)
+  // Raw PDB filter (preserves all sidechain ATOM, matching HETATM, and RECONSTRUCTED_O provenance)
   const lines = rawText.split('\n');
-  const out: string[] = [];
+  const inputReconOKeys = new Set<string>();
+  const keptReconOKeys: string[] = [];
+  const seenKeptReconO = new Set<string>();
+  const headerOut: string[] = [];
+  const bodyOut: string[] = [];
   let kept = 0;
   let seenAtom = false;
   for (const line of lines) {
+    if (line.startsWith('REMARK 250 RECONSTRUCTED_O ')) {
+      const keys = line.slice('REMARK 250 RECONSTRUCTED_O '.length).trim().split(/\s+/).filter(Boolean);
+      for (const k of keys) inputReconOKeys.add(k);
+      continue;
+    }
     if (line.startsWith('ENDMDL') && seenAtom) break;
     if (line.startsWith('ATOM  ') || line.startsWith('HETATM')) {
       seenAtom = true;
@@ -1077,31 +1563,43 @@ export function cropRawAllAtomStructure(
       const grp = line.startsWith('HETATM') ? 'HETATM' : 'ATOM';
       const comp = line.slice(17, 20).trim();
       const ch = (line[21] ?? 'A').trim() || 'A';
-      const rn = parseInt(line.slice(22, 26).trim(), 10);
-      if (matchesRawCropRule(rules, grp, ch, Number.isFinite(rn) ? rn : null, comp)) {
-        out.push(line);
+      const rnStr = line.slice(22, 26).trim();
+      const rn = parseInt(rnStr, 10);
+      const insCode = (line[26] ?? ' ').trim();
+      if (matchesRawCropRule(rules, grp, ch, Number.isFinite(rn) ? rn : null, insCode, comp)) {
+        bodyOut.push(line);
         kept++;
+        const rKey = `${ch}:${rnStr}:${insCode}`;
+        if (inputReconOKeys.has(rKey) && !seenKeptReconO.has(rKey)) {
+          seenKeptReconO.add(rKey);
+          keptReconOKeys.push(rKey);
+        }
       }
     } else if (
       line.startsWith('HEADER') ||
       line.startsWith('TITLE') ||
       line.startsWith('CRYST1')
     ) {
-      out.push(line);
+      headerOut.push(line);
     }
   }
-  out.push('END');
   if (kept === 0) {
     throw new Error(
       `Segment crop "${segmentSpec}" matched 0 atoms in PDB structure. Clear the crop or check chain/residue/ligand codes.`,
     );
   }
+  const reconRemarks: string[] = [];
+  for (let k = 0; k < keptReconOKeys.length; k += 8) {
+    reconRemarks.push(`REMARK 250 RECONSTRUCTED_O ${keptReconOKeys.slice(k, k + 8).join(' ')}`);
+  }
+  const out = [...headerOut, ...reconRemarks, ...bodyOut, 'END'];
   return { text: out.join('\n') + '\n', format: 'pdb', keptAtomLines: kept };
 }
 
 /**
- * Crop a ParsedStructure to specific chains or residue ranges (e.g. "A163-181", "A16-35, A52-71", "A").
- * Preserves exact original PDB chain IDs and residue numbers so downstream hotspots/motif spans match verbatim.
+ * Crop a ParsedStructure to specific chains or residue ranges (e.g. "A163-181", "A16-35, A52-71", "A", "A10A", "AA1-5").
+ * Preserves exact original chain IDs, residue numbers, insertion codes, source-residue identity,
+ * and observed-atom presence masks without fabricating missing backbone atoms.
  */
 export function cropParsedStructure(parsed: ParsedStructure, segmentSpec: string): ParsedStructure {
   const tokens = segmentSpec
@@ -1114,32 +1612,45 @@ export function cropParsedStructure(parsed: ParsedStructure, segmentSpec: string
     chain: string;
     start: number | null;
     end: number | null;
+    startIns?: string;
+    endIns?: string;
   }
   const rules: CropRule[] = [];
+  const invalidTokens: string[] = [];
   for (const tok of tokens) {
-    const chainOnly = /^([A-Za-z])$/.exec(tok);
-    if (chainOnly) {
-      rules.push({ chain: chainOnly[1].toUpperCase(), start: null, end: null });
+    const chainOnly = /^([A-Za-z][A-Za-z0-9_]*)$/.exec(tok);
+    if (chainOnly && !/^[A-Za-z]+\d/.test(tok)) {
+      rules.push({ chain: chainOnly[1], start: null, end: null });
       continue;
     }
-    const rangeMatch = /^([A-Za-z])?:?(\d+)(?:-(\d+))?$/.exec(tok);
-    if (rangeMatch) {
-      const chain = (rangeMatch[1] || 'A').toUpperCase();
-      const start = parseInt(rangeMatch[2], 10);
-      const end = rangeMatch[3] ? parseInt(rangeMatch[3], 10) : start;
-      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
-        rules.push({ chain, start, end });
-      }
+    const range = parseCropRangeSpec(tok);
+    if (range) {
+      rules.push({
+        chain: range.chain,
+        start: range.start,
+        end: range.end,
+        ...(range.startIns ? { startIns: range.startIns } : {}),
+        ...(range.endIns ? { endIns: range.endIns } : {}),
+      });
+      continue;
     }
+    invalidTokens.push(tok);
   }
-  if (rules.length === 0) return parsed;
+  if (invalidTokens.length > 0 || rules.length === 0) {
+    throw new Error(
+      `Invalid segment crop "${segmentSpec}": unrecognized token(s) ${invalidTokens.length > 0 ? invalidTokens.join(', ') : segmentSpec}.`,
+    );
+  }
 
   const keptIndices: number[] = [];
   for (let i = 0; i < parsed.nResidues; i++) {
-    const ch = (parsed.chainIds[i] || 'A').toUpperCase();
+    const ch = parsed.chainIds[i] || 'A';
     const rn = parsed.resNums[i] ?? i + 1;
+    const ins = parsed.insCodes?.[i] ?? '';
     const match = rules.some(
-      (r) => r.chain === ch && (r.start === null || (rn >= r.start && rn <= (r.end ?? r.start))),
+      (r) =>
+        r.chain === ch &&
+        (r.start === null || matchesResNumAndIns(rn, ins, r.start, r.end ?? r.start, r.startIns, r.endIns)),
     );
     if (match) keptIndices.push(i);
   }
@@ -1155,7 +1666,9 @@ export function cropParsedStructure(parsed: ParsedStructure, segmentSpec: string
   const backbone4Coords = new Float32Array(L * 4 * 3);
   const chainIds: string[] = [];
   const resNums: number[] = [];
-  const resSeqs: string[] = [];
+  const insCodes: string[] = [];
+  const atomPresence: BackboneAtomPresence[] = [];
+  const observedBackboneMask = new Uint8Array(L);
   let seq = '';
 
   for (let j = 0; j < L; j++) {
@@ -1164,7 +1677,16 @@ export function cropParsedStructure(parsed: ParsedStructure, segmentSpec: string
     chainIds.push(parsed.chainIds[src] ?? 'A');
     const rn = parsed.resNums[src] ?? src + 1;
     resNums.push(rn);
-    resSeqs.push(String(rn));
+    insCodes.push(parsed.insCodes?.[src] ?? '');
+    const srcPresence: BackboneAtomPresence = parsed.atomPresence?.[src]
+      ? { ...parsed.atomPresence[src] }
+      : { hasN: true, hasCA: true, hasC: true, hasO: true, oReconstructed: false };
+    atomPresence.push(srcPresence);
+    observedBackboneMask[j] =
+      parsed.observedBackboneMask !== undefined
+        ? parsed.observedBackboneMask[src]
+        : presenceToBitmask(srcPresence);
+
     caCoords[j * 3 + 0] = parsed.caCoords[src * 3 + 0];
     caCoords[j * 3 + 1] = parsed.caCoords[src * 3 + 1];
     caCoords[j * 3 + 2] = parsed.caCoords[src * 3 + 2];
@@ -1173,12 +1695,29 @@ export function cropParsedStructure(parsed: ParsedStructure, segmentSpec: string
     }
   }
 
+  const { projectedChainIds, chainIdMap } = projectChainIdsToPdb(chainIds);
+  const sourceResidues: SourceResidueId[] = keptIndices.map((src, j) => {
+    const prev = parsed.sourceResidues?.[src];
+    return {
+      index: j,
+      authChainId: prev?.authChainId ?? chainIds[j],
+      ...(prev?.labelChainId ? { labelChainId: prev.labelChainId } : {}),
+      resNum: prev?.resNum ?? resNums[j],
+      ...(prev?.labelSeqId !== undefined ? { labelSeqId: prev.labelSeqId } : {}),
+      insCode: prev?.insCode ?? insCodes[j],
+      resName: prev?.resName ?? (AA1_TO_AA3[seq[j]?.toUpperCase() ?? 'X'] ?? 'UNK'),
+      projectedChainId: projectedChainIds[j],
+    };
+  });
+
   const chainLengths = computeChainLengthsFromIds(chainIds);
   const pdbText = coordsToBackbonePdb(backbone4Coords, L, {
     atomsPerRes: 4,
     sequence: seq,
-    chainIds,
-    resSeqs,
+    chainIds: projectedChainIds,
+    resSeqs: resNums,
+    insCodes,
+    observedBackboneMask,
   });
 
   return {
@@ -1188,6 +1727,12 @@ export function cropParsedStructure(parsed: ParsedStructure, segmentSpec: string
     backbone4Coords,
     chainIds,
     resNums,
+    insCodes,
+    sourceResidues,
+    projectedChainIds,
+    chainIdMap,
+    atomPresence,
+    observedBackboneMask,
     pdbText,
     format: 'pdb',
     diagnostics: {

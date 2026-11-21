@@ -3,14 +3,21 @@ import {
   AA1_TO_AA3,
   AA3_TO_AA1,
   AF2_ATOM37_NAMES,
+  BACKBONE_MASK_C,
+  BACKBONE_MASK_CA,
+  BACKBONE_MASK_N,
+  BACKBONE_MASK_O,
   atom37ToPdb,
   coordsToBackbonePdb,
   coordsToMultiModelPdb,
+  cropParsedStructure,
   cropRawAllAtomStructure,
   extractCaFromBackbone,
   generateSampleHelixBundlePdb,
+  getMissingBackboneResidues,
   parsePdbBackbone,
   parseStructureText,
+  projectChainIdsToPdb,
   reconstructBackboneOxygen,
 } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
@@ -608,5 +615,374 @@ describe('protein-ops/pdb', () => {
     expect(chainOnly.text).not.toContain('CIT');
     expect(chainOnly.text).not.toContain('PO4');
     expect(chainOnly.text).not.toContain('HOH');
+  });
+
+  it('preserves multi-char mmCIF chains (AA/AB res 1) and insertion codes (100A/100B) bijectively across PDB projection', () => {
+    const twoChainCif = [
+      'data_multichar_chains',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.label_asym_id',
+      '_atom_site.label_seq_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.pdbx_PDB_ins_code',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      'ATOM 1 N ALA A 1 AA 1 ? 0.000 0.000 0.000',
+      'ATOM 2 CA ALA A 1 AA 1 ? 1.458 0.000 0.000',
+      'ATOM 3 C ALA A 1 AA 1 ? 2.009 1.420 0.000',
+      'ATOM 4 O ALA A 1 AA 1 ? 1.251 2.390 0.000',
+      'ATOM 5 N GLY B 1 AB 1 ? 10.000 0.000 0.000',
+      'ATOM 6 CA GLY B 1 AB 1 ? 11.458 0.000 0.000',
+      'ATOM 7 C GLY B 1 AB 1 ? 12.009 1.420 0.000',
+      'ATOM 8 O GLY B 1 AB 1 ? 11.251 2.390 0.000',
+      '#',
+    ].join('\n');
+
+    const parsed = parseStructureText(twoChainCif);
+    expect(parsed.format).toBe('mmcif');
+    expect(parsed.nResidues).toBe(2);
+    expect(parsed.sequence).toBe('AG');
+    expect(parsed.chainIds).toEqual(['AA', 'AB']);
+    expect(parsed.projectedChainIds).toEqual(['A', 'B']);
+    expect(parsed.chainIdMap).toEqual({ A: 'AA', B: 'AB' });
+    expect(parsed.insCodes).toEqual(['', '']);
+    expect(parsed.sourceResidues).toEqual([
+      {
+        index: 0,
+        authChainId: 'AA',
+        labelChainId: 'A',
+        resNum: 1,
+        labelSeqId: 1,
+        insCode: '',
+        resName: 'ALA',
+        projectedChainId: 'A',
+      },
+      {
+        index: 1,
+        authChainId: 'AB',
+        labelChainId: 'B',
+        resNum: 1,
+        labelSeqId: 1,
+        insCode: '',
+        resName: 'GLY',
+        projectedChainId: 'B',
+      },
+    ]);
+
+    // Reparsing derived PDB must preserve BOTH residues (AG, length 2) and map cleanly back to AA:1 / AB:1
+    const reparsed = parsePdbBackbone(parsed.pdbText);
+    expect(reparsed.nResidues).toBe(2);
+    expect(reparsed.sequence).toBe('AG');
+    expect(reparsed.chainIds).toEqual(['A', 'B']);
+    expect(reparsed.resNums).toEqual([1, 1]);
+    expect(reparsed.chainIds.map((ch) => parsed.chainIdMap[ch])).toEqual(['AA', 'AB']);
+
+    // Multi-char chains mixed with existing single-char chain 'A' + insertion codes 100A / 100B
+    const insCif = [
+      'data_multichar_ins',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.pdbx_PDB_ins_code',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      'ATOM 1 CA VAL A 1 ? 0.000 0.000 0.000',
+      'ATOM 2 CA ALA AA 100 A 5.000 0.000 0.000',
+      'ATOM 3 CA CYS AA 100 B 8.800 0.000 0.000',
+      'ATOM 4 CA GLY AB 100 A 15.000 0.000 0.000',
+      '#',
+    ].join('\n');
+
+    const parsedIns = parseStructureText(insCif);
+    expect(parsedIns.sequence).toBe('VACG');
+    expect(parsedIns.chainIds).toEqual(['A', 'AA', 'AA', 'AB']);
+    // Existing 1-char 'A' stays 'A'; 'AA' -> 'B', 'AB' -> 'C' (zero collisions)
+    expect(parsedIns.projectedChainIds).toEqual(['A', 'B', 'B', 'C']);
+    expect(parsedIns.chainIdMap).toEqual({ A: 'A', B: 'AA', C: 'AB' });
+    expect(parsedIns.resNums).toEqual([1, 100, 100, 100]);
+    expect(parsedIns.insCodes).toEqual(['', 'A', 'B', 'A']);
+
+    const reparsedIns = parsePdbBackbone(parsedIns.pdbText);
+    expect(reparsedIns.nResidues).toBe(4);
+    expect(reparsedIns.sequence).toBe('VACG');
+    expect(reparsedIns.resNums).toEqual([1, 100, 100, 100]);
+    expect(reparsedIns.insCodes).toEqual(['', 'A', 'B', 'A']);
+    expect(reparsedIns.chainIds.map((ch) => parsedIns.chainIdMap[ch])).toEqual(['A', 'AA', 'AA', 'AB']);
+
+    // Direct projectChainIdsToPdb preserves case-sensitive single-char chains ('A' vs 'a')
+    // and safely handles prototype-named chains ('constructor', '__proto__')
+    const projCase = projectChainIdsToPdb(['A', 'a', 'AA', 'AB']);
+    expect(projCase.projectedChainIds).toEqual(['A', 'a', 'B', 'C']);
+    expect(projCase.chainIdMap).toEqual({ A: 'A', a: 'a', B: 'AA', C: 'AB' });
+
+    const projProto = projectChainIdsToPdb(['constructor', '__proto__']);
+    expect(projProto.projectedChainIds).toEqual(['A', 'B']);
+    expect(projProto.chainIdMap).toEqual({ A: 'constructor', B: '__proto__' });
+    expect(projProto.sourceToProjected.constructor).toBe('A');
+    expect(Object.getOwnPropertyDescriptor(projProto.sourceToProjected, '__proto__')?.value).toBe('B');
+  });
+
+  it('tracks observed backbone atom presence without fabricating missing N/C/O and reports incomplete residues via getMissingBackboneResidues', () => {
+    const mixedCif = [
+      'data_mixed_coverage',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      // Residue 0 (AA:1): complete N, CA, C, O
+      'ATOM 1 N ALA AA 1 0.000 0.000 0.000',
+      'ATOM 2 CA ALA AA 1 1.458 0.000 0.000',
+      'ATOM 3 C ALA AA 1 2.009 1.420 0.000',
+      'ATOM 4 O ALA AA 1 1.251 2.390 0.000',
+      // Residue 1 (AB:1): strictly CA-only at (4, 1, 1)
+      'ATOM 5 CA GLY AB 1 4.000 1.000 1.000',
+      '#',
+    ].join('\n');
+
+    const parsed = parseStructureText(mixedCif);
+    expect(parsed.nResidues).toBe(2);
+    expect(parsed.sequence).toBe('AG');
+    expect(parsed.atomPresence).toEqual([
+      { hasN: true, hasCA: true, hasC: true, hasO: true, oReconstructed: false },
+      { hasN: false, hasCA: true, hasC: false, hasO: false, oReconstructed: false },
+    ]);
+    expect(Array.from(parsed.observedBackboneMask)).toEqual([
+      BACKBONE_MASK_N | BACKBONE_MASK_CA | BACKBONE_MASK_C | BACKBONE_MASK_O,
+      BACKBONE_MASK_CA,
+    ]);
+
+    // Residue 1 CA is exact (4, 1, 1), while missing N, C, and O remain NaN (never copied from CA!)
+    expect(parsed.caCoords[3]).toBeCloseTo(4.0, 3);
+    expect(parsed.caCoords[4]).toBeCloseTo(1.0, 3);
+    expect(parsed.caCoords[5]).toBeCloseTo(1.0, 3);
+    expect(Number.isNaN(parsed.backbone4Coords[(1 * 4 + 0) * 3])).toBe(true); // N
+    expect(parsed.backbone4Coords[(1 * 4 + 1) * 3]).toBeCloseTo(4.0, 3);      // CA
+    expect(Number.isNaN(parsed.backbone4Coords[(1 * 4 + 2) * 3])).toBe(true); // C
+    expect(Number.isNaN(parsed.backbone4Coords[(1 * 4 + 3) * 3])).toBe(true); // O
+
+    // Emitted PDB projection contains ONLY observed CA for chain B (projected AB), zero fabricated N/C/O
+    const chainBLines = parsed.pdbText
+      .split('\n')
+      .filter((l) => l.startsWith('ATOM  ') && l[21] === 'B');
+    expect(chainBLines).toHaveLength(1);
+    expect(chainBLines[0].slice(12, 16).trim()).toBe('CA');
+    expect(parsed.pdbText).not.toContain('NaN');
+
+    // Reparsing the emitted PDB yields identical atom presence & zero fabricated atoms
+    const reparsed = parsePdbBackbone(parsed.pdbText);
+    expect(reparsed.nResidues).toBe(2);
+    expect(reparsed.sequence).toBe('AG');
+    expect(reparsed.atomPresence[1]).toEqual({
+      hasN: false,
+      hasCA: true,
+      hasC: false,
+      hasO: false,
+      oReconstructed: false,
+    });
+    expect(Number.isNaN(reparsed.backbone4Coords[(1 * 4 + 0) * 3])).toBe(true);
+    expect(Number.isNaN(reparsed.backbone4Coords[(1 * 4 + 2) * 3])).toBe(true);
+    expect(Number.isNaN(reparsed.backbone4Coords[(1 * 4 + 3) * 3])).toBe(true);
+
+    // Validator helper reports missing measured atoms BEFORE execution
+    const missingAll = getMissingBackboneResidues(parsed);
+    expect(missingAll).toHaveLength(1);
+    expect(missingAll[0].index).toBe(1);
+    expect(missingAll[0].source.authChainId).toBe('AB');
+    expect(missingAll[0].source.resNum).toBe(1);
+    expect(missingAll[0].source.resName).toBe('GLY');
+    expect(missingAll[0].missingAtoms).toEqual(['N', 'C', 'O']);
+    expect(getMissingBackboneResidues(parsed, ['CA'])).toEqual([]);
+
+    // Mixed-coverage PDB: res 0 has N/CA/C (missing O, valid reconstruction); res 1 is CA-only; res 2 has CA+O
+    const mixedPdb = [
+      'ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 50.00           N  ',
+      'ATOM      2  CA  ALA A   1       1.458   0.000   0.000  1.00 50.00           C  ',
+      'ATOM      3  C   ALA A   1       2.009   1.420   0.000  1.00 50.00           C  ',
+      'ATOM      4  CA  GLY A   2       4.000   1.000   1.000  1.00 50.00           C  ',
+      'ATOM      5  CA  VAL A   3       7.800   1.000   1.000  1.00 50.00           C  ',
+      'ATOM      6  O   VAL A   3       8.500   2.000   1.500  1.00 50.00           O  ',
+      'END',
+    ].join('\n');
+    const parsedMixedPdb = parsePdbBackbone(mixedPdb);
+    // Res 0 O was validly reconstructed using (N,CA,C) fallback without NaN contamination from res 1
+    expect(parsedMixedPdb.atomPresence[0]).toEqual({
+      hasN: true,
+      hasCA: true,
+      hasC: true,
+      hasO: false,
+      oReconstructed: true,
+    });
+    expect(Number.isFinite(parsedMixedPdb.backbone4Coords[(0 * 4 + 3) * 3])).toBe(true);
+    // Res 1 remains strictly CA-only
+    expect(parsedMixedPdb.atomPresence[1]).toEqual({
+      hasN: false,
+      hasCA: true,
+      hasC: false,
+      hasO: false,
+      oReconstructed: false,
+    });
+    expect(Number.isNaN(parsedMixedPdb.backbone4Coords[(1 * 4 + 0) * 3])).toBe(true);
+    expect(Number.isNaN(parsedMixedPdb.backbone4Coords[(1 * 4 + 3) * 3])).toBe(true);
+    // Res 2 preserves observed O while reporting missing N and C
+    expect(parsedMixedPdb.atomPresence[2]).toEqual({
+      hasN: false,
+      hasCA: true,
+      hasC: false,
+      hasO: true,
+      oReconstructed: false,
+    });
+    expect(parsedMixedPdb.backbone4Coords[(2 * 4 + 3) * 3]).toBeCloseTo(8.5, 3);
+    expect(getMissingBackboneResidues(parsedMixedPdb).map((m) => [m.index, m.missingAtoms])).toEqual([
+      [0, ['O']],
+      [1, ['N', 'C', 'O']],
+      [2, ['N', 'C']],
+    ]);
+    expect(
+      getMissingBackboneResidues(parsedMixedPdb, ['N', 'CA', 'C', 'O'], { allowReconstructedO: true }).map(
+        (m) => [m.index, m.missingAtoms],
+      ),
+    ).toEqual([
+      [1, ['N', 'C', 'O']],
+      [2, ['N', 'C']],
+    ]);
+
+    // Round-tripping the patched PDB preserves reconstructed-O provenance (never upgrades it to observed O!)
+    const reparsedMixedPdb = parsePdbBackbone(parsedMixedPdb.pdbText);
+    expect(reparsedMixedPdb.atomPresence[0]).toEqual({
+      hasN: true,
+      hasCA: true,
+      hasC: true,
+      hasO: false,
+      oReconstructed: true,
+    });
+    expect(getMissingBackboneResidues(reparsedMixedPdb).map((m) => [m.index, m.missingAtoms])).toEqual([
+      [0, ['O']],
+      [1, ['N', 'C', 'O']],
+      [2, ['N', 'C']],
+    ]);
+
+    // coordsToBackbonePdb directly respects observedBackboneMask and bijectively projects multi-char chains
+    const directPdb = coordsToBackbonePdb(parsed.backbone4Coords, 2, {
+      atomsPerRes: 4,
+      sequence: 'AG',
+      chainIds: ['AA', 'AB'],
+      resSeqs: [1, 1],
+      observedBackboneMask: parsed.observedBackboneMask,
+    });
+    const directReparsed = parsePdbBackbone(directPdb);
+    expect(directReparsed.sequence).toBe('AG');
+    expect(directReparsed.chainIds).toEqual(['A', 'B']);
+    expect(directReparsed.atomPresence[1].hasN).toBe(false);
+    expect(directReparsed.atomPresence[1].hasC).toBe(false);
+    expect(directReparsed.atomPresence[1].hasO).toBe(false);
+  });
+
+  it('cropParsedStructure & cropRawAllAtomStructure preserve insertion codes, case-sensitive chains, observed-atom masks, and reject malformed specs', () => {
+    const insPdb = [
+      'ATOM      1  N   ALA A  10       0.000   0.000   0.000  1.00 50.00           N  ',
+      'ATOM      2  CA  ALA A  10       1.458   0.000   0.000  1.00 50.00           C  ',
+      'ATOM      3  C   ALA A  10       2.009   1.420   0.000  1.00 50.00           C  ',
+      'ATOM      4  O   ALA A  10       1.251   2.390   0.000  1.00 50.00           O  ',
+      // Insertion code 10A is CA-only
+      'ATOM      5  CA  CYS A  10A      4.000   2.800   0.000  1.00 50.00           C  ',
+      'ATOM      6  N   ASP A  11       6.000   2.600   0.000  1.00 50.00           N  ',
+      'ATOM      7  CA  ASP A  11       7.458   2.600   0.000  1.00 50.00           C  ',
+      'ATOM      8  C   ASP A  11       8.009   4.020   0.000  1.00 50.00           C  ',
+      'ATOM      9  O   ASP A  11       7.251   4.990   0.000  1.00 50.00           O  ',
+      'TER',
+      // Lowercase chain 'a' must remain distinct from uppercase 'A'
+      'ATOM     10  CA  GLU a   1      20.000   0.000   0.000  1.00 50.00           C  ',
+      'ATOM     11  CA  PHE a   2      23.800   0.000   0.000  1.00 50.00           C  ',
+      'ATOM     12  CA  GLY a   3      27.600   0.000   0.000  1.00 50.00           C  ',
+      'END',
+    ].join('\n');
+
+    const parsed = parsePdbBackbone(insPdb);
+    // Cropping A10-11 keeps A10, A10A, A11 (ACD), preserves insertion code 10A, and does NOT fabricate N/C/O for 10A
+    const croppedA = cropParsedStructure(parsed, 'A10-11');
+    expect(croppedA.nResidues).toBe(3);
+    expect(croppedA.sequence).toBe('ACD');
+    expect(croppedA.insCodes).toEqual(['', 'A', '']);
+    expect(croppedA.atomPresence[1]).toEqual({
+      hasN: false,
+      hasCA: true,
+      hasC: false,
+      hasO: false,
+      oReconstructed: false,
+    });
+    const reparsedCropA = parsePdbBackbone(croppedA.pdbText);
+    expect(reparsedCropA.nResidues).toBe(3);
+    expect(reparsedCropA.sequence).toBe('ACD');
+    expect(reparsedCropA.insCodes).toEqual(['', 'A', '']);
+    expect(reparsedCropA.atomPresence[1].hasN).toBe(false);
+    expect(reparsedCropA.atomPresence[1].hasC).toBe(false);
+    expect(reparsedCropA.atomPresence[1].hasO).toBe(false);
+
+    // Case-sensitive chain selection: 'a' selects ONLY lowercase chain 'a' (EFG), NOT uppercase 'A'
+    const croppedLower = cropParsedStructure(parsed, 'a');
+    expect(croppedLower.sequence).toBe('EFG');
+    expect(croppedLower.chainIds).toEqual(['a', 'a', 'a']);
+
+    const rawLower = cropRawAllAtomStructure(insPdb, 'a');
+    expect(parsePdbBackbone(rawLower.text).sequence).toBe('EFG');
+
+    // Explicit insertion-code crop rule 'A10A' works in raw cropper
+    const rawInsOnly = cropRawAllAtomStructure(insPdb, 'A10A');
+    expect(parsePdbBackbone(rawInsOnly.text).sequence).toBe('C');
+
+    // Bare ligand names ending in digits (FE2, PO4, SO4) must still match HETATM records
+    const metalPdb =
+      insPdb.replace(/END\s*$/, '') +
+      'HETATM   13 FE   FE2 A 201      10.000  10.000  10.000  1.00 20.00          FE  \n' +
+      'HETATM   14  P   PO4 A 202      12.000  10.000  10.000  1.00 20.00           P  \n' +
+      'HETATM   15  S   SO4 A 203      14.000  10.000  10.000  1.00 20.00           S  \n' +
+      'END\n';
+    expect(cropRawAllAtomStructure(metalPdb, 'FE2').text).toContain('FE2 A 201');
+    expect(cropRawAllAtomStructure(metalPdb, 'PO4, SO4').keptAtomLines).toBe(2);
+
+    // Raw crop preserves REMARK 250 RECONSTRUCTED_O so reconstructed O is NOT upgraded to observed O
+    const ncacNoO = [
+      'ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 50.00           N  ',
+      'ATOM      2  CA  ALA A   1       1.458   0.000   0.000  1.00 50.00           C  ',
+      'ATOM      3  C   ALA A   1       2.009   1.420   0.000  1.00 50.00           C  ',
+      'ATOM      4  N   GLY A   2       3.320   1.500   0.000  1.00 50.00           N  ',
+      'ATOM      5  CA  GLY A   2       4.000   2.800   0.000  1.00 50.00           C  ',
+      'ATOM      6  C   GLY A   2       5.500   2.600   0.000  1.00 50.00           C  ',
+      'END',
+    ].join('\n');
+    const parsedNoO = parsePdbBackbone(ncacNoO);
+    const rawCroppedNoO = cropRawAllAtomStructure(parsedNoO.pdbText, 'A1');
+    const reparsedRawCropNoO = parsePdbBackbone(rawCroppedNoO.text);
+    expect(reparsedRawCropNoO.atomPresence[0]).toEqual({
+      hasN: true,
+      hasCA: true,
+      hasC: true,
+      hasO: false,
+      oReconstructed: true,
+    });
+    expect(getMissingBackboneResidues(reparsedRawCropNoO)).toHaveLength(1);
+
+    // Malformed full OR partial crop specs throw instead of silently ignoring invalid tokens
+    expect(() => cropParsedStructure(parsed, '???')).toThrow(/Invalid segment crop/i);
+    expect(() => cropParsedStructure(parsed, 'A10-11, ???')).toThrow(/Invalid segment crop/i);
+    expect(() => cropRawAllAtomStructure(insPdb, '???')).toThrow(/Invalid segment crop/i);
+    expect(() => cropRawAllAtomStructure(insPdb, 'A10,???')).toThrow(/Invalid segment crop/i);
   });
 });

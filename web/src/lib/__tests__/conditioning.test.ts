@@ -12,6 +12,7 @@ import {
   isBareLengthContig,
   pdbTextToSplitCifText,
   resolveGenie3PolyAlaSequence,
+  resolveMotifSourceResidues,
 } from '$lib/engine/conditioning';
 import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
 import { isValidPdbId } from '$lib/protein-ops/rcsb';
@@ -407,5 +408,374 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
     expect(effectiveGenie3DdimSteps(100)).toBe(100);
     expect(effectiveGenie3DdimSteps(60)).toBe(63);
     expect(effectiveGenie3DdimSteps(150)).toBe(167);
+  });
+
+  it('links motif and binder selections back to original source residues (multi-char chains + insertion codes)', () => {
+    const cif = [
+      'data_motif_identity',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.label_asym_id',
+      '_atom_site.label_seq_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.pdbx_PDB_ins_code',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      'ATOM 1 CA ALA A 1 AA 1 ? 0.000 0.000 0.000',
+      'ATOM 2 CA HIS A 2 AA 10 ? 3.800 0.000 0.000',
+      'ATOM 3 CA CYS A 3 AA 10 A 7.600 0.000 0.000',
+      'ATOM 4 CA ASP A 4 AA 10 B 11.400 0.000 0.000',
+      'ATOM 5 CA GLU A 5 AA 11 ? 15.200 0.000 0.000',
+      'ATOM 6 CA GLY B 1 AB 1 ? 25.000 0.000 0.000',
+      'ATOM 7 CA TRP B 2 AB 2 ? 28.800 0.000 0.000',
+      '#',
+    ].join('\n');
+
+    const parsed = parseStructureText(cif);
+    expect(parsed.sequence).toBe('AHCDEGW');
+    expect(parsed.chainIdMap).toEqual({ A: 'AA', B: 'AB' });
+
+    // 1. Standalone resolveMotifSourceResidues links multi-char + insCode selection back to source
+    const resolved = resolveMotifSourceResidues(parsed, 'AA1, AA10A-10B, AB1');
+    expect(resolved).toEqual([
+      {
+        outputIndex: 0,
+        templateIndex: 0,
+        authChainId: 'AA',
+        labelChainId: 'A',
+        resNum: 1,
+        labelSeqId: 1,
+        insCode: '',
+        resName: 'ALA',
+        aa1: 'A',
+        projectedChainId: 'A',
+      },
+      {
+        outputIndex: 1,
+        templateIndex: 2,
+        authChainId: 'AA',
+        labelChainId: 'A',
+        resNum: 10,
+        labelSeqId: 3,
+        insCode: 'A',
+        resName: 'CYS',
+        aa1: 'C',
+        projectedChainId: 'A',
+      },
+      {
+        outputIndex: 2,
+        templateIndex: 3,
+        authChainId: 'AA',
+        labelChainId: 'A',
+        resNum: 10,
+        labelSeqId: 4,
+        insCode: 'B',
+        resName: 'ASP',
+        aa1: 'D',
+        projectedChainId: 'A',
+      },
+      {
+        outputIndex: 3,
+        templateIndex: 5,
+        authChainId: 'AB',
+        labelChainId: 'B',
+        resNum: 1,
+        labelSeqId: 1,
+        insCode: '',
+        resName: 'GLY',
+        aa1: 'G',
+        projectedChainId: 'B',
+      },
+    ]);
+
+    const tpl: StructureArtifact = {
+      kind: 'StructureArtifact',
+      id: 'tpl-multichar',
+      label: 'multichar.cif',
+      sourceModelId: 'pdb-input',
+      length: parsed.nResidues,
+      sequence: parsed.sequence,
+      caCoords: parsed.caCoords,
+      backbone4Coords: parsed.backbone4Coords,
+      pdbText: parsed.pdbText,
+      cifText: cif,
+      chainIds: parsed.chainIds,
+      chainLengths: parsed.diagnostics.chainLengths,
+      diagnostics: parsed.diagnostics,
+      geometry: computeGeometryStats(parsed.caCoords, parsed.chainIds),
+    };
+
+    // 2. Genie 3 motif compilation preserves AA:1, AA:10A, AA:10B, AB:1 with exact outputIndex mapping
+    const motifIntent = buildCanonicalConditionIntent({
+      contig: '5-5,AA1,AA10A-10B,AB1,5-5',
+      motifSpan: 'AA1, AA10A-10B, AB1',
+    });
+    const motifCond: ConditionSpecArtifact = {
+      kind: 'ConditionSpec',
+      id: 'cond-motif-id',
+      label: 'Motif Identity',
+      contig: motifIntent.contig,
+      conditions: {},
+      intent: motifIntent,
+      summary: 'motif identity',
+    };
+    const motifSpec = compileConditionToGenie3Spec(motifCond, tpl, 20);
+    expect(motifSpec.mode).toBe('motif');
+    expect(motifSpec.length).toBe(14); // 5 + 4 + 5
+    expect(motifSpec.selectedSourceResidues.map((r) => [r.outputIndex, r.authChainId, r.resNum, r.insCode, r.resName])).toEqual([
+      [5, 'AA', 1, '', 'ALA'],
+      [6, 'AA', 10, 'A', 'CYS'],
+      [7, 'AA', 10, 'B', 'ASP'],
+      [8, 'AB', 1, '', 'GLY'],
+    ]);
+    // Verify condStructMask agrees 1:1 with selectedSourceResidues outputIndex
+    for (const r of motifSpec.selectedSourceResidues) {
+      expect(motifSpec.condStructMask[r.outputIndex]).toBe(1);
+    }
+
+    // 3. Range AA10-11 selects 10, 10A, 10B, 11 in template order without clobbering insertion codes
+    const rangeIntent = buildCanonicalConditionIntent({
+      contig: '20-20',
+      motifSpan: 'AA10-11',
+    });
+    const rangeSpec = compileConditionToGenie3Spec(
+      {
+        kind: 'ConditionSpec',
+        id: 'cond-range-ins',
+        label: 'Range Ins',
+        contig: rangeIntent.contig,
+        conditions: {},
+        intent: rangeIntent,
+        summary: 'range ins',
+      },
+      tpl,
+      20,
+    );
+    expect(rangeSpec.selectedSourceResidues.map((r) => `${r.authChainId}:${r.resNum}${r.insCode}:${r.resName}`)).toEqual([
+      'AA:10:HIS',
+      'AA:10A:CYS',
+      'AA:10B:ASP',
+      'AA:11:GLU',
+    ]);
+
+    // 4. Binder mode against multi-char chain AA preserves exact lockChain & selectedSourceResidues
+    const binderIntent = buildCanonicalConditionIntent({
+      contig: 'AA1-11,/0,25-25',
+      lockChain: 'AA',
+      hotspots: 'AA10A',
+    });
+    expect(binderIntent.lockChain).toBe('AA');
+    const binderSpec = compileConditionToGenie3Spec(
+      {
+        kind: 'ConditionSpec',
+        id: 'cond-binder-aa',
+        label: 'Binder AA',
+        contig: binderIntent.contig,
+        conditions: {},
+        intent: binderIntent,
+        summary: 'binder aa',
+      },
+      tpl,
+      25,
+    );
+    expect(binderSpec.mode).toBe('binder');
+    expect(binderSpec.chainLengths).toEqual([25, 5]);
+    expect(binderSpec.selectedSourceResidues.map((r) => [r.outputIndex, r.authChainId, r.resNum, r.insCode])).toEqual([
+      [25, 'AA', 1, ''],
+      [26, 'AA', 10, ''],
+      [27, 'AA', 10, 'A'],
+      [28, 'AA', 10, 'B'],
+      [29, 'AA', 11, ''],
+    ]);
+    // Hotspot AA10A is at outputIndex 27 only (NOT AA10 at 26 or AA10B at 28!)
+    expect(binderSpec.condInterfaceMask[26]).toBe(0);
+    expect(binderSpec.condInterfaceMask[27]).toBe(1);
+    expect(binderSpec.condInterfaceMask[28]).toBe(0);
+
+    // 5. RFD4 compilation with templateContext returns selectedSourceResidues with exact compiled outputIndex
+    const rfd4Ctx = extractRfd4TemplateContext(cif);
+    const rfd4Compiled = compileConditionToRfd4(motifIntent, rfd4Ctx);
+    expect(
+      rfd4Compiled.selectedSourceResidues?.map((r) => [
+        r.outputIndex,
+        `${r.authChainId}:${r.resNum}${r.insCode}:${r.resName}`,
+      ]),
+    ).toEqual([
+      [5, 'AA:1:ALA'],
+      [6, 'AA:10A:CYS'],
+      [7, 'AA:10B:ASP'],
+      [8, 'AB:1:GLY'],
+    ]);
+
+    // Contig-only RFD4 selection (no motifSpan) also resolves selectedSourceResidues at exact outputIndex
+    const contigOnlyRfd4 = compileConditionToRfd4(
+      buildCanonicalConditionIntent({ contig: '5-5,AA10A,5-5' }),
+      rfd4Ctx,
+    );
+    expect(contigOnlyRfd4.selectedSourceResidues?.map((r) => [r.outputIndex, r.authChainId, r.resNum, r.insCode])).toEqual([
+      [5, 'AA', 10, 'A'],
+    ]);
+
+    // Absent insertion code (e.g. A10Z) must NOT fall back to unrelated label_seq_id (e.g. A19 -> label 10)
+    const shiftedRows = Array.from(
+      { length: 10 },
+      (_, i) => `ATOM ${i + 1} CA ALA A ${i + 1} A ${i + 10} ? ${i * 4} 0 0`,
+    );
+    const shiftedCif = [
+      'data_shifted_ins',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.label_asym_id',
+      '_atom_site.label_seq_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.pdbx_PDB_ins_code',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      ...shiftedRows,
+      'ATOM 11 CA ASP B 1 AA 10 D 50 0 0',
+      '#',
+    ].join('\n');
+    const shiftedCtx = extractRfd4TemplateContext(shiftedCif);
+    const absentInsCompiled = compileConditionToRfd4(
+      buildCanonicalConditionIntent({ contig: '5-5,A10Z,5-5', motifSpan: 'A10Z' }),
+      shiftedCtx,
+    );
+    expect(absentInsCompiled.contig).toBe('5-5,A10Z,5-5');
+    expect(absentInsCompiled.selectedSourceResidues).toBeUndefined();
+
+    // Insertion codes P/R/D/N with colon syntax (e.g. AA:10D) remap cleanly instead of being treated as expandable segments
+    expect(shiftedCtx.remapContig('5-5,AA:10D,5-5')).toBe('5-5,B1,5-5');
+
+    // Named expandable segments without trailing polymer suffix (e.g. h1:5-5) advance RFD4 outputIndex accurately
+    const namedExpRfd4 = compileConditionToRfd4(
+      buildCanonicalConditionIntent({ contig: 'h1:5-5,AA10A,5-5' }),
+      rfd4Ctx,
+    );
+    expect(namedExpRfd4.selectedSourceResidues?.map((r) => [r.outputIndex, r.authChainId, r.resNum, r.insCode])).toEqual([
+      [5, 'AA', 10, 'A'],
+    ]);
+
+    // Nucleic acid residues (including T/ADE/CYT/GUA/THY/URA) and CA-less polymer residues
+    // preceding protein in mmCIF must NOT shift protein templateIndex off parseStructureText
+    const dnaFirstCif = [
+      'data_dna_before_protein',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.label_asym_id',
+      '_atom_site.label_seq_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.pdbx_PDB_ins_code',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      'ATOM 1 P DA D 1 D 1 ? 0 0 0',
+      'ATOM 2 P THY D 2 D 2 ? 3 0 0',
+      'ATOM 3 P ADE R 1 R 1 ? 6 0 0',
+      'ATOM 4 P T D 3 D 3 ? 9 0 0',
+      // CA-less protein residue A:9 (excluded by parseStructureText) must get templateIndex -1
+      'ATOM 5 N SER A 1 A 9 ? 10 0 0',
+      'ATOM 6 C SER A 1 A 9 ? 11 0 0',
+      // Observed-CA protein residues A:10 (N before CA) and A:11 must get templateIndex 0 and 1
+      'ATOM 7 N ALA A 2 A 10 ? 12 0 0',
+      'ATOM 8 CA ALA A 2 A 10 ? 13.4 0 0',
+      'ATOM 9 CA GLY A 3 A 11 ? 17.2 0 0',
+      '#',
+    ].join('\n');
+    const dnaFirstParsed = parseStructureText(dnaFirstCif);
+    expect(dnaFirstParsed.sequence).toBe('AG');
+    const dnaFirstCtx = extractRfd4TemplateContext(dnaFirstCif);
+    expect(dnaFirstCtx.byLabelRes.get('A:1')?.templateIndex).toBe(-1);
+    const dnaFirstCompiled = compileConditionToRfd4(
+      buildCanonicalConditionIntent({ contig: '5-5,A10-11,5-5' }),
+      dnaFirstCtx,
+    );
+    expect(dnaFirstCompiled.selectedSourceResidues?.map((r) => [r.outputIndex, r.templateIndex, r.resNum])).toEqual([
+      [5, 0, 10],
+      [6, 1, 11],
+    ]);
+    for (const sel of dnaFirstCompiled.selectedSourceResidues ?? []) {
+      expect(dnaFirstParsed.sourceResidues[sel.templateIndex].resNum).toBe(sel.resNum);
+    }
+
+    // Contig-only Genie 3 motif (no explicit motifSpan) compiles as motif with selectedSourceResidues
+    const contigOnlyGenieIntent = buildCanonicalConditionIntent({
+      contig: '5-5,AA1-10,5-5',
+    });
+    const contigOnlyGenie = compileConditionToGenie3Spec(
+      {
+        kind: 'ConditionSpec',
+        id: 'cond-contig-only',
+        label: 'Contig Only',
+        contig: contigOnlyGenieIntent.contig,
+        conditions: {},
+        intent: contigOnlyGenieIntent,
+        summary: 'contig only',
+      },
+      tpl,
+      20,
+    );
+    expect(contigOnlyGenie.mode).toBe('motif');
+    expect(contigOnlyGenie.selectedSourceResidues.map((r) => [r.outputIndex, r.authChainId, r.resNum, r.insCode])).toEqual([
+      [5, 'AA', 1, ''],
+      [6, 'AA', 10, ''],
+      [7, 'AA', 10, 'A'],
+      [8, 'AA', 10, 'B'],
+    ]);
+
+    // pdbTextToSplitCifText must NOT emit parser-reconstructed O atoms as observed in mmCIF
+    const ncacOnlyPdb = [
+      'ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 50.00           N  ',
+      'ATOM      2  CA  ALA A   1       1.458   0.000   0.000  1.00 50.00           C  ',
+      'ATOM      3  C   ALA A   1       2.009   1.420   0.000  1.00 50.00           C  ',
+      'END',
+    ].join('\n');
+    const parsedNcacOnly = parseStructureText(ncacOnlyPdb);
+    const splitCif = pdbTextToSplitCifText(parsedNcacOnly.pdbText);
+    const reparsedSplitCif = parseStructureText(splitCif);
+    expect(reparsedSplitCif.atomPresence[0]).toEqual({
+      hasN: true,
+      hasCA: true,
+      hasC: true,
+      hasO: false,
+      oReconstructed: true,
+    });
+
+    // H-bond remapping preserves case-sensitive lowercase chains ('a' vs 'A')
+    const caseCif = [
+      'data_case_hbond',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.label_asym_id',
+      '_atom_site.label_seq_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.pdbx_PDB_ins_code',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      'ATOM 1 CA ALA X 1 A 1 ? 0 0 0',
+      'ATOM 2 CA GLY Y 1 a 1 ? 10 0 0',
+      '#',
+    ].join('\n');
+    const caseCtx = extractRfd4TemplateContext(caseCif);
+    expect(caseCtx.remapHbondSelection("sel('a/*/1/*')")).toBe("sel('Y/*/1/*')");
+    expect(caseCtx.remapHbondSelection("sel('A/*/1/*')")).toBe("sel('X/*/1/*')");
   });
 });
