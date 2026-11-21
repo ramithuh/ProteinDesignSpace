@@ -9,6 +9,7 @@
   let hoverInfo = $state<string | null>(null);
 
   let L = $derived(pae ? Math.floor(Math.sqrt(pae.length)) : 0);
+  let compact = $derived(size < 180);
 
   $effect(() => {
     if (!canvas || !pae || L <= 0) return;
@@ -44,13 +45,15 @@
       hoverInfo = null;
       return;
     }
-    hoverInfo = `(${y + 1}, ${x + 1}) = ${val.toFixed(1)} Å`;
+    hoverInfo = compact
+      ? `(${y + 1},${x + 1}) ${val.toFixed(1)} Å`
+      : `(${y + 1}, ${x + 1}) = ${val.toFixed(1)} Å`;
   }
 </script>
 
 <div class="pae-box" style="width: {size}px">
-  <div class="pae-head">
-    <span>PAE ({L}×{L})</span>
+  <div class="pae-head" class:compact>
+    <span class="pae-title">{compact && hoverInfo ? 'PAE' : `PAE (${L}×${L})`}</span>
     <span class="hover">{hoverInfo ?? '0–30 Å'}</span>
   </div>
   {#if pae && L > 0}
@@ -74,12 +77,28 @@
   }
   .pae-head {
     display: flex;
+    align-items: center;
     justify-content: space-between;
+    gap: 4px;
+    height: 16px;
+    line-height: 16px;
+    white-space: nowrap;
+    overflow: hidden;
     font-size: 11px;
+    font-variant-numeric: tabular-nums;
     color: var(--text-muted);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
+  .pae-head.compact {
+    font-size: 10px;
+  }
+  .pae-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .hover {
+    flex-shrink: 0;
     color: var(--text-secondary);
   }
   .pae-canvas {

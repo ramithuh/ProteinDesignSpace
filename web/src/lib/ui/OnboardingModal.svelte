@@ -228,8 +228,8 @@
 
   // Position the coachmark popover RIGHT NEXT TO the spotlighted element (where the cursor should go!)
   let coachLayout = $derived.by((): { style: string; caret: CaretSide; caretOffset: number } => {
-    const cardW = Math.min(316, Math.max(250, viewportW - 24));
-    const estH = 195;
+    const cardW = Math.min(336, Math.max(260, viewportW - 24));
+    const estH = 215;
     const gap = 14;
     if (!targetRect) {
       return { style: `bottom: 24px; right: 24px; width: ${cardW}px;`, caret: 'none', caretOffset: 24 };
@@ -625,35 +625,35 @@
 
   .onb-card {
     width: 100%;
-    max-width: 540px;
+    max-width: 590px;
     background: var(--bg-surface);
     border: 1px solid var(--border-strong);
     border-radius: 14px;
     box-shadow: 0 28px 70px rgba(0, 0, 0, 0.38);
-    padding: 22px 24px 16px;
+    padding: 26px 28px 18px;
     color: var(--text-body);
     display: flex;
     flex-direction: column;
-    gap: 15px;
+    gap: 16px;
     outline: none;
   }
 
   .onb-hero {
     display: flex;
     align-items: flex-start;
-    gap: 14px;
+    gap: 15px;
   }
 
   .onb-mark {
-    width: 44px;
-    height: 44px;
+    width: 48px;
+    height: 48px;
     flex-shrink: 0;
     filter: drop-shadow(0 6px 14px rgba(37, 99, 235, 0.24));
   }
 
   h2 {
     margin: 0;
-    font-size: 19px;
+    font-size: 22px;
     font-weight: 700;
     letter-spacing: -0.3px;
     color: var(--text-primary);
@@ -665,7 +665,7 @@
 
   .onb-sub {
     margin: 4px 0 0;
-    font-size: 12.5px;
+    font-size: 14.5px;
     line-height: 1.45;
     color: var(--text-muted);
   }
@@ -673,19 +673,19 @@
   .onb-highlights {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
     background: var(--bg-surface-2);
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 12px 14px;
+    padding: 14px 16px;
   }
 
   .hl-item {
     display: flex;
     align-items: flex-start;
-    gap: 9px;
-    font-size: 12px;
-    line-height: 1.45;
+    gap: 10px;
+    font-size: 13.5px;
+    line-height: 1.5;
     color: var(--text-secondary);
   }
 
@@ -699,19 +699,19 @@
     height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
-    margin-top: 5px;
+    margin-top: 6px;
   }
 
   .gpu-notice {
     display: flex;
     align-items: flex-start;
-    gap: 9px;
-    padding: 9px 12px;
+    gap: 10px;
+    padding: 10px 14px;
     border-radius: 9px;
     background: var(--warn-bg);
     border: 1px solid var(--warn-border);
     color: var(--warn-text);
-    font-size: 11.5px;
+    font-size: 13px;
     line-height: 1.45;
   }
 
@@ -720,8 +720,8 @@
   }
 
   .warn-ico {
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
     flex-shrink: 0;
     margin-top: 1px;
   }
@@ -739,8 +739,8 @@
     border: 1px solid var(--border-strong);
     color: var(--text-secondary);
     border-radius: 8px;
-    padding: 8px 14px;
-    font-size: 12.5px;
+    padding: 9px 16px;
+    font-size: 14px;
     font-weight: 500;
     cursor: pointer;
   }
@@ -756,8 +756,8 @@
     color: #ffffff;
     border: none;
     border-radius: 8px;
-    padding: 9px 18px;
-    font-size: 13px;
+    padding: 10px 20px;
+    font-size: 14.5px;
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
@@ -773,7 +773,7 @@
   }
 
   .reopen-foot {
-    font-size: 11px;
+    font-size: 12.5px;
     color: var(--text-dim);
     text-align: center;
     margin-top: -6px;
@@ -898,7 +898,7 @@
   .c-count {
     margin-left: 4px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10px;
+    font-size: 11px;
     color: var(--text-dim);
   }
 
@@ -906,7 +906,7 @@
     background: none;
     border: none;
     color: var(--text-muted);
-    font-size: 17px;
+    font-size: 18px;
     line-height: 1;
     cursor: pointer;
     padding: 0 4px;
@@ -920,7 +920,7 @@
 
   .coach-ok {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     color: var(--ok-text, #10b981);
     background: var(--ok-bg);
@@ -931,7 +931,7 @@
   }
 
   .coach-title {
-    font-size: 13px;
+    font-size: 14.5px;
     font-weight: 600;
     color: var(--text-primary);
   }
@@ -943,8 +943,8 @@
 
   .coach-body {
     margin: 0;
-    font-size: 11.8px;
-    line-height: 1.46;
+    font-size: 13px;
+    line-height: 1.48;
     color: var(--text-secondary);
   }
 
@@ -955,7 +955,7 @@
 
   kbd {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10.5px;
+    font-size: 11.5px;
     padding: 1px 5px;
     border-radius: 4px;
     border: 1px solid var(--border-strong);
@@ -975,7 +975,7 @@
     background: none;
     border: none;
     color: var(--text-muted);
-    font-size: 11.5px;
+    font-size: 12.5px;
     cursor: pointer;
     padding: 4px 2px;
   }
@@ -990,8 +990,8 @@
     color: var(--accent-soft);
     border: 1px solid var(--accent);
     border-radius: 7px;
-    padding: 5px 11px;
-    font-size: 11.5px;
+    padding: 6px 12px;
+    font-size: 12.5px;
     font-weight: 600;
     cursor: pointer;
   }
