@@ -37,5 +37,9 @@ dist/
 *.ckpt
 
 # Synced upstream WebGPU ES modules (recreated by `node tools/sync-upstream.mjs`)
-web/static/vendor/
+# Genie 3 JS/WGSL runtime (~220 KB, no weights) is tracked so Cloudflare Pages builds
+# work without cross-repo private auth; its FP16 weights are fetched from HuggingFace.
+web/static/vendor/*
+!web/static/vendor/genie3/
+web/static/vendor/genie3/weights/
 .upstream-tmp/

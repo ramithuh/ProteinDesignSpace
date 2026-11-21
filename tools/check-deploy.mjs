@@ -18,11 +18,23 @@ if (!existsSync(resolve(buildDir, 'index.html'))) {
   process.exit(1);
 }
 
-for (const req of ['_headers', 'vendor/localfold/webgpu/index.js', 'vendor/rfd4-proteina/webgpu/index.js']) {
+for (const req of [
+  '_headers',
+  'vendor/localfold/webgpu/index.js',
+  'vendor/rfd4-proteina/webgpu/index.js',
+  'vendor/genie3/webgpu/index.js',
+]) {
   if (!existsSync(resolve(buildDir, req))) {
     console.error(`[check:deploy] FAIL: required build asset missing: ${req}`);
     process.exit(1);
   }
+}
+
+if (existsSync(resolve(buildDir, 'vendor/genie3/weights'))) {
+  console.error(
+    '[check:deploy] FAIL: vendor/genie3/weights should not be bundled in Cloudflare Pages output (serve weights from HuggingFace).',
+  );
+  process.exit(1);
 }
 
 /** @type {Array<{ path: string; bytes: number }>} */
