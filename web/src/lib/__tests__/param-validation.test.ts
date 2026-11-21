@@ -545,4 +545,45 @@ describe('parameter validation & numeric sanitization', () => {
     expect(mpnnSrc).toContain('propagatedLockedChains');
     expect(mpnnSrc).toContain('structure.chainRoles');
   });
+
+  it('Wave-4 validation: web-protein-mpnn backboneNoise & omitAminoAcids bounds and schema-driven UI wiring', () => {
+    expect(NUMERIC_SPECS['web-protein-mpnn'].backboneNoise).toMatchObject({
+      min: 0,
+      max: 1,
+      defaultValue: 0,
+    });
+    expect(
+      validateNodeParams({
+        id: 'mpnn-adv-ok',
+        adapterId: 'web-protein-mpnn',
+        params: {
+          family: 'proteinmpnn',
+          modelName: 'v_48_030',
+          backboneNoise: 0.2,
+          omitAminoAcids: 'C, M',
+          designChains: 'A',
+          tiedPositions: 'A10=B10',
+        },
+      }),
+    ).toEqual([]);
+    expect(
+      validateNodeParams({
+        id: 'mpnn-noise-high',
+        adapterId: 'web-protein-mpnn',
+        params: { backboneNoise: 1.5 },
+      }).join(' '),
+    ).toMatch(/backboneNoise/);
+    expect(
+      validateNodeParams({
+        id: 'mpnn-bad-omit',
+        adapterId: 'web-protein-mpnn',
+        params: { omitAminoAcids: 'C1Z' },
+      }).join(' '),
+    ).toMatch(/omitAminoAcids/);
+
+    const inspectorSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/NodeInspector.svelte'), 'utf8');
+    expect(inspectorSrc).toContain('SchemaParamFields');
+    expect(inspectorSrc).toContain('getVisibleParamFields');
+    expect(inspectorSrc).toContain('getActiveModeSpec');
+  });
 });

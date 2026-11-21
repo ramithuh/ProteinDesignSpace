@@ -3,9 +3,11 @@
   import {
     ADAPTER_REGISTRY,
     LOCALFOLD_MODEL_OPTIONS,
+    MPNN_CHECKPOINTS_BY_FAMILY,
     MPNN_VARIANT_OPTIONS,
     RFD4_BENCHMARK_OPTIONS,
   } from '$lib/engine/registry';
+  import { getActiveModeSpec, getVisibleParamFields } from '$lib/engine/param-schema';
   import { STAGE_COLORS } from '$lib/engine/graph-utils';
   import {
     NUMERIC_SPECS,
@@ -26,6 +28,7 @@
   import { resolveMotifSourceResidues, type SelectedMotifSourceResidue } from '$lib/engine/conditioning';
   import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
   import NumericInput from './NumericInput.svelte';
+  import SchemaParamFields from './SchemaParamFields.svelte';
   import type {
     CanonicalArtifact,
     MsaMode,
@@ -63,24 +66,6 @@
     onSyncTaskToSiblings = undefined,
     onRunUpTo = undefined,
   }: Props = $props();
-
-  const MPNN_CHECKPOINTS_BY_FAMILY: Record<string, Array<{ id: string; label: string }>> = {
-    solublempnn: [
-      { id: 'v_48_020', label: 'v_48_020 (default · 0.20 Å noise)' },
-      { id: 'v_48_010', label: 'v_48_010 (0.10 Å noise)' },
-    ],
-    proteinmpnn: [
-      { id: 'v_48_020', label: 'v_48_020 (default · 0.20 Å noise)' },
-      { id: 'v_48_010', label: 'v_48_010 (0.10 Å noise)' },
-      { id: 'v_48_002', label: 'v_48_002 (0.02 Å noise)' },
-      { id: 'v_48_030', label: 'v_48_030 (0.30 Å noise)' },
-    ],
-    ca: [
-      { id: 'v_48_020', label: 'v_48_020 (default · 0.20 Å noise)' },
-      { id: 'v_48_010', label: 'v_48_010 (0.10 Å noise)' },
-      { id: 'v_48_002', label: 'v_48_002 (0.02 Å noise)' },
-    ],
-  };
 
   let liveStructure = $derived<StructureArtifact | null>(
     nodeOutput?.structure?.kind === 'StructureArtifact' ? nodeOutput.structure : null,
@@ -423,8 +408,12 @@
         return 'PDB / mmCIF structure input';
       case 'sequence-input':
         return 'FASTA sequence input';
-      default:
-        return manifest?.shortName ?? node.adapterId;
+      default: {
+        const activeMode = getActiveModeSpec(manifest, p);
+        return activeMode
+          ? `${manifest?.shortName ?? node.adapterId} · ${activeMode.label}`
+          : (manifest?.shortName ?? node.adapterId);
+      }
     }
   });
 
@@ -1552,6 +1541,14 @@
       {@const mpnnFamily = String(node.params.family ?? 'solublempnn')}
       {@const mpnnCheckpoints = MPNN_CHECKPOINTS_BY_FAMILY[mpnnFamily] ?? MPNN_CHECKPOINTS_BY_FAMILY.solublempnn}
       {@const mpnnModelName = String(node.params.modelName ?? 'v_48_020')}
+      {@const mpnnAdvFields = getVisibleParamFields(manifest, node.params, 'advanced')}
+      {@const mpnnHasCustomAdv =
+        mpnnModelName !== 'v_48_020' ||
+        Boolean(String(node.params.omitAminoAcids ?? '').trim()) ||
+        Boolean(String(node.params.tiedPositions ?? '').trim()) ||
+        Boolean(String(node.params.designChains ?? '').trim()) ||
+        Number(node.params.backboneNoise ?? 0) > 0 ||
+        Boolean(node.params.unlockInherited)}
       <label class="wide">
         Model Variant
         <select
@@ -1564,7 +1561,7 @@
               if (meta) onUpdateLabel?.(node.id, meta.shortLabel);
             }
             const validList = MPNN_CHECKPOINTS_BY_FAMILY[nextFamily] ?? MPNN_CHECKPOINTS_BY_FAMILY.solublempnn;
-            const reconciledModel = validList.some((c) => c.id === mpnnModelName)
+            const reconciledModel = validList.some((c) => c.value === mpnnModelName)
               ? mpnnModelName
               : 'v_48_020';
             onUpdate(node.id, {
@@ -1631,30 +1628,20 @@
       </div>
 
       <details class="adv-details full">
-        <summary>Advanced parameters</summary>
+        <summary>
+          Advanced parameters
+          {#if mpnnHasCustomAdv}
+            <span class="adv-badge">Custom</span>
+          {/if}
+        </summary>
         <div class="adv-fields">
-          <label class="wide">
-            Checkpoint
-            <select
-              {disabled}
-              value={mpnnCheckpoints.some((c) => c.id === mpnnModelName) ? mpnnModelName : 'v_48_020'}
-              onchange={(e) => setParam('modelName', e.currentTarget.value)}
-            >
-              {#each mpnnCheckpoints as ckpt (ckpt.id)}
-                <option value={ckpt.id}>{ckpt.label}</option>
-              {/each}
-            </select>
-          </label>
-          <label>
-            Seed
-            <NumericInput
-              {disabled}
-              ariaLabel="Seed"
-              spec={NUMERIC_SPECS['web-protein-mpnn'].seed}
-              value={Number(node.params.seed ?? 42)}
-              onChange={(v) => setParam('seed', v)}
-            />
-          </label>
+          <SchemaParamFields
+            fields={mpnnAdvFields}
+            params={node.params}
+            {disabled}
+            optionOverrides={{ modelName: mpnnCheckpoints }}
+            onChange={(key, value) => setParam(key, value)}
+          />
         </div>
       </details>
 
@@ -1956,6 +1943,54 @@
           </label>
         </div>
       </details>
+
+    {:else if manifest && (manifest.modes?.length || manifest.paramSchema?.length)}
+      {@const schemaModeKey = manifest.modeParamKey}
+      {@const schemaActiveMode = getActiveModeSpec(manifest, node.params)}
+      {@const schemaPrimaryFields = getVisibleParamFields(manifest, node.params, 'primary').filter(
+        (f) => !(manifest.modes?.length && schemaModeKey && f.key === schemaModeKey),
+      )}
+      {@const schemaAdvancedFields = getVisibleParamFields(manifest, node.params, 'advanced').filter(
+        (f) => !(manifest.modes?.length && schemaModeKey && f.key === schemaModeKey),
+      )}
+      {#if manifest.modes?.length && schemaModeKey}
+        <label class="full">
+          Mode
+          <select
+            {disabled}
+            value={schemaActiveMode?.id ?? manifest.modes[0].id}
+            onchange={(e) => setParam(schemaModeKey, e.currentTarget.value)}
+          >
+            {#each manifest.modes as modeSpec (modeSpec.id)}
+              <option value={modeSpec.id}>{modeSpec.label}</option>
+            {/each}
+          </select>
+          {#if schemaActiveMode?.description}
+            <span class="field-hint">{schemaActiveMode.description}</span>
+          {/if}
+        </label>
+      {/if}
+      {#if schemaPrimaryFields.length > 0}
+        <SchemaParamFields
+          fields={schemaPrimaryFields}
+          params={node.params}
+          {disabled}
+          onChange={(key, value) => setParam(key, value)}
+        />
+      {/if}
+      {#if schemaAdvancedFields.length > 0}
+        <details class="adv-details full">
+          <summary>Advanced parameters</summary>
+          <div class="adv-fields">
+            <SchemaParamFields
+              fields={schemaAdvancedFields}
+              params={node.params}
+              {disabled}
+              onChange={(key, value) => setParam(key, value)}
+            />
+          </div>
+        </details>
+      {/if}
     {/if}
   </div>
 

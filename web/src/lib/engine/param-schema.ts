@@ -1,0 +1,297 @@
+// Declarative adapter parameter schema helpers:
+// Single source of truth for active mode resolution, mode/tier field filtering,
+// schema-driven validation, and default parameter synthesis.
+
+import type {
+  AdapterManifest,
+  AdapterModeSpec,
+  AdapterParamField,
+} from './types';
+
+export interface SchemaNumericSpec {
+  min: number;
+  max: number;
+  step?: number;
+  integer?: boolean;
+  defaultValue: number;
+  unit?: string;
+}
+
+export interface SchemaValidationOptions {
+  /** Human-readable node label used in error messages (defaults to manifest.shortName). */
+  label?: string;
+  /**
+   * Connected input port names on the node (e.g. `['structure']`).
+   * When provided, active mode `requiredInputs` are checked against this set.
+   */
+  connectedInputs?: Iterable<string>;
+}
+
+const VALID_AA_CHAR_RE = /^[ACDEFGHIKLMNPQRSTVWYX]$/i;
+
+function isValidSchemaResidueToken(token: string): boolean {
+  const t = token.trim();
+  if (!t) return false;
+  if (/^[A-Za-z_]$/.test(t)) return true;
+  const colonM = /^([A-Za-z0-9_]+):(-?\d+)([A-Z])?(?:-(-?\d+)([A-Z])?)?$/.exec(t);
+  const bareM = !colonM
+    ? /^([A-Za-z_])?(-?\d+)([A-Z])?(?:-([A-Za-z_])?(-?\d+)([A-Z])?)?$/.exec(t)
+    : null;
+  if (!colonM && !bareM) return false;
+
+  let start: number;
+  let startIns: string | undefined;
+  let end: number;
+  let endIns: string | undefined;
+  if (colonM) {
+    start = Number(colonM[2]);
+    startIns = colonM[3];
+    if (colonM[4] !== undefined) {
+      end = Number(colonM[4]);
+      endIns = colonM[5];
+    } else {
+      end = start;
+      endIns = startIns;
+    }
+  } else {
+    const startChain = bareM![1];
+    const endChain = bareM![4];
+    if (startChain && endChain && startChain.toUpperCase() !== endChain.toUpperCase()) return false;
+    start = Number(bareM![2]);
+    startIns = bareM![3];
+    if (bareM![5] !== undefined) {
+      end = Number(bareM![5]);
+      endIns = bareM![6];
+    } else {
+      end = start;
+      endIns = startIns;
+    }
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+  if (end < start) return false;
+  if (end === start && (startIns ?? '') > (endIns ?? '')) return false;
+  return true;
+}
+
+function resolveDefaultModeId(manifest: AdapterManifest): string | null {
+  if (!manifest.modes || manifest.modes.length === 0) return null;
+  if (manifest.modeParamKey && manifest.paramSchema) {
+    const modeField = manifest.paramSchema.find((f) => f.key === manifest.modeParamKey);
+    if (modeField && typeof modeField.defaultValue === 'string' && modeField.defaultValue.trim()) {
+      return modeField.defaultValue;
+    }
+  }
+  return manifest.modes[0].id;
+}
+
+/**
+ * Resolve the active `AdapterModeSpec` for a manifest given current node `params`.
+ * - Returns `null` if the adapter declares no `modes`.
+ * - Falls back to the schema's default mode (or `modes[0]`) when the mode param is unset/empty.
+ * - Returns `null` when an explicit, unrecognized mode value is passed.
+ */
+export function getActiveModeSpec(
+  manifest: AdapterManifest | undefined | null,
+  params?: Record<string, unknown>,
+): AdapterModeSpec | null {
+  if (!manifest?.modes || manifest.modes.length === 0) return null;
+  const key = manifest.modeParamKey;
+  const raw = key ? params?.[key] : undefined;
+  const modeId =
+    raw !== undefined && raw !== null && String(raw).trim() !== ''
+      ? String(raw).trim()
+      : resolveDefaultModeId(manifest);
+  if (!modeId) return null;
+  return manifest.modes.find((m) => m.id === modeId) ?? null;
+}
+
+/**
+ * Return the `AdapterParamField[]` visible for the current active mode and optional tier.
+ * Fields without a `modes` restriction are visible across all modes.
+ */
+export function getVisibleParamFields(
+  manifest: AdapterManifest | undefined | null,
+  params?: Record<string, unknown>,
+  tier?: 'primary' | 'advanced',
+): AdapterParamField[] {
+  if (!manifest?.paramSchema || manifest.paramSchema.length === 0) return [];
+
+  let activeModeId: string | null = null;
+  if (manifest.modes && manifest.modes.length > 0) {
+    const activeSpec = getActiveModeSpec(manifest, params);
+    if (activeSpec) {
+      activeModeId = activeSpec.id;
+    } else if (manifest.modeParamKey) {
+      const raw = params?.[manifest.modeParamKey];
+      if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
+        activeModeId = String(raw).trim();
+      }
+    }
+  }
+
+  return manifest.paramSchema.filter((field) => {
+    if (tier !== undefined && field.tier !== tier) return false;
+    if (field.modes && field.modes.length > 0 && activeModeId !== null) {
+      return field.modes.includes(activeModeId);
+    }
+    return true;
+  });
+}
+
+/** Convert a numeric `AdapterParamField` into a `NumericInput`-compatible spec object. */
+export function fieldToNumericSpec(field: AdapterParamField): SchemaNumericSpec {
+  const isInt = field.kind === 'integer';
+  const defaultNum =
+    typeof field.defaultValue === 'number' && Number.isFinite(field.defaultValue)
+      ? field.defaultValue
+      : typeof field.min === 'number' && Number.isFinite(field.min)
+        ? field.min
+        : 0;
+  return {
+    min: typeof field.min === 'number' ? field.min : 0,
+    max: typeof field.max === 'number' ? field.max : 1_000_000,
+    step: typeof field.step === 'number' ? field.step : isInt ? 1 : 0.1,
+    integer: isInt,
+    defaultValue: defaultNum,
+    ...(field.unit ? { unit: field.unit } : {}),
+  };
+}
+
+/**
+ * Synthesize a fresh default parameter object directly from `manifest.paramSchema`.
+ * Useful for future plug-and-play adapters without hand-coded switch branches.
+ */
+export function getDefaultParamsFromSchema(
+  manifest: AdapterManifest | undefined | null,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!manifest?.paramSchema) return out;
+  for (const field of manifest.paramSchema) {
+    const val = field.defaultValue;
+    if (val !== null && typeof val === 'object') {
+      out[field.key] = structuredClone(val);
+    } else {
+      out[field.key] = val;
+    }
+  }
+  return out;
+}
+
+/**
+ * Validate `params` declaratively against `manifest.modes` and `manifest.paramSchema`:
+ * - Checks active mode validity against `manifest.modes`
+ * - Checks active mode `requiredInputs` when `opts.connectedInputs` is supplied
+ * - Checks numeric bounds and integer constraints for visible fields
+ * - Checks `select` options, `boolean` types, `aa-set` amino acid letters, and `residue-list` tokens
+ */
+export function validateParamsWithSchema(
+  manifest: AdapterManifest | undefined | null,
+  params?: Record<string, unknown>,
+  opts: SchemaValidationOptions = {},
+): string[] {
+  if (!manifest) return [];
+  const errs: string[] = [];
+  const label = opts.label || manifest.shortName || manifest.id;
+  const p = params ?? {};
+
+  // 1. Mode validation & required mode inputs
+  let modeInvalid = false;
+  if (manifest.modes && manifest.modes.length > 0 && manifest.modeParamKey) {
+    const modeKey = manifest.modeParamKey;
+    const rawMode = p[modeKey];
+    const activeMode = getActiveModeSpec(manifest, p);
+    if (rawMode !== undefined && rawMode !== null && String(rawMode).trim() !== '' && !activeMode) {
+      const allowed = manifest.modes.map((m) => m.id).join(', ');
+      errs.push(`"${label}": Unknown ${modeKey} "${String(rawMode)}" (expected ${allowed}).`);
+      modeInvalid = true;
+    } else if (activeMode && opts.connectedInputs !== undefined) {
+      const connected = new Set(opts.connectedInputs);
+      for (const reqPort of activeMode.requiredInputs ?? []) {
+        if (!connected.has(reqPort)) {
+          errs.push(
+            `"${label}" (${activeMode.label}) requires a connected "${reqPort}" input.`,
+          );
+        }
+      }
+    }
+  }
+
+  // 2. Field-level validation over mode-applicable fields
+  const fields = getVisibleParamFields(manifest, p);
+  for (const field of fields) {
+    const raw = p[field.key];
+    if (raw === undefined) continue;
+    // Avoid double-reporting an invalid mode key already flagged above
+    if (modeInvalid && field.key === manifest.modeParamKey) continue;
+
+    if (field.kind === 'number' || field.kind === 'integer') {
+      const val = Number(raw);
+      const unit = field.unit ? ` ${field.unit}` : '';
+      const hasMin = typeof field.min === 'number';
+      const hasMax = typeof field.max === 'number';
+      if (!Number.isFinite(val)) {
+        errs.push(`"${label}": ${field.key} must be a valid number.`);
+      } else if ((hasMin && val < field.min!) || (hasMax && val > field.max!)) {
+        if (hasMin && hasMax) {
+          errs.push(`"${label}": ${field.key} must be between ${field.min} and ${field.max}${unit}.`);
+        } else if (hasMin) {
+          errs.push(`"${label}": ${field.key} must be >= ${field.min}${unit}.`);
+        } else {
+          errs.push(`"${label}": ${field.key} must be <= ${field.max}${unit}.`);
+        }
+      } else if (field.kind === 'integer' && !Number.isInteger(val)) {
+        errs.push(`"${label}": ${field.key} must be an integer.`);
+      }
+      continue;
+    }
+
+    if (field.kind === 'select') {
+      if (field.options && field.options.length > 0) {
+        const str = String(raw);
+        if (!field.options.some((opt) => opt.value === str)) {
+          const allowed = field.options.map((opt) => opt.value).join(', ');
+          errs.push(`"${label}": Invalid ${field.key} "${str}" (expected ${allowed}).`);
+        }
+      }
+      continue;
+    }
+
+    if (field.kind === 'boolean') {
+      if (typeof raw !== 'boolean') {
+        errs.push(`"${label}": ${field.key} must be a boolean.`);
+      }
+      continue;
+    }
+
+    if (field.kind === 'aa-set') {
+      const str = String(raw ?? '').trim();
+      if (str) {
+        const badChars = new Set<string>();
+        for (const ch of str.replace(/[\s,;]+/g, '')) {
+          if (!VALID_AA_CHAR_RE.test(ch)) badChars.add(ch);
+        }
+        if (badChars.size > 0) {
+          errs.push(
+            `"${label}": ${field.key} contains invalid amino acid character(s): ${[...badChars].join(', ')} (use standard 1-letter AA codes e.g. C, M).`,
+          );
+        }
+      }
+      continue;
+    }
+
+    if (field.kind === 'residue-list') {
+      const str = String(raw ?? '').trim();
+      if (str) {
+        for (const tok of str.split(/[,\s]+/).filter(Boolean)) {
+          if (!isValidSchemaResidueToken(tok)) {
+            errs.push(
+              `"${label}": Invalid ${field.key} token "${tok}" (expected e.g. "A", "A10", "A10-15", "A-2", or "A100A").`,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  return errs;
+}

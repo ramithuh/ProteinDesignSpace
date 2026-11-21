@@ -4,7 +4,13 @@
 import type { WorkflowNode } from './types';
 import { isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
 import { parseStructureText } from '$lib/protein-ops/pdb';
-import { LOCALFOLD_MODEL_OPTIONS, RFD4_BENCHMARK_OPTIONS } from './registry';
+import {
+  ADAPTER_REGISTRY,
+  LOCALFOLD_MODEL_OPTIONS,
+  MPNN_CHECKPOINTS_BY_FAMILY,
+  RFD4_BENCHMARK_OPTIONS,
+} from './registry';
+import { validateParamsWithSchema } from './param-schema';
 
 const VALID_PDB_INPUT_MODES = new Set(['demo-bundle', 'pdb-id', 'custom']);
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
@@ -116,11 +122,12 @@ const VALID_RFD4_RECYCLE_SCHEDULES = new Set(['none', 'low', 'medium', 'high']);
 const VALID_GENIE3_TASK_MODES = new Set(['unconditional', 'binder', 'motif']);
 const VALID_LOCALFOLD_MODELS = new Set(LOCALFOLD_MODEL_OPTIONS.map((m) => m.id));
 const VALID_MSA_MODES = new Set(['single', 'mmseqs2', 'target-only', 'a3m']);
-const VALID_MPNN_CATALOG: Record<string, ReadonlySet<string>> = {
-  proteinmpnn: new Set(['v_48_002', 'v_48_010', 'v_48_020', 'v_48_030']),
-  solublempnn: new Set(['v_48_010', 'v_48_020']),
-  ca: new Set(['v_48_002', 'v_48_010', 'v_48_020']),
-};
+const VALID_MPNN_CATALOG: Record<string, ReadonlySet<string>> = Object.fromEntries(
+  Object.entries(MPNN_CHECKPOINTS_BY_FAMILY).map(([fam, opts]) => [
+    fam,
+    new Set(opts.map((o) => o.value)),
+  ]),
+);
 
 export interface NumericFieldSpec {
   min: number;
@@ -168,6 +175,7 @@ export const NUMERIC_SPECS: Record<string, Record<string, NumericFieldSpec>> = {
   'web-protein-mpnn': {
     numSequences: { min: 1, max: 8, step: 1, integer: true, defaultValue: 2 },
     temperature: { min: 0.01, max: 1.5, step: 0.05, integer: false, defaultValue: 0.1 },
+    backboneNoise: { min: 0, max: 1, step: 0.05, integer: false, defaultValue: 0, unit: 'Å' },
     seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 42 },
   },
   'localfold-af2': {
@@ -684,6 +692,18 @@ export function validateNodeParams(node: WorkflowNode): string[] {
         }
       }
     }
+    if (typeof p.omitAminoAcids === 'string' && p.omitAminoAcids.trim()) {
+      const compact = p.omitAminoAcids.trim().toUpperCase().replace(/[\s,;]+/g, '');
+      const badChars = new Set<string>();
+      for (const ch of compact) {
+        if (!VALID_AA_SET.has(ch) && ch !== 'X') badChars.add(ch);
+      }
+      if (badChars.size > 0) {
+        errs.push(
+          `"${label}": omitAminoAcids contains invalid amino acid character(s): ${[...badChars].join(', ')} (use standard 1-letter AA codes e.g. C, M).`,
+        );
+      }
+    }
   }
 
   if (node.adapterId === 'localfold-af2') {
@@ -796,6 +816,25 @@ export function validateNodeParams(node: WorkflowNode): string[] {
     const check = validateSequenceText(String(p.sequence ?? ''));
     if (check.status === 'error') {
       errs.push(`"${label}": ${check.message}`);
+    }
+  }
+
+  // Schema-driven fallback for any plug-and-play adapter not in the built-in hand-tuned set
+  const BUILTIN_HAND_VALIDATED = new Set([
+    'pdb-input',
+    'sequence-input',
+    'rfd4-proteina',
+    'genie3',
+    'web-protein-mpnn',
+    'localfold-af2',
+    'designability-scorer',
+  ]);
+  if (!BUILTIN_HAND_VALIDATED.has(node.adapterId)) {
+    const manifest = Object.hasOwn(ADAPTER_REGISTRY, node.adapterId)
+      ? ADAPTER_REGISTRY[node.adapterId]
+      : undefined;
+    if (manifest && (manifest.paramSchema?.length || manifest.modes?.length)) {
+      errs.push(...validateParamsWithSchema(manifest, p, { label }));
     }
   }
 
