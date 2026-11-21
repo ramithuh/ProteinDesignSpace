@@ -34,6 +34,7 @@
   import {
     COMPARE_PALETTE,
     buildComparisonState,
+    buildMultiDesignViewerModels,
     type ComparisonPairingMode,
   } from '$lib/engine/compare';
   import { estimateRunRequirements, type RunPreflightSummary } from '$lib/engine/run-preflight';
@@ -75,6 +76,9 @@
   let studioTab = $state<'input' | 'controls' | 'output'>('input');
   let studioHoveredToken = $state<string | null>(null);
   let studioFocusToken = $state<string | null>(null);
+  let selectedDesignKey = $state<string>('all');
+  let multiDesignViewMode = $state<'grid' | 'overlay' | 'single'>('grid');
+  let multiDesignHiddenIds = $state<string[]>([]);
   let splitMode = $state<'horizontal' | 'vertical'>('horizontal');
   let splitPct = $state<number>(65);
   let draggingSplit = $state(false);
@@ -1914,6 +1918,79 @@
   let peekStructure = $derived<StructureArtifact | null>(
     activeArtifact?.kind === 'StructureArtifact' ? activeArtifact : null,
   );
+  let peekStructureItems = $derived.by((): StructureArtifact[] => {
+    if (!peekStructure) return [];
+    const items = peekStructure.collection?.items;
+    return Array.isArray(items) && items.length > 1 ? items : [];
+  });
+  let hasMultiDesignStructures = $derived(peekStructureItems.length > 1);
+
+  function designKeyForItem(item: StructureArtifact, idx: number): string {
+    return item.designKey ?? item.id ?? `design-${idx + 1}`;
+  }
+
+  $effect(() => {
+    void peekStructure?.id;
+    selectedDesignKey = 'all';
+    multiDesignHiddenIds = [];
+  });
+
+  let activePeekStructureIdx = $derived.by((): number => {
+    if (!hasMultiDesignStructures || selectedDesignKey === 'all') return 0;
+    const found = peekStructureItems.findIndex(
+      (item, idx) => designKeyForItem(item, idx) === selectedDesignKey,
+    );
+    return found >= 0 ? found : 0;
+  });
+
+  let activePeekStructure = $derived<StructureArtifact | null>(
+    hasMultiDesignStructures && selectedDesignKey !== 'all'
+      ? (peekStructureItems[activePeekStructureIdx] ?? peekStructure)
+      : peekStructure,
+  );
+
+  let isMultiDesignAll3d = $derived(
+    !isCompareMode &&
+      !studioInputViewerActive &&
+      hasMultiDesignStructures &&
+      selectedDesignKey === 'all' &&
+      multiDesignViewMode !== 'single',
+  );
+
+  let multiDesignModels = $derived.by(() => {
+    if (!isMultiDesignAll3d) return null;
+    return buildMultiDesignViewerModels(
+      peekStructureItems,
+      multiDesignViewMode === 'overlay' ? 'overlay' : 'grid',
+      new Set(multiDesignHiddenIds),
+    );
+  });
+
+  function toggleMultiDesignModelVisibility(modelId: string) {
+    if (multiDesignHiddenIds.includes(modelId)) {
+      multiDesignHiddenIds = multiDesignHiddenIds.filter((id) => id !== modelId);
+    } else {
+      multiDesignHiddenIds = [...multiDesignHiddenIds, modelId];
+    }
+  }
+
+  function soloMultiDesignModel(modelId: string) {
+    if (!multiDesignModels) return;
+    const allIds = multiDesignModels.map((m) => m.id);
+    const others = allIds.filter((id) => id !== modelId);
+    const alreadySolo =
+      !multiDesignHiddenIds.includes(modelId) &&
+      others.every((id) => multiDesignHiddenIds.includes(id));
+    multiDesignHiddenIds = alreadySolo ? [] : others;
+  }
+
+  function stepMultiDesign(delta: number) {
+    if (!hasMultiDesignStructures) return;
+    const n = peekStructureItems.length;
+    const cur = selectedDesignKey === 'all' ? (delta > 0 ? 0 : n - 1) : (activePeekStructureIdx + delta + n) % n;
+    selectedDesignKey = designKeyForItem(peekStructureItems[cur], cur);
+    multiDesignViewMode = 'single';
+  }
   let peekSequences = $derived<SequenceSet | null>(
     activeArtifact?.kind === 'SequenceSet' ? activeArtifact : null,
   );
@@ -1947,7 +2024,7 @@
   // 3D Mol* viewport bindings derived strictly from the active peek modality
   let viewerDesignedPdb = $derived.by((): string | null => {
     if (peekMetrics) return activeRow?.designedPdb ?? contextStructure?.cifText ?? contextStructure?.pdbText ?? null;
-    if (peekStructure) return peekStructure.cifText ?? peekStructure.pdbText;
+    if (activePeekStructure) return activePeekStructure.cifText ?? activePeekStructure.pdbText;
     if (peekSequences) {
       // Clear 3D viewport when peeking a sequence-only wire/port unless user explicitly
       // previews the parent backbone (keeps Parameters-tab 3D residue picking intact).
@@ -1965,7 +2042,7 @@
   });
 
   let viewerStructureMeta = $derived<StructureArtifact | null>(
-    peekStructure ??
+    activePeekStructure ??
       (peekMetrics || (peekSequences && (!isPeekingSequenceSlot || showSeqParentBackbone))
         ? contextStructure
         : null),
@@ -2042,9 +2119,16 @@
           : 'N/A';
       return `${dirTag} · ${activeFold.sequenceId} · pLDDT ${plddtTxt}`;
     }
-    if (peekStructure) {
+    if (activePeekStructure) {
       const fromTag = activePeekSlot?.peerNodeLabel ? ` ← ${activePeekSlot.peerNodeLabel}` : '';
-      return `${dirTag}${fromTag} · ${peekStructure.label}`;
+      if (isMultiDesignAll3d) {
+        const modeTxt = multiDesignViewMode === 'overlay' ? 'Overlay' : 'Grid';
+        return `${dirTag}${fromTag} · All ${peekStructureItems.length} designs (${modeTxt})`;
+      }
+      if (hasMultiDesignStructures && selectedDesignKey !== 'all') {
+        return `${dirTag}${fromTag} · Design ${activePeekStructureIdx + 1}/${peekStructureItems.length} · ${activePeekStructure.label}`;
+      }
+      return `${dirTag}${fromTag} · ${activePeekStructure.label}`;
     }
     if (peekSequences) {
       if (isPeekingSequenceSlot && !showSeqParentBackbone) {
@@ -2684,6 +2768,73 @@
               × Exit
             </button>
           {:else}
+            {#if hasMultiDesignStructures && !studioInputViewerActive}
+              <div class="seg-group" role="group" aria-label="Multi-design 3D view mode">
+                <button
+                  type="button"
+                  class="seg-btn"
+                  class:active={selectedDesignKey === 'all' && multiDesignViewMode === 'grid'}
+                  onclick={() => {
+                    selectedDesignKey = 'all';
+                    multiDesignViewMode = 'grid';
+                  }}
+                  title="Show all generated designs arranged side-by-side in a 3D gallery"
+                >
+                  Grid ({peekStructureItems.length})
+                </button>
+                <button
+                  type="button"
+                  class="seg-btn"
+                  class:active={selectedDesignKey === 'all' && multiDesignViewMode === 'overlay'}
+                  onclick={() => {
+                    selectedDesignKey = 'all';
+                    multiDesignViewMode = 'overlay';
+                  }}
+                  title="Superpose all generated designs in one frame"
+                >
+                  Overlay ({peekStructureItems.length})
+                </button>
+                <button
+                  type="button"
+                  class="seg-btn"
+                  class:active={selectedDesignKey !== 'all' || multiDesignViewMode === 'single'}
+                  onclick={() => {
+                    if (selectedDesignKey === 'all') {
+                      selectedDesignKey = designKeyForItem(peekStructureItems[0], 0);
+                    }
+                    multiDesignViewMode = 'single';
+                  }}
+                  title="Inspect a single design"
+                >
+                  Single
+                </button>
+              </div>
+              <div class="seg-group" role="group" aria-label="Step between generated designs">
+                <button
+                  type="button"
+                  class="seg-btn"
+                  onclick={() => stepMultiDesign(-1)}
+                  title="Previous design"
+                  aria-label="Previous design"
+                >
+                  ◀
+                </button>
+                <span class="seg-btn" style="cursor: default; pointer-events: none;">
+                  {selectedDesignKey === 'all'
+                    ? `All ${peekStructureItems.length}`
+                    : `D${activePeekStructureIdx + 1}/${peekStructureItems.length}`}
+                </span>
+                <button
+                  type="button"
+                  class="seg-btn"
+                  onclick={() => stepMultiDesign(1)}
+                  title="Next design"
+                  aria-label="Next design"
+                >
+                  ▶
+                </button>
+              </div>
+            {/if}
             <label><input type="checkbox" bind:checked={showDesigned} /> Designed</label>
             <label><input type="checkbox" bind:checked={showRefold} /> Refold (pLDDT)</label>
             <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
@@ -2756,19 +2907,23 @@
 
         <div class="viewer-stage">
           <MolSuperposeViewer
-            designedPdb={isCompareMode
+            designedPdb={isCompareMode || isMultiDesignAll3d
               ? null
               : studioInputViewerActive
                 ? (studioPreview?.previewStructurePdb ?? viewerDesignedPdb)
                 : viewerDesignedPdb}
-            refoldPdb={isCompareMode || studioInputViewerActive ? null : viewerRefoldPdb}
-            models={isCompareMode && comparisonState ? comparisonState.models : null}
-            trajectoryPdb={isCompareMode || studioInputViewerActive
+            refoldPdb={isCompareMode || isMultiDesignAll3d || studioInputViewerActive ? null : viewerRefoldPdb}
+            models={isCompareMode && comparisonState
+              ? comparisonState.models
+              : isMultiDesignAll3d
+                ? multiDesignModels
+                : null}
+            trajectoryPdb={isCompareMode || isMultiDesignAll3d || studioInputViewerActive
               ? null
               : (viewerStructureMeta?.trajectoryPdb ?? null)}
             frameIndex={showTrajectory ? trajFrame : undefined}
             {showDesigned}
-            showRefold={studioInputViewerActive ? false : showRefold}
+            showRefold={studioInputViewerActive || isMultiDesignAll3d ? false : showRefold}
             {showTrajectory}
             {illustrative}
             spin={viewerSpin && !isRunning}
@@ -2787,14 +2942,16 @@
             highlightLayers={studioInputViewerActive ? studioPreview?.highlightLayers : undefined}
             hoveredToken={studioOpen ? studioHoveredToken : null}
             focusToken={studioOpen ? studioFocusToken : null}
-            emptyMessage={isCompareMode ? undefined : viewerEmptyMessage}
-            emptyActionLabel={!isCompareMode && isPeekingSequenceSlot && !showSeqParentBackbone && contextStructure
+            emptyMessage={isCompareMode || isMultiDesignAll3d ? undefined : viewerEmptyMessage}
+            emptyActionLabel={!isCompareMode && !isMultiDesignAll3d && isPeekingSequenceSlot && !showSeqParentBackbone && contextStructure
               ? 'Preview parent backbone'
               : undefined}
             onEmptyAction={() => (showSeqParentBackbone = true)}
-            onResidueClick={isCompareMode ? undefined : handleResidueClick}
-            onToggleModelVisibility={toggleCompareModelVisibility}
-            onSoloModel={soloCompareModel}
+            onResidueClick={isCompareMode || isMultiDesignAll3d ? undefined : handleResidueClick}
+            onToggleModelVisibility={isMultiDesignAll3d
+              ? toggleMultiDesignModelVisibility
+              : toggleCompareModelVisibility}
+            onSoloModel={isMultiDesignAll3d ? soloMultiDesignModel : soloCompareModel}
           />
         </div>
 
@@ -2878,6 +3035,7 @@
                 {contextStructure}
                 {selectedRowIdx}
                 {selectedFoldIdx}
+                {selectedDesignKey}
                 {scRmsdThreshold}
                 {plddtThreshold}
                 {ipaeThreshold}
@@ -2888,6 +3046,12 @@
                 onSelectSlot={handleSelectPeekSlot}
                 onSelectRow={(idx) => (selectedRowIdx = idx)}
                 onSelectFold={(idx) => (selectedFoldIdx = idx)}
+                onSelectDesignKey={(key) => {
+                  selectedDesignKey = key;
+                  if (key === 'all' && multiDesignViewMode === 'single') {
+                    multiDesignViewMode = 'grid';
+                  }
+                }}
                 onRunUpToNode={(id) => runWorkflow(false, id)}
                 onJumpToScorer={() => {
                   if (latestScorerHit) {
@@ -3027,6 +3191,7 @@
               {contextStructure}
               {selectedRowIdx}
               {selectedFoldIdx}
+              {selectedDesignKey}
               {scRmsdThreshold}
               {plddtThreshold}
               {ipaeThreshold}
@@ -3037,6 +3202,12 @@
               onSelectSlot={handleSelectPeekSlot}
               onSelectRow={(idx) => (selectedRowIdx = idx)}
               onSelectFold={(idx) => (selectedFoldIdx = idx)}
+              onSelectDesignKey={(key) => {
+                selectedDesignKey = key;
+                if (key === 'all' && multiDesignViewMode === 'single') {
+                  multiDesignViewMode = 'grid';
+                }
+              }}
               onRunUpToNode={(id) => runWorkflow(false, id)}
               onJumpToScorer={() => {
                 if (latestScorerHit) {

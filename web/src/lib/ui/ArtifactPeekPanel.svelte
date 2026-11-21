@@ -51,6 +51,7 @@
     contextStructure?: StructureArtifact | null;
     selectedRowIdx: number;
     selectedFoldIdx: number;
+    selectedDesignKey?: string;
     scRmsdThreshold: number;
     plddtThreshold: number;
     ipaeThreshold?: number;
@@ -62,6 +63,7 @@
     onSelectSlot: (slotId: string) => void;
     onSelectRow: (idx: number) => void;
     onSelectFold: (idx: number) => void;
+    onSelectDesignKey?: (key: string) => void;
     onRunUpToNode?: (nodeId: string) => void;
     onJumpToScorer?: () => void;
     onDownloadText: (text: string, filename: string) => void;
@@ -74,6 +76,7 @@
     contextStructure = null,
     selectedRowIdx,
     selectedFoldIdx,
+    selectedDesignKey = undefined,
     scRmsdThreshold,
     plddtThreshold,
     ipaeThreshold = 10.0,
@@ -85,6 +88,7 @@
     onSelectSlot,
     onSelectRow,
     onSelectFold,
+    onSelectDesignKey = undefined,
     onRunUpToNode = undefined,
     onJumpToScorer = undefined,
     onDownloadText,
@@ -94,7 +98,13 @@
   let copyFailedKey = $state<string | null>(null);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
   let rawPreviewOpen = $state(false);
-  let selectedDesignFilter = $state<string>('all');
+  let localDesignFilter = $state<string>('all');
+  let selectedDesignFilter = $derived(selectedDesignKey ?? localDesignFilter);
+
+  function setDesignFilter(nextKey: string) {
+    localDesignFilter = nextKey;
+    onSelectDesignKey?.(nextKey);
+  }
 
   async function copyText(text: string, key: string) {
     if (copyTimer) clearTimeout(copyTimer);
@@ -261,7 +271,7 @@
 
   $effect(() => {
     void artifact?.id;
-    selectedDesignFilter = 'all';
+    localDesignFilter = 'all';
     rawPreviewOpen = false;
   });
 
@@ -1077,7 +1087,7 @@
             class="design-pill"
             class:active={selectedDesignFilter === 'all'}
             aria-pressed={selectedDesignFilter === 'all'}
-            onclick={() => (selectedDesignFilter = 'all')}
+            onclick={() => setDesignFilter('all')}
           >
             All designs ({metricsDesignPills.length})
           </button>
@@ -1088,7 +1098,7 @@
               class:active={selectedDesignFilter === pill.key}
               aria-pressed={selectedDesignFilter === pill.key}
               title={`Filter to ${pill.label} (${pill.key})`}
-              onclick={() => (selectedDesignFilter = pill.key)}
+              onclick={() => setDesignFilter(pill.key)}
             >
               {pill.label}
               <span class="pill-count">{pill.passedCount ?? 0}/{pill.count}</span>
@@ -1375,7 +1385,7 @@
             class="design-pill"
             class:active={selectedDesignFilter === 'all'}
             aria-pressed={selectedDesignFilter === 'all'}
-            onclick={() => (selectedDesignFilter = 'all')}
+            onclick={() => setDesignFilter('all')}
           >
             All designs ({foldDesignPills.length})
           </button>
@@ -1386,7 +1396,7 @@
               class:active={selectedDesignFilter === pill.key}
               aria-pressed={selectedDesignFilter === pill.key}
               title={`Filter folds to ${pill.label} (${pill.key})`}
-              onclick={() => (selectedDesignFilter = pill.key)}
+              onclick={() => setDesignFilter(pill.key)}
             >
               {pill.label}
               <span class="pill-count">{pill.count}</span>
@@ -1593,7 +1603,7 @@
             class="design-pill"
             class:active={selectedDesignFilter === 'all'}
             aria-pressed={selectedDesignFilter === 'all'}
-            onclick={() => (selectedDesignFilter = 'all')}
+            onclick={() => setDesignFilter('all')}
           >
             All designs ({seqDesignPills.length})
           </button>
@@ -1604,7 +1614,7 @@
               class:active={selectedDesignFilter === pill.key}
               aria-pressed={selectedDesignFilter === pill.key}
               title={`Filter sequences to ${pill.label} (${pill.key})`}
-              onclick={() => (selectedDesignFilter = pill.key)}
+              onclick={() => setDesignFilter(pill.key)}
             >
               {pill.label}
               <span class="pill-count">{pill.count}</span>
@@ -1710,7 +1720,7 @@
             class="design-pill"
             class:active={selectedDesignFilter === 'all'}
             aria-pressed={selectedDesignFilter === 'all'}
-            onclick={() => (selectedDesignFilter = 'all')}
+            onclick={() => setDesignFilter('all')}
           >
             All designs ({structDesignPills.length})
           </button>
@@ -1721,7 +1731,7 @@
               class:active={selectedDesignFilter === pill.key}
               aria-pressed={selectedDesignFilter === pill.key}
               title={`Inspect ${pill.label} (${pill.key})`}
-              onclick={() => (selectedDesignFilter = pill.key)}
+              onclick={() => setDesignFilter(pill.key)}
             >
               {pill.label}
             </button>
@@ -1742,7 +1752,7 @@
           <tbody>
             {#each structCollectionItems as item, idx (`${item.id}_${idx}`)}
               {@const dk = getDesignKeyFromStruct(item, idx)}
-              <tr onclick={() => (selectedDesignFilter = dk)}>
+              <tr onclick={() => setDesignFilter(dk)}>
                 <td><span class="design-tag">Design {idx + 1}</span></td>
                 <td><code>{item.id}</code></td>
                 <td>{item.length} aa</td>

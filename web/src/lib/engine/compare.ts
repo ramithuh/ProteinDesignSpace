@@ -1713,6 +1713,120 @@ function branchesShareUpstreamTemplate(
   return false;
 }
 
+const MULTI_DESIGN_PALETTE: ReadonlyArray<{ hex: number; css: string }> = [
+  { hex: 0x3b82f6, css: '#3b82f6' }, // blue
+  { hex: 0x10b981, css: '#10b981' }, // emerald
+  { hex: 0xf59e0b, css: '#f59e0b' }, // amber
+  { hex: 0xa855f7, css: '#a855f7' }, // purple
+  { hex: 0xef4444, css: '#ef4444' }, // red
+  { hex: 0x06b6d4, css: '#06b6d4' }, // cyan
+  { hex: 0xec4899, css: '#ec4899' }, // pink
+  { hex: 0x84cc16, css: '#84cc16' }, // lime
+];
+
+/**
+ * Build multi-model `ViewerModelSpec[]` for rendering all generated backbones from a
+ * `StructureArtifact.collection` simultaneously in a single Mol* canvas — either arranged
+ * in a centered 2D X-Y gallery (`grid`) or centered/superposed together (`overlay`).
+ */
+export function buildMultiDesignViewerModels(
+  items: readonly StructureArtifact[],
+  mode: 'grid' | 'overlay' = 'grid',
+  hiddenIds: ReadonlySet<string> = new Set(),
+): ViewerModelSpec[] {
+  if (items.length === 0) return [];
+  const cols = mode === 'grid' ? Math.ceil(Math.sqrt(items.length)) : 1;
+  const rows = mode === 'grid' ? Math.ceil(items.length / cols) : 1;
+  let maxRg = 12;
+  for (const item of items) {
+    if (item.geometry?.rg && Number.isFinite(item.geometry.rg)) {
+      maxRg = Math.max(maxRg, item.geometry.rg);
+    }
+  }
+  const spacing = maxRg * 3.1 + 12;
+
+  const anchor = items[0];
+  const anchorText = anchor.cifText || anchor.pdbText;
+  const anchorCenter =
+    anchor.caCoords && anchor.length > 0
+      ? centroidOf(anchor.caCoords)
+      : centroidOfStructureText(anchorText);
+
+  const out: ViewerModelSpec[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const rawText = item.cifText || item.pdbText;
+    if (!rawText) continue;
+    const pal = MULTI_DESIGN_PALETTE[i % MULTI_DESIGN_PALETTE.length];
+    const [cx, cy, cz] =
+      item.caCoords && item.length > 0
+        ? centroidOf(item.caCoords)
+        : centroidOfStructureText(rawText);
+
+    let transformedText: string;
+    if (mode === 'grid') {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const tx = (col - (cols - 1) / 2) * spacing;
+      const ty = ((rows - 1) / 2 - row) * spacing;
+      const shift = new Float64Array([tx - cx, ty - cy, -cz]);
+      transformedText = applyTransformToStructureText(rawText, IDENTITY_ROT, shift);
+    } else if (
+      i > 0 &&
+      anchor.caCoords &&
+      item.caCoords &&
+      anchor.length === item.length &&
+      item.length >= 3
+    ) {
+      // Kabsch-align equal-length backbones onto Design 1 centered at origin
+      try {
+        const centeredAnchor = new Float32Array(anchor.caCoords.length);
+        for (let k = 0; k < anchor.length; k++) {
+          centeredAnchor[k * 3 + 0] = anchor.caCoords[k * 3 + 0] - anchorCenter[0];
+          centeredAnchor[k * 3 + 1] = anchor.caCoords[k * 3 + 1] - anchorCenter[1];
+          centeredAnchor[k * 3 + 2] = anchor.caCoords[k * 3 + 2] - anchorCenter[2];
+        }
+        const fit = kabschAlign(item.caCoords, centeredAnchor);
+        if (isValidKabschResult(fit)) {
+          transformedText = applyTransformToStructureText(rawText, fit.rotation, fit.translation);
+        } else {
+          transformedText = applyTransformToStructureText(
+            rawText,
+            IDENTITY_ROT,
+            new Float64Array([-cx, -cy, -cz]),
+          );
+        }
+      } catch {
+        transformedText = applyTransformToStructureText(
+          rawText,
+          IDENTITY_ROT,
+          new Float64Array([-cx, -cy, -cz]),
+        );
+      }
+    } else {
+      const shift = new Float64Array([-cx, -cy, -cz]);
+      transformedText = applyTransformToStructureText(rawText, IDENTITY_ROT, shift);
+    }
+
+    const id = `design-${item.designKey ?? item.id ?? i}`;
+    const rgTxt = item.geometry?.rg ? `Rg ${item.geometry.rg.toFixed(1)} Å` : '';
+    out.push({
+      id,
+      nodeId: null,
+      badge: `D${i + 1}`,
+      label: `Design ${i + 1}`,
+      pdbText: transformedText,
+      colorHex: pal.hex,
+      colorCss: pal.css,
+      alpha: mode === 'overlay' ? 0.85 : 1.0,
+      colorByPlddt: false,
+      visible: !hiddenIds.has(id),
+      metricSummary: rgTxt ? `${item.length} aa · ${rgTxt}` : `${item.length} aa`,
+    });
+  }
+  return out;
+}
+
 export function buildComparisonState(
   graph: WorkflowGraph,
   selectedNodeIds: readonly string[],
