@@ -36,7 +36,7 @@ import {
   resolveAf2Tolerance,
   validateAndParseA3mText,
 } from './localfold-msa';
-import { compileMpnnInputSpec } from './mpnn-spec';
+import { compileMpnnInputSpec, parseFixedPositionsAndChains } from './mpnn-spec';
 import { validateParamsWithSchema } from './param-schema';
 import { extractSubgraphUpTo, findContextStructure } from './peek';
 import {
@@ -2663,6 +2663,614 @@ export function compileNodeInputPreview(
         2,
       ),
     };
+  } else if (node.adapterId === 'thermompnn') {
+    const structure = resolvedInputs.structure as StructureArtifact | undefined;
+    const precision = String(node.params.precision ?? 'fp16');
+    const chainFilter = String(node.params.chain ?? '').trim();
+    const bfactorAggregate = String(node.params.bfactorAggregate ?? 'best-stabilizing');
+
+    if (!structure) {
+      const missingUp = missingUpstreamByPort.get('structure');
+      if (missingUp) {
+        availability = 'pending-upstream';
+        missingUpstreamNodeIds = [missingUp];
+      } else {
+        availability = 'error';
+      }
+      payload = {
+        format: 'scorer-mapping',
+        headline: missingUp
+          ? `ThermoMPNN (${precision.toUpperCase()}) · waiting for upstream structure`
+          : `ThermoMPNN (${precision.toUpperCase()}) · connect a StructureArtifact input`,
+        compiledSummary: {
+          precision,
+          chain: chainFilter || 'all',
+          bfactorAggregate,
+        },
+        rawSpecText: JSON.stringify({ precision, chain: chainFilter, bfactorAggregate }, null, 2),
+      };
+    } else {
+      runRuntimeValidation();
+      const rawText = structure.pdbText || structure.cifText || '';
+      const entry = getOrParseCachedStructure(structure.id, rawText);
+      const parsed = entry.parsed;
+      const availableChains = [...new Set(parsed.sourceResidues.map((s) => s.authChainId))];
+      const upperFilter = chainFilter.toUpperCase();
+      if (upperFilter && !availableChains.some((c) => c.toUpperCase() === upperFilter)) {
+        pushIssue({
+          severity: 'warning',
+          source: 'compiler',
+          message: `Target chain "${chainFilter}" not found in structure (available: ${availableChains.join(', ')}).`,
+        });
+      }
+
+      const chainMap = new Map<string, PreviewChainTrack>();
+      const allRes: PreviewResidue[] = [];
+      let scannedCount = 0;
+
+      for (let i = 0; i < parsed.nResidues; i++) {
+        const src = parsed.sourceResidues[i];
+        let track = chainMap.get(src.authChainId);
+        if (!track) {
+          const roleTag = structure.chainRoles?.[src.authChainId];
+          track = {
+            chainId: src.authChainId,
+            ...(src.labelChainId ? { labelChainId: src.labelChainId } : {}),
+            entityKind: 'protein',
+            ...(roleTag ? { roleTag } : {}),
+            sequence: '',
+            residues: [],
+          };
+          chainMap.set(src.authChainId, track);
+        }
+
+        let gapBefore = 0;
+        if (track.residues.length > 0) {
+          const prev = track.residues[track.residues.length - 1];
+          const delta = src.resNum - prev.authSeqId - 1;
+          if (delta > 0) gapBefore = delta;
+        }
+
+        const inScope = !upperFilter || src.authChainId.toUpperCase() === upperFilter;
+        if (inScope) scannedCount++;
+        const aa1 = parsed.sequence[i] ?? AA3_TO_AA1[src.resName] ?? 'X';
+        const pr: PreviewResidue = {
+          flatIndex: inScope ? i : -1,
+          authChain: src.authChainId,
+          ...(src.labelChainId ? { labelChain: src.labelChainId } : {}),
+          authSeqId: src.resNum,
+          insCode: src.insCode,
+          ...(src.labelSeqId !== undefined ? { labelSeqId: src.labelSeqId } : {}),
+          token: formatResidueToken(src.authChainId, src.resNum, src.insCode),
+          aa1,
+          resName: src.resName,
+          roles: inScope ? ['designable'] : ['cropped-out'],
+          ...(gapBefore > 0 ? { gapBefore } : {}),
+          ...(entry.bfactors ? { bfactor: entry.bfactors[i] } : {}),
+          backboneAtoms: formatBackboneAtoms(parsed.atomPresence[i], structure.atomGranularity),
+        };
+        track.residues.push(pr);
+        track.sequence += aa1;
+        allRes.push(pr);
+      }
+
+      chains = [...chainMap.values()];
+      highlightLayers = buildHighlightLayersFromResidues(allRes);
+      const ligClass = classifyLigands(structure.diagnostics?.ligandNames ?? parsed.diagnostics.ligandNames);
+      entities = {
+        includedLigands: ligClass.includedLigands,
+        filteredBuffers: ligClass.filteredBuffers,
+        nucleicChains: [...(structure.diagnostics?.nucleicAcidChains ?? parsed.diagnostics.nucleicAcidChains)],
+      };
+
+      totalResidues = parsed.nResidues;
+      designedResidues = scannedCount;
+      fixedResidues = Math.max(0, parsed.nResidues - scannedCount);
+      estimatedTokens = scannedCount;
+
+      previewStructurePdb = structure.pdbText;
+      previewStructureMeta = {
+        label: structure.label,
+        atomGranularity: structure.atomGranularity ?? 'backbone4',
+        length: parsed.nResidues,
+      };
+      const scannedSeq = allRes
+        .filter((r) => r.flatIndex >= 0)
+        .map((r) => r.aa1)
+        .join('');
+      if (scannedSeq.length > 0) {
+        fastaEntries = [
+          {
+            id: structure.id,
+            header: `>${structure.label} (SSM scan · ${scannedCount} pos × 20 aa = ${scannedCount * 20} ΔΔG)`,
+            sequence: scannedSeq,
+            selected: true,
+          },
+        ];
+      }
+
+      payload = {
+        format: 'scorer-mapping',
+        headline: `ThermoMPNN (${precision.toUpperCase()}) · ${scannedCount} pos (${scannedCount * 20} ΔΔG mutations)`,
+        compiledSummary: {
+          precision,
+          chain: chainFilter || 'all',
+          bfactorAggregate,
+          scannedResidues: scannedCount,
+          totalMutations: scannedCount * 20,
+          chains: availableChains,
+        },
+        rawSpecText: JSON.stringify(
+          {
+            precision,
+            chain: chainFilter || null,
+            bfactorAggregate,
+            scannedResidues: scannedCount,
+            totalMutations: scannedCount * 20,
+            chains: availableChains,
+          },
+          null,
+          2,
+        ),
+      };
+    }
+  } else if (node.adapterId === 'ligandmpnn' || node.adapterId === 'lasermpnn') {
+    const isLigand = node.adapterId === 'ligandmpnn';
+    const modelName = isLigand ? 'LigandMPNN' : 'LASErMPNN';
+    const structure = resolvedInputs.structure as StructureArtifact | undefined;
+    const precision = String(node.params.precision ?? 'fp16');
+    const checkpoint = isLigand ? String(node.params.checkpoint ?? 'ligandmpnn_v_32_020_25') : undefined;
+    const numSequences = Math.max(1, Math.min(8, Math.round(Number(node.params.numSequences ?? 2))));
+    const temperature = Number(node.params.temperature ?? 0.1);
+    const fixedSpec = String(node.params.fixedPositions ?? '').trim();
+    const omitAminoAcids = String(node.params.omitAminoAcids ?? '')
+      .trim()
+      .toUpperCase()
+      .replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, '');
+    const useLigandContext = isLigand ? node.params.useLigandContext !== false : true;
+    const unlockInherited = Boolean(node.params.unlockInherited);
+    const seed = Number(node.params.seed ?? 42);
+
+    if (!structure) {
+      const missingUp = missingUpstreamByPort.get('structure');
+      if (missingUp) {
+        availability = 'pending-upstream';
+        missingUpstreamNodeIds = [missingUp];
+      } else {
+        availability = 'error';
+      }
+      payload = {
+        format: 'mpnn-masks',
+        headline: missingUp
+          ? `${modelName} · waiting for upstream structure`
+          : `${modelName} · connect a StructureArtifact input`,
+        compiledSummary: {
+          ...(checkpoint ? { checkpoint } : {}),
+          precision,
+          numSequences,
+          temperature,
+          ...(isLigand ? { useLigandContext } : { allAtomRotamers: true }),
+          seed,
+        },
+        rawSpecText: JSON.stringify(node.params, null, 2),
+      };
+    } else {
+      runRuntimeValidation();
+      try {
+        const rawAllAtom = structure.cifText ?? structure.pdbText;
+        const entry = getOrParseCachedStructure(structure.id, rawAllAtom);
+        const parsed = entry.parsed;
+        const ctx = getCachedRfd4Context(entry, rawAllAtom);
+        const ligClass = classifyLigands([
+          ...(structure.diagnostics?.ligandNames ?? parsed.diagnostics.ligandNames),
+          ...ctx.ligands.map((l) => l.compId),
+        ]);
+        const nucleicChains = [
+          ...new Set([
+            ...(structure.diagnostics?.nucleicAcidChains ?? parsed.diagnostics.nucleicAcidChains),
+            ...ctx.nucleicChains.map((c) => c.authChain),
+          ]),
+        ];
+        entities = {
+          includedLigands: ligClass.includedLigands,
+          filteredBuffers: ligClass.filteredBuffers,
+          nucleicChains,
+        };
+
+        const allChains = [...new Set(parsed.sourceResidues.map((s) => s.authChainId))];
+        const defaultChain = allChains[0] ?? 'A';
+        const { fixedPositions: userFixed, lockedChains: userLockedRaw } =
+          parseFixedPositionsAndChains(fixedSpec, defaultChain);
+        const userLockedChainSet = new Set(userLockedRaw.map((c) => c.toUpperCase()));
+        const inheritedLockedChainSet = new Set(
+          !unlockInherited && Array.isArray(structure.lockedChains)
+            ? structure.lockedChains.map((c) => String(c).trim().toUpperCase())
+            : [],
+        );
+        const userFixedKeys = new Set<string>();
+        for (const ref of userFixed) {
+          if (typeof ref !== 'number') {
+            userFixedKeys.add(`${ref.chain.toUpperCase()}:${ref.number}:${ref.insertionCode ?? ''}`);
+          }
+        }
+        const inheritedFixedIndices = new Set<number>(
+          !unlockInherited && Array.isArray(structure.fixedResidueIndices)
+            ? structure.fixedResidueIndices.map((idx) => Number(idx) - 1)
+            : [],
+        );
+
+        const chainMap = new Map<string, PreviewChainTrack>();
+        const allRes: PreviewResidue[] = [];
+        let designedCount = 0;
+        let fixedCount = 0;
+
+        for (let i = 0; i < parsed.nResidues; i++) {
+          const src = parsed.sourceResidues[i];
+          const chUpper = src.authChainId.toUpperCase();
+          let track = chainMap.get(src.authChainId);
+          if (!track) {
+            const roleTag = structure.chainRoles?.[src.authChainId];
+            track = {
+              chainId: src.authChainId,
+              ...(src.labelChainId ? { labelChainId: src.labelChainId } : {}),
+              entityKind: 'protein',
+              ...(roleTag ? { roleTag } : {}),
+              sequence: '',
+              residues: [],
+            };
+            chainMap.set(src.authChainId, track);
+          }
+
+          let gapBefore = 0;
+          if (track.residues.length > 0) {
+            const prev = track.residues[track.residues.length - 1];
+            const delta = src.resNum - prev.authSeqId - 1;
+            if (delta > 0) gapBefore = delta;
+          }
+
+          const resKey = `${chUpper}:${src.resNum}:${src.insCode}`;
+          const isUserFixed = userLockedChainSet.has(chUpper) || userFixedKeys.has(resKey);
+          const isInheritedFixed =
+            !isUserFixed && (inheritedLockedChainSet.has(chUpper) || inheritedFixedIndices.has(i));
+          const isFixed = isUserFixed || isInheritedFixed;
+          if (isFixed) fixedCount++;
+          else designedCount++;
+
+          const aa1 = parsed.sequence[i] ?? AA3_TO_AA1[src.resName] ?? 'X';
+          const pr: PreviewResidue = {
+            flatIndex: i,
+            authChain: src.authChainId,
+            ...(src.labelChainId ? { labelChain: src.labelChainId } : {}),
+            authSeqId: src.resNum,
+            insCode: src.insCode,
+            ...(src.labelSeqId !== undefined ? { labelSeqId: src.labelSeqId } : {}),
+            token: formatResidueToken(src.authChainId, src.resNum, src.insCode),
+            aa1,
+            resName: src.resName,
+            roles: isFixed ? ['fixed-sequence'] : ['designable'],
+            ...(isInheritedFixed ? { inheritedLock: true } : {}),
+            ...(gapBefore > 0 ? { gapBefore } : {}),
+            ...(entry.bfactors ? { bfactor: entry.bfactors[i] } : {}),
+            backboneAtoms: formatBackboneAtoms(parsed.atomPresence[i], structure.atomGranularity),
+          };
+          track.residues.push(pr);
+          track.sequence += aa1;
+          allRes.push(pr);
+        }
+
+        chains = [...chainMap.values()];
+        highlightLayers = buildHighlightLayersFromResidues(allRes);
+        totalResidues = parsed.nResidues;
+        designedResidues = designedCount;
+        fixedResidues = fixedCount;
+        estimatedTokens =
+          totalResidues + (useLigandContext ? entities.includedLigands.length : 0);
+
+        const hasNonProt = entities.includedLigands.length > 0 || entities.nucleicChains.length > 0;
+        previewStructurePdb =
+          structure.cifText && (hasNonProt || !structure.pdbText)
+            ? structure.cifText
+            : structure.pdbText;
+        previewStructureMeta = {
+          label: structure.label,
+          atomGranularity: structure.atomGranularity ?? 'all-atom',
+          length: parsed.nResidues,
+        };
+        fastaEntries = [
+          {
+            id: structure.id,
+            header: `>${structure.label} (template · ${designedCount}/${parsed.nResidues} designable)`,
+            sequence: parsed.sequence,
+            chainLengths: parsed.diagnostics.chainLengths,
+            selected: true,
+          },
+        ];
+
+        const contextNote =
+          useLigandContext && hasNonProt
+            ? ` · retains ${[
+                ...(entities.includedLigands.length > 0
+                  ? [`${entities.includedLigands.length} ligand${entities.includedLigands.length === 1 ? '' : 's'}`]
+                  : []),
+                ...(entities.nucleicChains.length > 0
+                  ? [`${entities.nucleicChains.length} NA chain${entities.nucleicChains.length === 1 ? '' : 's'}`]
+                  : []),
+              ].join(' + ')}`
+            : '';
+
+        payload = {
+          format: 'mpnn-masks',
+          headline: `${modelName} (${precision.toUpperCase()}) · ${designedCount} design / ${fixedCount} fixed${contextNote}`,
+          compiledSummary: {
+            ...(checkpoint ? { checkpoint } : {}),
+            precision,
+            numSequences,
+            temperature,
+            useLigandContext,
+            ...(isLigand ? {} : { allAtomRotamers: true }),
+            retainedLigands: useLigandContext ? entities.includedLigands : [],
+            retainedNucleicChains: useLigandContext ? entities.nucleicChains : [],
+            lockedChains: [...new Set([...userLockedChainSet, ...inheritedLockedChainSet])],
+            omitAminoAcids: omitAminoAcids || 'none',
+            unlockInherited,
+            seed,
+          },
+          rawSpecText: JSON.stringify(
+            {
+              adapter: node.adapterId,
+              ...(checkpoint ? { checkpoint } : {}),
+              precision,
+              numSequences,
+              temperature,
+              useLigandContext,
+              retainedLigands: useLigandContext ? entities.includedLigands : [],
+              retainedNucleicChains: useLigandContext ? entities.nucleicChains : [],
+              fixedPositions: fixedSpec || null,
+              omitAminoAcids: omitAminoAcids || null,
+              unlockInherited,
+              designedCount,
+              fixedCount,
+              seed,
+            },
+            null,
+            2,
+          ),
+        };
+      } catch (err) {
+        availability = 'error';
+        pushIssue({
+          severity: 'error',
+          source: 'compiler',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  } else if (node.adapterId === 'antifold-esmif1') {
+    const structure = resolvedInputs.structure as StructureArtifact | undefined;
+    const variant = String(node.params.variant ?? 'antifold') === 'esmif1' ? 'esmif1' : 'antifold';
+    const variantLabel = variant === 'esmif1' ? 'ESM-IF1' : 'AntiFold';
+    const precision = String(node.params.precision ?? 'fp16');
+    const numSequences = Math.max(1, Math.min(8, Math.round(Number(node.params.numSequences ?? 2))));
+    const temperature = Number(node.params.temperature ?? 0.2);
+    const samplingMode =
+      String(node.params.samplingMode ?? 'independent') === 'autoregressive'
+        ? 'autoregressive'
+        : 'independent';
+    const targetChainParam = String(node.params.targetChain ?? '').trim();
+    const regions = variant === 'antifold' ? String(node.params.regions ?? 'CDR1 CDR2 CDR3').trim() : '';
+    const fixedSpec = String(node.params.fixedPositions ?? '').trim();
+    const unlockInherited = Boolean(node.params.unlockInherited);
+    const seed = Number(node.params.seed ?? 42);
+
+    if (!structure) {
+      const missingUp = missingUpstreamByPort.get('structure');
+      if (missingUp) {
+        availability = 'pending-upstream';
+        missingUpstreamNodeIds = [missingUp];
+      } else {
+        availability = 'error';
+      }
+      payload = {
+        format: 'mpnn-masks',
+        headline: missingUp
+          ? `${variantLabel} · waiting for upstream structure`
+          : `${variantLabel} · connect a StructureArtifact input`,
+        compiledSummary: {
+          variant,
+          precision,
+          numSequences,
+          temperature,
+          samplingMode,
+          ...(targetChainParam ? { targetChain: targetChainParam } : {}),
+          ...(regions ? { regions } : {}),
+          seed,
+        },
+        rawSpecText: JSON.stringify(node.params, null, 2),
+      };
+    } else {
+      runRuntimeValidation();
+      try {
+        const rawText = structure.pdbText || structure.cifText || '';
+        const entry = getOrParseCachedStructure(structure.id, rawText);
+        const parsed = entry.parsed;
+        const allChains = [...new Set(parsed.sourceResidues.map((s) => s.authChainId))];
+        let resolvedTargetChain = allChains[0] ?? 'A';
+        if (targetChainParam) {
+          const matched = allChains.find((c) => c.toUpperCase() === targetChainParam.toUpperCase());
+          if (matched) {
+            resolvedTargetChain = matched;
+          } else {
+            resolvedTargetChain = targetChainParam;
+            pushIssue({
+              severity: 'warning',
+              source: 'compiler',
+              message: `Target chain "${targetChainParam}" not found in structure (available: ${allChains.join(', ')}).`,
+            });
+          }
+        } else if (variant === 'antifold' && allChains.some((c) => c.toUpperCase() === 'H')) {
+          resolvedTargetChain = allChains.find((c) => c.toUpperCase() === 'H')!;
+        }
+
+        const { fixedPositions: userFixed, lockedChains: userLockedRaw } =
+          parseFixedPositionsAndChains(fixedSpec, resolvedTargetChain);
+        const userLockedChainSet = new Set(userLockedRaw.map((c) => c.toUpperCase()));
+        const inheritedLockedChainSet = new Set(
+          !unlockInherited && Array.isArray(structure.lockedChains)
+            ? structure.lockedChains.map((c) => String(c).trim().toUpperCase())
+            : [],
+        );
+        const userFixedKeys = new Set<string>();
+        for (const ref of userFixed) {
+          if (typeof ref !== 'number') {
+            userFixedKeys.add(`${ref.chain.toUpperCase()}:${ref.number}:${ref.insertionCode ?? ''}`);
+          }
+        }
+        const inheritedFixedIndices = new Set<number>(
+          !unlockInherited && Array.isArray(structure.fixedResidueIndices)
+            ? structure.fixedResidueIndices.map((idx) => Number(idx) - 1)
+            : [],
+        );
+
+        const chainMap = new Map<string, PreviewChainTrack>();
+        const allRes: PreviewResidue[] = [];
+        let designedCount = 0;
+        let fixedCount = 0;
+
+        for (let i = 0; i < parsed.nResidues; i++) {
+          const src = parsed.sourceResidues[i];
+          const chUpper = src.authChainId.toUpperCase();
+          let track = chainMap.get(src.authChainId);
+          if (!track) {
+            const roleTag = structure.chainRoles?.[src.authChainId];
+            track = {
+              chainId: src.authChainId,
+              ...(src.labelChainId ? { labelChainId: src.labelChainId } : {}),
+              entityKind: 'protein',
+              ...(roleTag ? { roleTag } : {}),
+              sequence: '',
+              residues: [],
+            };
+            chainMap.set(src.authChainId, track);
+          }
+
+          let gapBefore = 0;
+          if (track.residues.length > 0) {
+            const prev = track.residues[track.residues.length - 1];
+            const delta = src.resNum - prev.authSeqId - 1;
+            if (delta > 0) gapBefore = delta;
+          }
+
+          const isTarget = chUpper === resolvedTargetChain.toUpperCase();
+          const resKey = `${chUpper}:${src.resNum}:${src.insCode}`;
+          const isUserFixed = userLockedChainSet.has(chUpper) || userFixedKeys.has(resKey);
+          const isInheritedFixed =
+            !isUserFixed && (inheritedLockedChainSet.has(chUpper) || inheritedFixedIndices.has(i));
+          const roles: ResidueRole[] = !isTarget
+            ? ['fixed-backbone', 'fixed-sequence']
+            : isUserFixed || isInheritedFixed
+              ? ['fixed-sequence']
+              : ['designable'];
+          if (roles.includes('designable')) designedCount++;
+          else fixedCount++;
+
+          const aa1 = parsed.sequence[i] ?? AA3_TO_AA1[src.resName] ?? 'X';
+          const pr: PreviewResidue = {
+            flatIndex: i,
+            authChain: src.authChainId,
+            ...(src.labelChainId ? { labelChain: src.labelChainId } : {}),
+            authSeqId: src.resNum,
+            insCode: src.insCode,
+            ...(src.labelSeqId !== undefined ? { labelSeqId: src.labelSeqId } : {}),
+            token: formatResidueToken(src.authChainId, src.resNum, src.insCode),
+            aa1,
+            resName: src.resName,
+            roles,
+            ...(isInheritedFixed ? { inheritedLock: true } : {}),
+            ...(gapBefore > 0 ? { gapBefore } : {}),
+            ...(entry.bfactors ? { bfactor: entry.bfactors[i] } : {}),
+            backboneAtoms: formatBackboneAtoms(parsed.atomPresence[i], structure.atomGranularity),
+          };
+          track.residues.push(pr);
+          track.sequence += aa1;
+          allRes.push(pr);
+        }
+
+        chains = [...chainMap.values()];
+        highlightLayers = buildHighlightLayersFromResidues(allRes);
+        const ligClass = classifyLigands(
+          structure.diagnostics?.ligandNames ?? parsed.diagnostics.ligandNames,
+        );
+        entities = {
+          includedLigands: ligClass.includedLigands,
+          filteredBuffers: ligClass.filteredBuffers,
+          nucleicChains: [
+            ...(structure.diagnostics?.nucleicAcidChains ?? parsed.diagnostics.nucleicAcidChains),
+          ],
+        };
+
+        totalResidues = parsed.nResidues;
+        designedResidues = designedCount;
+        fixedResidues = fixedCount;
+        estimatedTokens = totalResidues;
+
+        previewStructurePdb = structure.pdbText;
+        previewStructureMeta = {
+          label: structure.label,
+          atomGranularity: structure.atomGranularity ?? 'backbone4',
+          length: parsed.nResidues,
+        };
+        fastaEntries = [
+          {
+            id: structure.id,
+            header: `>${structure.label} (${variantLabel} · target ${resolvedTargetChain} · ${designedCount} designable)`,
+            sequence: parsed.sequence,
+            chainLengths: parsed.diagnostics.chainLengths,
+            selected: true,
+          },
+        ];
+
+        payload = {
+          format: 'mpnn-masks',
+          headline: `${variantLabel} (${precision.toUpperCase()} · ${samplingMode}) · chain ${resolvedTargetChain} · ${designedCount} design / ${fixedCount} fixed`,
+          compiledSummary: {
+            variant,
+            precision,
+            samplingMode,
+            targetChain: resolvedTargetChain,
+            ...(regions ? { regions } : {}),
+            numSequences,
+            temperature,
+            unlockInherited,
+            seed,
+          },
+          rawSpecText: JSON.stringify(
+            {
+              variant,
+              precision,
+              samplingMode,
+              targetChain: resolvedTargetChain,
+              ...(variant === 'antifold' ? { regions: regions || null } : {}),
+              numSequences,
+              temperature,
+              fixedPositions: fixedSpec || null,
+              unlockInherited,
+              designedCount,
+              fixedCount,
+              seed,
+            },
+            null,
+            2,
+          ),
+        };
+      } catch (err) {
+        availability = 'error';
+        pushIssue({
+          severity: 'error',
+          source: 'compiler',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   } else {
     availability = 'partial';
     payload = {

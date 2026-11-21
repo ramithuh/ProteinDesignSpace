@@ -351,9 +351,10 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
 
   'thermompnn-webgpu': {
     id: 'thermompnn-webgpu',
+    adapterId: 'thermompnn',
     displayName: 'ThermoMPNN',
-    status: 'weights-hosted',
-    activePrecisionId: 'fp32',
+    status: 'live',
+    activePrecisionId: 'fp16',
     precisions: [
       {
         id: 'fp32',
@@ -418,9 +419,10 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
 
   'ligandmpnn-webgpu': {
     id: 'ligandmpnn-webgpu',
+    adapterId: 'ligandmpnn',
     displayName: 'LigandMPNN',
-    status: 'weights-hosted',
-    activePrecisionId: 'fp32',
+    status: 'live',
+    activePrecisionId: 'fp16',
     precisions: [
       {
         id: 'fp32',
@@ -485,9 +487,10 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
 
   'lasermpnn-webgpu': {
     id: 'lasermpnn-webgpu',
+    adapterId: 'lasermpnn',
     displayName: 'LASErMPNN',
-    status: 'weights-hosted',
-    activePrecisionId: 'fp32',
+    status: 'live',
+    activePrecisionId: 'fp16',
     precisions: [
       {
         id: 'fp32',
@@ -554,8 +557,9 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
 
   'antifold-esmif1-webgpu': {
     id: 'antifold-esmif1-webgpu',
+    adapterId: 'antifold-esmif1',
     displayName: 'AntiFold & ESM-IF1',
-    status: 'weights-hosted',
+    status: 'live',
     activePrecisionId: 'fp16',
     precisions: [
       {
@@ -836,6 +840,24 @@ export function getModelCardForAdapter(
       resolved.precisions[0].quantizationDetail =
         'Block-64 INT8 sharded weights (~330 MB trunk + decoder + ~138 MB autoencoder encoder = ~469 MB) uploaded as packed FP16 on WebGPU ({ half: true })';
     }
+  } else if (
+    (adapterId === 'antifold-esmif1' || adapterId === 'antifold-esmif1-webgpu') &&
+    typeof params?.variant === 'string'
+  ) {
+    if (params.variant === 'esmif1') {
+      resolved.displayName = 'ESM-IF1';
+      resolved.license = 'MIT (Meta ESM-IF1 & GVP · WebGPU port)';
+    } else if (params.variant === 'antifold') {
+      resolved.displayName = 'AntiFold (Antibody CDRs)';
+      resolved.license = 'BSD-3-Clause (AntiFold) · MIT (GVP & WebGPU port)';
+    }
+  } else if (
+    (adapterId === 'ligandmpnn' || adapterId === 'ligandmpnn-webgpu') &&
+    typeof params?.checkpoint === 'string' &&
+    params.checkpoint.trim().length > 0
+  ) {
+    const ckptShort = params.checkpoint.trim().replace(/^ligandmpnn_/, '');
+    resolved.displayName = `LigandMPNN (${ckptShort})`;
   }
 
   if (

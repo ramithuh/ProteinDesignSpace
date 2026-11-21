@@ -58,9 +58,12 @@ export interface FilteredCatalogEntry {
 export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
   { title: 'Inputs', ids: ['pdb-input', 'sequence-input'] },
   { title: 'Structure Generation', ids: ['rfd4-proteina', 'genie3'] },
-  { title: 'Sequence Design', ids: ['web-protein-mpnn'] },
+  {
+    title: 'Sequence Design',
+    ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1'],
+  },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
-  { title: 'Evaluation', ids: ['top-k-filter', 'designability-scorer'] },
+  { title: 'Evaluation', ids: ['thermompnn', 'top-k-filter', 'designability-scorer'] },
 ];
 
 export const CONCISE_BLOCK_ROLES: Record<string, string> = {
@@ -69,7 +72,11 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   'rfd4-proteina': 'All-atom backbone and sequence co-design',
   genie3: 'Fast de novo backbone diffusion (23.3M parameters)',
   'web-protein-mpnn': 'Inverse folding (SolubleMPNN, ProteinMPNN, Cα-only)',
+  ligandmpnn: 'Ligand-, metal- & nucleic-acid-aware protein sequence design',
+  lasermpnn: 'Ligand-aware sequence & all-atom sidechain rotamer co-design',
+  'antifold-esmif1': 'Antibody CDR (AntiFold) & general protein inverse folding (ESM-IF1)',
   'localfold-af2': 'Predict 3D structures (AlphaFold2, RF3, Boltz-2, AlphaFold 3 & more)',
+  thermompnn: 'Full L×20 site-saturation ΔΔG stability scan & B-factor painting',
   'top-k-filter': 'Rank and filter top-K sequences per backbone or globally before folding',
   'designability-scorer': 'Kabsch alignment, scRMSD, scTM & pLDDT pass rate',
 };
@@ -192,6 +199,41 @@ function buildSubGroupsForAdapter(adapterId: string): {
         .toLowerCase(),
     }));
 
+    return {
+      subCountLabel: `${items.length} variants`,
+      subGroups: [{ title: 'Model Variants', items }],
+    };
+  }
+
+  if (adapterId === 'antifold-esmif1') {
+    const items: CatalogSubItem[] = [
+      {
+        key: 'antifold',
+        label: 'AntiFold (Antibody CDRs)',
+        subtitle: 'Antibody & nanobody CDR inverse folding (IMGT/Kabat regions)',
+        meta: '~271 MB · BSD-3-Clause',
+        insert: {
+          adapterId: 'antifold-esmif1',
+          params: { variant: 'antifold' },
+          label: 'AntiFold',
+        },
+        searchBlob:
+          'antifold antibody nanobody vhh cdr cdr1 cdr2 cdr3 imgt kabat inverse folding opig bsd-3'.toLowerCase(),
+      },
+      {
+        key: 'esmif1',
+        label: 'ESM-IF1',
+        subtitle: 'General GVP-Transformer inverse folding (Meta AI · 142M params)',
+        meta: '~271 MB · MIT',
+        insert: {
+          adapterId: 'antifold-esmif1',
+          params: { variant: 'esmif1' },
+          label: 'ESM-IF1',
+        },
+        searchBlob:
+          'esmif1 esm-if1 esm gvp transformer meta general inverse folding sequence design mit'.toLowerCase(),
+      },
+    ];
     return {
       subCountLabel: `${items.length} variants`,
       subGroups: [{ title: 'Model Variants', items }],
@@ -390,17 +432,45 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
   })(),
   (() => {
     const mpnn = buildSubGroupsForAdapter('web-protein-mpnn');
-    const total = mpnn.subGroups.reduce((a, g) => a + g.items.length, 0);
-    const identityBlob = 'sequence design inverse fold folding proteinmpnn mpnn';
-    const searchBlob = `${identityBlob} ${mpnn.subGroups.flatMap((g) => [g.title.toLowerCase(), ...g.items.map((i) => i.searchBlob)]).join(' ')}`;
+    const antifold = buildSubGroupsForAdapter('antifold-esmif1');
+    const lig = ADAPTER_REGISTRY.ligandmpnn;
+    const laser = ADAPTER_REGISTRY.lasermpnn;
+    const allAtomItems: CatalogSubItem[] = [
+      {
+        key: 'ligandmpnn',
+        label: lig.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.ligandmpnn,
+        meta: `~${lig.approxWeightsMB} MB · MIT`,
+        insert: { adapterId: 'ligandmpnn', label: 'LigandMPNN' },
+        searchBlob:
+          `${lig.id} ${lig.shortName} ${lig.displayName} ${CONCISE_BLOCK_ROLES.ligandmpnn} ligand metal ion dna rna holo pocket mpnn mit`.toLowerCase(),
+      },
+      {
+        key: 'lasermpnn',
+        label: laser.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.lasermpnn,
+        meta: `~${laser.approxWeightsMB} MB · MIT`,
+        insert: { adapterId: 'lasermpnn', label: 'LASErMPNN' },
+        searchBlob:
+          `${laser.id} ${laser.shortName} ${laser.displayName} ${CONCISE_BLOCK_ROLES.lasermpnn} ligand rotamer sidechain packing all-atom spice polizzi mpnn mit`.toLowerCase(),
+      },
+    ];
+    const subGroups: CatalogSubGroup[] = [
+      { title: 'ProteinMPNN Family', items: mpnn.subGroups[0]?.items ?? [] },
+      { title: 'Ligand & All-Atom Inverse Folding', items: allAtomItems },
+      { title: 'Antibody & General GVP-Transformer', items: antifold.subGroups[0]?.items ?? [] },
+    ];
+    const total = subGroups.reduce((a, g) => a + g.items.length, 0);
+    const identityBlob = 'sequence design inverse fold folding';
+    const searchBlob = `${identityBlob} ${subGroups.flatMap((g) => [g.title.toLowerCase(), ...g.items.map((i) => i.searchBlob)]).join(' ')}`;
     return {
       id: 'sequence-design',
       title: 'Sequence Design',
       stage: 'inverse-fold',
-      subtitle: 'SolubleMPNN, ProteinMPNN & Cα-only',
+      subtitle: 'ProteinMPNN, LigandMPNN, LASErMPNN, AntiFold & ESM-IF1',
       countLabel: `${total}`,
-      footnote: 'Powered by webProteinMPNN (MurrellGroup)',
-      subGroups: mpnn.subGroups,
+      footnote: 'Runs locally over WebGPU — ProteinMPNN, LigandMPNN, LASErMPNN, AntiFold & ESM-IF1',
+      subGroups,
       identityBlob,
       searchBlob,
     };
@@ -425,7 +495,17 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
   (() => {
     const sc = ADAPTER_REGISTRY['designability-scorer'];
     const tk = ADAPTER_REGISTRY['top-k-filter'];
+    const th = ADAPTER_REGISTRY.thermompnn;
     const items: CatalogSubItem[] = [
+      {
+        key: 'thermompnn',
+        label: th.displayName,
+        subtitle: CONCISE_BLOCK_ROLES.thermompnn,
+        meta: `~${th.approxWeightsMB} MB · MIT`,
+        insert: { adapterId: 'thermompnn', label: 'ThermoMPNN' },
+        searchBlob:
+          `${th.id} ${th.shortName} ${th.displayName} ${CONCISE_BLOCK_ROLES.thermompnn} thermompnn ddg stability mutation ssm site saturation heatmap bfactor kuhlman mit`.toLowerCase(),
+      },
       {
         key: 'top-k-filter',
         label: tk.displayName,
@@ -441,14 +521,14 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         searchBlob: `${sc.id} ${sc.shortName} ${sc.displayName} ${CONCISE_BLOCK_ROLES['designability-scorer']} score evaluation designability kabsch scrmsd sctm plddt`.toLowerCase(),
       },
     ];
-    const subGroups: CatalogSubGroup[] = [{ title: 'Filtering & Designability Metrics', items }];
-    const identityBlob = 'evaluation score scoring metrics designability scrmsd sctm filter ranker top-k';
+    const subGroups: CatalogSubGroup[] = [{ title: 'Stability, Filtering & Designability Metrics', items }];
+    const identityBlob = 'evaluation score scoring metrics designability scrmsd sctm filter ranker top-k stability';
     const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
     return {
       id: 'evaluation',
       title: 'Evaluation',
       stage: 'score',
-      subtitle: 'Top-K sequence filter, Kabsch scRMSD, scTM & pLDDT pass rate',
+      subtitle: 'ThermoMPNN ΔΔG stability, Top-K filter, scRMSD & scTM',
       countLabel: `${items.length}`,
       subGroups,
       identityBlob,

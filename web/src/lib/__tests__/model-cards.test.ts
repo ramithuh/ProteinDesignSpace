@@ -40,7 +40,7 @@ const EXPECTED_HOSTED_REVISIONS: Record<(typeof HOSTED_PORT_CARD_IDS)[number], {
 describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
   it('resolves a non-null ModelCardSpec for every GPU/WebGPU/ONNX adapter in ADAPTER_REGISTRY', () => {
     const mlAdapters = Object.values(ADAPTER_REGISTRY).filter((a) => a.runtime !== 'cpu-ts');
-    expect(mlAdapters.length).toBeGreaterThanOrEqual(4);
+    expect(mlAdapters.length).toBeGreaterThanOrEqual(8);
 
     for (const adapter of mlAdapters) {
       const card = getModelCardForAdapter(adapter.id);
@@ -63,7 +63,7 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
 
   it('ensures every card in MODEL_CARDS has a valid activePrecisionId and complete provenance', () => {
     const cards = Object.values(MODEL_CARDS);
-    expect(cards.length).toBe(10); // 4 live GPU/ONNX adapters + 6 hosted WebGPU ports
+    expect(cards.length).toBe(10); // 8 live GPU/ONNX adapters + 2 remaining hosted WebGPU ports
 
     for (const card of cards) {
       expect(card.precisions.length).toBeGreaterThan(0);
@@ -81,13 +81,25 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
     }
   });
 
-  it('includes all 6 hosted WebGPU ports with exact measured parity metrics, pinned HF URLs, licenses, and honest limitations', () => {
+  it('includes all 6 HF-hosted WebGPU ports with exact measured parity metrics, pinned HF URLs, Wave-7A live promotion, and honest limitations', () => {
     expect(HOSTED_PORT_CARD_IDS).toHaveLength(6);
+    const liveWave7Cards: Record<string, string> = {
+      'thermompnn-webgpu': 'thermompnn',
+      'ligandmpnn-webgpu': 'ligandmpnn',
+      'lasermpnn-webgpu': 'lasermpnn',
+      'antifold-esmif1-webgpu': 'antifold-esmif1',
+    };
 
     for (const id of HOSTED_PORT_CARD_IDS) {
       const card = MODEL_CARDS[id];
       expect(card, `Missing hosted port card "${id}"`).toBeDefined();
-      expect(card.status).toBe('weights-hosted');
+      if (id in liveWave7Cards) {
+        expect(card.status).toBe('live');
+        expect(card.adapterId).toBe(liveWave7Cards[id]);
+        expect(card.activePrecisionId).toBe('fp16');
+      } else {
+        expect(card.status).toBe('weights-hosted');
+      }
       expect(card.weightsRepo).toBe(EXPECTED_HOSTED_REVISIONS[id].repo);
       expect(card.weightsRevision).toBe(EXPECTED_HOSTED_REVISIONS[id].rev);
       expect(card.upstreamCommit).toMatch(/^[0-9a-f]{40}$/);
@@ -113,6 +125,28 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
       expect(overridden?.activePrecisionId).toBe(alt);
       expect(MODEL_CARDS[id].activePrecisionId).toBe(origActive);
     }
+
+    // Dynamic variant & precision resolution for Wave-7A adapters
+    const esmIf1Int8 = getModelCardForAdapter('antifold-esmif1', { variant: 'esmif1', precision: 'int8' });
+    expect(esmIf1Int8?.displayName).toBe('ESM-IF1');
+    expect(esmIf1Int8?.activePrecisionId).toBe('int8');
+    expect(esmIf1Int8?.license).toContain('MIT');
+
+    const antiFoldFp16 = getModelCardForAdapter('antifold-esmif1', { variant: 'antifold', precision: 'fp16' });
+    expect(antiFoldFp16?.displayName).toBe('AntiFold (Antibody CDRs)');
+    expect(antiFoldFp16?.activePrecisionId).toBe('fp16');
+    expect(antiFoldFp16?.license).toContain('BSD-3-Clause');
+
+    const thermoInt8 = getModelCardForAdapter('thermompnn', { precision: 'int8' });
+    expect(thermoInt8?.activePrecisionId).toBe('int8');
+    expect(getActivePrecision(thermoInt8!).approxSizeMB).toBe(1.9);
+
+    const lig010 = getModelCardForAdapter('ligandmpnn', {
+      checkpoint: 'ligandmpnn_v_32_010_25',
+      precision: 'fp32',
+    });
+    expect(lig010?.displayName).toBe('LigandMPNN (v_32_010_25)');
+    expect(lig010?.activePrecisionId).toBe('fp32');
   });
 
   it('specializes LocalFold, ProteinMPNN, and RFD4 cards from adapter params and covers all LocalFold families', () => {

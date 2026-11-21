@@ -102,8 +102,49 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         seed: 42,
         fixedPositions: '',
       };
+    case 'ligandmpnn':
+      return {
+        checkpoint: 'ligandmpnn_v_32_020_25',
+        precision: 'fp16',
+        numSequences: 2,
+        temperature: 0.1,
+        fixedPositions: '',
+        omitAminoAcids: '',
+        useLigandContext: true,
+        unlockInherited: false,
+        seed: 42,
+      };
+    case 'lasermpnn':
+      return {
+        precision: 'fp16',
+        numSequences: 2,
+        temperature: 0.1,
+        fixedPositions: '',
+        omitAminoAcids: '',
+        unlockInherited: false,
+        seed: 42,
+      };
+    case 'antifold-esmif1':
+      return {
+        variant: 'antifold',
+        precision: 'fp16',
+        numSequences: 2,
+        temperature: 0.2,
+        samplingMode: 'independent',
+        targetChain: '',
+        regions: 'CDR1 CDR2 CDR3',
+        fixedPositions: '',
+        unlockInherited: false,
+        seed: 42,
+      };
     case 'localfold-af2':
       return { model: 'monomer', recycles: 1, diffusionSteps: 25, maxSequences: 2, seed: 0 };
+    case 'thermompnn':
+      return {
+        precision: 'fp16',
+        chain: '',
+        bfactorAggregate: 'best-stabilizing',
+      };
     case 'top-k-filter':
       return {
         mode: 'per-backbone',

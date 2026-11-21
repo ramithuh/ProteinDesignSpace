@@ -66,6 +66,42 @@
       url: 'https://github.com/MurrellGroup/webProteinMPNN',
       linkLabel: 'MurrellGroup/webProteinMPNN',
     },
+    {
+      name: 'ThermoMPNN',
+      role: 'Point-Mutation Stability Prediction (ΔΔG)',
+      detail:
+        'Transfer-learned protein stability predictor (Dieckhaus et al., PNAS 2024; Kuhlman Lab, UNC) computing full L×20 site-saturation ΔΔG landscapes in browser WebGPU.',
+      license: 'MIT',
+      url: 'https://github.com/Kuhlman-Lab/ThermoMPNN',
+      linkLabel: 'Kuhlman-Lab/ThermoMPNN',
+    },
+    {
+      name: 'LigandMPNN',
+      role: 'Ligand- & Nucleic-Acid-Aware Inverse Folding',
+      detail:
+        'Atomic context-conditioned sequence design preserving small molecules, metal ions, and DNA/RNA (Dauparas et al., Nature Methods 2025; Baker Lab), ported to native WebGPU.',
+      license: 'MIT',
+      url: 'https://github.com/dauparas/LigandMPNN',
+      linkLabel: 'dauparas/LigandMPNN',
+    },
+    {
+      name: 'LASErMPNN',
+      role: 'Ligand-Aware Sequence & Sidechain Rotamer Co-Design',
+      detail:
+        'All-atom inverse folding and discrete χ1–χ4 sidechain rotamer packing with an embedded SPICE ligand encoder (Polizzi Lab, Harvard/DFCI), ported to native WebGPU.',
+      license: 'MIT',
+      url: 'https://github.com/polizzilab/LASErMPNN',
+      linkLabel: 'polizzilab/LASErMPNN',
+    },
+    {
+      name: 'AntiFold & ESM-IF1',
+      role: 'Antibody CDR & General GVP-Transformer Inverse Folding',
+      detail:
+        'Antibody and nanobody CDR inverse folding by OPIG (Høie et al., Bioinformatics 2024) built on Meta AI ESM-IF1 (Hsu et al., ICML 2022), running natively in WebGPU.',
+      license: 'BSD-3-Clause (AntiFold) · MIT (Meta ESM-IF1)',
+      url: 'https://github.com/oxpig/AntiFold',
+      linkLabel: 'oxpig/AntiFold',
+    },
   ];
 
   const TOOL_CREDITS: CreditItem[] = [

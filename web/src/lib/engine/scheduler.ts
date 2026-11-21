@@ -6,6 +6,10 @@ import MpnnWorker from '$lib/workers/mpnn.worker?worker';
 import LocalFoldWorker from '$lib/workers/localfold.worker?worker';
 import Rfd4Worker from '$lib/workers/rfd4.worker?worker';
 import Genie3Worker from '$lib/workers/genie3.worker?worker';
+import ThermoMpnnWorker from '$lib/workers/thermompnn.worker?worker';
+import LigandMpnnWorker from '$lib/workers/ligandmpnn.worker?worker';
+import LaserMpnnWorker from '$lib/workers/lasermpnn.worker?worker';
+import AntiFoldWorker from '$lib/workers/antifold.worker?worker';
 import {
   cropRawAllAtomStructure,
   generateSampleHelixBundlePdb,
@@ -1249,6 +1253,14 @@ export class ExecutionScheduler {
         return new Rfd4Worker();
       case 'genie3':
         return new Genie3Worker();
+      case 'thermompnn':
+        return new ThermoMpnnWorker();
+      case 'ligandmpnn':
+        return new LigandMpnnWorker();
+      case 'lasermpnn':
+        return new LaserMpnnWorker();
+      case 'antifold-esmif1':
+        return new AntiFoldWorker();
       default:
         throw new Error(`No GPU worker registered for adapter "${adapterId}"`);
     }

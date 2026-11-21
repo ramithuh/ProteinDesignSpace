@@ -44,7 +44,9 @@ describe('engine/catalog & biologist terminology', () => {
     }
 
     expect(RFD4_BENCHMARK_OPTIONS).toHaveLength(9);
-    expect(WORKFLOW_PRESETS).toHaveLength(7);
+    expect(WORKFLOW_PRESETS).toHaveLength(8);
+    expect(WORKFLOW_PRESETS[0].id).toBe('genie3-mpnn-af2');
+    expect(WORKFLOW_PRESETS[WORKFLOW_PRESETS.length - 1].id).toBe('pdb-thermompnn');
 
     for (const preset of WORKFLOW_PRESETS) {
       expect(validateGraph(preset.graph)).toEqual([]);
@@ -54,12 +56,16 @@ describe('engine/catalog & biologist terminology', () => {
     }
   });
 
-  it('organizes all 8 blocks into workflow groups with structured sub-items for LocalFold and ProteinMPNN', () => {
+  it('organizes all 12 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, and AntiFold/ESM-IF1', () => {
     const groupedIds = CATALOG_STAGE_GROUPS.flatMap((g) => g.ids);
     expect(new Set(groupedIds)).toEqual(new Set(Object.keys(ADAPTER_REGISTRY)));
     expect(CATALOG_ITEMS).toHaveLength(Object.keys(ADAPTER_REGISTRY).length);
-    expect(CATALOG_ITEMS).toHaveLength(8);
+    expect(CATALOG_ITEMS).toHaveLength(12);
     expect(ADAPTER_REGISTRY['top-k-filter']).toBeDefined();
+    expect(ADAPTER_REGISTRY.thermompnn).toBeDefined();
+    expect(ADAPTER_REGISTRY.ligandmpnn).toBeDefined();
+    expect(ADAPTER_REGISTRY.lasermpnn).toBeDefined();
+    expect(ADAPTER_REGISTRY['antifold-esmif1']).toBeDefined();
     expect(ADAPTER_REGISTRY['rfd4-conditioner']).toBeUndefined();
 
     const lf = CATALOG_ITEMS.find((i) => i.id === 'localfold-af2')!;
@@ -81,6 +87,13 @@ describe('engine/catalog & biologist terminology', () => {
       'solublempnn',
       'proteinmpnn',
       'ca',
+    ]);
+
+    const antifold = CATALOG_ITEMS.find((i) => i.id === 'antifold-esmif1')!;
+    expect(antifold.subGroups).toHaveLength(1);
+    expect(antifold.subGroups[0].items.map((s) => s.insert.params?.variant)).toEqual([
+      'antifold',
+      'esmif1',
     ]);
 
     // Genie 3 preset defaults to Cα-ProteinMPNN (family: 'ca') for honest Cα-only backbones
@@ -166,6 +179,40 @@ describe('engine/catalog & biologist terminology', () => {
     expect(genie).toHaveLength(1);
     expect(genie[0].category.id).toBe('generation');
     expect(genie[0].matchingSubItems.map((s) => s.key)).toEqual(['genie3']);
+
+    const seqCat = CATALOG_CATEGORIES.find((c) => c.id === 'sequence-design')!;
+    expect(seqCat.subGroups.flatMap((g) => g.items).map((i) => i.key)).toEqual([
+      'solublempnn',
+      'proteinmpnn',
+      'ca',
+      'ligandmpnn',
+      'lasermpnn',
+      'antifold',
+      'esmif1',
+    ]);
+
+    const evalCat = CATALOG_CATEGORIES.find((c) => c.id === 'evaluation')!;
+    expect(evalCat.subGroups.flatMap((g) => g.items).map((i) => i.key)).toEqual([
+      'thermompnn',
+      'top-k-filter',
+      'designability-scorer',
+    ]);
+
+    expect(filterCatalogCategories('ligandmpnn')[0].matchingSubItems.map((s) => s.key)).toEqual([
+      'ligandmpnn',
+    ]);
+    expect(filterCatalogCategories('lasermpnn')[0].matchingSubItems.map((s) => s.key)).toEqual([
+      'lasermpnn',
+    ]);
+    expect(filterCatalogCategories('antifold')[0].matchingSubItems.map((s) => s.key)).toEqual([
+      'antifold',
+    ]);
+    expect(filterCatalogCategories('esm-if1')[0].matchingSubItems.map((s) => s.key)).toEqual([
+      'esmif1',
+    ]);
+    expect(filterCatalogCategories('thermompnn')[0].matchingSubItems.map((s) => s.key)).toEqual([
+      'thermompnn',
+    ]);
   });
 
   it('insertBlockSmart supports pre-configured params, label deduplication, default param preservation, and auto-wire proposals', () => {

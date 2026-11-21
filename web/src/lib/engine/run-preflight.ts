@@ -136,7 +136,12 @@ function estimateGraphWorkload(
     if (node.adapterId === 'genie3' || node.adapterId === 'rfd4-proteina') {
       const n = readNumDesigns(node, forceSingleDesign);
       res = { backbones: n, sequences: n };
-    } else if (node.adapterId === 'web-protein-mpnn') {
+    } else if (
+      node.adapterId === 'web-protein-mpnn' ||
+      node.adapterId === 'ligandmpnn' ||
+      node.adapterId === 'lasermpnn' ||
+      node.adapterId === 'antifold-esmif1'
+    ) {
       const up = findUpstreamNode(node.id, 'structure');
       const n = up ? backbonesOut(up, visiting) : 1;
       const k = readClampedInt(node.params?.numSequences, 2, 1, MAX_SEQUENCES_PER_DESIGN);
@@ -199,7 +204,12 @@ function estimateGraphWorkload(
       continue;
     }
 
-    if (node.adapterId === 'web-protein-mpnn') {
+    if (
+      node.adapterId === 'web-protein-mpnn' ||
+      node.adapterId === 'ligandmpnn' ||
+      node.adapterId === 'lasermpnn' ||
+      node.adapterId === 'antifold-esmif1'
+    ) {
       hasMpnn = true;
       const out = sequencesOut(node);
       mpnnSequences += out.sequences;
@@ -454,6 +464,83 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
       continue;
     }
 
+    if (node.adapterId === 'thermompnn') {
+      const precision = String(node.params.precision ?? 'fp16');
+      const approxMB = precision === 'int8' ? 1.9 : precision === 'fp32' ? 7.4 : 3.7;
+      const key = `thermompnn:${precision}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          key,
+          label: `ThermoMPNN (${precision.toUpperCase()})`,
+          approxMB,
+          estimatedVramMB: manifest.estimatedVramMB,
+          runtime: manifest.runtime,
+          plannedItems: 0,
+        });
+      }
+      addPlannedItems(key, nodeItems);
+      continue;
+    }
+
+    if (node.adapterId === 'ligandmpnn') {
+      const checkpoint = String(node.params.checkpoint ?? 'ligandmpnn_v_32_020_25');
+      const precision = String(node.params.precision ?? 'fp16');
+      const approxMB = precision === 'int8' ? 2.8 : precision === 'fp32' ? 10.5 : 5.3;
+      const ckptShort = checkpoint.replace(/^ligandmpnn_/, '');
+      const key = `ligandmpnn:${checkpoint}:${precision}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          key,
+          label: `LigandMPNN (${ckptShort} · ${precision.toUpperCase()})`,
+          approxMB,
+          estimatedVramMB: manifest.estimatedVramMB,
+          runtime: manifest.runtime,
+          plannedItems: 0,
+        });
+      }
+      addPlannedItems(key, nodeItems);
+      continue;
+    }
+
+    if (node.adapterId === 'lasermpnn') {
+      const precision = String(node.params.precision ?? 'fp16');
+      const approxMB = precision === 'int8' ? 21.1 : precision === 'fp32' ? 82.5 : 41.5;
+      const key = `lasermpnn:${precision}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          key,
+          label: `LASErMPNN (${precision.toUpperCase()})`,
+          approxMB,
+          estimatedVramMB: manifest.estimatedVramMB,
+          runtime: manifest.runtime,
+          plannedItems: 0,
+        });
+      }
+      addPlannedItems(key, nodeItems);
+      continue;
+    }
+
+    if (node.adapterId === 'antifold-esmif1') {
+      const variant = String(node.params.variant ?? 'antifold') === 'esmif1' ? 'esmif1' : 'antifold';
+      const precision = String(node.params.precision ?? 'fp16');
+      const approxMB = precision === 'int8' ? 137 : precision === 'fp32' ? 567 : 271;
+      const estimatedVramMB = precision === 'int8' ? 520 : manifest.estimatedVramMB;
+      const variantLabel = variant === 'esmif1' ? 'ESM-IF1' : 'AntiFold';
+      const key = `antifold-esmif1:${variant}:${precision}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          key,
+          label: `${variantLabel} (${precision.toUpperCase()})`,
+          approxMB,
+          estimatedVramMB,
+          runtime: manifest.runtime,
+          plannedItems: 0,
+        });
+      }
+      addPlannedItems(key, nodeItems);
+      continue;
+    }
+
     if (!byKey.has(manifest.id)) {
       byKey.set(manifest.id, {
         key: manifest.id,
@@ -504,6 +591,9 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
 export function formatApproxSize(mb: number): string {
   if (mb >= 1000) {
     return `~${(mb / 1024).toFixed(1)} GB`;
+  }
+  if (mb > 0 && mb < 10 && !Number.isInteger(mb)) {
+    return `~${mb.toFixed(1)} MB`;
   }
   return `~${Math.round(mb)} MB`;
 }
