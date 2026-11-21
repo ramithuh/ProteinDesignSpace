@@ -39,6 +39,13 @@ export const NUMERIC_SPECS: Record<string, Record<string, NumericFieldSpec>> = {
     },
     seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 42 },
   },
+  genie3: {
+    length: { min: 30, max: 256, step: 1, integer: true, defaultValue: 80, unit: 'aa' },
+    nSampleStep: { min: 10, max: 250, step: 10, integer: true, defaultValue: 100 },
+    directionScale: { min: 0.1, max: 1.5, step: 0.1, integer: false, defaultValue: 0.8 },
+    noiseScale: { min: 0, max: 1.5, step: 0.1, integer: false, defaultValue: 1.0 },
+    seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 42 },
+  },
   'web-protein-mpnn': {
     numSequences: { min: 1, max: 8, step: 1, integer: true, defaultValue: 2 },
     temperature: { min: 0.01, max: 1.5, step: 0.05, integer: false, defaultValue: 0.1 },

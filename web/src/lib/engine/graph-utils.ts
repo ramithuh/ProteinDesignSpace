@@ -44,6 +44,15 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         partialFraction: 0.5,
         customSpecYaml: '',
       };
+    case 'genie3':
+      return {
+        length: 80,
+        nSampleStep: 100,
+        directionScale: 0.8,
+        noiseScale: 1.0,
+        predictSequence: true,
+        seed: 42,
+      };
     case 'rfd4-conditioner':
       return {
         taskPreset: 'custom',

@@ -5,6 +5,7 @@
 import MpnnWorker from '$lib/workers/mpnn.worker?worker';
 import LocalFoldWorker from '$lib/workers/localfold.worker?worker';
 import Rfd4Worker from '$lib/workers/rfd4.worker?worker';
+import Genie3Worker from '$lib/workers/genie3.worker?worker';
 import { generateSampleHelixBundlePdb, parseStructureText } from '$lib/protein-ops/pdb';
 import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/protein-ops/kabsch';
 import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
@@ -133,6 +134,8 @@ export class ExecutionScheduler {
         return new LocalFoldWorker();
       case 'rfd4-proteina':
         return new Rfd4Worker();
+      case 'genie3':
+        return new Genie3Worker();
       default:
         throw new Error(`No GPU worker registered for adapter "${adapterId}"`);
     }

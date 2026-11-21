@@ -53,6 +53,8 @@
           ? 'RFD4-Proteina · INT8 + 138M encoder'
           : 'RFD4-Proteina · INT8 (FP16 compute)';
       }
+      case 'genie3':
+        return 'Genie 3 V1 · FP16 (~45 MB · Apache-2.0)';
       case 'web-protein-mpnn': {
         const fam =
           p.family === 'proteinmpnn'
@@ -503,6 +505,73 @@
               ></textarea>
             </label>
           {/if}
+        </div>
+      </details>
+
+    {:else if node.adapterId === 'genie3'}
+      <label>
+        Length (aa)
+        <NumericInput
+          {disabled}
+          ariaLabel="Length (aa)"
+          spec={NUMERIC_SPECS.genie3.length}
+          value={Number(node.params.length ?? 80)}
+          onChange={(v) => setParam('length', v)}
+        />
+      </label>
+      <label>
+        DDIM steps
+        <NumericInput
+          {disabled}
+          ariaLabel="DDIM sampling steps"
+          spec={NUMERIC_SPECS.genie3.nSampleStep}
+          value={Number(node.params.nSampleStep ?? 100)}
+          onChange={(v) => setParam('nSampleStep', v)}
+        />
+      </label>
+
+      <details class="adv-details full">
+        <summary>Advanced parameters</summary>
+        <div class="adv-fields">
+          <label>
+            Direction scale
+            <NumericInput
+              {disabled}
+              ariaLabel="DDIM direction scale"
+              spec={NUMERIC_SPECS.genie3.directionScale}
+              value={Number(node.params.directionScale ?? 0.8)}
+              onChange={(v) => setParam('directionScale', v)}
+            />
+          </label>
+          <label>
+            Noise scale
+            <NumericInput
+              {disabled}
+              ariaLabel="DDIM noise scale"
+              spec={NUMERIC_SPECS.genie3.noiseScale}
+              value={Number(node.params.noiseScale ?? 1.0)}
+              onChange={(v) => setParam('noiseScale', v)}
+            />
+          </label>
+          <label>
+            Seed
+            <NumericInput
+              {disabled}
+              ariaLabel="Seed"
+              spec={NUMERIC_SPECS.genie3.seed}
+              value={Number(node.params.seed ?? 42)}
+              onChange={(v) => setParam('seed', v)}
+            />
+          </label>
+          <label class="inline-check">
+            <input
+              type="checkbox"
+              {disabled}
+              checked={node.params.predictSequence !== false}
+              onchange={(e) => setParam('predictSequence', e.currentTarget.checked)}
+            />
+            Predict native 1-step sequence
+          </label>
         </div>
       </details>
 

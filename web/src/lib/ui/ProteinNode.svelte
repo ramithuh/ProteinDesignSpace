@@ -90,6 +90,11 @@
         if (mode === 'inverse-folding') return `INT8 · inv-fold · ${steps} steps`;
         return `INT8 · ${Number(p.length ?? 70)} aa · ${steps} steps`;
       }
+      case 'genie3': {
+        const len = Number(p.length ?? 80);
+        const steps = Number(p.nSampleStep ?? 100);
+        return `FP16 · ${len} aa · ${steps} DDIM`;
+      }
       case 'web-protein-mpnn': {
         const fam =
           p.family === 'proteinmpnn'

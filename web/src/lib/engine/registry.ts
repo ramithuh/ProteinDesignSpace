@@ -73,6 +73,23 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       sequences: { type: 'SequenceSet' },
     },
   },
+  genie3: {
+    id: 'genie3',
+    displayName: 'Genie 3 (WebGPU FP16)',
+    shortName: 'Genie 3',
+    stage: 'generate',
+    runtime: 'wgsl-custom',
+    estimatedVramMB: 220,
+    approxWeightsMB: 45,
+    licenseNote: 'Apache-2.0 (aqlaboratory/genie3 · WebGPU port ramithuh/genie3-webgpu)',
+    description:
+      'Fast SE(3)-equivariant protein diffusion (AlQuraishi Lab · 23.3M params) running natively on WebGPU via custom WGSL FP16 kernels (~45 MB). Reconstructs ideal N/CA/C/O backbones + optional 1-step native sequence.',
+    inputs: {},
+    outputs: {
+      structure: { type: 'StructureArtifact' },
+      sequences: { type: 'SequenceSet' },
+    },
+  },
   'web-protein-mpnn': {
     id: 'web-protein-mpnn',
     displayName: 'ProteinMPNN / SolubleMPNN (ONNX)',
@@ -222,6 +239,56 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
       ],
       edges: [
         { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    },
+  },
+  {
+    id: 'genie3-mpnn-af2',
+    name: 'Genie 3 → ProteinMPNN → LocalFold AF2',
+    badge: 'Fast SE(3) Diffusion (~45 MB)',
+    summary:
+      'Generate a de novo protein backbone in-browser with Genie 3 WebGPU FP16 (~45 MB, 23.3M params), inverse-fold with SolubleMPNN, refold with LocalFold AF2, and score scRMSD/scTM.',
+    graph: {
+      id: 'genie3-mpnn-af2',
+      name: 'Genie 3 → ProteinMPNN → LocalFold AF2',
+      nodes: [
+        {
+          id: 'gen',
+          adapterId: 'genie3',
+          label: 'Genie 3',
+          params: {
+            length: 80,
+            nSampleStep: 100,
+            directionScale: 0.8,
+            noiseScale: 1.0,
+            predictSequence: true,
+            seed: 42,
+          },
+        },
+        {
+          id: 'mpnn',
+          adapterId: 'web-protein-mpnn',
+          label: 'SolubleMPNN',
+          params: { family: 'solublempnn', modelName: 'v_48_020', numSequences: 2, temperature: 0.1, seed: 42 },
+        },
+        {
+          id: 'fold',
+          adapterId: 'localfold-af2',
+          label: 'LocalFold AF2',
+          params: { model: 'monomer', recycles: 1, maxSequences: 2, seed: 0 },
+        },
+        {
+          id: 'score',
+          adapterId: 'designability-scorer',
+          label: 'scRMSD / scTM',
+          params: { scRmsdThreshold: 2.0, plddtThreshold: 70 },
+        },
+      ],
+      edges: [
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
+        { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
         { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
         { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
       ],
