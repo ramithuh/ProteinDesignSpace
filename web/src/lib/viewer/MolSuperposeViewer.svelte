@@ -17,6 +17,8 @@
     spin?: boolean;
     /** Rotations per second when `spin` is enabled (Mol* default is 0.1; 0.02 ≈ 1 turn / 50s). */
     spinSpeed?: number;
+    /** When true (full-view expanded mode), shows the floating Representation & View menu. */
+    expanded?: boolean;
     theme?: 'dark' | 'light';
     height?: number | string;
     label?: string;
@@ -45,6 +47,7 @@
     illustrative = false,
     spin = true,
     spinSpeed = 0.02,
+    expanded = false,
     theme = 'dark',
     height = 420,
     label = undefined,
@@ -70,6 +73,63 @@
 
   let scrubPending = false;
   let queuedFrame: number | null = null;
+
+  // Interactive Representation & View controls (shown in expanded full-view mode)
+  type PolymerRepType =
+    | 'cartoon'
+    | 'ball-and-stick'
+    | 'molecular-surface'
+    | 'gaussian-surface'
+    | 'putty'
+    | 'spacefill'
+    | 'backbone';
+  type ColorSchemeOption =
+    | 'auto'
+    | 'chain-id'
+    | 'plddt-confidence'
+    | 'secondary-structure'
+    | 'hydrophobicity'
+    | 'sequence-id'
+    | 'element-symbol';
+
+  let styleMenuOpen = $state(true);
+  let repType = $state<PolymerRepType>('cartoon');
+  let colorScheme = $state<ColorSchemeOption>('auto');
+  let showSidechains = $state(false);
+  let showSurfaceOverlay = $state(false);
+  let showLigands = $state(true);
+  let cameraMode = $state<'perspective' | 'orthographic'>('perspective');
+  let localSpinSpeed = $state<number | null>(null);
+  let effectiveSpinSpeed = $derived(localSpinSpeed ?? spinSpeed);
+  let lastStructureKey = '';
+
+  function resetStyleControls() {
+    repType = 'cartoon';
+    colorScheme = 'auto';
+    showSidechains = false;
+    showSurfaceOverlay = false;
+    showLigands = true;
+    cameraMode = 'perspective';
+    localSpinSpeed = null;
+  }
+
+  function handleResetCamera() {
+    plugin?.canvas3d?.requestCameraReset();
+  }
+
+  function handleSavePng() {
+    if (!canvasEl) return;
+    try {
+      plugin?.canvas3d?.commit(true);
+      const url = canvasEl.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${(label || 'structure').replace(/[^a-z0-9._-]+/gi, '_').slice(0, 48)}.png`;
+      a.click();
+    } catch {
+      /* ignore if canvas cannot export */
+    }
+  }
 
   async function ensurePlugin() {
     if (destroyed) return null;
@@ -174,44 +234,85 @@
    * ball-and-stick) representations to a Mol* structure and return their state refs for visibility toggling.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async function addAccessoryRepresentations(ctx: any, struct: any): Promise<string[]> {
+  async function addAccessoryRepresentations(
+    ctx: any,
+    struct: any,
+    opts: {
+      includeLigands: boolean;
+      includeSidechains: boolean;
+      includeSurfaceOverlay: boolean;
+      primaryRep: PolymerRepType;
+      colorArg: Record<string, unknown>;
+      alpha?: number;
+    },
+  ): Promise<string[]> {
     const refs: string[] = [];
     const sData = struct.data;
     const polymerResidues = sData?.polymerResidueCount ?? 0;
     const isSparseTheozyme = polymerResidues > 0 && polymerResidues <= 15;
-    try {
-      const ligComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ligand');
-      if (ligComp) {
-        const ligRepr = await ctx.builders.structure.representation.addRepresentation(ligComp, {
-          type: 'ball-and-stick',
-          color: 'element-symbol',
-        });
-        if (ligRepr?.ref) refs.push(ligRepr.ref);
-        else if (ligComp.ref) refs.push(ligComp.ref);
-      }
-    } catch {
-      /* ignore if no ligand component */
-    }
-    try {
-      const ionComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ion');
-      if (ionComp) {
-        const ionRepr = await ctx.builders.structure.representation.addRepresentation(ionComp, {
-          type: 'spacefill',
-          color: 'element-symbol',
-        });
-        if (ionRepr?.ref) refs.push(ionRepr.ref);
-        else if (ionComp.ref) refs.push(ionComp.ref);
-      }
-    } catch {
-      /* ignore if no ion component */
-    }
-    if (isSparseTheozyme) {
+    if (opts.includeLigands) {
       try {
-        const sparseRepr = await ctx.builders.structure.representation.addRepresentation(struct, {
+        const ligComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ligand');
+        if (ligComp) {
+          const ligRepr = await ctx.builders.structure.representation.addRepresentation(ligComp, {
+            type: 'ball-and-stick',
+            color: 'element-symbol',
+          });
+          if (ligRepr?.ref) refs.push(ligRepr.ref);
+          else if (ligComp.ref) refs.push(ligComp.ref);
+        }
+      } catch {
+        /* ignore if no ligand component */
+      }
+      try {
+        const ionComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ion');
+        if (ionComp) {
+          const ionRepr = await ctx.builders.structure.representation.addRepresentation(ionComp, {
+            type: 'spacefill',
+            color: 'element-symbol',
+          });
+          if (ionRepr?.ref) refs.push(ionRepr.ref);
+          else if (ionComp.ref) refs.push(ionComp.ref);
+        }
+      } catch {
+        /* ignore if no ion component */
+      }
+      if (isSparseTheozyme && opts.primaryRep !== 'ball-and-stick') {
+        try {
+          const sparseRepr = await ctx.builders.structure.representation.addRepresentation(struct, {
+            type: 'ball-and-stick',
+            color: 'element-symbol',
+          });
+          if (sparseRepr?.ref) refs.push(sparseRepr.ref);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    if (opts.includeSidechains && opts.primaryRep !== 'ball-and-stick' && !isSparseTheozyme) {
+      try {
+        const scRepr = await ctx.builders.structure.representation.addRepresentation(struct, {
           type: 'ball-and-stick',
           color: 'element-symbol',
+          typeParams: { sizeFactor: 0.16, alpha: opts.alpha ?? 1.0 },
         });
-        if (sparseRepr?.ref) refs.push(sparseRepr.ref);
+        if (scRepr?.ref) refs.push(scRepr.ref);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (
+      opts.includeSurfaceOverlay &&
+      opts.primaryRep !== 'molecular-surface' &&
+      opts.primaryRep !== 'gaussian-surface'
+    ) {
+      try {
+        const surfRepr = await ctx.builders.structure.representation.addRepresentation(struct, {
+          type: 'molecular-surface',
+          ...opts.colorArg,
+          typeParams: { alpha: 0.24 },
+        });
+        if (surfRepr?.ref) refs.push(surfRepr.ref);
       } catch {
         /* ignore */
       }
@@ -227,6 +328,14 @@
     sDesigned: boolean,
     sRefold: boolean,
     fIdx: number | undefined,
+    styleOpts: {
+      rep: PolymerRepType;
+      color: ColorSchemeOption;
+      sidechains: boolean;
+      surfaceOverlay: boolean;
+      ligands: boolean;
+      preserveCamera: boolean;
+    },
   ) {
     const mySeq = ++loadSeq;
     initError = null;
@@ -239,6 +348,7 @@
     try {
       const ctx = await ensurePlugin();
       if (destroyed || !ctx || mySeq !== loadSeq) return;
+      const savedCam = styleOpts.preserveCamera ? ctx.canvas3d?.camera?.getSnapshot() : null;
 
       await ctx.clear();
       trajModelRef = null;
@@ -298,17 +408,28 @@
             }
           }
         }
+        const designedColorArg =
+          styleOpts.color !== 'auto'
+            ? { color: styleOpts.color }
+            : hasOverlay
+              ? { color: 'uniform', colorParams: { value: Color(0x94a3b8) } }
+              : isMultiChain
+                ? { color: 'chain-id' }
+                : { color: 'uniform', colorParams: { value: Color(0x60a5fa) } };
+        const designedAlpha = hasOverlay ? 0.45 : 1.0;
         await ctx.builders.structure.representation.addRepresentation(struct, {
-          type: 'cartoon',
-          color: hasOverlay ? 'uniform' : isMultiChain ? 'chain-id' : 'uniform',
-          ...(hasOverlay || !isMultiChain
-            ? { colorParams: { value: Color(hasOverlay ? 0x94a3b8 : 0x60a5fa) } }
-            : {}),
-          typeParams: { alpha: hasOverlay ? 0.45 : 1.0 },
+          type: styleOpts.rep,
+          ...designedColorArg,
+          typeParams: { alpha: designedAlpha },
         });
-        // Render ligands/metals/ions and sparse catalytic theozymes (<= 280 atoms) in both
-        // single-structure and overlay modes so cofactors & catalytic residues remain visible.
-        await addAccessoryRepresentations(ctx, struct);
+        await addAccessoryRepresentations(ctx, struct, {
+          includeLigands: styleOpts.ligands,
+          includeSidechains: styleOpts.sidechains && !hasOverlay,
+          includeSurfaceOverlay: styleOpts.surfaceOverlay && !hasOverlay,
+          primaryRep: styleOpts.rep,
+          colorArg: designedColorArg,
+          alpha: designedAlpha,
+        });
       }
 
       if (destroyed || mySeq !== loadSeq) return;
@@ -326,16 +447,28 @@
           name: 'model',
           params: {},
         });
+        const refoldColorArg =
+          styleOpts.color !== 'auto' ? { color: styleOpts.color } : { color: 'plddt-confidence' };
         await ctx.builders.structure.representation.addRepresentation(struct, {
-          type: 'cartoon',
-          color: 'plddt-confidence',
+          type: styleOpts.rep,
+          ...refoldColorArg,
         });
-        await addAccessoryRepresentations(ctx, struct);
+        await addAccessoryRepresentations(ctx, struct, {
+          includeLigands: styleOpts.ligands,
+          includeSidechains: styleOpts.sidechains,
+          includeSurfaceOverlay: styleOpts.surfaceOverlay,
+          primaryRep: styleOpts.rep,
+          colorArg: refoldColorArg,
+        });
       }
 
       if (destroyed || mySeq !== loadSeq) return;
       applyIllustrative(illustrative);
-      ctx.canvas3d?.requestCameraReset();
+      if (savedCam) {
+        ctx.canvas3d?.camera?.setState(savedCam, 0);
+      } else {
+        ctx.canvas3d?.requestCameraReset();
+      }
     } catch (err) {
       if (!destroyed && mySeq === loadSeq) {
         initError = err instanceof Error ? err.message : String(err);
@@ -404,7 +537,17 @@
     });
   }
 
-  async function renderMultiModels(specs: ViewerModelSpec[]) {
+  async function renderMultiModels(
+    specs: ViewerModelSpec[],
+    styleOpts: {
+      rep: PolymerRepType;
+      color: ColorSchemeOption;
+      sidechains: boolean;
+      surfaceOverlay: boolean;
+      ligands: boolean;
+      preserveCamera: boolean;
+    },
+  ) {
     const mySeq = ++loadSeq;
     initError = null;
     modelRefs = new Map();
@@ -417,6 +560,7 @@
     try {
       const ctx = await ensurePlugin();
       if (destroyed || !ctx || mySeq !== loadSeq) return;
+      const savedCam = styleOpts.preserveCamera ? ctx.canvas3d?.camera?.getSnapshot() : null;
 
       await ctx.clear();
       if (destroyed || mySeq !== loadSeq) return;
@@ -441,23 +585,26 @@
           name: 'model',
           params: {},
         });
-        const repr = await ctx.builders.structure.representation.addRepresentation(
-          struct,
-          m.colorByPlddt
-            ? {
-                type: 'cartoon',
-                color: 'plddt-confidence',
-                typeParams: { alpha: m.alpha },
-              }
-            : {
-                type: 'cartoon',
-                color: 'uniform',
-                colorParams: { value: Color(m.colorHex) },
-                typeParams: { alpha: m.alpha },
-              },
-        );
+        const modelColorArg =
+          styleOpts.color !== 'auto'
+            ? { color: styleOpts.color }
+            : m.colorByPlddt
+              ? { color: 'plddt-confidence' }
+              : { color: 'uniform', colorParams: { value: Color(m.colorHex) } };
+        const repr = await ctx.builders.structure.representation.addRepresentation(struct, {
+          type: styleOpts.rep,
+          ...modelColorArg,
+          typeParams: { alpha: m.alpha },
+        });
         if (destroyed || mySeq !== loadSeq) return;
-        const extraRefs = await addAccessoryRepresentations(ctx, struct);
+        const extraRefs = await addAccessoryRepresentations(ctx, struct, {
+          includeLigands: styleOpts.ligands,
+          includeSidechains: styleOpts.sidechains,
+          includeSurfaceOverlay: styleOpts.surfaceOverlay,
+          primaryRep: styleOpts.rep,
+          colorArg: modelColorArg,
+          alpha: m.alpha,
+        });
         if (destroyed || mySeq !== loadSeq) return;
         const refs = [repr?.ref ?? struct.ref, ...extraRefs];
         nextRefs.set(m.id, refs);
@@ -473,7 +620,11 @@
       if (destroyed || mySeq !== loadSeq) return;
       modelRefs = nextRefs;
       applyIllustrative(illustrative);
-      ctx.canvas3d?.requestCameraReset();
+      if (savedCam) {
+        ctx.canvas3d?.camera?.setState(savedCam, 0);
+      } else {
+        ctx.canvas3d?.requestCameraReset();
+      }
     } catch (err) {
       if (!destroyed && mySeq === loadSeq) {
         initError = err instanceof Error ? err.message : String(err);
@@ -512,11 +663,20 @@
       .join('||');
   });
 
-  // Re-render full scene when structures or structural compare inputs change
+  // Re-render full scene when structures, compare inputs, or representation style change
   $effect(() => {
+    const styleOpts = {
+      rep: repType,
+      color: colorScheme,
+      sidechains: showSidechains,
+      surfaceOverlay: showSurfaceOverlay,
+      ligands: showLigands,
+    };
     if (multiRenderKey !== null) {
+      const sameStructure = lastStructureKey === `multi:${multiRenderKey}`;
+      lastStructureKey = `multi:${multiRenderKey}`;
       const snapshot = untrack(() => models ?? []);
-      void renderMultiModels(snapshot);
+      void renderMultiModels(snapshot, { ...styleOpts, preserveCamera: sameStructure });
       return;
     }
     const d = designedPdb;
@@ -525,7 +685,13 @@
     const useT = showTrajectory && Boolean(t);
     const sd = showDesigned;
     const sr = showRefold;
-    void renderScene(d, r, t, useT, sd, sr, untrack(() => frameIndex));
+    const sKey = `single:${sd ? d?.length ?? 0 : -1}:${d?.slice(0, 48) ?? ''}|${sr ? r?.length ?? 0 : -1}:${r?.slice(0, 48) ?? ''}|${useT ? 1 : 0}`;
+    const sameStructure = lastStructureKey === sKey;
+    lastStructureKey = sKey;
+    void renderScene(d, r, t, useT, sd, sr, untrack(() => frameIndex), {
+      ...styleOpts,
+      preserveCamera: sameStructure,
+    });
   });
 
   // Camera-preserving incremental visibility sync when only `visible` flags change in compare mode
@@ -550,8 +716,17 @@
 
   $effect(() => {
     const on = spin && hasAnyStructure;
-    const speed = spinSpeed;
+    const speed = effectiveSpinSpeed;
     if (plugin) applySpin(on, speed);
+  });
+
+  $effect(() => {
+    const mode = cameraMode;
+    if (plugin?.canvas3d) {
+      plugin.canvas3d.setProps({
+        camera: { mode },
+      });
+    }
   });
 
   $effect(() => {
@@ -578,6 +753,35 @@
     return () => ro.disconnect();
   });
 
+  $effect(() => {
+    const el = containerEl;
+    const loop = plugin?.animationLoop;
+    if (!el || !loop) return;
+    let inViewport = true;
+    let observing = true;
+    function syncAnimation() {
+      if (!observing) return;
+      if (document.hidden || !inViewport) {
+        if (loop.isAnimating) loop.stop({ noDraw: true });
+      } else if (!loop.isAnimating) {
+        loop.start();
+      }
+    }
+    const observer = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver((entries) => {
+      if (entries.length === 0) return;
+      inViewport = entries[entries.length - 1].isIntersecting;
+      syncAnimation();
+    });
+    observer?.observe(el);
+    document.addEventListener('visibilitychange', syncAnimation);
+    syncAnimation();
+    return () => {
+      observing = false;
+      observer?.disconnect();
+      document.removeEventListener('visibilitychange', syncAnimation);
+    };
+  });
+
   onDestroy(() => {
     destroyed = true;
     loadSeq++;
@@ -593,6 +797,95 @@
 <div class="mol-card" style="height: {typeof height === 'number' ? `${height}px` : height}">
   {#if label}
     <div class="badge">{label}</div>
+  {/if}
+  {#if expanded && hasAnyStructure}
+    <div class="style-menu-wrap">
+      <button
+        type="button"
+        class="style-toggle-btn"
+        class:active={styleMenuOpen}
+        onclick={() => (styleMenuOpen = !styleMenuOpen)}
+        title="Toggle structure representation & view controls"
+      >
+        ⚙ Representation {styleMenuOpen ? '▾' : '▸'}
+      </button>
+      {#if styleMenuOpen}
+        <div class="style-panel" role="region" aria-label="Structure representation controls">
+          <label class="sp-field">
+            <span>Polymer</span>
+            <select bind:value={repType}>
+              <option value="cartoon">Cartoon</option>
+              <option value="ball-and-stick">Ball &amp; Stick</option>
+              <option value="molecular-surface">Molecular Surface</option>
+              <option value="gaussian-surface">Gaussian Surface</option>
+              <option value="putty">Putty (B-factor / pLDDT)</option>
+              <option value="backbone">Backbone</option>
+              <option value="spacefill">Spacefill (VDW)</option>
+            </select>
+          </label>
+          <label class="sp-field">
+            <span>Color</span>
+            <select bind:value={colorScheme}>
+              <option value="auto">Auto (Default)</option>
+              <option value="chain-id">By Chain</option>
+              <option value="plddt-confidence">pLDDT Confidence</option>
+              <option value="secondary-structure">Secondary Structure</option>
+              <option value="hydrophobicity">Hydrophobicity</option>
+              <option value="sequence-id">Rainbow (N → C)</option>
+              <option value="element-symbol">Element</option>
+            </select>
+          </label>
+          <div class="sp-checks">
+            <label><input type="checkbox" bind:checked={showSidechains} /> All-atom sticks</label>
+            <label><input type="checkbox" bind:checked={showSurfaceOverlay} /> Translucent surface</label>
+            <label><input type="checkbox" bind:checked={showLigands} /> Ligands &amp; ions</label>
+          </div>
+          <div class="sp-field">
+            <span>Projection</span>
+            <div class="sp-seg">
+              <button
+                type="button"
+                class:active={cameraMode === 'perspective'}
+                onclick={() => (cameraMode = 'perspective')}
+              >
+                Perspective
+              </button>
+              <button
+                type="button"
+                class:active={cameraMode === 'orthographic'}
+                onclick={() => (cameraMode = 'orthographic')}
+              >
+                Ortho
+              </button>
+            </div>
+          </div>
+          {#if spin}
+            <label class="sp-field">
+              <span>Spin speed ({effectiveSpinSpeed.toFixed(3)} rot/s)</span>
+              <input
+                type="range"
+                min="0.005"
+                max="0.15"
+                step="0.005"
+                value={effectiveSpinSpeed}
+                oninput={(e) => (localSpinSpeed = Number(e.currentTarget.value))}
+              />
+            </label>
+          {/if}
+          <div class="sp-actions">
+            <button type="button" onclick={handleResetCamera} title="Reset camera framing">
+              ⟲ Reset view
+            </button>
+            <button type="button" onclick={handleSavePng} title="Download PNG screenshot">
+              📷 PNG
+            </button>
+            <button type="button" onclick={resetStyleControls} title="Restore default style">
+              ↺ Default
+            </button>
+          </div>
+        </div>
+      {/if}
+    </div>
   {/if}
   {#if models && models.length > 0}
     <div class="compare-legend" role="group" aria-label="Compared 3D structures">
@@ -834,5 +1127,130 @@
     color: var(--err-text);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 12px;
+  }
+  .style-menu-wrap {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 15;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+  }
+  .style-toggle-btn {
+    background: var(--overlay-bg);
+    color: var(--text-primary);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+  }
+  .style-toggle-btn:hover,
+  .style-toggle-btn.active {
+    border-color: var(--accent);
+    color: var(--accent-bright);
+  }
+  .style-panel {
+    width: 230px;
+    background: var(--overlay-bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 10px 11px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    font-size: 11.5px;
+    color: var(--text-body);
+  }
+  .sp-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .sp-field > span {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.35px;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .sp-field select {
+    background: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 4px 6px;
+    font-size: 11.5px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .sp-field input[type='range'] {
+    width: 100%;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .sp-checks {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 2px 0;
+  }
+  .sp-checks label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+  }
+  .sp-seg {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    overflow: hidden;
+  }
+  .sp-seg button {
+    border: none;
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 4px 6px;
+    cursor: pointer;
+  }
+  .sp-seg button.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .sp-actions {
+    display: grid;
+    grid-template-columns: 1.2fr 0.85fr 0.95fr;
+    gap: 5px;
+    padding-top: 2px;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .sp-actions button {
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 5px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .sp-actions button:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
   }
 </style>

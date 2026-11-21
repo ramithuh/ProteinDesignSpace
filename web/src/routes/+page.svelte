@@ -2270,6 +2270,7 @@
             {showTrajectory}
             {illustrative}
             spin={viewerSpin}
+            expanded={expandedPane === 'viewer'}
             {theme}
             height={expandedPane === 'viewer' ? '100%' : splitMode === 'horizontal' ? 350 : 460}
             label={isCompareMode ? compareViewerLabel : viewerLabel}

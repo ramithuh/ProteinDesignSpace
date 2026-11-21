@@ -412,7 +412,7 @@
       <div class="onb-highlights">
         <div class="hl-item">
           <span class="hl-dot" style="background: #3b82f6"></span>
-          <span><b>Backbone Design &amp; Conditioning:</b> De novo monomers, motif scaffolding, protein binders, enzymes, ligands &amp; DNA.</span>
+          <span><b>Structure Design &amp; Co-Design:</b> All-atom &amp; Cα de novo monomers, motif scaffolding, protein binders, enzymes, ligands &amp; DNA.</span>
         </div>
         <div class="hl-item">
           <span class="hl-dot" style="background: #a855f7"></span>
