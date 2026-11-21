@@ -9,9 +9,11 @@
     type PeekSlot,
   } from '$lib/engine/peek';
   import type {
+    CollectionKind,
     ConditionSpecArtifact,
     DesignabilityMetrics,
     FoldedStructure,
+    ReferenceRelation,
     SequenceSet,
     StructureArtifact,
     WorkflowNode,
@@ -27,6 +29,8 @@
     selectedFoldIdx: number;
     scRmsdThreshold: number;
     plddtThreshold: number;
+    ipaeThreshold?: number;
+    motifRmsdThreshold?: number;
     isRunning: boolean;
     embedded?: boolean;
     hasScorerResult?: boolean;
@@ -47,6 +51,8 @@
     selectedFoldIdx,
     scRmsdThreshold,
     plddtThreshold,
+    ipaeThreshold = 10.0,
+    motifRmsdThreshold = 1.0,
     isRunning,
     embedded = false,
     hasScorerResult = false,
@@ -61,6 +67,7 @@
   let copiedKey = $state<string | null>(null);
   let copyFailedKey = $state<string | null>(null);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
+  let rawPreviewOpen = $state(false);
 
   async function copyText(text: string, key: string) {
     if (copyTimer) clearTimeout(copyTimer);
@@ -89,6 +96,50 @@
     return idleLabel;
   }
 
+  function isFiniteNum(v: unknown): v is number {
+    return typeof v === 'number' && Number.isFinite(v);
+  }
+
+  function fmtNum(v: number | null | undefined, digits: number, suffix = ''): string {
+    if (!isFiniteNum(v)) return '—';
+    return `${v.toFixed(digits)}${suffix}`;
+  }
+
+  function safeFilename(name: string): string {
+    return name.replace(/[/:\\*?<>|]+/g, '_');
+  }
+
+  function formatCollectionKind(kind?: CollectionKind): string | null {
+    if (kind === 'independent-candidates') return 'Independent candidates';
+    if (kind === 'multi-sample') return 'Multi-sample';
+    if (kind === 'ordered-frames') return 'Ordered frames';
+    return null;
+  }
+
+  function formatReferenceRelationBadge(
+    relation?: ReferenceRelation,
+    lineageMismatch?: boolean,
+  ): { text: string; tone: 'ok' | 'info' | 'warn' | 'err' } | null {
+    if (relation === 'self-consistency') {
+      return { text: 'Self-consistency', tone: 'ok' };
+    }
+    if (relation === 'external-mapped') {
+      return { text: 'External ref (mapped)', tone: 'info' };
+    }
+    if (relation === 'external-unlinked') {
+      return { text: 'External ref', tone: 'warn' };
+    }
+    if (relation === 'external-mismatch' || lineageMismatch) {
+      return { text: 'External ref · Lineage mismatch', tone: 'err' };
+    }
+    return null;
+  }
+
+  function isSelfGeneratorId(id?: string): boolean {
+    if (!id) return false;
+    return id.startsWith('rfd4-proteina') || id.startsWith('genie3');
+  }
+
   let inSlots = $derived(slots.filter((s) => s.direction === 'in'));
   let outSlots = $derived(slots.filter((s) => s.direction === 'out'));
 
@@ -99,22 +150,56 @@
   let structArt = $derived(artifact?.kind === 'StructureArtifact' ? (artifact as StructureArtifact) : null);
   let condArt = $derived(artifact?.kind === 'ConditionSpec' ? (artifact as ConditionSpecArtifact) : null);
 
+  $effect(() => {
+    void structArt?.id;
+    rawPreviewOpen = false;
+  });
+
   let activeRow = $derived(metricsArt?.rows[selectedRowIdx] ?? metricsArt?.best ?? null);
   let activeFold = $derived(foldArt?.folds[selectedFoldIdx] ?? foldArt?.folds[0] ?? null);
+  let activeRowSeqStats = $derived(activeRow ? analyzeSequence(activeRow.sequence) : null);
+  let structSeqStats = $derived(structArt ? analyzeSequence(structArt.sequence) : null);
+  let skipSelfRecovery = $derived(
+    Boolean(
+      seqArt &&
+        ((activeSlot?.direction === 'out' && isSelfGeneratorId(node?.adapterId)) ||
+          (contextStructure?.id === seqArt.parentStructureId && isSelfGeneratorId(seqArt.sourceModelId))),
+    ),
+  );
+  let seqCandidateStats = $derived.by(() => {
+    if (!seqArt) return [];
+    const refSeq = skipSelfRecovery ? undefined : contextStructure?.sequence;
+    return seqArt.candidates.map((c) => analyzeSequence(c.sequence, refSeq));
+  });
+  let rawStructText = $derived(structArt ? (structArt.cifText ?? structArt.pdbText) : '');
+  let rawPrev = $derived(
+    rawPreviewOpen && structArt ? previewTextLines(rawStructText, 36) : null,
+  );
+  let metricsRefBadge = $derived(
+    metricsArt
+      ? formatReferenceRelationBadge(
+          activeRow?.referenceRelation ?? metricsArt.referenceRelation,
+          activeRow?.lineageMismatch ?? metricsArt.lineageMismatch,
+        )
+      : null,
+  );
+  let metricsRefLabel = $derived(
+    activeRow?.referenceLabel ?? metricsArt?.referenceLabel ?? null,
+  );
   let hasBinderMetrics = $derived(
     Boolean(
       metricsArt?.rows.some(
         (r) =>
-          r.ipae !== undefined ||
-          r.binderScRmsd !== undefined ||
-          r.targetAlignedBinderRmsd !== undefined,
+          isFiniteNum(r.ipae) ||
+          isFiniteNum(r.binderScRmsd) ||
+          isFiniteNum(r.targetAlignedBinderRmsd),
       ),
     ),
   );
   let hasMotifMetrics = $derived(
     Boolean(
       metricsArt?.rows.some(
-        (r) => r.refoldMotifRmsd !== undefined || r.genMotifRmsd !== undefined,
+        (r) => isFiniteNum(r.refoldMotifRmsd) || isFiniteNum(r.genMotifRmsd),
       ),
     ),
   );
@@ -137,8 +222,25 @@
     return CONDITION_KEY_LABELS[key] ?? key;
   }
 
+  function formatCandidateSequence(sequence: string, chainLengths?: number[]): string {
+    if (!chainLengths || chainLengths.length <= 1) return sequence;
+    const sum = chainLengths.reduce((acc, n) => acc + n, 0);
+    if (sum !== sequence.length) return sequence;
+    const parts: string[] = [];
+    let offset = 0;
+    for (const len of chainLengths) {
+      parts.push(sequence.slice(offset, offset + len));
+      offset += len;
+    }
+    return parts.join(':');
+  }
+
   function formatFasta(seqSet: SequenceSet): string {
-    return seqSet.candidates.map((c) => `>${c.id}\n${c.sequence}`).join('\n') + '\n';
+    return (
+      seqSet.candidates
+        .map((c) => `>${c.id}\n${formatCandidateSequence(c.sequence, c.chainLengths)}`)
+        .join('\n') + '\n'
+    );
   }
 
   function plddtSummary(arr: Float32Array) {
@@ -147,18 +249,22 @@
     let max = -Infinity;
     let sum = 0;
     let ge70 = 0;
+    let count = 0;
     for (let i = 0; i < arr.length; i++) {
       const v = arr[i];
+      if (!Number.isFinite(v)) continue;
+      count++;
       if (v < min) min = v;
       if (v > max) max = v;
       sum += v;
       if (v >= 70) ge70++;
     }
+    if (count === 0) return null;
     return {
       min,
       max,
-      mean: sum / arr.length,
-      ge70Pct: (ge70 / arr.length) * 100,
+      mean: sum / count,
+      ge70Pct: (ge70 / count) * 100,
     };
   }
 </script>
@@ -177,8 +283,8 @@
     </div>
     <div class="head-right">
       {#if metricsArt}
-        <span class="pass-pill" class:good={metricsArt.passRate > 0}>
-          {(metricsArt.passRate * 100).toFixed(0)}% designable
+        <span class="pass-pill" class:good={isFiniteNum(metricsArt.passRate) && metricsArt.passRate > 0}>
+          {isFiniteNum(metricsArt.passRate) ? `${(metricsArt.passRate * 100).toFixed(0)}% designable` : '—'}
         </span>
       {:else if hasScorerResult && onJumpToScorer}
         <button class="jump-btn" onclick={onJumpToScorer}>Scorer summary →</button>
@@ -241,44 +347,76 @@
 
   <!-- Modality-Specific Content -->
   {#if metricsArt && metricsArt.rows.length > 0}
+    {#if metricsRefBadge || metricsArt.collectionKind}
+      {@const colLabel = formatCollectionKind(metricsArt.collectionKind)}
+      <div class="lineage-meta-bar">
+        {#if metricsRefBadge}
+          <span
+            class="ref-pill"
+            class:tone-ok={metricsRefBadge.tone === 'ok'}
+            class:tone-info={metricsRefBadge.tone === 'info'}
+            class:tone-warn={metricsRefBadge.tone === 'warn'}
+            class:tone-err={metricsRefBadge.tone === 'err'}
+            title={metricsRefLabel ?? metricsRefBadge.text}
+          >
+            {metricsRefBadge.text}
+          </span>
+        {/if}
+        {#if metricsRefLabel}
+          <span class="ref-desc">{metricsRefLabel}</span>
+        {/if}
+        {#if colLabel}
+          <span class="stat-chip">{colLabel}</span>
+        {/if}
+      </div>
+    {/if}
+    {#if metricsArt.lineageWarning}
+      <div class="lineage-warn-banner" role="status">
+        ⚠ {metricsArt.lineageWarning}
+      </div>
+    {/if}
+
     <table class="scores">
       <thead>
         <tr>
           <th>Seq</th>
-          <th>scRMSD</th>
-          <th>scTM</th>
+          <th>{metricsRefBadge && metricsRefBadge.tone !== 'ok' ? 'Ref RMSD' : 'scRMSD'}</th>
+          <th>{metricsRefBadge && metricsRefBadge.tone !== 'ok' ? 'Ref TM' : 'scTM'}</th>
           <th>pLDDT</th>
           <th>pTM</th>
           {#if hasBinderMetrics}
-            <th title="Mean interface PAE (Å)">iPAE</th>
-            <th title="Target-aligned or independent binder Cα RMSD (Å)">Binder RMSD</th>
+            <th title={`Mean interface PAE (Å, pass < ${ipaeThreshold})`}>iPAE</th>
+            <th title={`Target-aligned or independent binder Cα RMSD (Å, pass < ${scRmsdThreshold})`}>Binder RMSD</th>
           {/if}
           {#if hasMotifMetrics}
-            <th title="Refolded motif Cα RMSD vs native template (Å)">Motif RMSD</th>
+            <th title={`Refolded motif Cα RMSD vs native template (Å, pass < ${motifRmsdThreshold})`}>Motif RMSD</th>
           {/if}
           <th>Status</th>
         </tr>
       </thead>
       <tbody>
         {#each metricsArt.rows as row, i (`${row.sequenceId}_${i}`)}
-          {@const bRmsd = row.targetAlignedBinderRmsd ?? row.binderScRmsd}
+          {@const bRmsd = isFiniteNum(row.targetAlignedBinderRmsd) ? row.targetAlignedBinderRmsd : row.binderScRmsd}
+          {@const rowConfAvail = row.confidenceAvailable !== false && isFiniteNum(row.meanPlddt)}
           <tr class:selected={i === selectedRowIdx} onclick={() => onSelectRow(i)}>
             <td><code>{row.sequenceId}</code></td>
-            <td class:good-val={row.scRmsd < scRmsdThreshold}>{row.scRmsd.toFixed(2)} Å</td>
-            <td>{row.scTm.toFixed(3)}</td>
-            <td class:good-val={row.meanPlddt >= plddtThreshold}>{row.meanPlddt.toFixed(1)}</td>
-            <td>{row.ptm !== null ? row.ptm.toFixed(2) : '—'}</td>
+            <td class:good-val={isFiniteNum(row.scRmsd) && row.scRmsd < scRmsdThreshold}>{fmtNum(row.scRmsd, 2, ' Å')}</td>
+            <td>{fmtNum(row.scTm, 3)}</td>
+            <td class:good-val={rowConfAvail && row.meanPlddt >= plddtThreshold}>
+              {rowConfAvail ? fmtNum(row.meanPlddt, 1) : 'N/A'}
+            </td>
+            <td>{fmtNum(row.ptm, 2)}</td>
             {#if hasBinderMetrics}
-              <td class:good-val={row.ipae !== undefined && row.ipae < 10}>
-                {row.ipae !== undefined ? `${row.ipae.toFixed(1)} Å` : '—'}
+              <td class:good-val={isFiniteNum(row.ipae) && row.ipae < ipaeThreshold}>
+                {fmtNum(row.ipae, 1, ' Å')}
               </td>
-              <td class:good-val={bRmsd !== undefined && bRmsd < scRmsdThreshold}>
-                {bRmsd !== undefined ? `${bRmsd.toFixed(2)} Å` : '—'}
+              <td class:good-val={isFiniteNum(bRmsd) && bRmsd < scRmsdThreshold}>
+                {fmtNum(bRmsd, 2, ' Å')}
               </td>
             {/if}
             {#if hasMotifMetrics}
-              <td class:good-val={row.refoldMotifRmsd !== undefined && row.refoldMotifRmsd < 1.0}>
-                {row.refoldMotifRmsd !== undefined ? `${row.refoldMotifRmsd.toFixed(2)} Å` : '—'}
+              <td class:good-val={isFiniteNum(row.refoldMotifRmsd) && row.refoldMotifRmsd < motifRmsdThreshold}>
+                {fmtNum(row.refoldMotifRmsd, 2, ' Å')}
               </td>
             {/if}
             <td>
@@ -291,12 +429,11 @@
       </tbody>
     </table>
 
-    {#if activeRow}
-      {@const seqStats = analyzeSequence(activeRow.sequence)}
+    {#if activeRow && activeRowSeqStats}
       {@const designedIsCif = activeRow.designedPdb.trimStart().startsWith('data_')}
       <div class="seq-box">
         <div class="seq-head">
-          <span>Selected Sequence ({activeRow.sequence.length} aa · {seqStats.uniqueAaCount} unique AAs)</span>
+          <span>Selected Sequence ({activeRow.sequence.length} aa · {activeRowSeqStats.uniqueAaCount} unique AAs)</span>
           <div class="dl-links">
             <button class="link-btn" onclick={() => copyText(activeRow.sequence, 'metric-seq')}>
               {copyBtnLabel('metric-seq', 'Copy seq')}
@@ -307,7 +444,7 @@
                 onclick={() =>
                   onDownloadText(
                     activeRow.designedPdb,
-                    `${activeRow.structureId}_designed.${designedIsCif ? 'cif' : 'pdb'}`,
+                    safeFilename(`${activeRow.structureId}_designed.${designedIsCif ? 'cif' : 'pdb'}`),
                   )}
               >
                 {designedIsCif ? '↓ Designed mmCIF' : '↓ Designed PDB'}
@@ -315,15 +452,19 @@
             {/if}
             <button
               class="link-btn"
-              onclick={() => onDownloadText(activeRow.alignedFoldPdb, `${activeRow.sequenceId}_refold_aligned.pdb`)}
+              onclick={() =>
+                onDownloadText(
+                  activeRow.alignedFoldPdb,
+                  safeFilename(`${activeRow.sequenceId}_refold_aligned.pdb`),
+                )}
             >
               ↓ Refold PDB
             </button>
           </div>
         </div>
-        {#if seqStats.warnings.length > 0}
+        {#if activeRowSeqStats.warnings.length > 0}
           <div class="warn-chips">
-            {#each seqStats.warnings as w (w)}
+            {#each activeRowSeqStats.warnings as w (w)}
               <span class="warn-chip">⚠ {w}</span>
             {/each}
           </div>
@@ -334,42 +475,64 @@
       <div class="pae-row">
         <PaePlot pae={activeRow.pae} size={200} />
         <div class="pae-notes">
-          <div><b>Fold time:</b> {(activeRow.foldElapsedMs / 1000).toFixed(1)} s</div>
-          {#if activeRow.iptm !== null && activeRow.iptm !== undefined}
+          <div><b>Fold time:</b> {isFiniteNum(activeRow.foldElapsedMs) ? `${(activeRow.foldElapsedMs / 1000).toFixed(1)} s` : '—'}</div>
+          {#if isFiniteNum(activeRow.iptm)}
             <div><b>ipTM:</b> {activeRow.iptm.toFixed(3)}</div>
           {/if}
-          {#if activeRow.ipae !== undefined}
+          {#if isFiniteNum(activeRow.ipae)}
             <div><b>iPAE:</b> {activeRow.ipae.toFixed(2)} Å</div>
           {/if}
-          {#if activeRow.binderScRmsd !== undefined}
+          {#if isFiniteNum(activeRow.binderScRmsd)}
             <div><b>Binder scRMSD:</b> {activeRow.binderScRmsd.toFixed(2)} Å</div>
           {/if}
-          {#if activeRow.targetAlignedBinderRmsd !== undefined}
+          {#if isFiniteNum(activeRow.targetAlignedBinderRmsd)}
             <div><b>Target-aligned Binder RMSD:</b> {activeRow.targetAlignedBinderRmsd.toFixed(2)} Å</div>
           {/if}
-          {#if activeRow.binderPlddt !== undefined || activeRow.targetPlddt !== undefined}
+          {#if isFiniteNum(activeRow.binderPlddt) || isFiniteNum(activeRow.targetPlddt)}
             <div>
               <b>Chain pLDDT:</b>
-              {activeRow.binderPlddt !== undefined ? `Binder ${activeRow.binderPlddt.toFixed(1)}` : ''}
-              {activeRow.binderPlddt !== undefined && activeRow.targetPlddt !== undefined ? ' · ' : ''}
-              {activeRow.targetPlddt !== undefined ? `Target ${activeRow.targetPlddt.toFixed(1)}` : ''}
+              {isFiniteNum(activeRow.binderPlddt) ? `Binder ${activeRow.binderPlddt.toFixed(1)}` : ''}
+              {isFiniteNum(activeRow.binderPlddt) && isFiniteNum(activeRow.targetPlddt) ? ' · ' : ''}
+              {isFiniteNum(activeRow.targetPlddt) ? `Target ${activeRow.targetPlddt.toFixed(1)}` : ''}
             </div>
           {/if}
-          {#if activeRow.genMotifRmsd !== undefined}
+          {#if isFiniteNum(activeRow.genMotifRmsd)}
             <div><b>Gen Motif RMSD:</b> {activeRow.genMotifRmsd.toFixed(2)} Å</div>
           {/if}
-          {#if activeRow.refoldMotifRmsd !== undefined}
+          {#if isFiniteNum(activeRow.refoldMotifRmsd)}
             <div><b>Refold Motif RMSD:</b> {activeRow.refoldMotifRmsd.toFixed(2)} Å</div>
           {/if}
-          <div><b>Refold R<sub>g</sub>:</b> {activeRow.geometry.rg.toFixed(1)} Å</div>
-          <div><b>Refold α/β:</b> {activeRow.geometry.helixPct.toFixed(0)}% / {activeRow.geometry.sheetPct.toFixed(0)}%</div>
+          <div><b>Refold R<sub>g</sub>:</b> {fmtNum(activeRow.geometry?.rg, 1, ' Å')}</div>
+          <div><b>Refold α/β:</b> {fmtNum(activeRow.geometry?.helixPct, 0, '%')} / {fmtNum(activeRow.geometry?.sheetPct, 0, '%')}</div>
           <p class="tip">
-            Tip: Click any block, port label, or colored wire on the canvas to peek at intermediate structures, sequences, or conditioning specs!
+            Tip: Click any block, port label, or colored wire on the canvas to peek at intermediate structures, sequences, or folds!
           </p>
         </div>
       </div>
     {/if}
   {:else if foldArt && foldArt.folds.length > 0}
+    {@const foldColLabel = formatCollectionKind(foldArt.collectionKind)}
+    {#if foldColLabel || foldArt.representativeSelection || (foldArt.excludedCandidates && foldArt.excludedCandidates.length > 0)}
+      <div class="stat-chips">
+        {#if foldColLabel}
+          <span class="stat-chip">{foldColLabel}</span>
+        {/if}
+        {#if foldArt.representativeSelection}
+          <span
+            class="stat-chip cond-key"
+            title={`Selected ${foldArt.representativeSelection.selectedKey} from ${foldArt.representativeSelection.totalMembers} member(s) by ${foldArt.representativeSelection.criterion}`}
+          >
+            Rep: {foldArt.representativeSelection.selectedKey} · {foldArt.representativeSelection.criterion} ({foldArt.representativeSelection.totalMembers})
+          </span>
+        {/if}
+        {#if foldArt.excludedCandidates && foldArt.excludedCandidates.length > 0}
+          <span class="warn-chip">
+            {foldArt.excludedCandidates.length} excluded candidate{foldArt.excludedCandidates.length === 1 ? '' : 's'}
+          </span>
+        {/if}
+      </div>
+    {/if}
+
     <table class="scores">
       <thead>
         <tr>
@@ -382,19 +545,23 @@
       </thead>
       <tbody>
         {#each foldArt.folds as f, i (`${f.sequenceId}_${i}`)}
+          {@const confAvail = f.confidenceAvailable !== false && isFiniteNum(f.meanPlddt)}
           <tr class:selected={i === selectedFoldIdx} onclick={() => onSelectFold(i)}>
             <td><code>{f.sequenceId}</code></td>
             <td>{f.sequence.length} aa</td>
-            <td class:good-val={f.meanPlddt >= plddtThreshold}>{f.meanPlddt.toFixed(1)}</td>
-            <td>{f.ptm !== null ? f.ptm.toFixed(2) : '—'}</td>
-            <td>{(f.elapsedMs / 1000).toFixed(1)}s</td>
+            <td class:good-val={confAvail && f.meanPlddt >= plddtThreshold}>
+              {confAvail ? fmtNum(f.meanPlddt, 1) : 'N/A'}
+            </td>
+            <td>{fmtNum(f.ptm, 2)}</td>
+            <td>{isFiniteNum(f.elapsedMs) ? `${(f.elapsedMs / 1000).toFixed(1)}s` : '—'}</td>
           </tr>
         {/each}
       </tbody>
     </table>
 
     {#if activeFold}
-      {@const pStats = plddtSummary(activeFold.plddt)}
+      {@const activeFoldConfAvail = activeFold.confidenceAvailable !== false && isFiniteNum(activeFold.meanPlddt)}
+      {@const pStats = activeFoldConfAvail ? plddtSummary(activeFold.plddt) : null}
       <div class="seq-box">
         <div class="seq-head">
           <span>{activeFold.sequenceId} · {formatFoldModelName(activeFold.foldModelId)}</span>
@@ -404,7 +571,11 @@
             </button>
             <button
               class="link-btn"
-              onclick={() => onDownloadText(activeFold.pdbText, `${activeFold.sequenceId}_${foldModelSlug(activeFold.foldModelId)}.pdb`)}
+              onclick={() =>
+                onDownloadText(
+                  activeFold.pdbText,
+                  safeFilename(`${activeFold.sequenceId}_${foldModelSlug(activeFold.foldModelId)}.pdb`),
+                )}
             >
               ↓ Folded PDB
             </button>
@@ -416,39 +587,40 @@
       <div class="pae-row">
         <PaePlot pae={activeFold.pae} size={200} />
         <div class="pae-notes">
-          <div><b>Mean pLDDT:</b> {activeFold.meanPlddt.toFixed(1)}</div>
+          <div><b>Mean pLDDT:</b> {activeFoldConfAvail ? fmtNum(activeFold.meanPlddt, 1) : 'N/A'}</div>
           {#if pStats}
             <div><b>pLDDT range:</b> {pStats.min.toFixed(1)} – {pStats.max.toFixed(1)}</div>
             <div><b>Confident (≥70):</b> {pStats.ge70Pct.toFixed(0)}%</div>
           {/if}
-          {#if activeFold.ptm !== null}
+          {#if isFiniteNum(activeFold.ptm)}
             <div><b>pTM:</b> {activeFold.ptm.toFixed(3)}</div>
           {/if}
-          {#if activeFold.iptm !== null && activeFold.iptm !== undefined}
+          {#if isFiniteNum(activeFold.iptm)}
             <div>
               <b>ipTM:</b> {activeFold.iptm.toFixed(3)}{activeFold.iptmIsMonomerApprox ? ' (monomer approx)' : ''}
             </div>
           {/if}
           <div><b>MSA:</b> Single-sequence (no MSA)</div>
-          <div><b>Fold time:</b> {(activeFold.elapsedMs / 1000).toFixed(1)} s</div>
+          <div><b>Fold time:</b> {isFiniteNum(activeFold.elapsedMs) ? `${(activeFold.elapsedMs / 1000).toFixed(1)} s` : '—'}</div>
         </div>
       </div>
     {/if}
   {:else if seqArt}
-    {@const skipSelfRecovery =
-      (activeSlot?.direction === 'out' &&
-        (node?.adapterId === 'rfd4-proteina' || node?.adapterId === 'genie3')) ||
-      (contextStructure?.id === seqArt.parentStructureId &&
-        (seqArt.sourceModelId === 'rfd4-proteina' || seqArt.sourceModelId === 'genie3'))}
+    {@const seqColLabel = formatCollectionKind(seqArt.collectionKind)}
     <div class="meta-bar">
-      <span><b>{seqArt.candidates.length}</b> sequence{seqArt.candidates.length === 1 ? '' : 's'} · <span>{formatAdapterName(seqArt.sourceModelId)}</span></span>
+      <span>
+        <b>{seqArt.candidates.length}</b> sequence{seqArt.candidates.length === 1 ? '' : 's'} · <span>{formatAdapterName(seqArt.sourceModelId)}</span>
+        {#if seqColLabel}
+          <span class="stat-chip inline-chip">{seqColLabel}</span>
+        {/if}
+      </span>
       <div class="dl-links">
         <button class="link-btn" onclick={() => copyText(formatFasta(seqArt), 'all-fasta')}>
           {copyBtnLabel('all-fasta', 'Copy FASTA', '✓ Copied FASTA')}
         </button>
         <button
           class="link-btn"
-          onclick={() => onDownloadText(formatFasta(seqArt), `${seqArt.id}.fasta`)}
+          onclick={() => onDownloadText(formatFasta(seqArt), safeFilename(`${seqArt.id}.fasta`))}
         >
           ↓ FASTA
         </button>
@@ -457,7 +629,8 @@
 
     <div class="seq-list">
       {#each seqArt.candidates as c, i (`${c.id}_${i}`)}
-        {@const st = analyzeSequence(c.sequence, skipSelfRecovery ? undefined : contextStructure?.sequence)}
+        {@const st = seqCandidateStats[i]}
+        {@const displaySeq = formatCandidateSequence(c.sequence, c.chainLengths)}
         <div class="seq-box">
           <div class="seq-head">
             <span class="cand-title">
@@ -465,24 +638,24 @@
               {#if c.chainLengths && c.chainLengths.length > 1}
                 · chains [{c.chainLengths.join('+')}]
               {/if}
-              {#if c.score !== null}
+              {#if isFiniteNum(c.score)}
                 · score {c.score.toFixed(2)}
               {/if}
-              {#if st.recoveryPct !== null}
+              {#if isFiniteNum(st.recoveryPct)}
                 · recovery {st.recoveryPct.toFixed(0)}%
               {/if}
             </span>
-            <button class="link-btn" onclick={() => copyText(c.sequence, `cand-${i}`)}>
+            <button class="link-btn" onclick={() => copyText(displaySeq, `cand-${i}`)}>
               {copyBtnLabel(`cand-${i}`, 'Copy')}
             </button>
           </div>
           <div class="stat-chips">
             <span class="stat-chip">{st.uniqueAaCount} unique AAs</span>
-            <span class="stat-chip">hydro {st.hydrophobicPct.toFixed(0)}%</span>
-            <span class="stat-chip">polar {st.polarPct.toFixed(0)}%</span>
-            <span class="stat-chip">charged {st.chargedPct.toFixed(0)}%</span>
+            <span class="stat-chip">hydro {fmtNum(st.hydrophobicPct, 0, '%')}</span>
+            <span class="stat-chip">polar {fmtNum(st.polarPct, 0, '%')}</span>
+            <span class="stat-chip">charged {fmtNum(st.chargedPct, 0, '%')}</span>
             {#if st.topAa}
-              <span class="stat-chip">top: {st.topAa.aa} ({st.topAa.pct.toFixed(0)}%)</span>
+              <span class="stat-chip">top: {st.topAa.aa} ({fmtNum(st.topAa.pct, 0, '%')})</span>
             {/if}
           </div>
           {#if st.warnings.length > 0}
@@ -492,32 +665,29 @@
               {/each}
             </div>
           {/if}
-          <div class="seq-text">{c.sequence}</div>
+          <div class="seq-text">{displaySeq}</div>
         </div>
       {/each}
     </div>
-  {:else if structArt}
-    {@const st = analyzeSequence(structArt.sequence)}
+  {:else if structArt && structSeqStats}
     {@const hasValidPdb = Boolean(
       structArt.pdbText &&
         structArt.pdbText.trim().length > 0 &&
         !structArt.pdbText.trimStart().startsWith('data_'),
     )}
-    {@const rawStructText = structArt.cifText ?? structArt.pdbText}
     {@const isCifPreview = Boolean(structArt.cifText) || rawStructText.trimStart().startsWith('data_')}
-    {@const rawPrev = previewTextLines(rawStructText, 36)}
     <div class="meta-bar">
       <span><b>{structArt.label}</b> · <span>{formatAdapterName(structArt.sourceModelId)}</span></span>
       <div class="dl-links">
         {#if hasValidPdb}
-          <button class="link-btn" onclick={() => onDownloadText(structArt.pdbText, `${structArt.id}.pdb`)}>
+          <button class="link-btn" onclick={() => onDownloadText(structArt.pdbText, safeFilename(`${structArt.id}.pdb`))}>
             ↓ PDB
           </button>
         {/if}
         {#if structArt.cifText || (!hasValidPdb && structArt.pdbText.trimStart().startsWith('data_'))}
           <button
             class="link-btn"
-            onclick={() => onDownloadText(structArt.cifText ?? structArt.pdbText, `${structArt.id}.cif`)}
+            onclick={() => onDownloadText(structArt.cifText ?? structArt.pdbText, safeFilename(`${structArt.id}.cif`))}
           >
             ↓ mmCIF
           </button>
@@ -525,7 +695,7 @@
         {#if structArt.trajectoryPdb}
           <button
             class="link-btn"
-            onclick={() => onDownloadText(structArt.trajectoryPdb!, `${structArt.id}_traj.pdb`)}
+            onclick={() => onDownloadText(structArt.trajectoryPdb!, safeFilename(`${structArt.id}_traj.pdb`))}
           >
             ↓ Trajectory ({structArt.trajectoryFrameCount ?? '?'}f)
           </button>
@@ -538,10 +708,18 @@
       {#if structArt.diagnostics?.chainCount && structArt.diagnostics.chainCount > 1}
         <span class="stat-chip">{structArt.diagnostics.chainCount} chains</span>
       {/if}
-      <span class="stat-chip">R<sub>g</sub> = {structArt.geometry.rg.toFixed(1)} Å</span>
-      <span class="stat-chip">α {structArt.geometry.helixPct.toFixed(0)}% · β {structArt.geometry.sheetPct.toFixed(0)}%</span>
-      <span class="stat-chip">breaks: {structArt.geometry.chainBreaks}</span>
-      <span class="stat-chip">clashes: {structArt.geometry.clashes}</span>
+      <span class="stat-chip">R<sub>g</sub> = {fmtNum(structArt.geometry?.rg, 1, ' Å')}</span>
+      <span class="stat-chip">α {fmtNum(structArt.geometry?.helixPct, 0, '%')} · β {fmtNum(structArt.geometry?.sheetPct, 0, '%')}</span>
+      <span class="stat-chip">breaks: {structArt.geometry?.chainBreaks ?? '—'}</span>
+      <span class="stat-chip">clashes: {structArt.geometry?.clashes ?? '—'}</span>
+      {#if structArt.representativeSelection}
+        <span
+          class="stat-chip cond-key"
+          title={`Selected ${structArt.representativeSelection.selectedKey} from ${structArt.representativeSelection.totalMembers} member(s) by ${structArt.representativeSelection.criterion}`}
+        >
+          Rep: {structArt.representativeSelection.selectedKey} · {structArt.representativeSelection.criterion} ({structArt.representativeSelection.totalMembers})
+        </span>
+      {/if}
       {#if structArt.diagnostics?.ligandNames?.length}
         <span class="stat-chip cond-key">Ligands: {structArt.diagnostics.ligandNames.join(', ')}</span>
       {/if}
@@ -555,14 +733,14 @@
 
     <div class="seq-box">
       <div class="seq-head">
-        <span>Backbone residue sequence ({structArt.sequence.length} aa · {st.uniqueAaCount} unique AAs)</span>
+        <span>Backbone residue sequence ({structArt.sequence.length} aa · {structSeqStats.uniqueAaCount} unique AAs)</span>
         <button class="link-btn" onclick={() => copyText(structArt.sequence, 'struct-seq')}>
           {copyBtnLabel('struct-seq', 'Copy seq')}
         </button>
       </div>
-      {#if st.warnings.length > 0}
+      {#if structSeqStats.warnings.length > 0}
         <div class="warn-chips">
-          {#each st.warnings as w (w)}
+          {#each structSeqStats.warnings as w (w)}
             <span class="warn-chip">⚠ {w}</span>
           {/each}
         </div>
@@ -570,9 +748,18 @@
       <div class="seq-text">{structArt.sequence}</div>
     </div>
 
-    <details class="raw-details">
-      <summary>Raw {isCifPreview ? 'mmCIF' : 'PDB'} preview ({rawPrev.totalLines} lines)</summary>
-      <pre class="raw-pre">{rawPrev.preview}{rawPrev.truncated ? `\n… (${rawPrev.totalLines - 36} more lines)` : ''}</pre>
+    <details class="raw-details" bind:open={rawPreviewOpen}>
+      <summary>
+        Raw {isCifPreview ? 'mmCIF' : 'PDB'} preview
+        {#if rawPrev}
+          ({rawPrev.totalLines} lines)
+        {:else}
+          ({(rawStructText.length / 1024).toFixed(1)} KB)
+        {/if}
+      </summary>
+      {#if rawPrev}
+        <pre class="raw-pre">{rawPrev.preview}{rawPrev.truncated ? `\n… (${rawPrev.totalLines - 36} more lines)` : ''}</pre>
+      {/if}
     </details>
   {:else if condArt}
     {@const condKeys = Object.keys(condArt.conditions ?? {})}
@@ -829,6 +1016,60 @@
     border: 1px solid var(--warn-border);
     padding: 2px 7px;
     border-radius: 4px;
+  }
+  .inline-chip {
+    margin-left: 6px;
+  }
+  .lineage-meta-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-size: 11px;
+  }
+  .ref-pill {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface-2);
+    color: var(--text-secondary);
+  }
+  .ref-pill.tone-ok {
+    background: var(--ok-bg);
+    color: var(--ok-text);
+    border-color: var(--ok-border);
+  }
+  .ref-pill.tone-info {
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+    border-color: var(--border-strong);
+  }
+  .ref-pill.tone-warn {
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border-color: var(--warn-border);
+  }
+  .ref-pill.tone-err {
+    background: var(--err-bg);
+    color: var(--err-strong);
+    border-color: var(--err-border);
+  }
+  .ref-desc {
+    font-size: 11px;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
+  .lineage-warn-banner {
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 6px 9px;
+    border-radius: 6px;
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border: 1px solid var(--warn-border);
   }
 
   table.scores {

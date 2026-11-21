@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import {
     ADAPTER_REGISTRY,
     LOCALFOLD_MODEL_OPTIONS,
@@ -8,8 +9,9 @@
   import { STAGE_COLORS } from '$lib/engine/graph-utils';
   import {
     NUMERIC_SPECS,
+    computeUploadDigest,
     isValidResidueToken,
-    validateJsonOverride,
+    isValidSha256Hex,
     validatePdbId,
     validateSequenceText,
     validateStructureText,
@@ -19,6 +21,8 @@
     fetchStructureByPdbId,
     normalizePdbId,
   } from '$lib/protein-ops/rcsb';
+  import { parseStructureText, type ParsedStructure } from '$lib/protein-ops/pdb';
+  import { resolveMotifSourceResidues, type SelectedMotifSourceResidue } from '$lib/engine/conditioning';
   import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
   import NumericInput from './NumericInput.svelte';
   import type { CanonicalArtifact, NodeProgressEvent, StructureArtifact, WorkflowNode } from '$lib/engine/types';
@@ -29,6 +33,7 @@
     embedded?: boolean;
     nodeOutput?: Record<string, CanonicalArtifact>;
     nodeState?: NodeProgressEvent;
+    upstreamStructure?: StructureArtifact | null;
     hasStructureInput?: boolean;
     siblingGeneratorIds?: string[];
     onUpdate: (nodeId: string, params: Record<string, unknown>) => void;
@@ -43,6 +48,7 @@
     embedded = false,
     nodeOutput = undefined,
     nodeState = undefined,
+    upstreamStructure = null,
     hasStructureInput = false,
     siblingGeneratorIds = [],
     onUpdate,
@@ -51,12 +57,116 @@
     onRunUpTo = undefined,
   }: Props = $props();
 
+  const MPNN_CHECKPOINTS_BY_FAMILY: Record<string, Array<{ id: string; label: string }>> = {
+    solublempnn: [
+      { id: 'v_48_020', label: 'v_48_020 (default · 0.20 Å noise)' },
+      { id: 'v_48_010', label: 'v_48_010 (0.10 Å noise)' },
+    ],
+    proteinmpnn: [
+      { id: 'v_48_020', label: 'v_48_020 (default · 0.20 Å noise)' },
+      { id: 'v_48_010', label: 'v_48_010 (0.10 Å noise)' },
+      { id: 'v_48_002', label: 'v_48_002 (0.02 Å noise)' },
+      { id: 'v_48_030', label: 'v_48_030 (0.30 Å noise)' },
+    ],
+    ca: [
+      { id: 'v_48_020', label: 'v_48_020 (default · 0.20 Å noise)' },
+      { id: 'v_48_010', label: 'v_48_010 (0.10 Å noise)' },
+      { id: 'v_48_002', label: 'v_48_002 (0.02 Å noise)' },
+    ],
+  };
+
   let liveStructure = $derived<StructureArtifact | null>(
     nodeOutput?.structure?.kind === 'StructureArtifact' ? nodeOutput.structure : null,
   );
 
   let manifest = $derived(ADAPTER_REGISTRY[node.adapterId]);
   let stageColor = $derived(STAGE_COLORS[manifest?.stage ?? 'source'] ?? '#64748b');
+
+  // Lightweight cache for parsed upstream template structure so typing motif/hotspot tokens
+  // never re-parses large mmCIF/PDB texts on every keystroke.
+  let cachedTemplateKey = '';
+  let cachedParsedTemplate: ParsedStructure | null = null;
+  function getParsedUpstreamTemplate(struct: StructureArtifact | null): ParsedStructure | null {
+    if (!struct) return null;
+    const raw = struct.cifText ?? struct.pdbText ?? '';
+    if (!raw.trim()) return null;
+    const key = `${struct.id}:${raw.length}`;
+    if (key === cachedTemplateKey) return cachedParsedTemplate;
+    try {
+      cachedParsedTemplate = parseStructureText(raw);
+      cachedTemplateKey = key;
+    } catch {
+      cachedParsedTemplate = null;
+      cachedTemplateKey = key;
+    }
+    return cachedParsedTemplate;
+  }
+
+  function formatResidueId(r: SelectedMotifSourceResidue): string {
+    return `${r.authChainId}${r.resNum}${r.insCode || ''}`;
+  }
+
+  function summarizeSourceResidues(list: SelectedMotifSourceResidue[]): string {
+    if (list.length === 0) return '';
+    if (list.length <= 5) {
+      return list.map(formatResidueId).join(', ');
+    }
+    const first = formatResidueId(list[0]);
+    const second = formatResidueId(list[1]);
+    const last = formatResidueId(list[list.length - 1]);
+    return `${first}, ${second}, … ${last}`;
+  }
+
+  let conditioningSourceSummary = $derived.by((): {
+    active: boolean;
+    kindLabel: string;
+    count: number;
+    preview: string;
+    hasTemplate: boolean;
+  } | null => {
+    const p = node.params ?? {};
+    let mode = '';
+    if (node.adapterId === 'rfd4-proteina') {
+      mode = String(p.mode ?? 'unconditional');
+    } else if (node.adapterId === 'genie3') {
+      mode = String(p.taskMode ?? 'unconditional');
+    } else {
+      return null;
+    }
+    if (mode !== 'motif' && mode !== 'binder') return null;
+
+    let spec = '';
+    let kindLabel = 'motif';
+    if (mode === 'motif') {
+      spec = String(p.motifSpan ?? '').trim() || String(p.contig ?? '').trim();
+      kindLabel = 'motif';
+    } else {
+      const hot = String(p.hotspots ?? '').trim();
+      if (hot) {
+        spec = hot;
+        kindLabel = 'hotspot';
+      } else {
+        const contig = String(p.contig ?? '').trim();
+        const beforeBreak = contig.includes('/0') ? contig.split('/0')[0].trim() : '';
+        spec = beforeBreak;
+        kindLabel = 'target';
+      }
+    }
+    if (!spec) return null;
+
+    const parsed = getParsedUpstreamTemplate(upstreamStructure);
+    if (!parsed || parsed.nResidues === 0) {
+      return { active: true, kindLabel, count: 0, preview: '', hasTemplate: false };
+    }
+    const resolved = resolveMotifSourceResidues(parsed, spec);
+    return {
+      active: true,
+      kindLabel,
+      count: resolved.length,
+      preview: summarizeSourceResidues(resolved),
+      hasTemplate: true,
+    };
+  });
 
   let selectedLocalFoldMeta = $derived.by(() => {
     if (node.adapterId !== 'localfold-af2') return null;
@@ -82,6 +192,62 @@
   $effect(() => {
     void node.id;
     titleDraft = node.label ?? '';
+  });
+
+  // Debounced textarea drafts for large `pdbText` and `sequence` inputs (200 ms)
+  let pdbTextDraft = $state('');
+  let sequenceDraft = $state('');
+  let pendingTextCommit: {
+    timer: ReturnType<typeof setTimeout>;
+    nodeId: string;
+    key: 'pdbText' | 'sequence';
+    value: string;
+    baseParams: Record<string, unknown>;
+  } | null = null;
+
+  function flushPendingTextCommit() {
+    if (!pendingTextCommit) return;
+    const pending = pendingTextCommit;
+    clearTimeout(pending.timer);
+    pendingTextCommit = null;
+    onUpdate(pending.nodeId, { ...pending.baseParams, [pending.key]: pending.value });
+  }
+
+  function scheduleTextParam(key: 'pdbText' | 'sequence', value: string) {
+    if (key === 'pdbText') pdbTextDraft = value;
+    else sequenceDraft = value;
+    const targetNodeId = node.id;
+    const baseParams = { ...node.params };
+    if (pendingTextCommit) {
+      if (pendingTextCommit.nodeId !== targetNodeId || pendingTextCommit.key !== key) {
+        flushPendingTextCommit();
+      } else {
+        clearTimeout(pendingTextCommit.timer);
+      }
+    }
+    const timer = setTimeout(() => {
+      if (pendingTextCommit?.timer === timer) {
+        pendingTextCommit = null;
+      }
+      onUpdate(targetNodeId, { ...baseParams, [key]: value });
+    }, 200);
+    pendingTextCommit = { timer, nodeId: targetNodeId, key, value, baseParams };
+  }
+
+  $effect(() => {
+    const id = node.id;
+    const extPdb = String(node.params.pdbText ?? '');
+    const extSeq = String(node.params.sequence ?? '');
+    if (!pendingTextCommit || pendingTextCommit.nodeId !== id || pendingTextCommit.key !== 'pdbText') {
+      pdbTextDraft = extPdb;
+    }
+    if (!pendingTextCommit || pendingTextCommit.nodeId !== id || pendingTextCommit.key !== 'sequence') {
+      sequenceDraft = extSeq;
+    }
+  });
+
+  onDestroy(() => {
+    flushPendingTextCommit();
   });
 
   function isAutoLocalFoldLabel(label: string | undefined): { auto: boolean; suffix: string } {
@@ -143,8 +309,6 @@
         const ckpt = String(p.modelName ?? 'v_48_020');
         return `${famMeta.label} · ${ckpt}`;
       }
-      case 'rfd4-conditioner':
-        return 'Model-agnostic hotspots, motifs, H-bonds & fold topology';
       case 'designability-scorer':
         return 'Kabsch alignment · scRMSD / scTM';
       case 'pdb-input':
@@ -158,9 +322,6 @@
 
   function setParam(key: string, value: unknown) {
     const next: Record<string, unknown> = { ...node.params, [key]: value };
-    if (node.adapterId === 'rfd4-conditioner' && 'autoSyncedBenchmarkId' in next) {
-      next.autoSyncedBenchmarkId = '';
-    }
     if (
       (node.adapterId === 'rfd4-proteina' || node.adapterId === 'genie3') &&
       ['mode', 'taskMode', 'contig', 'lockChain', 'hotspots', 'motifSpan', 'unindexedMotif', 'hbondMode', 'hbondSelection', 'cathCode', 'presetId'].includes(key)
@@ -168,6 +329,42 @@
       next.userEditedTask = true;
     }
     onUpdate(node.id, next);
+  }
+
+  /**
+   * Update ONLY numeric binder length token(s) after `/0`, leaving internal target linker
+   * spans before `/0` untouched (e.g. `A1-50,5-5,A60-120,/0,70-70` -> `A1-50,5-5,A60-120,/0,90-90`).
+   */
+  function updateBinderLengthInContig(
+    prevContig: string,
+    newLen: number,
+    clearBareLength: boolean,
+  ): string {
+    const trimmed = prevContig.trim();
+    if (!trimmed) return '';
+    if (trimmed.includes('/0')) {
+      const tokens = trimmed.split(/[,\s]+/).filter(Boolean);
+      const breakIdx = tokens.lastIndexOf('/0');
+      if (breakIdx >= 0) {
+        return tokens
+          .map((tok, idx) =>
+            idx > breakIdx && /^\d+(?:-\d+)?$/.test(tok) ? `${newLen}-${newLen}` : tok,
+          )
+          .join(',');
+      }
+      const slashIdx = trimmed.lastIndexOf('/0');
+      const before = trimmed.slice(0, slashIdx + 2);
+      const afterTokens = trimmed
+        .slice(slashIdx + 2)
+        .split(/[,\s]+/)
+        .filter(Boolean)
+        .map((tok) => (/^\d+(?:-\d+)?$/.test(tok) ? `${newLen}-${newLen}` : tok));
+      return afterTokens.length > 0 ? `${before},${afterTokens.join(',')}` : trimmed;
+    }
+    if (clearBareLength && /^\d+(?:-\d+)?$/.test(trimmed)) {
+      return '';
+    }
+    return trimmed;
   }
 
   function parseResidueTokens(raw: unknown): string[] {
@@ -183,25 +380,34 @@
     setParam(key, tokens.join(', '));
   }
 
-  let pdbFetchBusy = $state(false);
-  let pdbFetchError = $state<string | null>(null);
-  let pdbFetchSummary = $state<string | null>(null);
+  // Per-node PDB fetch & upload status so two `pdb-input` nodes never bleed busy/error/summary state
+  interface PdbNodeStatus {
+    busy: boolean;
+    error: string | null;
+    summary: string | null;
+  }
+  let pdbFetchStateByNode = $state<Record<string, PdbNodeStatus>>({});
+  let curPdbStatus = $derived<PdbNodeStatus>(
+    pdbFetchStateByNode[node.id] ?? { busy: false, error: null, summary: null },
+  );
 
-  $effect(() => {
-    void node.id;
-    pdbFetchError = null;
-    pdbFetchSummary = null;
-  });
+  function patchPdbStatus(targetNodeId: string, patch: Partial<PdbNodeStatus>) {
+    const prev = pdbFetchStateByNode[targetNodeId] ?? { busy: false, error: null, summary: null };
+    pdbFetchStateByNode = {
+      ...pdbFetchStateByNode,
+      [targetNodeId]: { ...prev, ...patch },
+    };
+  }
 
   async function handleFetchPdbId(overrideId?: string, benchmarkIdOverride?: string) {
     const rawId = overrideId ?? String(node.params.pdbId ?? '');
     const normId = normalizePdbId(rawId);
     const check = validatePdbId(normId);
+    const targetNodeId = node.id;
     if (check.status === 'error') {
-      pdbFetchError = check.message ?? 'Invalid PDB ID';
+      patchPdbStatus(targetNodeId, { error: check.message ?? 'Invalid PDB ID' });
       return;
     }
-    const targetNodeId = node.id;
     const baseParams = { ...node.params };
     const prevNormId = normalizePdbId(String(baseParams.pdbId ?? ''));
     const shouldClearCrop = overrideId !== undefined || normId !== prevNormId;
@@ -213,9 +419,7 @@
         : overrideId
           ? ''
           : String(baseParams.benchmarkId ?? '');
-    pdbFetchBusy = true;
-    pdbFetchError = null;
-    pdbFetchSummary = null;
+    patchPdbStatus(targetNodeId, { busy: true, error: null, summary: null });
     try {
       const res = await fetchStructureByPdbId(normId);
       if (isAutoPdbLabel(prevLabel, prevFilename)) {
@@ -239,35 +443,88 @@
         res.ligandNames.length > 0 ? `ligands: ${res.ligandNames.join(', ')}` : '',
         res.nucleicAcidChains.length > 0 ? `NA chains: ${res.nucleicAcidChains.join(', ')}` : '',
       ].filter(Boolean);
-      pdbFetchSummary =
-        `Loaded ${res.filename} · ${res.nResidues} aa · ${res.chainCount} chain${res.chainCount === 1 ? '' : 's'}` +
-        (extras.length > 0 ? ` · ${extras.join(' · ')}` : '');
+      patchPdbStatus(targetNodeId, {
+        summary:
+          `Loaded ${res.filename} · ${res.nResidues} aa · ${res.chainCount} chain${res.chainCount === 1 ? '' : 's'}` +
+          (extras.length > 0 ? ` · ${extras.join(' · ')}` : ''),
+      });
     } catch (err) {
-      pdbFetchError = err instanceof Error ? err.message : String(err);
+      patchPdbStatus(targetNodeId, {
+        error: err instanceof Error ? err.message : String(err),
+      });
     } finally {
-      pdbFetchBusy = false;
+      patchPdbStatus(targetNodeId, { busy: false });
     }
+  }
+
+  function clearMissingUploadExpectation() {
+    flushPendingTextCommit();
+    const next: Record<string, unknown> = { ...node.params };
+    next.missingUpload = false;
+    delete next.expectedPdbSha256;
+    delete next.expectedFilename;
+    delete next.missingUploadFilename;
+    delete next.missingUploadSha256;
+    patchPdbStatus(node.id, { error: null, summary: 'Cleared expected upload digest.' });
+    onUpdate(node.id, next);
   }
 
   async function handleFileUpload(ev: Event) {
     const input = ev.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
+    flushPendingTextCommit();
     const targetNodeId = node.id;
     const baseParams = { ...node.params };
     const prevLabel = node.label;
     const prevFilename = String(baseParams.filename ?? '');
+    const expectedShaRaw = String(
+      baseParams.expectedPdbSha256 ?? baseParams.missingUploadSha256 ?? '',
+    )
+      .trim()
+      .toLowerCase();
     try {
       const text = await file.text();
       if (isAutoPdbLabel(prevLabel, prevFilename)) {
         onUpdateLabel?.(targetNodeId, `PDB: ${file.name}`);
       }
-      onUpdate(targetNodeId, {
+      const nextParams: Record<string, unknown> = {
         ...baseParams,
         mode: 'custom',
         filename: file.name,
         pdbText: text,
-      });
+        cropSegments: '',
+        benchmarkId: '',
+      };
+      if (expectedShaRaw && isValidSha256Hex(expectedShaRaw)) {
+        const actualSha = computeUploadDigest(text);
+        if (actualSha === expectedShaRaw) {
+          nextParams.missingUpload = false;
+          delete nextParams.expectedPdbSha256;
+          delete nextParams.expectedFilename;
+          delete nextParams.missingUploadFilename;
+          delete nextParams.missingUploadSha256;
+          patchPdbStatus(targetNodeId, {
+            error: null,
+            summary: `Verified ${file.name} (SHA-256 ${actualSha.slice(0, 12)}…)`,
+          });
+        } else {
+          nextParams.missingUpload = true;
+          patchPdbStatus(targetNodeId, {
+            error: `Digest mismatch: uploaded ${file.name} (${actualSha.slice(0, 12)}…) does not match expected ${expectedShaRaw.slice(0, 12)}…. Re-upload the matching file or click Clear expectation.`,
+            summary: null,
+          });
+        }
+      } else {
+        nextParams.missingUpload = false;
+        delete nextParams.expectedPdbSha256;
+        delete nextParams.expectedFilename;
+        delete nextParams.missingUploadFilename;
+        delete nextParams.missingUploadSha256;
+        patchPdbStatus(targetNodeId, { error: null, summary: `Loaded ${file.name}` });
+      }
+      pdbTextDraft = text;
+      onUpdate(targetNodeId, nextParams);
     } finally {
       input.value = '';
     }
@@ -314,7 +571,10 @@
         type="button"
         class="run-here-btn"
         {disabled}
-        onclick={() => onRunUpTo(node.id)}
+        onclick={() => {
+          flushPendingTextCommit();
+          onRunUpTo(node.id);
+        }}
         title="Execute only upstream blocks up to this block (memoized for full runs)"
       >
         ▶ Run to here
@@ -331,9 +591,9 @@
           {disabled}
           value={String(node.params.mode ?? 'demo-bundle')}
           onchange={(e) => {
+            flushPendingTextCommit();
             const nextMode = e.currentTarget.value;
-            pdbFetchError = null;
-            pdbFetchSummary = null;
+            patchPdbStatus(node.id, { error: null, summary: null });
             if (isAutoPdbLabel(node.label, String(node.params.filename ?? ''))) {
               if (nextMode === 'demo-bundle') {
                 onUpdateLabel?.(node.id, 'PDB Input');
@@ -348,7 +608,11 @@
                 onUpdateLabel?.(node.id, fn && fn !== 'demo_3helix_53aa.pdb' ? `PDB: ${fn}` : 'PDB Input');
               }
             }
-            setParam('mode', nextMode);
+            onUpdate(node.id, {
+              ...node.params,
+              mode: nextMode,
+              ...(nextMode === 'demo-bundle' ? { cropSegments: '', benchmarkId: '' } : {}),
+            });
           }}
         >
           <option value="demo-bundle">Built-in 53 aa 3-helix bundle demo</option>
@@ -361,7 +625,7 @@
         {@const pdbIdVal = String(node.params.pdbId ?? '')}
         {@const pdbIdCheck = validatePdbId(pdbIdVal)}
         {@const isAutoFetching = nodeState?.status === 'loading'}
-        {@const isBusy = pdbFetchBusy || isAutoFetching}
+        {@const isBusy = curPdbStatus.busy || isAutoFetching}
         {@const isAlreadyLoaded =
           pdbIdCheck.status === 'ok' &&
           (Boolean(liveStructure) ||
@@ -379,8 +643,7 @@
               value={pdbIdVal}
               oninput={(e) => {
                 const nextPdbId = e.currentTarget.value.toUpperCase();
-                pdbFetchError = null;
-                pdbFetchSummary = null;
+                patchPdbStatus(node.id, { error: null, summary: null });
                 const norm = normalizePdbId(nextPdbId);
                 if (isAutoPdbLabel(node.label, String(node.params.filename ?? ''))) {
                   onUpdateLabel?.(
@@ -434,8 +697,7 @@
                 const benchId = e.currentTarget.value;
                 const bench = getBenchmarkById(benchId);
                 if (!bench) return;
-                pdbFetchError = null;
-                pdbFetchSummary = null;
+                patchPdbStatus(node.id, { error: null, summary: null });
                 if (isAutoPdbLabel(node.label, String(node.params.filename ?? ''))) {
                   onUpdateLabel?.(node.id, `PDB: ${bench.name} (${bench.pdbId})`);
                 }
@@ -469,14 +731,14 @@
               </optgroup>
             </select>
           </label>
-          {#if pdbFetchError}
-            <span class="field-hint err">{pdbFetchError}</span>
+          {#if curPdbStatus.error}
+            <span class="field-hint err">{curPdbStatus.error}</span>
           {:else if nodeState?.status === 'error' && nodeState.error}
             <span class="field-hint err">{nodeState.error}</span>
           {:else if isBusy}
             <span class="field-hint">Fetching {normalizePdbId(pdbIdVal) || 'structure'} from RCSB PDB for 3D preview…</span>
-          {:else if pdbFetchSummary}
-            <span class="field-hint ok">✓ {pdbFetchSummary}</span>
+          {:else if curPdbStatus.summary}
+            <span class="field-hint ok">✓ {curPdbStatus.summary}</span>
           {:else if liveStructure}
             <span class="field-hint ok">
               ✓ Loaded {liveStructure.label} · {liveStructure.diagnostics?.chainCount ?? 1} chain{(liveStructure.diagnostics?.chainCount ?? 1) === 1 ? '' : 's'} (previewed in 3D)
@@ -490,21 +752,77 @@
           {/if}
         </div>
       {:else if node.params.mode === 'custom'}
-        {@const pdbCheck = validateStructureText(String(node.params.pdbText ?? ''))}
+        {@const pdbCheck = validateStructureText(pdbTextDraft)}
+        {@const expectedFilename = String(
+          node.params.expectedFilename ?? node.params.missingUploadFilename ?? node.params.filename ?? '',
+        ).trim()}
+        {@const expectedSha = String(
+          node.params.expectedPdbSha256 ?? node.params.missingUploadSha256 ?? '',
+        ).trim()}
+        {@const showMissingUploadCard = Boolean(node.params.missingUpload) || Boolean(expectedSha)}
+        {#if showMissingUploadCard}
+          <div class="missing-upload-card full" role="alert">
+            <div class="mu-head">
+              <span class="mu-title">⚠ Missing Uploaded File</span>
+              {#if expectedSha}
+                <code class="mu-sha" title={`Expected SHA-256: ${expectedSha}`}>
+                  SHA-256 {expectedSha.slice(0, 12)}…
+                </code>
+              {/if}
+            </div>
+            <p class="mu-body">
+              This shared recipe expects custom structure
+              {#if expectedFilename}
+                <code class="filename-wrap">{expectedFilename}</code>
+              {:else}
+                an omitted local PDB/mmCIF upload
+              {/if}.
+              Re-upload the matching file to verify integrity, or clear the expectation to use a different input.
+            </p>
+            <div class="mu-actions">
+              <label class="mu-upload-btn" class:is-disabled={disabled}>
+                <span>Re-upload matching file</span>
+                <input
+                  type="file"
+                  accept=".pdb,.cif,.mmcif,.ent,.txt"
+                  hidden
+                  {disabled}
+                  onchange={handleFileUpload}
+                />
+              </label>
+              <button
+                type="button"
+                class="mu-clear-btn"
+                {disabled}
+                onclick={clearMissingUploadExpectation}
+              >
+                Clear expectation
+              </button>
+            </div>
+          </div>
+        {/if}
         <label class="file-row full">
-          Upload .pdb / .cif
+          <span>Upload .pdb / .cif</span>
           <input type="file" accept=".pdb,.cif,.mmcif,.ent,.txt" {disabled} onchange={handleFileUpload} />
         </label>
         <label class="full">
-          PDB / mmCIF text ({String(node.params.filename || 'custom.pdb')})
+          <span class="filename-wrap">PDB / mmCIF text ({String(node.params.filename || 'custom.pdb')})</span>
           <textarea
             rows="4"
             class:input-error={pdbCheck.status === 'error'}
             {disabled}
             placeholder="Paste ATOM lines or mmCIF _atom_site block…"
-            value={String(node.params.pdbText ?? '')}
-            oninput={(e) => setParam('pdbText', e.currentTarget.value)}
+            value={pdbTextDraft}
+            oninput={(e) => scheduleTextParam('pdbText', e.currentTarget.value)}
+            onblur={flushPendingTextCommit}
           ></textarea>
+          {#if curPdbStatus.error}
+            <span class="field-hint err">{curPdbStatus.error}</span>
+          {:else if nodeState?.status === 'error' && nodeState.error}
+            <span class="field-hint err">{nodeState.error}</span>
+          {:else if curPdbStatus.summary}
+            <span class="field-hint ok">✓ {curPdbStatus.summary}</span>
+          {/if}
           {#if pdbCheck.message}
             <span class="field-hint" class:err={pdbCheck.status === 'error'} class:ok={pdbCheck.status === 'ok'}>
               {pdbCheck.message}
@@ -544,7 +862,7 @@
       {/if}
 
     {:else if node.adapterId === 'sequence-input'}
-      {@const seqCheck = validateSequenceText(String(node.params.sequence ?? ''))}
+      {@const seqCheck = validateSequenceText(sequenceDraft)}
       <label class="full">
         Amino acid sequence (plain or multi-FASTA)
         <textarea
@@ -553,8 +871,9 @@
           class:input-warn={seqCheck.status === 'warn'}
           {disabled}
           placeholder=">seq1&#10;MKTAYIAKQRQISFVK..."
-          value={String(node.params.sequence ?? '')}
-          oninput={(e) => setParam('sequence', e.currentTarget.value)}
+          value={sequenceDraft}
+          oninput={(e) => scheduleTextParam('sequence', e.currentTarget.value)}
+          onblur={flushPendingTextCommit}
         ></textarea>
         <span
           class="field-hint"
@@ -581,254 +900,12 @@
         </div>
       </details>
 
-    {:else if node.adapterId === 'rfd4-conditioner'}
-      {@const hotspotTokens = parseResidueTokens(node.params.hotspots)}
-      {@const motifTokens = parseResidueTokens(node.params.motifSpan)}
-      {@const taskPresetId = String(node.params.taskPreset ?? 'custom')}
-      {@const selectedPresetMeta = taskPresetId !== 'custom' ? RFD4_BENCHMARK_OPTIONS.find((o) => o.id === taskPresetId) : null}
-      <label class="full">
-        Design Task / Preset
-        <select
-          {disabled}
-          value={taskPresetId}
-          onchange={(e) => setParam('taskPreset', e.currentTarget.value)}
-        >
-          <option value="custom">Custom Conditioning Builder</option>
-          {#each RFD4_BENCHMARK_OPTIONS as opt (opt.id)}
-            <option value={opt.id}>[{opt.category}] {opt.label}</option>
-          {/each}
-        </select>
-        {#if selectedPresetMeta}
-          <span class="field-hint">
-            Preset category: {selectedPresetMeta.category}{selectedPresetMeta.needsEncoder ? ' · uses structure encoder (~138 MB)' : ''}
-          </span>
-        {/if}
-      </label>
-
-      {#if taskPresetId === 'custom'}
-        {@const contigVal = String(node.params.contig ?? '70-70')}
-        {@const rawJsonCheck = validateJsonOverride(String(node.params.rawJsonOverride ?? ''))}
-        {@const activeBench = getBenchmarkById(String(node.params.benchmarkId ?? ''))}
-        <label class="full">
-          Load Curated Benchmark Spec (optional)
-          <select
-            {disabled}
-            value={String(node.params.benchmarkId ?? '')}
-            onchange={(e) => {
-              const id = e.currentTarget.value;
-              const b = getBenchmarkById(id);
-              if (!b) {
-                setParam('benchmarkId', '');
-                return;
-              }
-              onUpdate(node.id, {
-                ...node.params,
-                benchmarkId: b.id,
-                pdbId: b.pdbId,
-                taskPreset: b.conditionParams.taskPreset,
-                contig: b.conditionParams.contig,
-                lockChain: b.conditionParams.lockChain ?? '',
-                hotspots: b.conditionParams.hotspots ?? '',
-                motifSpan: b.conditionParams.motifSpan ?? '',
-                unindexedMotif: Boolean(b.conditionParams.unindexedMotif),
-                hbondMode: b.conditionParams.hbondMode ?? 'none',
-                hbondSelection: b.conditionParams.hbondSelection ?? '',
-                cathCode: '',
-                rawJsonOverride: '',
-              });
-            }}
-          >
-            <option value="">— Custom parameters below —</option>
-            <optgroup label="PPI Binders (RFD4 & Genie 3)">
-              {#each BENCHMARK_TARGETS.filter((b) => b.category === 'binder') as b (b.id)}
-                <option value={b.id}>{b.shortLabel} · ~{b.approxTokens} tok</option>
-              {/each}
-            </optgroup>
-            <optgroup label="Motif Scaffolding (RFD4 & Genie 3)">
-              {#each BENCHMARK_TARGETS.filter((b) => b.category === 'motif') as b (b.id)}
-                <option value={b.id}>{b.shortLabel} · ~{b.approxTokens} tok</option>
-              {/each}
-            </optgroup>
-            <optgroup label="AME Enzymes, Ligands & DNA (RFD4 All-Atom)">
-              {#each BENCHMARK_TARGETS.filter((b) => b.category === 'enzyme-ligand') as b (b.id)}
-                <option value={b.id}>{b.shortLabel} · ~{b.approxTokens} tok</option>
-              {/each}
-            </optgroup>
-          </select>
-          {#if activeBench}
-            <span class="field-hint">
-              {activeBench.biology} · Wire PDB <code>{activeBench.pdbId}</code> into <code>template</code> · {activeBench.supportsGenie3 ? 'Compatible with RFD4 & Genie 3' : 'RFD4 all-atom only'}
-            </span>
-          {/if}
-        </label>
-        <label class="full">
-          Contig (e.g. <code>70-70</code>, <code>A18-132,/0,70-70</code>)
-          <input
-            type="text"
-            class:input-error={!contigVal.trim() && !String(node.params.rawJsonOverride ?? '').trim()}
-            {disabled}
-            value={contigVal}
-            oninput={(e) => setParam('contig', e.currentTarget.value)}
-          />
-          {#if !contigVal.trim() && !String(node.params.rawJsonOverride ?? '').trim()}
-            <span class="field-hint err">Contig is required unless a JSON constraint override is provided.</span>
-          {/if}
-        </label>
-
-        <div class="chip-field full">
-          <label>
-            Binding Hotspots (click residues in 3D viewer or enter e.g. A54, A56)
-            <input
-              type="text"
-              {disabled}
-              placeholder="A54, A56, A66, A115"
-              value={String(node.params.hotspots ?? '')}
-              oninput={(e) => setParam('hotspots', e.currentTarget.value)}
-            />
-          </label>
-          {#if hotspotTokens.length > 0}
-            <div class="res-chips">
-              {#each hotspotTokens as tok, i (`hot_${tok}_${i}`)}
-                {@const badTok = !isValidResidueToken(tok)}
-                <span class="res-chip" class:invalid-chip={badTok} title={badTok ? 'Expected format like A54 or A16-35' : undefined}>
-                  {tok}
-                  <button
-                    type="button"
-                    class="chip-x"
-                    {disabled}
-                    aria-label={`Remove hotspot ${tok}`}
-                    onclick={() => removeResidueTokenAt('hotspots', i)}
-                  >×</button>
-                </span>
-              {/each}
-            </div>
-          {/if}
-        </div>
-
-        <div class="chip-field full">
-          <label>
-            Fixed Structural Motif (e.g. A16-35, A52-71)
-            <input
-              type="text"
-              {disabled}
-              placeholder="A16-35, A52-71"
-              value={String(node.params.motifSpan ?? '')}
-              oninput={(e) => setParam('motifSpan', e.currentTarget.value)}
-            />
-          </label>
-          {#if motifTokens.length > 0}
-            <div class="res-chips">
-              {#each motifTokens as tok, i (`motif_${tok}_${i}`)}
-                {@const badTok = !isValidResidueToken(tok)}
-                <span class="res-chip" class:invalid-chip={badTok} title={badTok ? 'Expected format like A16-35' : undefined}>
-                  {tok}
-                  <button
-                    type="button"
-                    class="chip-x"
-                    {disabled}
-                    aria-label={`Remove motif ${tok}`}
-                    onclick={() => removeResidueTokenAt('motifSpan', i)}
-                  >×</button>
-                </span>
-              {/each}
-            </div>
-          {/if}
-        </div>
-
-        <details class="adv-details full">
-          <summary>Advanced parameters</summary>
-          <div class="adv-fields">
-            <label>
-              Lock Chain
-              <input
-                type="text"
-                {disabled}
-                placeholder="e.g. A"
-                style="width: 72px"
-                value={String(node.params.lockChain ?? '')}
-                oninput={(e) => setParam('lockChain', e.currentTarget.value)}
-              />
-            </label>
-            <label>
-              CATH Fold
-              <input
-                type="text"
-                {disabled}
-                placeholder="e.g. 3.40.50"
-                style="width: 96px"
-                value={String(node.params.cathCode ?? '')}
-                oninput={(e) => setParam('cathCode', e.currentTarget.value)}
-              />
-            </label>
-            <label>
-              3D Click Brush
-              <select
-                {disabled}
-                value={String(node.params.paintBrush ?? 'hotspots')}
-                onchange={(e) => setParam('paintBrush', e.currentTarget.value)}
-              >
-                <option value="hotspots">Paint Binding Hotspots</option>
-                <option value="motifSpan">Paint Fixed Motif</option>
-              </select>
-            </label>
-            <label class="inline-check">
-              <input
-                type="checkbox"
-                {disabled}
-                checked={Boolean(node.params.unindexedMotif)}
-                onchange={(e) => setParam('unindexedMotif', e.currentTarget.checked)}
-              />
-              Unindexed Motif (auto-place sequence position)
-            </label>
-            <label>
-              Hydrogen-Bond Constraint
-              <select
-                {disabled}
-                value={String(node.params.hbondMode ?? 'none')}
-                onchange={(e) => setParam('hbondMode', e.currentTarget.value)}
-              >
-                <option value="none">None</option>
-                <option value="ACCEPTOR">Acceptor</option>
-                <option value="DONOR">Donor</option>
-                <option value="BOTH">Both</option>
-              </select>
-            </label>
-            {#if String(node.params.hbondMode ?? 'none') !== 'none'}
-              <label class="full">
-                Target Atoms / Ligand for H-Bond (e.g. <code>B/SAM/*/*</code>)
-                <input
-                  type="text"
-                  {disabled}
-                  placeholder="B/SAM/*/*"
-                  value={String(node.params.hbondSelection ?? '')}
-                  oninput={(e) => setParam('hbondSelection', e.currentTarget.value)}
-                />
-              </label>
-            {/if}
-            <label class="full">
-              Advanced JSON Constraint Override
-              <textarea
-                rows="3"
-                class:input-error={rawJsonCheck.status === 'error'}
-                {disabled}
-                placeholder={'{"contig": "70-70", "conditions": {}}'}
-                value={String(node.params.rawJsonOverride ?? '')}
-                oninput={(e) => setParam('rawJsonOverride', e.currentTarget.value)}
-              ></textarea>
-              {#if rawJsonCheck.message}
-                <span class="field-hint" class:err={rawJsonCheck.status === 'error'} class:ok={rawJsonCheck.status === 'ok'}>
-                  {rawJsonCheck.message}
-                </span>
-              {/if}
-            </label>
-          </div>
-        </details>
-      {/if}
-
     {:else if node.adapterId === 'rfd4-proteina'}
       {@const rfdMode = String(node.params.mode ?? 'unconditional')}
       {@const hotspotTokens = parseResidueTokens(node.params.hotspots)}
       {@const motifTokens = parseResidueTokens(node.params.motifSpan)}
+      {@const hasCustomContig =
+        (rfdMode === 'motif' || rfdMode === 'binder') && String(node.params.contig ?? '').trim().length > 0}
       <label class="full">
         Design Task
         <select
@@ -855,9 +932,6 @@
           <option value="partial">Partial Diffusion (refine structure)</option>
           <option value="inverse-folding">Inverse Folding (design sequence)</option>
           <option value="preset">All-Atom / Built-In Task Preset</option>
-          {#if rfdMode === 'conditioned'}
-            <option value="conditioned">Custom Conditioned Spec</option>
-          {/if}
         </select>
       </label>
 
@@ -897,15 +971,6 @@
           />
         </label>
       {:else if rfdMode === 'motif'}
-        <label class="full">
-          Contig (e.g. <code>10-10,A16-35,16-16,A52-71,10-10</code> or <code>150-150</code>)
-          <input
-            type="text"
-            {disabled}
-            value={String(node.params.contig ?? '100-100')}
-            oninput={(e) => setParam('contig', e.currentTarget.value)}
-          />
-        </label>
         <div class="chip-field full">
           <label>
             Fixed Motif Spans (click 3D residues or enter e.g. A16-35, A52-71)
@@ -939,16 +1004,6 @@
           Unindexed motif (auto-place catalytic residues, e.g. AME enzymes)
         </label>
       {:else if rfdMode === 'binder'}
-        <label class="full">
-          Binder Contig (blank = auto from template, or e.g. <code>A17-132,/0,70-70</code>)
-          <input
-            type="text"
-            {disabled}
-            placeholder="Auto from template (or e.g. A17-132,/0,70-70)"
-            value={String(node.params.contig ?? '')}
-            oninput={(e) => setParam('contig', e.currentTarget.value)}
-          />
-        </label>
         <label>
           Target Chain
           <input
@@ -967,16 +1022,8 @@
             spec={NUMERIC_SPECS['rfd4-proteina'].length}
             value={Number(node.params.length ?? 70)}
             onChange={(v) => {
-              const prevContig = String(node.params.contig ?? '').trim();
-              const nextContig = prevContig.includes('/0')
-                ? prevContig
-                    .split(/[,\s]+/)
-                    .filter(Boolean)
-                    .map((tok) => (/^\d+(?:-\d+)?$/.test(tok) ? `${v}-${v}` : tok))
-                    .join(',')
-                : /^\d+(?:-\d+)?$/.test(prevContig)
-                  ? ''
-                  : prevContig;
+              const prevContig = String(node.params.contig ?? '');
+              const nextContig = updateBinderLengthInContig(prevContig, v, true);
               onUpdate(node.id, {
                 ...node.params,
                 length: v,
@@ -1037,16 +1084,22 @@
         <span class="field-hint full">
           Redesigns sequence for the wired input backbone using RFD4's structure encoder (~138 MB lazy load).
         </span>
-      {:else if rfdMode === 'conditioned'}
-        <label class="full">
-          Contig
-          <input
-            type="text"
-            {disabled}
-            value={String(node.params.contig ?? '70-70')}
-            oninput={(e) => setParam('contig', e.currentTarget.value)}
-          />
-        </label>
+      {/if}
+
+      {#if conditioningSourceSummary?.active && conditioningSourceSummary.hasTemplate}
+        <div
+          class="source-res-badge full"
+          class:is-warn={conditioningSourceSummary.count === 0}
+        >
+          {#if conditioningSourceSummary.count > 0}
+            ✓ Resolved <b>{conditioningSourceSummary.count}</b> source {conditioningSourceSummary.kindLabel} residue{conditioningSourceSummary.count === 1 ? '' : 's'}
+            {#if conditioningSourceSummary.preview}
+              <span class="source-res-list">({conditioningSourceSummary.preview})</span>
+            {/if}
+          {:else}
+            ⚠ 0 template residues matched current {conditioningSourceSummary.kindLabel} selection
+          {/if}
+        </div>
       {/if}
 
       {#if !hasStructureInput && (rfdMode === 'motif' || rfdMode === 'binder' || rfdMode === 'partial' || rfdMode === 'inverse-folding')}
@@ -1056,8 +1109,27 @@
       {/if}
 
       <details class="adv-details full">
-        <summary>Advanced parameters</summary>
+        <summary>
+          Advanced parameters
+          {#if hasCustomContig}
+            <span class="adv-badge" title={`Custom contig: ${String(node.params.contig).trim()}`}>Custom contig</span>
+          {/if}
+        </summary>
         <div class="adv-fields">
+          {#if rfdMode === 'motif' || rfdMode === 'binder'}
+            <label class="full">
+              {rfdMode === 'binder' ? 'Binder Contig (optional override)' : 'Contig (optional override)'}
+              <input
+                type="text"
+                {disabled}
+                placeholder={rfdMode === 'binder'
+                  ? 'Auto from template (or e.g. A17-132,/0,70-70)'
+                  : 'e.g. 10-10,A16-35,16-16,A52-71,10-10'}
+                value={String(node.params.contig ?? '')}
+                oninput={(e) => setParam('contig', e.currentTarget.value)}
+              />
+            </label>
+          {/if}
           <label>
             Steps
             <NumericInput
@@ -1141,6 +1213,8 @@
       {@const g3Mode = String(node.params.taskMode ?? 'unconditional')}
       {@const g3Hotspots = parseResidueTokens(node.params.hotspots)}
       {@const g3Motifs = parseResidueTokens(node.params.motifSpan)}
+      {@const g3HasCustomContig =
+        (g3Mode === 'motif' || g3Mode === 'binder') && String(node.params.contig ?? '').trim().length > 0}
       <label class="full">
         Design Task
         <select
@@ -1180,16 +1254,6 @@
           />
         </label>
       {:else if g3Mode === 'motif'}
-        <label class="full">
-          Contig (e.g. <code>10-10,A16-35,16-16,A52-71,10-10</code>)
-          <input
-            type="text"
-            {disabled}
-            placeholder="25-25,A163-181,30-30"
-            value={String(node.params.contig ?? '')}
-            oninput={(e) => setParam('contig', e.currentTarget.value)}
-          />
-        </label>
         <div class="chip-field full">
           <label>
             Fixed Motif Spans (click 3D residues or enter e.g. A16-35, A52-71)
@@ -1222,14 +1286,8 @@
             spec={NUMERIC_SPECS.genie3.length}
             value={Number(node.params.length ?? 80)}
             onChange={(v) => {
-              const prevContig = String(node.params.contig ?? '').trim();
-              const nextContig = prevContig.includes('/0')
-                ? prevContig
-                    .split(/[,\s]+/)
-                    .filter(Boolean)
-                    .map((tok) => (/^\d+(?:-\d+)?$/.test(tok) ? `${v}-${v}` : tok))
-                    .join(',')
-                : prevContig;
+              const prevContig = String(node.params.contig ?? '');
+              const nextContig = updateBinderLengthInContig(prevContig, v, false);
               onUpdate(node.id, {
                 ...node.params,
                 length: v,
@@ -1274,6 +1332,22 @@
         </div>
       {/if}
 
+      {#if conditioningSourceSummary?.active && conditioningSourceSummary.hasTemplate}
+        <div
+          class="source-res-badge full"
+          class:is-warn={conditioningSourceSummary.count === 0}
+        >
+          {#if conditioningSourceSummary.count > 0}
+            ✓ Resolved <b>{conditioningSourceSummary.count}</b> source {conditioningSourceSummary.kindLabel} residue{conditioningSourceSummary.count === 1 ? '' : 's'}
+            {#if conditioningSourceSummary.preview}
+              <span class="source-res-list">({conditioningSourceSummary.preview})</span>
+            {/if}
+          {:else}
+            ⚠ 0 template residues matched current {conditioningSourceSummary.kindLabel} selection
+          {/if}
+        </div>
+      {/if}
+
       {#if !hasStructureInput && (g3Mode === 'motif' || g3Mode === 'binder')}
         <span class="field-hint err full">
           Wire a PDB Input into Genie 3's <code>structure</code> port for {g3Mode} design.
@@ -1292,8 +1366,27 @@
       </label>
 
       <details class="adv-details full">
-        <summary>Advanced parameters</summary>
+        <summary>
+          Advanced parameters
+          {#if g3HasCustomContig}
+            <span class="adv-badge" title={`Custom contig: ${String(node.params.contig).trim()}`}>Custom contig</span>
+          {/if}
+        </summary>
         <div class="adv-fields">
+          {#if g3Mode === 'motif' || g3Mode === 'binder'}
+            <label class="full">
+              {g3Mode === 'binder' ? 'Binder Contig (optional override)' : 'Contig (optional override)'}
+              <input
+                type="text"
+                {disabled}
+                placeholder={g3Mode === 'binder'
+                  ? 'Auto from template (or e.g. A17-132,/0,80-80)'
+                  : 'e.g. 25-25,A163-181,30-30'}
+                value={String(node.params.contig ?? '')}
+                oninput={(e) => setParam('contig', e.currentTarget.value)}
+              />
+            </label>
+          {/if}
           <label>
             Direction scale
             <NumericInput
@@ -1338,18 +1431,29 @@
 
     {:else if node.adapterId === 'web-protein-mpnn'}
       {@const fixedTokens = parseResidueTokens(node.params.fixedPositions)}
+      {@const mpnnFamily = String(node.params.family ?? 'solublempnn')}
+      {@const mpnnCheckpoints = MPNN_CHECKPOINTS_BY_FAMILY[mpnnFamily] ?? MPNN_CHECKPOINTS_BY_FAMILY.solublempnn}
+      {@const mpnnModelName = String(node.params.modelName ?? 'v_48_020')}
       <label class="wide">
         Model Variant
         <select
           {disabled}
-          value={String(node.params.family ?? 'solublempnn')}
+          value={mpnnFamily}
           onchange={(e) => {
             const nextFamily = e.currentTarget.value;
             if (isAutoMpnnLabel(node.label)) {
               const meta = MPNN_VARIANT_OPTIONS.find((v) => v.family === nextFamily);
               if (meta) onUpdateLabel?.(node.id, meta.shortLabel);
             }
-            setParam('family', nextFamily);
+            const validList = MPNN_CHECKPOINTS_BY_FAMILY[nextFamily] ?? MPNN_CHECKPOINTS_BY_FAMILY.solublempnn;
+            const reconciledModel = validList.some((c) => c.id === mpnnModelName)
+              ? mpnnModelName
+              : 'v_48_020';
+            onUpdate(node.id, {
+              ...node.params,
+              family: nextFamily,
+              modelName: reconciledModel,
+            });
           }}
         >
           {#each MPNN_VARIANT_OPTIONS as v (v.id)}
@@ -1415,11 +1519,12 @@
             Checkpoint
             <select
               {disabled}
-              value={String(node.params.modelName ?? 'v_48_020')}
+              value={mpnnCheckpoints.some((c) => c.id === mpnnModelName) ? mpnnModelName : 'v_48_020'}
               onchange={(e) => setParam('modelName', e.currentTarget.value)}
             >
-              <option value="v_48_020">v_48_020 (default)</option>
-              <option value="v_48_010">v_48_010</option>
+              {#each mpnnCheckpoints as ckpt (ckpt.id)}
+                <option value={ckpt.id}>{ckpt.label}</option>
+              {/each}
             </select>
           </label>
           <label>
@@ -1924,6 +2029,131 @@
     color: #fff;
   }
   .sync-sib-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .file-row {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .file-row input[type='file'] {
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .filename-wrap {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .adv-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    font-weight: 600;
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+    border: 1px solid var(--border-strong);
+    vertical-align: middle;
+  }
+  .source-res-badge {
+    font-size: 10.5px;
+    line-height: 1.4;
+    padding: 5px 8px;
+    border-radius: 5px;
+    background: var(--ok-bg);
+    color: var(--ok-text);
+    border: 1px solid var(--ok-border);
+    overflow-wrap: anywhere;
+  }
+  .source-res-badge.is-warn {
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border-color: var(--warn-border);
+  }
+  .source-res-list {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    margin-left: 4px;
+    opacity: 0.9;
+  }
+  .missing-upload-card {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 9px 10px;
+    border-radius: 6px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-text);
+  }
+  .mu-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .mu-title {
+    font-size: 11.5px;
+    font-weight: 700;
+  }
+  .mu-sha {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.14);
+  }
+  .mu-body {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  .mu-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .mu-upload-btn {
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: 5px;
+    background: var(--accent);
+    color: #fff;
+    border: 1px solid var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .mu-upload-btn.is-disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .mu-clear-btn {
+    padding: 4px 9px;
+    border-radius: 5px;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-strong);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .mu-clear-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: var(--accent);
+  }
+  .mu-clear-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }

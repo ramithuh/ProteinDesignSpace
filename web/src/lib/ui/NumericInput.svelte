@@ -1,3 +1,11 @@
+<script module lang="ts">
+  let invalidNumericCount = $state(0);
+
+  export function hasInvalidNumericInputs(): boolean {
+    return invalidNumericCount > 0;
+  }
+</script>
+
 <script lang="ts">
   import { untrack } from 'svelte';
   import {
@@ -37,6 +45,15 @@
   });
 
   let feedback = $derived(validateNumericDraft(draft, spec));
+  let isInvalid = $derived(feedback.status === 'error');
+
+  $effect(() => {
+    if (!isInvalid) return;
+    invalidNumericCount += 1;
+    return () => {
+      invalidNumericCount = Math.max(0, invalidNumericCount - 1);
+    };
+  });
 
   function handleInput(ev: Event) {
     const el = ev.currentTarget as HTMLInputElement;
@@ -81,7 +98,7 @@
     } else if (ev.key === 'ArrowDown') {
       ev.preventDefault();
       stepBy(-1);
-    } else if (ev.key === 'Enter') {
+    } else if (ev.key === 'Enter' && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
       commit();
       (ev.currentTarget as HTMLInputElement).blur();
     } else if (ev.key === 'Escape') {
@@ -100,11 +117,12 @@
   >
     <input
       type="text"
+      class="num-input"
       inputmode={spec.integer ? 'numeric' : 'decimal'}
       autocomplete="off"
       spellcheck="false"
       aria-label={ariaLabel}
-      aria-invalid={feedback.status === 'error'}
+      aria-invalid={isInvalid}
       {disabled}
       value={draft}
       onfocus={() => (focused = true)}

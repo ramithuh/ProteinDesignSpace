@@ -3,9 +3,11 @@
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import {
     ExecutionScheduler,
+    RunCancellationError,
     attachProgrammaticApi,
     materializePdbInputNode,
     materializeSequenceInputNode,
+    type ActiveRunState,
   } from '$lib/engine/scheduler';
   import { clearRcsbCache, isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
   import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from '$lib/engine/registry';
@@ -24,14 +26,21 @@
     parseRecipeToGraph,
     serializeWorkflowJson,
   } from '$lib/engine/share';
-  import { clearAllModelCaches, getCacheStats } from '$lib/engine/opfs-cache';
-  import { COMPARE_PALETTE, buildComparisonState } from '$lib/engine/compare';
+  import {
+    clearAllModelCaches,
+    createIndexedDbCheckpointStore,
+    getCacheStats,
+  } from '$lib/engine/opfs-cache';
+  import {
+    COMPARE_PALETTE,
+    buildComparisonState,
+    type ComparisonPairingMode,
+  } from '$lib/engine/compare';
   import { estimateRunRequirements, type RunPreflightSummary } from '$lib/engine/run-preflight';
   import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
   import type {
     BioCompatibilityIssue,
     CanonicalArtifact,
-    ConditionSpecArtifact,
     DesignabilityMetrics,
     DesignabilityRow,
     FoldedStructure,
@@ -43,15 +52,18 @@
   } from '$lib/engine/types';
   import MolSuperposeViewer from '$lib/viewer/MolSuperposeViewer.svelte';
   import ArtifactPeekPanel from '$lib/ui/ArtifactPeekPanel.svelte';
-  import ComparePeekPanel from '$lib/ui/ComparePeekPanel.svelte';
+  import ComparePeekPanel, { type CompareBranchMeta } from '$lib/ui/ComparePeekPanel.svelte';
   import CreditsModal from '$lib/ui/CreditsModal.svelte';
   import FirstRunModal from '$lib/ui/FirstRunModal.svelte';
   import OnboardingModal from '$lib/ui/OnboardingModal.svelte';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
+  import { hasInvalidNumericInputs } from '$lib/ui/NumericInput.svelte';
   import WorkflowCanvas from '$lib/ui/WorkflowCanvas.svelte';
   import RecipeDrawer from '$lib/ui/RecipeDrawer.svelte';
 
-  const scheduler = new ExecutionScheduler();
+  const scheduler = new ExecutionScheduler({
+    checkpointStore: createIndexedDbCheckpointStore(),
+  });
 
   let rightPanelTab = $state<'params' | 'peek'>('params');
   let expandedPane = $state<'none' | 'viewer' | 'inspector'>('none');
@@ -59,6 +71,8 @@
   let splitPct = $state<number>(65);
   let draggingSplit = $state(false);
   let splitWrapEl: HTMLDivElement | null = $state(null);
+  let splitMoveRafId: number | null = null;
+  let pendingSplitClientX: number | null = null;
   let theme = $state<'dark' | 'light'>('dark');
   let webgpuSupported = $state<boolean | null>(null);
   let webgpuDetail = $state<string>('checking…');
@@ -71,6 +85,7 @@
 
   // Header popovers & first-run confirmation dialog
   let sysMenuOpen = $state(false);
+  let sysPopAlignLeft = $state(false);
   let moreMenuOpen = $state(false);
   let sysWrapEl: HTMLDivElement | null = $state(null);
   let moreWrapEl: HTMLDivElement | null = $state(null);
@@ -93,19 +108,38 @@
   let compareLayout = $state<'overlay' | 'side-by-side'>('overlay');
   let compareColorMode = $state<'by-model' | 'plddt'>('by-model');
   let compareAlignKabsch = $state(true);
+  let comparePairingMode = $state<ComparisonPairingMode | undefined>(undefined);
+  let compareSelectedCandidateKey = $state<string | null>(null);
   let hiddenCompareModelIds = $state<string[]>([]);
   let branchCandidateIdx = $state<Record<string, number>>({});
-  let isRunning = $state(false);
+  let localRunning = $state(false);
+  let activeRunState = $state<ActiveRunState>(scheduler.getActiveRunState());
+  let isRunning = $derived(
+    localRunning || activeRunState.leaseHeld || activeRunState.status === 'running',
+  );
+  let hasInvalidNumeric = $derived(hasInvalidNumericInputs());
+
+  function hasAnyInvalidNumericInput(): boolean {
+    return (
+      hasInvalidNumericInputs() ||
+      (typeof document !== 'undefined' &&
+        Boolean(document.querySelector('.num-input[aria-invalid="true"]')))
+    );
+  }
 
   function setSingleSelection(id: string) {
     selectedNodeIds = id ? [id] : [];
     hiddenCompareModelIds = [];
+    comparePairingMode = undefined;
+    compareSelectedCandidateKey = null;
   }
 
   function handleSelectNodes(ids: string[]) {
     const valid = ids.filter((id) => graph.nodes.some((n) => n.id === id)).slice(0, COMPARE_PALETTE.length);
     selectedNodeIds = valid;
     hiddenCompareModelIds = [];
+    comparePairingMode = undefined;
+    compareSelectedCandidateKey = null;
     selectedPeekSlotId = null;
     selectedEdgeId = null;
     if (selectedNodeIds.length >= 2) {
@@ -152,8 +186,76 @@
   let runError = $state<string | null>(null);
   let totalElapsedMs = $state<number | null>(null);
 
-  let nodeStates = $state<Record<string, NodeProgressEvent>>({});
+  let nodeStates = $state.raw<Record<string, NodeProgressEvent>>({});
   let outputsByNode = $state.raw<Record<string, Record<string, CanonicalArtifact>>>({});
+
+  // Progress throttling / rAF coalescing (~100ms, flushing status transitions immediately)
+  let pendingProgressEvents: Record<string, NodeProgressEvent> = {};
+  let progressFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let progressRafId: number | null = null;
+  let lastProgressFlushMs = 0;
+
+  function clearPendingProgress() {
+    pendingProgressEvents = {};
+    if (progressFlushTimer !== null) {
+      clearTimeout(progressFlushTimer);
+      progressFlushTimer = null;
+    }
+    if (progressRafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(progressRafId);
+      progressRafId = null;
+    }
+  }
+
+  function flushPendingProgress() {
+    if (progressFlushTimer !== null) {
+      clearTimeout(progressFlushTimer);
+      progressFlushTimer = null;
+    }
+    if (progressRafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(progressRafId);
+      progressRafId = null;
+    }
+    const keys = Object.keys(pendingProgressEvents);
+    if (keys.length === 0) return;
+    const batch = pendingProgressEvents;
+    pendingProgressEvents = {};
+    lastProgressFlushMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    nodeStates = { ...nodeStates, ...batch };
+    activeGpuWorker = scheduler.getActiveGpuAdapter();
+  }
+
+  const unsubscribeRunState = scheduler.subscribeRunState((nextState) => {
+    activeRunState = nextState;
+    activeGpuWorker = scheduler.getActiveGpuAdapter();
+  });
+
+  function shallowParamsEqual(
+    a: Record<string, unknown> | undefined,
+    b: Record<string, unknown> | undefined,
+  ): boolean {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    for (let i = 0; i < keysA.length; i++) {
+      const k = keysA[i];
+      if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+      const va = a[k];
+      const vb = b[k];
+      if (!Object.is(va, vb)) {
+        if (Array.isArray(va) && Array.isArray(vb) && va.length === vb.length) {
+          for (let j = 0; j < va.length; j++) {
+            if (!Object.is(va[j], vb[j])) return false;
+          }
+        } else {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
 
   // Viewer & intermediate peek state
   let selectedPeekSlotId = $state<string | null>(null);
@@ -210,13 +312,24 @@
 
   function handleWindowPointerMove(ev: PointerEvent) {
     if (!draggingSplit || !splitWrapEl) return;
-    const rect = splitWrapEl.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const rawPct = ((ev.clientX - rect.left) / rect.width) * 100;
-    splitPct = Math.min(78, Math.max(32, Math.round(rawPct * 10) / 10));
+    pendingSplitClientX = ev.clientX;
+    if (splitMoveRafId !== null) return;
+    splitMoveRafId = requestAnimationFrame(() => {
+      splitMoveRafId = null;
+      if (!draggingSplit || !splitWrapEl || pendingSplitClientX === null) return;
+      const rect = splitWrapEl.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const rawPct = ((pendingSplitClientX - rect.left) / rect.width) * 100;
+      splitPct = Math.min(78, Math.max(32, Math.round(rawPct * 10) / 10));
+    });
   }
 
   function handleWindowPointerUp() {
+    if (splitMoveRafId !== null) {
+      cancelAnimationFrame(splitMoveRafId);
+      splitMoveRafId = null;
+    }
+    pendingSplitClientX = null;
     if (draggingSplit) draggingSplit = false;
   }
 
@@ -255,6 +368,11 @@
 
     // Cmd/Ctrl + Enter runs workflow from anywhere (never hijacks Cmd+R browser reload)
     if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey) && !ev.altKey) {
+      if (hasAnyInvalidNumericInput()) {
+        ev.preventDefault();
+        runError = 'Fix invalid numeric parameter(s) before running.';
+        return;
+      }
       if (!isRunning && validationErrors.length === 0) {
         ev.preventDefault();
         void runWorkflow(false);
@@ -271,6 +389,11 @@
       !isEditableElement(ev.target) &&
       !isEditableElement(document.activeElement)
     ) {
+      if (hasAnyInvalidNumericInput()) {
+        ev.preventDefault();
+        runError = 'Fix invalid numeric parameter(s) before running.';
+        return;
+      }
       if (!isRunning && validationErrors.length === 0) {
         ev.preventDefault();
         void runWorkflow(false);
@@ -363,8 +486,15 @@
   });
 
   onDestroy(() => {
+    unsubscribeRunState();
+    clearPendingProgress();
+    if (splitMoveRafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(splitMoveRafId);
+    }
     if (shareToastTimer) clearTimeout(shareToastTimer);
-    void scheduler.releaseActiveGpu();
+    if (!activeRunState.leaseHeld) {
+      void scheduler.releaseActiveGpu();
+    }
   });
 
   async function refreshCacheStats() {
@@ -373,8 +503,39 @@
   }
 
   function handleProgress(ev: NodeProgressEvent) {
-    nodeStates = { ...nodeStates, [ev.nodeId]: ev };
-    activeGpuWorker = scheduler.getActiveGpuAdapter();
+    const prev = pendingProgressEvents[ev.nodeId] ?? nodeStates[ev.nodeId];
+    const statusChanged = !prev || prev.status !== ev.status;
+    pendingProgressEvents[ev.nodeId] = ev;
+    if (statusChanged) {
+      flushPendingProgress();
+      return;
+    }
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const elapsed = now - lastProgressFlushMs;
+    if (elapsed >= 100) {
+      if (progressRafId === null) {
+        if (typeof requestAnimationFrame === 'function') {
+          progressRafId = requestAnimationFrame(() => {
+            progressRafId = null;
+            flushPendingProgress();
+          });
+        } else {
+          flushPendingProgress();
+        }
+      }
+    } else if (progressFlushTimer === null) {
+      progressFlushTimer = setTimeout(() => {
+        progressFlushTimer = null;
+        if (typeof requestAnimationFrame === 'function') {
+          progressRafId = requestAnimationFrame(() => {
+            progressRafId = null;
+            flushPendingProgress();
+          });
+        } else {
+          flushPendingProgress();
+        }
+      }, Math.max(0, 100 - elapsed));
+    }
   }
 
   function selectPreset(presetId: string) {
@@ -389,10 +550,12 @@
     selectedPeekSlotId = null;
     selectedEdgeId = null;
     rightPanelTab = 'params';
+    clearPendingProgress();
     nodeStates = {};
     outputsByNode = {};
     previewedInputSigs.clear();
     inFlightInputSigs.clear();
+    failedInputSigs.clear();
     runError = null;
     totalElapsedMs = null;
     selectedRowIdx = 0;
@@ -429,10 +592,12 @@
       edges: [],
     });
     setSingleSelection('genie3_1');
+    clearPendingProgress();
     nodeStates = {};
     outputsByNode = {};
     previewedInputSigs.clear();
     inFlightInputSigs.clear();
+    failedInputSigs.clear();
     runError = null;
     rightPanelTab = 'params';
   }
@@ -441,7 +606,7 @@
     if (isRunning) return;
     const opts =
       adapterId === 'web-protein-mpnn'
-        ? { autoCommit: true, params: { family: 'solublempnn', modelName: 'v_48_020' }, label: 'SolubleMPNN' }
+        ? { autoCommit: true, params: { family: 'ca', modelName: 'v_48_020' }, label: 'Cα-ProteinMPNN' }
         : adapterId === 'localfold-af2'
           ? { autoCommit: true, params: { model: 'monomer' }, label: 'AF2 Model 1' }
           : { autoCommit: true, label: 'scRMSD / scTM' };
@@ -454,14 +619,17 @@
             graph.nodes.find((n) => n.adapterId === 'pdb-input')?.id ??
             selectedNodeId);
 
+    const prevGraph = $state.snapshot(graph) as WorkflowGraph;
     const { graph: nextGraph, nodeId } = insertBlockSmart(
-      $state.snapshot(graph) as WorkflowGraph,
+      prevGraph,
       adapterId,
       anchorId || undefined,
       undefined,
       opts,
     );
-    graph = autoLayoutGraph(nextGraph);
+    const laid = autoLayoutGraph(nextGraph);
+    graph = laid;
+    scheduler.invalidateEditedGraph(prevGraph, laid);
     setSingleSelection(nodeId);
     runError = null;
   }
@@ -565,27 +733,32 @@
   }
 
   function handleGraphChange(next: WorkflowGraph) {
+    const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
     const nextById = new Map(next.nodes.map((n) => [n.id, n]));
-    const prevById = new Map(graph.nodes.map((n) => [n.id, n]));
+    const prevById = new Map(prevSnapshot.nodes.map((n) => [n.id, n]));
 
     const dirtySeeds = new Set<string>();
     for (const [id, cur] of nextById.entries()) {
       const prev = prevById.get(id);
       if (!prev || cur.adapterId !== prev.adapterId) {
         dirtySeeds.add(id);
-      } else if (JSON.stringify(cur.params) !== JSON.stringify(prev.params)) {
+      } else if (!shallowParamsEqual(cur.params, prev.params)) {
         dirtySeeds.add(id);
       }
     }
 
-    const prevEdgeKeys = new Set(graph.edges.map((e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)));
-    const nextEdgeKeys = new Set(next.edges.map((e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)));
+    const prevEdgeKeys = new Set(
+      prevSnapshot.edges.map((e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)),
+    );
+    const nextEdgeKeys = new Set(
+      next.edges.map((e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)),
+    );
     for (const e of next.edges) {
       if (!prevEdgeKeys.has(makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort))) {
         dirtySeeds.add(e.toNode);
       }
     }
-    for (const e of graph.edges) {
+    for (const e of prevSnapshot.edges) {
       if (!nextEdgeKeys.has(makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)) && nextById.has(e.toNode)) {
         dirtySeeds.add(e.toNode);
       }
@@ -617,24 +790,49 @@
     }
 
     graph = next;
+    scheduler.invalidateEditedGraph(prevSnapshot, next);
+
+    // Prune deleted node IDs from selection & hidden compare models (resetting if all remaining would be hidden)
+    let nextSelected = selectedNodeIds;
     if (selectedNodeIds.length > 0) {
       const kept = selectedNodeIds.filter((id) => nextById.has(id));
       if (kept.length !== selectedNodeIds.length) {
-        selectedNodeIds = kept.length > 0 ? kept : next.nodes[0]?.id ? [next.nodes[0].id] : [];
+        nextSelected = kept.length > 0 ? kept : next.nodes[0]?.id ? [next.nodes[0].id] : [];
+        selectedNodeIds = nextSelected;
+      }
+    }
+    if (hiddenCompareModelIds.length > 0) {
+      if (nextSelected.length < 2) {
+        hiddenCompareModelIds = [];
+      } else {
+        const selectedSet = new Set(nextSelected);
+        const pruned = hiddenCompareModelIds.filter((modelId) => {
+          if (modelId === 'ref-designed') return true;
+          if (modelId.startsWith('branch-')) {
+            const nid = modelId.slice('branch-'.length);
+            return nextById.has(nid) && selectedSet.has(nid);
+          }
+          return nextById.has(modelId) && selectedSet.has(modelId);
+        });
+        const allBranchesHidden = nextSelected.every((nid) => pruned.includes(`branch-${nid}`));
+        hiddenCompareModelIds = allBranchesHidden ? [] : pruned;
       }
     }
     runError = null;
   }
 
   function updateNodeParams(nodeId: string, params: Record<string, unknown>) {
-    const prevNode = graph.nodes.find((n) => n.id === nodeId);
-    const paramsChanged = !prevNode || JSON.stringify(prevNode.params) !== JSON.stringify(params);
-    graph = {
-      ...graph,
-      nodes: graph.nodes.map((n) => (n.id === nodeId ? { ...n, params } : n)),
+    const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
+    const prevNode = prevSnapshot.nodes.find((n) => n.id === nodeId);
+    const paramsChanged = !prevNode || !shallowParamsEqual(prevNode.params, params);
+    const nextGraph: WorkflowGraph = {
+      ...prevSnapshot,
+      nodes: prevSnapshot.nodes.map((n) => (n.id === nodeId ? { ...n, params } : n)),
     };
+    graph = nextGraph;
     if (paramsChanged) {
-      invalidateNodes(getDownstreamNodeIds(graph, [nodeId]));
+      scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
+      invalidateNodes(getDownstreamNodeIds(nextGraph, [nodeId]));
     }
   }
 
@@ -652,6 +850,7 @@
   // inspect structures in 3D or compare PDBs immediately without needing to click Run.
   const previewedInputSigs = new Map<string, string>();
   const inFlightInputSigs = new Map<string, string>();
+  const failedInputSigs = new Map<string, string>();
 
   function computeInputPreviewSig(node: { adapterId: string; params: Record<string, unknown> }): string | null {
     const p = node.params ?? {};
@@ -707,12 +906,13 @@
 
   // Auto-seed unconfigured (or previously auto-seeded) Genie 3 & RFD4-Proteina blocks when wired
   // to a curated benchmark PDB Input on their unified `structure` port — fixes forked workflows
-  // like 1PRW -> Genie 3 + RFD4 so both immediately pick up the exact motif/binder/enzyme task!
+  // like 1PRW -> Genie 3 + RFD4 so both immediately pick up the exact motif/binder/enzyme task,
+  // and resets stale auto-seeded Genie 3 constraints when switching to an RFD4-only benchmark (5O45 -> 1CTT).
   $effect(() => {
     if (isRunning) return;
     let patches: Record<string, Record<string, unknown>> | null = null;
     for (const node of graph.nodes) {
-      if (node.adapterId !== 'genie3' && node.adapterId !== 'rfd4-proteina' && node.adapterId !== 'rfd4-conditioner') {
+      if (node.adapterId !== 'genie3' && node.adapterId !== 'rfd4-proteina') {
         continue;
       }
       const structEdge = graph.edges.find(
@@ -727,32 +927,6 @@
       if (!bench) continue;
 
       const cp = node.params ?? {};
-      if (node.adapterId === 'rfd4-conditioner') {
-        const syncedId = String(cp.autoSyncedBenchmarkId ?? '').trim();
-        if (syncedId === bench.id) continue;
-        const isUntouched =
-          String(cp.taskPreset ?? 'custom') === 'custom' &&
-          (String(cp.contig ?? '70-70').trim() === '' || String(cp.contig ?? '70-70').trim() === '70-70') &&
-          !String(cp.lockChain ?? '').trim() &&
-          !String(cp.hotspots ?? '').trim() &&
-          !String(cp.motifSpan ?? '').trim();
-        if (!isUntouched && !syncedId) continue;
-        patches ??= {};
-        patches[node.id] = {
-          ...cp,
-          taskPreset: bench.conditionParams.taskPreset,
-          contig: bench.conditionParams.contig,
-          lockChain: bench.conditionParams.lockChain ?? '',
-          hotspots: bench.conditionParams.hotspots ?? '',
-          motifSpan: bench.conditionParams.motifSpan ?? '',
-          unindexedMotif: Boolean(bench.conditionParams.unindexedMotif),
-          hbondMode: bench.conditionParams.hbondMode ?? 'none',
-          hbondSelection: bench.conditionParams.hbondSelection ?? '',
-          autoSyncedBenchmarkId: bench.id,
-        };
-        continue;
-      }
-
       if (Boolean(cp.userEditedTask)) continue;
       const seededId = String(cp.autoSeededBenchmarkId ?? '').trim();
       if (seededId === bench.id) continue;
@@ -789,37 +963,55 @@
           hbondSelection: bp.hbondSelection ?? '',
           autoSeededBenchmarkId: bench.id,
         };
-      } else if (node.adapterId === 'genie3' && bench.supportsGenie3) {
-        const isUntouched =
-          String(cp.taskMode ?? 'unconditional') === 'unconditional' &&
-          !String(cp.hotspots ?? '').trim() &&
-          !String(cp.motifSpan ?? '').trim() &&
-          !String(cp.lockChain ?? '').trim();
-        if (!isUntouched && !seededId) continue;
+      } else if (node.adapterId === 'genie3') {
+        if (bench.supportsGenie3) {
+          const isUntouched =
+            String(cp.taskMode ?? 'unconditional') === 'unconditional' &&
+            !String(cp.hotspots ?? '').trim() &&
+            !String(cp.motifSpan ?? '').trim() &&
+            !String(cp.lockChain ?? '').trim();
+          if (!isUntouched && !seededId) continue;
 
-        const bp = bench.conditionParams;
-        const parsedLen = parseLengthFromContig(bp.contig);
-        const nextTaskMode = bench.category === 'binder' ? 'binder' : 'motif';
-        patches ??= {};
-        patches[node.id] = {
-          ...cp,
-          taskMode: nextTaskMode,
-          ...(parsedLen !== null ? { length: parsedLen } : {}),
-          contig: bp.contig,
-          lockChain: bp.lockChain ?? '',
-          hotspots: bp.hotspots ?? '',
-          motifSpan: bp.motifSpan ?? '',
-          autoSeededBenchmarkId: bench.id,
-        };
+          const bp = bench.conditionParams;
+          const parsedLen = parseLengthFromContig(bp.contig);
+          const nextTaskMode = bench.category === 'binder' ? 'binder' : 'motif';
+          patches ??= {};
+          patches[node.id] = {
+            ...cp,
+            taskMode: nextTaskMode,
+            ...(parsedLen !== null ? { length: parsedLen } : {}),
+            contig: bp.contig,
+            lockChain: bp.lockChain ?? '',
+            hotspots: bp.hotspots ?? '',
+            motifSpan: bp.motifSpan ?? '',
+            autoSeededBenchmarkId: bench.id,
+          };
+        } else if (seededId) {
+          // Previously auto-seeded for a Genie 3-compatible benchmark, now switched to an
+          // RFD4-only benchmark (e.g. 5O45 -> 1CTT): reset stale constraints cleanly.
+          patches ??= {};
+          patches[node.id] = {
+            ...cp,
+            taskMode: 'unconditional',
+            contig: '',
+            lockChain: '',
+            hotspots: '',
+            motifSpan: '',
+            autoSeededBenchmarkId: bench.id,
+          };
+        }
       }
     }
     if (patches) {
       const map = patches;
-      graph = {
-        ...graph,
-        nodes: graph.nodes.map((n) => (map[n.id] ? { ...n, params: map[n.id] } : n)),
+      const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
+      const nextGraph: WorkflowGraph = {
+        ...prevSnapshot,
+        nodes: prevSnapshot.nodes.map((n) => (map[n.id] ? { ...n, params: map[n.id] } : n)),
       };
-      invalidateNodes(getDownstreamNodeIds(graph, Object.keys(map)));
+      graph = nextGraph;
+      scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
+      invalidateNodes(getDownstreamNodeIds(nextGraph, Object.keys(map)));
     }
   });
 
@@ -858,9 +1050,10 @@
     const syncLen = Number(sp.length ?? parsedLen ?? (src.adapterId === 'genie3' ? 80 : 70));
     const unsupportedGenie3Labels: string[] = [];
 
-    graph = {
-      ...graph,
-      nodes: graph.nodes.map((n) => {
+    const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
+    const nextGraph: WorkflowGraph = {
+      ...prevSnapshot,
+      nodes: prevSnapshot.nodes.map((n) => {
         if (!siblingIds.has(n.id)) return n;
         const shared = {
           length: syncLen,
@@ -925,7 +1118,9 @@
         };
       }),
     };
-    invalidateNodes(getDownstreamNodeIds(graph, siblingIds));
+    graph = nextGraph;
+    scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
+    invalidateNodes(getDownstreamNodeIds(nextGraph, siblingIds));
     if (unsupportedGenie3Labels.length > 0) {
       showToastMessage(
         `${unsupportedGenie3Labels.join(', ')} does not support RFD4 "${srcMode}" mode — reset to unconditional (${syncLen} aa) and cleared incompatible constraints.`,
@@ -944,6 +1139,12 @@
       if (!activeIds.has(id)) {
         previewedInputSigs.delete(id);
         inFlightInputSigs.delete(id);
+        failedInputSigs.delete(id);
+      }
+    }
+    for (const id of [...failedInputSigs.keys()]) {
+      if (!activeIds.has(id)) {
+        failedInputSigs.delete(id);
       }
     }
 
@@ -954,10 +1155,12 @@
         const hadTracked =
           previewedInputSigs.has(node.id) ||
           inFlightInputSigs.has(node.id) ||
+          failedInputSigs.has(node.id) ||
           Boolean(outputsByNode[node.id]) ||
           Boolean(nodeStates[node.id]);
         previewedInputSigs.delete(node.id);
         inFlightInputSigs.delete(node.id);
+        failedInputSigs.delete(node.id);
         if (hadTracked) {
           invalidateNodes(getDownstreamNodeIds(graph, [node.id]));
         }
@@ -965,10 +1168,12 @@
       }
       const hasOut = Boolean(outputsByNode[node.id] && Object.keys(outputsByNode[node.id]).length > 0);
       if (inFlightInputSigs.get(node.id) === sig) continue;
+      if (failedInputSigs.get(node.id) === sig) continue;
       if (previewedInputSigs.get(node.id) === sig && hasOut) continue;
 
       const prevSig = previewedInputSigs.get(node.id);
       previewedInputSigs.set(node.id, sig);
+      failedInputSigs.delete(node.id);
       const nodeSnap = $state.snapshot(node);
 
       if (node.adapterId === 'sequence-input') {
@@ -983,6 +1188,7 @@
             [node.id]: { nodeId: node.id, status: 'done', detail: `${seqSet.candidates.length} sequence(s)` },
           };
         } catch {
+          failedInputSigs.set(node.id, sig);
           invalidateNodes(getDownstreamNodeIds(graph, [node.id]));
         }
         continue;
@@ -1017,6 +1223,7 @@
           if (inFlightInputSigs.get(node.id) === sig) inFlightInputSigs.delete(node.id);
           if (previewedInputSigs.get(node.id) !== sig) return;
           if (!graph.nodes.some((n) => n.id === node.id)) return;
+          failedInputSigs.delete(node.id);
           if (prevSig && prevSig !== sig) {
             invalidateNodes(getDownstreamNodeIds(graph, [node.id]), { keepSeedIds: new Set([node.id]) });
           }
@@ -1034,6 +1241,7 @@
           if (inFlightInputSigs.get(node.id) === sig) inFlightInputSigs.delete(node.id);
           if (previewedInputSigs.get(node.id) !== sig) return;
           if (!graph.nodes.some((n) => n.id === node.id)) return;
+          failedInputSigs.set(node.id, sig);
           invalidateNodes(getDownstreamNodeIds(graph, [node.id]), { keepStateIds: new Set([node.id]) });
           nodeStates = {
             ...nodeStates,
@@ -1050,9 +1258,10 @@
   function applyBioFix(issue: BioCompatibilityIssue) {
     if (!issue.fix || isRunning) return;
     const { nodeId, paramsPatch, nodeLabel } = issue.fix;
-    graph = {
-      ...graph,
-      nodes: graph.nodes.map((n) =>
+    const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
+    const nextGraph: WorkflowGraph = {
+      ...prevSnapshot,
+      nodes: prevSnapshot.nodes.map((n) =>
         n.id === nodeId
           ? {
               ...n,
@@ -1062,7 +1271,9 @@
           : n,
       ),
     };
-    invalidateNodes(getDownstreamNodeIds(graph, [nodeId]));
+    graph = nextGraph;
+    scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
+    invalidateNodes(getDownstreamNodeIds(nextGraph, [nodeId]));
     runError = null;
   }
 
@@ -1086,8 +1297,18 @@
     pendingRun = null;
   }
 
+  function handleCancelRun() {
+    if (scheduler.cancelActiveRun('Run cancelled from UI')) {
+      showToastMessage('Cancelling active run…', 2400);
+    }
+  }
+
   async function runWorkflow(bypassCache = false, upToNodeId?: string, confirmed = false) {
     if (isRunning) return;
+    if (hasAnyInvalidNumericInput()) {
+      runError = 'Fix invalid numeric parameter(s) before running.';
+      return;
+    }
     moreMenuOpen = false;
     const plainGraph = $state.snapshot(graph) as WorkflowGraph;
     const targetGraph = upToNodeId ? extractSubgraphUpTo(plainGraph, upToNodeId) : plainGraph;
@@ -1103,9 +1324,10 @@
         return;
       }
     }
-    isRunning = true;
+    localRunning = true;
     runTargetIds = targetGraph.nodes.map((n) => n.id);
     runError = null;
+    clearPendingProgress();
     if (!upToNodeId) {
       totalElapsedMs = null;
       nodeStates = {};
@@ -1118,17 +1340,29 @@
 
     try {
       const res = await scheduler.run(targetGraph, handleProgress, {
+        source: 'canvas',
         bypassCache,
         onNodeOutput: (nodeId, outs) => {
           outputsByNode = { ...outputsByNode, [nodeId]: outs };
         },
       });
-      outputsByNode = { ...outputsByNode, ...res.outputsByNode };
+      flushPendingProgress();
+      let needsOutputMerge = false;
+      for (const [nid, outs] of Object.entries(res.outputsByNode)) {
+        if (outputsByNode[nid] !== outs) {
+          needsOutputMerge = true;
+          break;
+        }
+      }
+      if (needsOutputMerge) {
+        outputsByNode = { ...outputsByNode, ...res.outputsByNode };
+      }
       for (const n of targetGraph.nodes) {
         if (n.adapterId === 'pdb-input' || n.adapterId === 'sequence-input') {
           const sig = computeInputPreviewSig(n);
           if (sig && res.outputsByNode[n.id]) {
             previewedInputSigs.set(n.id, sig);
+            failedInputSigs.delete(n.id);
           }
         }
       }
@@ -1185,24 +1419,34 @@
       }
       rightPanelTab = 'peek';
 
-      await refreshCacheStats();
+      void refreshCacheStats();
     } catch (err) {
-      runError = err instanceof Error ? err.message : String(err);
+      flushPendingProgress();
+      if (err instanceof RunCancellationError) {
+        if (Object.keys(err.outputsByNode).length > 0) {
+          outputsByNode = { ...outputsByNode, ...err.outputsByNode };
+        }
+        runError = null;
+        showToastMessage('Run cancelled — completed steps preserved.', 3200);
+      } else {
+        runError = err instanceof Error ? err.message : String(err);
+      }
     } finally {
-      isRunning = false;
+      flushPendingProgress();
+      localRunning = false;
       runTargetIds = [];
       activeGpuWorker = scheduler.getActiveGpuAdapter();
     }
   }
 
   async function freeVram() {
-    if (isRunning) return;
+    if (isRunning || activeRunState.leaseHeld) return;
     await scheduler.releaseActiveGpu();
     activeGpuWorker = null;
   }
 
   async function handleClearCache() {
-    if (isRunning) return;
+    if (isRunning || activeRunState.leaseHeld) return;
     await scheduler.releaseActiveGpu();
     scheduler.clearMemo();
     clearRcsbCache();
@@ -1255,10 +1499,12 @@
     showSeqParentBackbone = false;
     rightPanelTab = 'params';
     if (opts?.clearOutputs !== false) {
+      clearPendingProgress();
       nodeStates = {};
       outputsByNode = {};
       previewedInputSigs.clear();
       inFlightInputSigs.clear();
+      failedInputSigs.clear();
       runError = null;
       totalElapsedMs = null;
       selectedRowIdx = 0;
@@ -1275,7 +1521,7 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${graph.id}.denovo.json`;
+    a.download = `${graph.id.replace(/[/:\\*?<>|]+/g, '_')}.denovo.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
@@ -1301,11 +1547,12 @@
   }
 
   function downloadText(text: string, filename: string) {
+    const safeName = filename.replace(/[/:\\*?<>|]+/g, '_');
     const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = filename;
+    a.download = safeName;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
@@ -1319,10 +1566,9 @@
   }
 
   function isConditionedGenerator(n: { adapterId: string; params: Record<string, unknown> }): boolean {
-    if (n.adapterId === 'rfd4-conditioner') return true;
     if (n.adapterId === 'rfd4-proteina') {
       const m = String(n.params?.mode ?? 'unconditional');
-      return m === 'binder' || m === 'motif' || m === 'conditioned';
+      return m === 'binder' || m === 'motif';
     }
     if (n.adapterId === 'genie3') {
       const tm = String(n.params?.taskMode ?? 'unconditional');
@@ -1365,9 +1611,7 @@
 
       if (molPickMode === 'hotspots' || molPickMode === 'motif') {
         const isCondOrGen = (n: WorkflowGraph['nodes'][number]) =>
-          n.adapterId === 'rfd4-proteina' ||
-          n.adapterId === 'genie3' ||
-          n.adapterId === 'rfd4-conditioner';
+          n.adapterId === 'rfd4-proteina' || n.adapterId === 'genie3';
         const candidates = graph.nodes.filter(isCondOrGen);
         const conditionedOnly = candidates.filter(isConditionedGenerator);
         const target =
@@ -1388,7 +1632,7 @@
         };
       }
 
-      // Auto mode: ONLY edit the selected block (if MPNN or already-conditioned generator/conditioner),
+      // Auto mode: ONLY edit the selected block (if MPNN or already-conditioned generator),
       // OR a single unambiguous conditioned generator when viewing an input structure.
       // Never silently flip an unconditional generator to binder, and never mutate an unselected branch.
       if (selectedNode?.adapterId === 'web-protein-mpnn') {
@@ -1397,16 +1641,6 @@
           nodeName: labelOf(selectedNode),
           fieldKey: 'fixedPositions',
           fieldLabel: 'Fix Positions',
-        };
-      }
-      if (selectedNode?.adapterId === 'rfd4-conditioner') {
-        const brush = String(selectedNode.params.paintBrush ?? 'hotspots');
-        const key = brush === 'motifSpan' ? 'motifSpan' : 'hotspots';
-        return {
-          node: selectedNode,
-          nodeName: labelOf(selectedNode),
-          fieldKey: key,
-          fieldLabel: key === 'motifSpan' ? 'Motif' : 'Hotspots',
         };
       }
       if (selectedNode?.adapterId === 'rfd4-proteina' || selectedNode?.adapterId === 'genie3') {
@@ -1428,16 +1662,6 @@
       const conditionedNodes = graph.nodes.filter(isConditionedGenerator);
       if (conditionedNodes.length === 1) {
         const target = conditionedNodes[0];
-        if (target.adapterId === 'rfd4-conditioner') {
-          const brush = String(target.params.paintBrush ?? 'hotspots');
-          const key = brush === 'motifSpan' ? 'motifSpan' : 'hotspots';
-          return {
-            node: target,
-            nodeName: labelOf(target),
-            fieldKey: key,
-            fieldLabel: key === 'motifSpan' ? 'Motif' : 'Hotspots',
-          };
-        }
         const m = String(
           target.adapterId === 'genie3'
             ? (target.params.taskMode ?? 'unconditional')
@@ -1503,9 +1727,7 @@
         ...target.node.params,
         [target.fieldKey]: updated,
       };
-      if (target.node.adapterId === 'rfd4-conditioner') {
-        nextParams.taskPreset = 'custom';
-      } else if (target.node.adapterId === 'genie3') {
+      if (target.node.adapterId === 'genie3') {
         if (target.switchMode) nextParams.taskMode = target.switchMode;
         nextParams.userEditedTask = true;
       } else if (target.node.adapterId === 'rfd4-proteina') {
@@ -1526,12 +1748,7 @@
   // Preset & pick-target helpers
   let activePreset = $derived(WORKFLOW_PRESETS.find((p) => p.id === selectedPresetId) ?? null);
   let hasConditionerNode = $derived(
-    graph.nodes.some(
-      (n) =>
-        n.adapterId === 'rfd4-conditioner' ||
-        n.adapterId === 'rfd4-proteina' ||
-        n.adapterId === 'genie3',
-    ),
+    graph.nodes.some((n) => n.adapterId === 'rfd4-proteina' || n.adapterId === 'genie3'),
   );
   let hasMpnnNode = $derived(graph.nodes.some((n) => n.adapterId === 'web-protein-mpnn'));
 
@@ -1569,6 +1786,19 @@
     selectedNode ? findContextStructure(graph, selectedNode.id, outputsByNode) : null,
   );
 
+  // Directly wired upstream template StructureArtifact for live motif/hotspot source-residue resolution
+  let selectedUpstreamStructure = $derived.by((): StructureArtifact | null => {
+    if (!selectedNode) return null;
+    const edge = graph.edges.find(
+      (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
+    );
+    if (edge) {
+      const art = outputsByNode[edge.fromNode]?.[edge.fromPort];
+      if (art?.kind === 'StructureArtifact') return art;
+    }
+    return contextStructure;
+  });
+
   // Typed views of the currently peeked modality
   let peekMetrics = $derived<DesignabilityMetrics | null>(
     activeArtifact?.kind === 'DesignabilityMetrics' ? activeArtifact : null,
@@ -1578,9 +1808,6 @@
   );
   let peekStructure = $derived<StructureArtifact | null>(
     activeArtifact?.kind === 'StructureArtifact' ? activeArtifact : null,
-  );
-  let peekCondition = $derived<ConditionSpecArtifact | null>(
-    activeArtifact?.kind === 'ConditionSpec' ? activeArtifact : null,
   );
   let peekSequences = $derived<SequenceSet | null>(
     activeArtifact?.kind === 'SequenceSet' ? activeArtifact : null,
@@ -1603,8 +1830,6 @@
     return null;
   });
 
-  let metricsArtifact = $derived<DesignabilityMetrics | null>(latestScorerHit?.metrics ?? null);
-
   let activeRow = $derived<DesignabilityRow | null>(
     peekMetrics?.rows[selectedRowIdx] ?? peekMetrics?.best ?? null,
   );
@@ -1618,7 +1843,6 @@
   let viewerDesignedPdb = $derived.by((): string | null => {
     if (peekMetrics) return activeRow?.designedPdb ?? contextStructure?.cifText ?? contextStructure?.pdbText ?? null;
     if (peekStructure) return peekStructure.cifText ?? peekStructure.pdbText;
-    if (peekCondition) return peekCondition.inputCif ?? contextStructure?.cifText ?? contextStructure?.pdbText ?? null;
     if (peekSequences) {
       // Clear 3D viewport when peeking a sequence-only wire/port unless user explicitly
       // previews the parent backbone (keeps Parameters-tab 3D residue picking intact).
@@ -1637,7 +1861,7 @@
 
   let viewerStructureMeta = $derived<StructureArtifact | null>(
     peekStructure ??
-      (peekMetrics || peekCondition || (peekSequences && (!isPeekingSequenceSlot || showSeqParentBackbone))
+      (peekMetrics || (peekSequences && (!isPeekingSequenceSlot || showSeqParentBackbone))
         ? contextStructure
         : null),
   );
@@ -1657,10 +1881,19 @@
       ? `${activePeekSlot.direction === 'in' ? 'IN' : 'OUT'} · ${activePeekSlot.portName}`
       : '';
     if (peekMetrics && activeRow) {
-      return `${selectedNode?.label ?? 'Scorer'} · ${activeRow.sequenceId} · scRMSD ${activeRow.scRmsd.toFixed(2)} Å · pLDDT ${activeRow.meanPlddt.toFixed(1)}`;
+      const rmsdTxt = Number.isFinite(activeRow.scRmsd) ? `${activeRow.scRmsd.toFixed(2)} Å` : '—';
+      const plddtTxt =
+        activeRow.confidenceAvailable !== false && Number.isFinite(activeRow.meanPlddt)
+          ? activeRow.meanPlddt.toFixed(1)
+          : 'N/A';
+      return `${selectedNode?.label ?? 'Scorer'} · ${activeRow.sequenceId} · scRMSD ${rmsdTxt} · pLDDT ${plddtTxt}`;
     }
     if (peekFoldSet && activeFold) {
-      return `${dirTag} · ${activeFold.sequenceId} · pLDDT ${activeFold.meanPlddt.toFixed(1)}`;
+      const plddtTxt =
+        activeFold.confidenceAvailable !== false && Number.isFinite(activeFold.meanPlddt)
+          ? activeFold.meanPlddt.toFixed(1)
+          : 'N/A';
+      return `${dirTag} · ${activeFold.sequenceId} · pLDDT ${plddtTxt}`;
     }
     if (peekStructure) {
       const fromTag = activePeekSlot?.peerNodeLabel ? ` ← ${activePeekSlot.peerNodeLabel}` : '';
@@ -1673,11 +1906,6 @@
       if (contextStructure) {
         return `Parent backbone (${contextStructure.label}) · peeking ${dirTag}`;
       }
-    }
-    if (peekCondition) {
-      return viewerDesignedPdb
-        ? `${dirTag} template · ${peekCondition.label}`
-        : `${dirTag} · ${peekCondition.label}`;
     }
     return selectedNode
       ? `${selectedNode.label ?? selectedNode.adapterId} · denovo.run viewport`
@@ -1708,6 +1936,62 @@
   );
   let scRmsdThreshold = $derived(Number(activeScorerNode?.params.scRmsdThreshold ?? 2.0));
   let plddtThreshold = $derived(Number(activeScorerNode?.params.plddtThreshold ?? 70));
+  let ipaeThreshold = $derived(Number(activeScorerNode?.params.ipaeThreshold ?? 10.0));
+  let motifRmsdThreshold = $derived(Number(activeScorerNode?.params.motifRmsdThreshold ?? 1.0));
+
+  let thresholdsByNodeId = $derived.by(
+    (): Record<string, { scRmsd: number; plddt: number; ipae: number; motifRmsd: number }> => {
+      const map: Record<string, { scRmsd: number; plddt: number; ipae: number; motifRmsd: number }> = {};
+      for (const n of graph.nodes) {
+        if (n.adapterId === 'designability-scorer') {
+          map[n.id] = {
+            scRmsd: Number(n.params.scRmsdThreshold ?? 2.0),
+            plddt: Number(n.params.plddtThreshold ?? 70),
+            ipae: Number(n.params.ipaeThreshold ?? 10.0),
+            motifRmsd: Number(n.params.motifRmsdThreshold ?? 1.0),
+          };
+        }
+      }
+      return map;
+    },
+  );
+
+  // Per-branch lineage & collection metadata for ComparePeekPanel
+  let compareBranchMetaByNodeId = $derived.by((): Record<string, CompareBranchMeta> => {
+    if (!isCompareMode) return {};
+    const map: Record<string, CompareBranchMeta> = {};
+    for (const id of selectedNodeIds) {
+      const outs = outputsByNode[id];
+      if (!outs) continue;
+      const values = Object.values(outs);
+      const metrics = values.find((a): a is DesignabilityMetrics => a.kind === 'DesignabilityMetrics');
+      if (metrics) {
+        map[id] = {
+          referenceRelation: metrics.referenceRelation,
+          referenceLabel: metrics.referenceLabel,
+          lineageWarning: metrics.lineageWarning,
+          lineageMismatch: metrics.lineageMismatch,
+          collectionKind: metrics.collectionKind,
+        };
+        continue;
+      }
+      const folds = values.find((a): a is FoldedStructure => a.kind === 'FoldedStructure');
+      if (folds) {
+        map[id] = {
+          representativeSelection: folds.representativeSelection,
+          collectionKind: folds.collectionKind,
+        };
+        continue;
+      }
+      const struct = values.find((a): a is StructureArtifact => a.kind === 'StructureArtifact');
+      if (struct) {
+        map[id] = {
+          representativeSelection: struct.representativeSelection,
+        };
+      }
+    }
+    return map;
+  });
 
   // Multi-select 3D comparison derived state
   let compareColors = $derived.by((): Record<string, { badge: string; css: string }> => {
@@ -1728,6 +2012,8 @@
       alignKabsch: compareAlignKabsch,
       branchCandidateIdx,
       hiddenModelIds: new Set(hiddenCompareModelIds),
+      pairingMode: comparePairingMode,
+      selectedCandidateKey: compareSelectedCandidateKey,
     });
   });
 
@@ -1825,7 +2111,12 @@
         aria-expanded={sysMenuOpen}
         onclick={() => {
           moreMenuOpen = false;
-          sysMenuOpen = !sysMenuOpen;
+          const nextOpen = !sysMenuOpen;
+          if (nextOpen && sysWrapEl) {
+            const rect = sysWrapEl.getBoundingClientRect();
+            sysPopAlignLeft = rect.right < 276;
+          }
+          sysMenuOpen = nextOpen;
         }}
         title="WebGPU status, VRAM & weight cache"
       >
@@ -1834,7 +2125,12 @@
       </button>
 
       {#if sysMenuOpen}
-        <div class="hdr-popover sys-pop" role="dialog" aria-label="System & WebGPU status">
+        <div
+          class="hdr-popover sys-pop"
+          class:align-left={sysPopAlignLeft}
+          role="dialog"
+          aria-label="System & WebGPU status"
+        >
           <div class="pop-row">
             <span class="pop-k">WebGPU</span>
             <span class="pop-v" class:ok-t={webgpuSupported} class:bad-t={webgpuSupported === false}>
@@ -1853,7 +2149,7 @@
               <button
                 type="button"
                 class="pop-action"
-                disabled={isRunning}
+                disabled={isRunning || activeRunState.leaseHeld}
                 onclick={freeVram}
               >
                 Free VRAM ({activeGpuWorkerLabel})
@@ -1865,7 +2161,7 @@
             <button
               type="button"
               class="pop-action danger"
-              disabled={isRunning}
+              disabled={isRunning || activeRunState.leaseHeld}
               onclick={handleClearCache}
               title="Clear cached model weights from browser storage"
             >
@@ -1973,7 +2269,7 @@
             type="button"
             class="menu-item"
             role="menuitem"
-            disabled={isRunning || validationErrors.length > 0}
+            disabled={isRunning || validationErrors.length > 0 || hasInvalidNumeric}
             onclick={() => runWorkflow(true)}
           >
             <span>Re-run Fresh</span>
@@ -1982,15 +2278,29 @@
       {/if}
     </div>
 
+    <!-- Cancel CTA while any canvas or API run is active -->
+    {#if isRunning}
+      <button
+        type="button"
+        class="btn-cancel"
+        onclick={handleCancelRun}
+        title="Cancel active run and preserve completed steps"
+      >
+        ■ Cancel
+      </button>
+    {/if}
+
     <!-- Primary Run CTA -->
     <button
       type="button"
       class="btn-primary"
       class:is-running={isRunning}
       data-tour="run-btn"
-      disabled={isRunning || validationErrors.length > 0}
+      disabled={isRunning || validationErrors.length > 0 || hasInvalidNumeric}
       onclick={() => runWorkflow(false)}
-      title="Run workflow (R or ⌘↵ / Ctrl+Enter)"
+      title={hasInvalidNumeric
+        ? 'Fix invalid numeric parameter(s) before running'
+        : 'Run workflow (R or ⌘↵ / Ctrl+Enter)'}
     >
       {#if isRunning}
         <span class="run-pulse"></span>
@@ -2270,7 +2580,7 @@
             {showRefold}
             {showTrajectory}
             {illustrative}
-            spin={viewerSpin}
+            spin={viewerSpin && !isRunning}
             expanded={expandedPane === 'viewer'}
             {theme}
             height={expandedPane === 'viewer' ? '100%' : splitMode === 'horizontal' ? 350 : 460}
@@ -2363,6 +2673,7 @@
                 disabled={isRunning}
                 nodeOutput={outputsByNode[selectedNode.id]}
                 nodeState={nodeStates[selectedNode.id]}
+                upstreamStructure={selectedUpstreamStructure}
                 hasStructureInput={graph.edges.some(
                   (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
                 )}
@@ -2386,12 +2697,23 @@
               comparison={comparisonState}
               {scRmsdThreshold}
               {plddtThreshold}
+              {ipaeThreshold}
+              {motifRmsdThreshold}
+              {thresholdsByNodeId}
+              branchMetaByNodeId={compareBranchMetaByNodeId}
               {isRunning}
               onSelectBranchCandidate={(nodeId, idx) => {
                 branchCandidateIdx = { ...branchCandidateIdx, [nodeId]: idx };
               }}
+              onChangePairingMode={(mode) => {
+                comparePairingMode = mode;
+              }}
+              onSelectCandidateKey={(key) => {
+                compareSelectedCandidateKey = key;
+              }}
               onFocusSingle={(nodeId) => handleSelectNode(nodeId)}
               onRunUpToNode={(id) => runWorkflow(false, id)}
+              onDownloadText={downloadText}
               onExitCompare={() => setSingleSelection(selectedNodeId)}
             />
           {:else}
@@ -2405,6 +2727,8 @@
               {selectedFoldIdx}
               {scRmsdThreshold}
               {plddtThreshold}
+              {ipaeThreshold}
+              {motifRmsdThreshold}
               {isRunning}
               hasScorerResult={Boolean(latestScorerHit && latestScorerHit.nodeId !== selectedNode?.id)}
               onSelectSlot={handleSelectPeekSlot}
@@ -2471,12 +2795,14 @@
     gap: 10px;
     flex-wrap: wrap;
     min-width: 0;
+    max-width: 100%;
   }
   .hdr-right {
     display: flex;
     align-items: center;
     gap: 7px;
     flex-wrap: wrap;
+    max-width: 100%;
   }
   .brand-logo {
     margin: 0;
@@ -2497,6 +2823,7 @@
     border: 1px solid var(--border-strong);
     border-radius: 6px;
     overflow: hidden;
+    min-width: 0;
     max-width: 100%;
   }
   .example-picker:hover:not(.disabled),
@@ -2517,6 +2844,7 @@
     border-right: 1px solid var(--border);
     padding: 6px 9px;
     white-space: nowrap;
+    flex-shrink: 0;
     user-select: none;
   }
   .preset-select {
@@ -2527,7 +2855,12 @@
     padding: 5px 10px;
     font-size: 12px;
     font-family: inherit;
-    max-width: 340px;
+    min-width: 0;
+    flex: 1;
+    width: 100%;
+    max-width: min(340px, 100%);
+    overflow: hidden;
+    text-overflow: ellipsis;
     cursor: pointer;
   }
   .preset-select:disabled {
@@ -2604,18 +2937,52 @@
     top: calc(100% + 6px);
     right: 0;
     z-index: 60;
+    max-width: calc(100vw - 24px);
     background: var(--bg-surface);
     border: 1px solid var(--border-strong);
     border-radius: 8px;
     box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35), var(--node-shadow);
   }
   .sys-pop {
-    width: 260px;
+    width: min(260px, calc(100vw - 24px));
     padding: 10px 12px;
     display: flex;
     flex-direction: column;
     gap: 8px;
     font-size: 11.5px;
+  }
+  .sys-pop.align-left {
+    left: 0;
+    right: auto;
+  }
+  @media (max-width: 900px) {
+    .sys-pop {
+      left: 0;
+      right: auto;
+      width: min(260px, calc(100vw - 24px));
+    }
+  }
+  @media (max-width: 640px) {
+    .hdr-left {
+      width: 100%;
+    }
+    .example-picker {
+      display: flex;
+      flex: 1 1 100%;
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .example-lbl {
+      padding: 6px 7px;
+      font-size: 9.5px;
+    }
+    .preset-select {
+      min-width: 0;
+      flex: 1;
+      width: 100%;
+      max-width: 100%;
+    }
   }
   .pop-row {
     display: flex;
@@ -2710,6 +3077,24 @@
     margin: 3px 4px;
   }
 
+  .btn-cancel {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--err-bg);
+    color: var(--err-strong);
+    border: 1px solid var(--err-border);
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn-cancel:hover {
+    background: var(--err-strong);
+    color: #fff;
+  }
   .btn-primary {
     display: inline-flex;
     align-items: center;
@@ -2984,6 +3369,7 @@
     inset: 0;
     z-index: 155;
     background: rgba(10, 14, 24, 0.58);
+    -webkit-backdrop-filter: blur(4px);
     backdrop-filter: blur(4px);
   }
   .viewer-col.is-expanded,

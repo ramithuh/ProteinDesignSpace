@@ -1,16 +1,43 @@
 <script lang="ts">
   import PaePlot from '$lib/viewer/PaePlot.svelte';
-  import type { ComparisonState } from '$lib/engine/compare';
+  import {
+    exportJoinedCollectionCsv,
+    type ComparisonPairingMode,
+    type ComparisonState,
+  } from '$lib/engine/compare';
+  import type {
+    CollectionKind,
+    ReferenceRelation,
+    RepresentativeSelection,
+  } from '$lib/engine/types';
+
+  export interface CompareBranchMeta {
+    referenceRelation?: ReferenceRelation;
+    referenceLabel?: string;
+    lineageWarning?: string;
+    lineageMismatch?: boolean;
+    representativeSelection?: RepresentativeSelection;
+    collectionKind?: CollectionKind;
+  }
 
   interface Props {
     comparison: ComparisonState;
     scRmsdThreshold?: number;
     plddtThreshold?: number;
-    thresholdsByNodeId?: Record<string, { scRmsd: number; plddt: number }>;
+    ipaeThreshold?: number;
+    motifRmsdThreshold?: number;
+    thresholdsByNodeId?: Record<
+      string,
+      { scRmsd: number; plddt: number; ipae?: number; motifRmsd?: number }
+    >;
+    branchMetaByNodeId?: Record<string, CompareBranchMeta>;
     isRunning?: boolean;
     onSelectBranchCandidate: (nodeId: string, idx: number) => void;
+    onChangePairingMode?: (mode: ComparisonPairingMode) => void;
+    onSelectCandidateKey?: (key: string) => void;
     onFocusSingle: (nodeId: string) => void;
     onRunUpToNode?: (nodeId: string) => void;
+    onDownloadText?: (text: string, filename: string) => void;
     onExitCompare: () => void;
   }
 
@@ -18,15 +45,30 @@
     comparison,
     scRmsdThreshold = 2.0,
     plddtThreshold = 70,
+    ipaeThreshold = 10.0,
+    motifRmsdThreshold = 1.0,
     thresholdsByNodeId = undefined,
+    branchMetaByNodeId = undefined,
     isRunning = false,
     onSelectBranchCandidate,
+    onChangePairingMode = undefined,
+    onSelectCandidateKey = undefined,
     onFocusSingle,
     onRunUpToNode = undefined,
+    onDownloadText = undefined,
     onExitCompare,
   }: Props = $props();
 
   let branches = $derived(comparison.branches);
+
+  function isFiniteNum(v: unknown): v is number {
+    return typeof v === 'number' && Number.isFinite(v);
+  }
+
+  function fmtNum(v: number | null | undefined, digits: number, suffix = ''): string {
+    if (!isFiniteNum(v)) return '—';
+    return `${v.toFixed(digits)}${suffix}`;
+  }
 
   function branchScRmsdThreshold(nodeId: string): number {
     return thresholdsByNodeId?.[nodeId]?.scRmsd ?? scRmsdThreshold;
@@ -36,67 +78,128 @@
     return thresholdsByNodeId?.[nodeId]?.plddt ?? plddtThreshold;
   }
 
-  // Best-value highlights per metric row
+  function branchIpaeThreshold(nodeId: string): number {
+    return thresholdsByNodeId?.[nodeId]?.ipae ?? ipaeThreshold;
+  }
+
+  function branchMotifRmsdThreshold(nodeId: string): number {
+    return thresholdsByNodeId?.[nodeId]?.motifRmsd ?? motifRmsdThreshold;
+  }
+
+  function formatCollectionKind(kind?: CollectionKind): string | null {
+    if (kind === 'independent-candidates') return 'Candidates';
+    if (kind === 'multi-sample') return 'Multi-sample';
+    if (kind === 'ordered-frames') return 'Ordered frames';
+    return null;
+  }
+
+  function formatRefBadge(meta?: CompareBranchMeta): { text: string; tone: 'ok' | 'info' | 'warn' | 'err' } | null {
+    if (!meta) return null;
+    if (meta.referenceRelation === 'self-consistency') return { text: 'Self-consistency', tone: 'ok' };
+    if (meta.referenceRelation === 'external-mapped') return { text: 'External ref (mapped)', tone: 'info' };
+    if (meta.referenceRelation === 'external-unlinked') return { text: 'External ref', tone: 'warn' };
+    if (meta.referenceRelation === 'external-mismatch' || meta.lineageMismatch) {
+      return { text: 'External ref · Mismatch', tone: 'err' };
+    }
+    return null;
+  }
+
+  function handleExportJoinedCsv() {
+    if (!onDownloadText || comparison.pairedCandidates.length === 0) return;
+    const completeRowCount = comparison.pairedCandidates.filter(
+      (r) => r.missingBranchIds.length === 0,
+    ).length;
+    const csv = exportJoinedCollectionCsv({
+      keys: comparison.candidateKeys,
+      branchIds: branches.map((b) => b.nodeId),
+      rows: comparison.pairedCandidates,
+      completeRowCount,
+      partialRowCount: comparison.pairedCandidates.length - completeRowCount,
+    });
+    onDownloadText(csv, 'denovo_compare_joined.csv');
+  }
+
+  // Best-value highlights per metric row (strictly finite-guarded to avoid NaN/Infinity)
   let bestRmsd = $derived.by((): number | null => {
-    const vals = branches.map((b) => b.scRmsd).filter((v): v is number => v !== null);
+    const vals = branches.map((b) => b.scRmsd).filter(isFiniteNum);
     return vals.length >= 2 ? Math.min(...vals) : null;
   });
   let bestTm = $derived.by((): number | null => {
-    const vals = branches.map((b) => b.scTm).filter((v): v is number => v !== null);
+    const vals = branches.map((b) => b.scTm).filter(isFiniteNum);
     return vals.length >= 2 ? Math.max(...vals) : null;
   });
   let bestPlddt = $derived.by((): number | null => {
-    const vals = branches.map((b) => b.meanPlddt).filter((v): v is number => v !== null);
+    const vals = branches
+      .filter((b) => b.confidenceAvailable !== false)
+      .map((b) => b.meanPlddt)
+      .filter(isFiniteNum);
     return vals.length >= 2 ? Math.max(...vals) : null;
   });
   let bestPtm = $derived.by((): number | null => {
-    const vals = branches.map((b) => b.ptm).filter((v): v is number => v !== null);
+    const vals = branches.map((b) => b.ptm).filter(isFiniteNum);
     return vals.length >= 2 ? Math.max(...vals) : null;
   });
   let bestIptm = $derived.by((): number | null => {
-    const vals = branches.map((b) => b.iptm).filter((v): v is number => v !== null);
+    const vals = branches.map((b) => b.iptm).filter(isFiniteNum);
     return vals.length >= 2 ? Math.max(...vals) : null;
   });
   let bestIpae = $derived.by((): number | null => {
-    const vals = branches.map((b) => b.ipae).filter((v): v is number => v !== null);
+    const vals = branches.map((b) => b.ipae).filter(isFiniteNum);
     return vals.length >= 2 ? Math.min(...vals) : null;
   });
   let bestBinderScRmsd = $derived.by((): number | null => {
-    const vals = branches.map((b) => b.binderScRmsd).filter((v): v is number => v !== null);
+    const vals = branches.map((b) => b.binderScRmsd).filter(isFiniteNum);
     return vals.length >= 2 ? Math.min(...vals) : null;
   });
   let bestTargetAlignedBinderRmsd = $derived.by((): number | null => {
-    const vals = branches
-      .map((b) => b.targetAlignedBinderRmsd)
-      .filter((v): v is number => v !== null);
+    const vals = branches.map((b) => b.targetAlignedBinderRmsd).filter(isFiniteNum);
     return vals.length >= 2 ? Math.min(...vals) : null;
   });
   let bestBinderPlddt = $derived.by((): number | null => {
-    const vals = branches.map((b) => b.binderPlddt).filter((v): v is number => v !== null);
+    const vals = branches.map((b) => b.binderPlddt).filter(isFiniteNum);
     return vals.length >= 2 ? Math.max(...vals) : null;
   });
   let bestRefoldMotifRmsd = $derived.by((): number | null => {
-    const vals = branches.map((b) => b.refoldMotifRmsd).filter((v): v is number => v !== null);
+    const vals = branches.map((b) => b.refoldMotifRmsd).filter(isFiniteNum);
     return vals.length >= 2 ? Math.min(...vals) : null;
   });
   let bestGenMotifRmsd = $derived.by((): number | null => {
-    const vals = branches.map((b) => b.genMotifRmsd).filter((v): v is number => v !== null);
+    const vals = branches.map((b) => b.genMotifRmsd).filter(isFiniteNum);
     return vals.length >= 2 ? Math.min(...vals) : null;
   });
 
-  let hasAnyRmsd = $derived(branches.some((b) => b.scRmsd !== null));
-  let hasAnyPlddt = $derived(branches.some((b) => b.meanPlddt !== null));
-  let hasAnyPtm = $derived(branches.some((b) => b.ptm !== null));
-  let hasAnyIptm = $derived(branches.some((b) => b.iptm !== null));
-  let hasAnyIpae = $derived(branches.some((b) => b.ipae !== null));
-  let hasAnyBinderScRmsd = $derived(branches.some((b) => b.binderScRmsd !== null));
-  let hasAnyTargetAlignedBinderRmsd = $derived(
-    branches.some((b) => b.targetAlignedBinderRmsd !== null),
+  let hasAnyRmsd = $derived(branches.some((b) => isFiniteNum(b.scRmsd)));
+  let hasAnyPlddt = $derived(
+    branches.some((b) => isFiniteNum(b.meanPlddt) || b.confidenceAvailable === false),
   );
-  let hasAnyBinderPlddt = $derived(branches.some((b) => b.binderPlddt !== null));
-  let hasAnyRefoldMotifRmsd = $derived(branches.some((b) => b.refoldMotifRmsd !== null));
-  let hasAnyGenMotifRmsd = $derived(branches.some((b) => b.genMotifRmsd !== null));
-  let hasAnyTime = $derived(branches.some((b) => b.foldElapsedMs !== null));
+  let hasAnyPtm = $derived(branches.some((b) => isFiniteNum(b.ptm)));
+  let hasAnyIptm = $derived(branches.some((b) => isFiniteNum(b.iptm)));
+  let hasAnyIpae = $derived(branches.some((b) => isFiniteNum(b.ipae)));
+  let hasAnyBinderScRmsd = $derived(branches.some((b) => isFiniteNum(b.binderScRmsd)));
+  let hasAnyTargetAlignedBinderRmsd = $derived(
+    branches.some((b) => isFiniteNum(b.targetAlignedBinderRmsd)),
+  );
+  let hasAnyBinderPlddt = $derived(branches.some((b) => isFiniteNum(b.binderPlddt)));
+  let hasAnyRefoldMotifRmsd = $derived(branches.some((b) => isFiniteNum(b.refoldMotifRmsd)));
+  let hasAnyGenMotifRmsd = $derived(branches.some((b) => isFiniteNum(b.genMotifRmsd)));
+  let hasAnyTime = $derived(branches.some((b) => isFiniteNum(b.foldElapsedMs)));
+  let hasAnyRefMeta = $derived(
+    branches.some((b) => Boolean(formatRefBadge(branchMetaByNodeId?.[b.nodeId]))),
+  );
+  let hasAnyCollectionMeta = $derived(
+    branches.some((b) => {
+      const meta = branchMetaByNodeId?.[b.nodeId];
+      return Boolean(meta?.representativeSelection || b.collectionKind || meta?.collectionKind);
+    }),
+  );
+  let lineageWarnings = $derived(
+    branches
+      .map((b) => {
+        const w = branchMetaByNodeId?.[b.nodeId]?.lineageWarning;
+        return w ? { badge: b.badge, label: b.label, warning: w } : null;
+      })
+      .filter((x): x is { badge: string; label: string; warning: string } => x !== null),
+  );
   let paeBranches = $derived(branches.filter((b) => b.pae !== null));
 </script>
 
@@ -112,28 +215,98 @@
         </span>
       {/if}
     </div>
-    <button type="button" class="exit-btn" onclick={onExitCompare} title="Return to single-block view (Esc)">
-      × Exit Compare
-    </button>
+    <div class="cmp-head-actions">
+      {#if comparison.pairedCandidates.length > 0 && onDownloadText}
+        <button
+          type="button"
+          class="csv-btn"
+          onclick={handleExportJoinedCsv}
+          title="Export keyed multi-branch candidate comparison table as CSV (with explicit MISSING & N/A markers)"
+        >
+          ↓ Export Joined CSV
+        </button>
+      {/if}
+      <button type="button" class="exit-btn" onclick={onExitCompare} title="Return to single-block view (Esc)">
+        × Exit Compare
+      </button>
+    </div>
   </div>
 
-  {#if comparison.pairwise}
+  {#if onChangePairingMode || comparison.candidateKeys.length > 0}
+    <div class="pairing-bar">
+      {#if onChangePairingMode}
+        <div class="pair-seg" role="group" aria-label="Candidate pairing mode" title={comparison.pairingLabel}>
+          <button
+            type="button"
+            class="pair-seg-btn"
+            class:active={comparison.pairingMode === 'by-candidate'}
+            onclick={() => onChangePairingMode('by-candidate')}
+          >
+            By candidate
+          </button>
+          <button
+            type="button"
+            class="pair-seg-btn"
+            class:active={comparison.pairingMode === 'branch-best'}
+            onclick={() => onChangePairingMode('branch-best')}
+          >
+            Branch best
+          </button>
+        </div>
+      {:else}
+        <span class="cmp-note-info">{comparison.pairingLabel}</span>
+      {/if}
+
+      {#if comparison.pairingMode === 'by-candidate' && comparison.candidateKeys.length > 0 && onSelectCandidateKey}
+        <label class="cand-key-pick">
+          <span>Candidate:</span>
+          <select
+            class="cand-sel"
+            value={comparison.selectedCandidateKey ?? ''}
+            onchange={(e) => onSelectCandidateKey(e.currentTarget.value)}
+          >
+            {#each comparison.pairedCandidates as row (row.key)}
+              <option value={row.key}>
+                {row.key} ({row.presentCount}/{branches.length}{row.missingBranchIds.length > 0 ? ' · partial' : ''})
+              </option>
+            {/each}
+          </select>
+        </label>
+      {:else if comparison.pairingMode === 'branch-best'}
+        <span class="pairing-hint">Each branch shows its own top-ranked candidate independently.</span>
+      {/if}
+    </div>
+  {/if}
+
+  {#if lineageWarnings.length > 0}
+    <div class="lineage-warn-list" role="status">
+      {#each lineageWarnings as lw (lw.badge)}
+        <div class="lineage-warn-item">
+          <b>{lw.badge} ({lw.label}):</b> {lw.warning}
+        </div>
+      {/each}
+    </div>
+  {/if}
+
+  {#if comparison.pairwise && isFiniteNum(comparison.pairwise.rmsd)}
     <div class="agreement-banner">
       <span>
         {#if comparison.pairwise.isSubstructure}
           {comparison.pairwise.alignmentLabel ?? (comparison.pairwise.hasSharedTemplate ? 'Motif Kabsch' : 'Substructure Kabsch')} Cα RMSD (<b>{comparison.pairwise.badgeA} ↔ {comparison.pairwise.badgeB}</b> · {comparison.pairwise.alignedResidues} aa):
-          <b>{comparison.pairwise.rmsd.toFixed(2)} Å</b>
+          <b>{fmtNum(comparison.pairwise.rmsd, 2, ' Å')}</b>
         {:else}
           Inter-model Kabsch Cα RMSD (<b>{comparison.pairwise.badgeA} ↔ {comparison.pairwise.badgeB}</b>):
-          <b>{comparison.pairwise.rmsd.toFixed(2)} Å</b> · TM <b>{comparison.pairwise.tmScore.toFixed(3)}</b>
+          <b>{fmtNum(comparison.pairwise.rmsd, 2, ' Å')}</b> · TM <b>{fmtNum(comparison.pairwise.tmScore, 3)}</b>
         {/if}
       </span>
       {#if comparison.allPairwise && comparison.allPairwise.length > 1}
         <div class="extra-pairs">
           {#each comparison.allPairwise.slice(1) as pair (`${pair.badgeA}-${pair.badgeB}`)}
-            <span class="pair-chip">
-              <b>{pair.badgeA}↔{pair.badgeB}</b>: {pair.rmsd.toFixed(2)} Å{#if !pair.isSubstructure} · TM {pair.tmScore.toFixed(2)}{/if}
-            </span>
+            {#if isFiniteNum(pair.rmsd)}
+              <span class="pair-chip">
+                <b>{pair.badgeA}↔{pair.badgeB}</b>: {fmtNum(pair.rmsd, 2, ' Å')}{#if !pair.isSubstructure && isFiniteNum(pair.tmScore)} · TM {fmtNum(pair.tmScore, 2)}{/if}
+              </span>
+            {/if}
           {/each}
         </div>
       {/if}
@@ -178,9 +351,13 @@
                 {:else}
                   <span class="dim">Not run</span>
                 {/if}
+              {:else if b.missingSelectedCandidate}
+                <span class="missing-badge" title={`Candidate ${b.candidateKey ?? ''} is not present in this branch`}>
+                  MISSING
+                </span>
               {:else if !b.has3D}
                 <span class="dim">No 3D</span>
-              {:else if b.candidateCount > 1}
+              {:else if comparison.pairingMode !== 'by-candidate' && b.candidateCount > 1}
                 <select
                   class="cand-sel"
                   value={b.selectedIndex}
@@ -191,29 +368,80 @@
                   {/each}
                 </select>
               {:else}
-                <code class="mono-sm">{b.sequenceId ?? (b.length ? `${b.length} aa` : '—')}</code>
+                <code class="mono-sm">{b.candidateKey ?? b.sequenceId ?? (b.length ? `${b.length} aa` : '—')}</code>
               {/if}
             </td>
           {/each}
         </tr>
+
+        {#if hasAnyRefMeta}
+          <tr>
+            <td class="m-k">Reference</td>
+            {#each branches as b (b.nodeId)}
+              {@const meta = branchMetaByNodeId?.[b.nodeId]}
+              {@const refBadge = formatRefBadge(meta)}
+              <td>
+                {#if refBadge}
+                  <span
+                    class="ref-badge"
+                    class:tone-ok={refBadge.tone === 'ok'}
+                    class:tone-info={refBadge.tone === 'info'}
+                    class:tone-warn={refBadge.tone === 'warn'}
+                    class:tone-err={refBadge.tone === 'err'}
+                    title={meta?.referenceLabel ?? refBadge.text}
+                  >
+                    {refBadge.text}
+                  </span>
+                {:else}
+                  <span class="dim">—</span>
+                {/if}
+              </td>
+            {/each}
+          </tr>
+        {/if}
+
+        {#if hasAnyCollectionMeta}
+          <tr>
+            <td class="m-k">Collection</td>
+            {#each branches as b (b.nodeId)}
+              {@const meta = branchMetaByNodeId?.[b.nodeId]}
+              {@const colKind = formatCollectionKind(b.collectionKind ?? meta?.collectionKind)}
+              {@const rep = meta?.representativeSelection}
+              <td>
+                {#if rep}
+                  <span
+                    class="mono-sm"
+                    title={`Representative: ${rep.selectedKey} (${rep.criterion} of ${rep.totalMembers})`}
+                  >
+                    {colKind ? `${colKind} · ` : ''}{rep.criterion}
+                  </span>
+                {:else if colKind}
+                  <span class="mono-sm">{colKind}</span>
+                {:else}
+                  <span class="dim">—</span>
+                {/if}
+              </td>
+            {/each}
+          </tr>
+        {/if}
 
         {#if hasAnyRmsd}
           <tr>
             <td class="m-k">scRMSD</td>
             {#each branches as b (b.nodeId)}
               <td
-                class:win={bestRmsd !== null && b.scRmsd === bestRmsd}
-                class:pass-val={b.scRmsd !== null && b.scRmsd < branchScRmsdThreshold(b.nodeId)}
+                class:win={bestRmsd !== null && isFiniteNum(b.scRmsd) && b.scRmsd === bestRmsd}
+                class:pass-val={isFiniteNum(b.scRmsd) && b.scRmsd < branchScRmsdThreshold(b.nodeId)}
               >
-                {b.scRmsd !== null ? `${b.scRmsd.toFixed(2)} Å` : '—'}
+                {fmtNum(b.scRmsd, 2, ' Å')}
               </td>
             {/each}
           </tr>
           <tr>
             <td class="m-k">scTM</td>
             {#each branches as b (b.nodeId)}
-              <td class:win={bestTm !== null && b.scTm === bestTm}>
-                {b.scTm !== null ? b.scTm.toFixed(3) : '—'}
+              <td class:win={bestTm !== null && isFiniteNum(b.scTm) && b.scTm === bestTm}>
+                {fmtNum(b.scTm, 3)}
               </td>
             {/each}
           </tr>
@@ -224,10 +452,10 @@
             <td class="m-k">Binder scRMSD</td>
             {#each branches as b (b.nodeId)}
               <td
-                class:win={bestBinderScRmsd !== null && b.binderScRmsd === bestBinderScRmsd}
-                class:pass-val={b.binderScRmsd !== null && b.binderScRmsd < branchScRmsdThreshold(b.nodeId)}
+                class:win={bestBinderScRmsd !== null && isFiniteNum(b.binderScRmsd) && b.binderScRmsd === bestBinderScRmsd}
+                class:pass-val={isFiniteNum(b.binderScRmsd) && b.binderScRmsd < branchScRmsdThreshold(b.nodeId)}
               >
-                {b.binderScRmsd !== null ? `${b.binderScRmsd.toFixed(2)} Å` : '—'}
+                {fmtNum(b.binderScRmsd, 2, ' Å')}
               </td>
             {/each}
           </tr>
@@ -238,9 +466,9 @@
             <td class="m-k">Target-aligned RMSD</td>
             {#each branches as b (b.nodeId)}
               <td
-                class:win={bestTargetAlignedBinderRmsd !== null && b.targetAlignedBinderRmsd === bestTargetAlignedBinderRmsd}
+                class:win={bestTargetAlignedBinderRmsd !== null && isFiniteNum(b.targetAlignedBinderRmsd) && b.targetAlignedBinderRmsd === bestTargetAlignedBinderRmsd}
               >
-                {b.targetAlignedBinderRmsd !== null ? `${b.targetAlignedBinderRmsd.toFixed(2)} Å` : '—'}
+                {fmtNum(b.targetAlignedBinderRmsd, 2, ' Å')}
               </td>
             {/each}
           </tr>
@@ -251,10 +479,10 @@
             <td class="m-k">Motif RMSD</td>
             {#each branches as b (b.nodeId)}
               <td
-                class:win={bestRefoldMotifRmsd !== null && b.refoldMotifRmsd === bestRefoldMotifRmsd}
-                class:pass-val={b.refoldMotifRmsd !== null && b.refoldMotifRmsd < 1.0}
+                class:win={bestRefoldMotifRmsd !== null && isFiniteNum(b.refoldMotifRmsd) && b.refoldMotifRmsd === bestRefoldMotifRmsd}
+                class:pass-val={isFiniteNum(b.refoldMotifRmsd) && b.refoldMotifRmsd < branchMotifRmsdThreshold(b.nodeId)}
               >
-                {b.refoldMotifRmsd !== null ? `${b.refoldMotifRmsd.toFixed(2)} Å` : '—'}
+                {fmtNum(b.refoldMotifRmsd, 2, ' Å')}
               </td>
             {/each}
           </tr>
@@ -265,10 +493,10 @@
             <td class="m-k">Gen Motif RMSD</td>
             {#each branches as b (b.nodeId)}
               <td
-                class:win={bestGenMotifRmsd !== null && b.genMotifRmsd === bestGenMotifRmsd}
-                class:pass-val={b.genMotifRmsd !== null && b.genMotifRmsd < 1.0}
+                class:win={bestGenMotifRmsd !== null && isFiniteNum(b.genMotifRmsd) && b.genMotifRmsd === bestGenMotifRmsd}
+                class:pass-val={isFiniteNum(b.genMotifRmsd) && b.genMotifRmsd < branchMotifRmsdThreshold(b.nodeId)}
               >
-                {b.genMotifRmsd !== null ? `${b.genMotifRmsd.toFixed(2)} Å` : '—'}
+                {fmtNum(b.genMotifRmsd, 2, ' Å')}
               </td>
             {/each}
           </tr>
@@ -278,11 +506,16 @@
           <tr>
             <td class="m-k">pLDDT</td>
             {#each branches as b (b.nodeId)}
+              {@const confAvail = b.confidenceAvailable !== false && isFiniteNum(b.meanPlddt)}
               <td
-                class:win={bestPlddt !== null && b.meanPlddt === bestPlddt}
-                class:pass-val={b.meanPlddt !== null && b.meanPlddt >= branchPlddtThreshold(b.nodeId)}
+                class:win={bestPlddt !== null && confAvail && b.meanPlddt === bestPlddt}
+                class:pass-val={confAvail && b.meanPlddt! >= branchPlddtThreshold(b.nodeId)}
               >
-                {b.meanPlddt !== null ? b.meanPlddt.toFixed(1) : '—'}
+                {#if b.confidenceAvailable === false}
+                  <span class="dim">N/A</span>
+                {:else}
+                  {fmtNum(b.meanPlddt, 1)}
+                {/if}
               </td>
             {/each}
           </tr>
@@ -293,10 +526,10 @@
             <td class="m-k">Binder pLDDT</td>
             {#each branches as b (b.nodeId)}
               <td
-                class:win={bestBinderPlddt !== null && b.binderPlddt === bestBinderPlddt}
-                class:pass-val={b.binderPlddt !== null && b.binderPlddt >= branchPlddtThreshold(b.nodeId)}
+                class:win={bestBinderPlddt !== null && isFiniteNum(b.binderPlddt) && b.binderPlddt === bestBinderPlddt}
+                class:pass-val={isFiniteNum(b.binderPlddt) && b.binderPlddt >= branchPlddtThreshold(b.nodeId)}
               >
-                {b.binderPlddt !== null ? b.binderPlddt.toFixed(1) : '—'}
+                {fmtNum(b.binderPlddt, 1)}
               </td>
             {/each}
           </tr>
@@ -306,8 +539,8 @@
           <tr>
             <td class="m-k">pTM</td>
             {#each branches as b (b.nodeId)}
-              <td class:win={bestPtm !== null && b.ptm === bestPtm}>
-                {b.ptm !== null ? b.ptm.toFixed(3) : '—'}
+              <td class:win={bestPtm !== null && isFiniteNum(b.ptm) && b.ptm === bestPtm}>
+                {fmtNum(b.ptm, 3)}
               </td>
             {/each}
           </tr>
@@ -317,8 +550,8 @@
           <tr>
             <td class="m-k">ipTM</td>
             {#each branches as b (b.nodeId)}
-              <td class:win={bestIptm !== null && b.iptm === bestIptm}>
-                {b.iptm !== null ? b.iptm.toFixed(3) : '—'}
+              <td class:win={bestIptm !== null && isFiniteNum(b.iptm) && b.iptm === bestIptm}>
+                {fmtNum(b.iptm, 3)}
               </td>
             {/each}
           </tr>
@@ -329,10 +562,10 @@
             <td class="m-k">iPAE</td>
             {#each branches as b (b.nodeId)}
               <td
-                class:win={bestIpae !== null && b.ipae === bestIpae}
-                class:pass-val={b.ipae !== null && b.ipae < 10.0}
+                class:win={bestIpae !== null && isFiniteNum(b.ipae) && b.ipae === bestIpae}
+                class:pass-val={isFiniteNum(b.ipae) && b.ipae < branchIpaeThreshold(b.nodeId)}
               >
-                {b.ipae !== null ? `${b.ipae.toFixed(1)} Å` : '—'}
+                {fmtNum(b.ipae, 1, ' Å')}
               </td>
             {/each}
           </tr>
@@ -360,7 +593,7 @@
           {#each branches as b (b.nodeId)}
             <td>
               {#if b.length !== null}
-                {b.length} aa{#if b.geometry} · {b.geometry.rg.toFixed(1)} Å{/if}
+                {b.length} aa{#if b.geometry && isFiniteNum(b.geometry.rg)} · {b.geometry.rg.toFixed(1)} Å{/if}
               {:else}
                 —
               {/if}
@@ -372,7 +605,7 @@
           <tr>
             <td class="m-k">Fold time</td>
             {#each branches as b (b.nodeId)}
-              <td>{b.foldElapsedMs !== null ? `${(b.foldElapsedMs / 1000).toFixed(1)} s` : '—'}</td>
+              <td>{isFiniteNum(b.foldElapsedMs) ? `${(b.foldElapsedMs / 1000).toFixed(1)} s` : '—'}</td>
             {/each}
           </tr>
         {/if}
@@ -468,6 +701,124 @@
   .exit-btn:hover {
     color: var(--text-primary);
     border-color: var(--accent);
+  }
+  .cmp-head-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .csv-btn {
+    border: 1px solid var(--border-strong);
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .csv-btn:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .pairing-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 11px;
+  }
+  .pair-seg {
+    display: inline-flex;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    overflow: hidden;
+    background: var(--bg-surface-2);
+  }
+  .pair-seg-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 3px 8px;
+    font-size: 10.5px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .pair-seg-btn:not(:last-child) {
+    border-right: 1px solid var(--border-subtle);
+  }
+  .pair-seg-btn.active {
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+  .cand-key-pick {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-muted);
+    font-size: 10.5px;
+  }
+  .pairing-hint {
+    font-size: 10.5px;
+    color: var(--text-dim);
+  }
+  .lineage-warn-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .lineage-warn-item {
+    font-size: 10.5px;
+    line-height: 1.4;
+    padding: 5px 8px;
+    border-radius: 5px;
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border: 1px solid var(--warn-border);
+  }
+  .missing-badge {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border: 1px solid var(--warn-border);
+  }
+  .ref-badge {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface-2);
+    color: var(--text-secondary);
+  }
+  .ref-badge.tone-ok {
+    background: var(--ok-bg);
+    color: var(--ok-text);
+    border-color: var(--ok-border);
+  }
+  .ref-badge.tone-info {
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+  }
+  .ref-badge.tone-warn {
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border-color: var(--warn-border);
+  }
+  .ref-badge.tone-err {
+    background: var(--err-bg);
+    color: var(--err-strong);
+    border-color: var(--err-border);
   }
   .agreement-banner {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
