@@ -153,10 +153,18 @@ export class ExecutionScheduler {
         status: 'loading',
         phase: 'vram',
         progress: 0,
-        detail: `Releasing ${this.activeGpu.adapterId} VRAM before starting ${node.adapterId}...`,
+        detail: `Releasing ${this.activeGpu.adapterId} VRAM before starting ${node.label ?? node.adapterId}...`,
       });
       await this.releaseActiveGpu();
     }
+
+    onProgress({
+      nodeId: node.id,
+      status: 'loading',
+      phase: 'init',
+      progress: 0.02,
+      detail: `Starting ${node.label ?? node.adapterId} worker...`,
+    });
 
     if (!this.activeGpu) {
       const worker = this.spawnWorker(node.adapterId);

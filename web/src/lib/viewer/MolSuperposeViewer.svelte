@@ -17,6 +17,9 @@
     theme?: 'dark' | 'light';
     height?: number;
     label?: string;
+    emptyMessage?: string;
+    emptyActionLabel?: string;
+    onEmptyAction?: () => void;
     onResidueClick?: (info: { chain: string; seqId: number; compId: string }) => void;
     onToggleModelVisibility?: (modelId: string) => void;
     onSoloModel?: (modelId: string) => void;
@@ -35,6 +38,9 @@
     theme = 'dark',
     height = 420,
     label = undefined,
+    emptyMessage = undefined,
+    emptyActionLabel = undefined,
+    onEmptyAction = undefined,
     onResidueClick = undefined,
     onToggleModelVisibility = undefined,
     onSoloModel = undefined,
@@ -469,7 +475,17 @@
   </div>
   {#if (!models || models.length === 0) && !designedPdb && !refoldPdb}
     <div class="empty">
-      {models ? 'Run the selected blocks to compare their 3D structures' : 'Run a pipeline to visualize designed & refolded 3D structures'}
+      <span>
+        {emptyMessage ??
+          (models
+            ? 'Run the selected blocks to compare their 3D structures'
+            : 'Run a pipeline to visualize designed & refolded 3D structures')}
+      </span>
+      {#if emptyActionLabel && onEmptyAction}
+        <button type="button" class="empty-action-btn" onclick={onEmptyAction}>
+          {emptyActionLabel}
+        </button>
+      {/if}
     </div>
   {/if}
   {#if initError}
@@ -615,11 +631,31 @@
     position: absolute;
     inset: 0;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 10px;
+    padding: 18px;
+    text-align: center;
     color: var(--text-dim);
     font-size: 13px;
     pointer-events: none;
+  }
+  .empty-action-btn {
+    pointer-events: auto;
+    background: var(--bg-surface);
+    color: var(--text-body);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 5px 11px;
+    font-size: 11.5px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .empty-action-btn:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+    background: var(--bg-surface-hover);
   }
   .err-overlay {
     position: absolute;

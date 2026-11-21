@@ -31,6 +31,7 @@
   import ArtifactPeekPanel from '$lib/ui/ArtifactPeekPanel.svelte';
   import ComparePeekPanel from '$lib/ui/ComparePeekPanel.svelte';
   import FirstRunModal from '$lib/ui/FirstRunModal.svelte';
+  import OnboardingModal from '$lib/ui/OnboardingModal.svelte';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
   import WorkflowCanvas from '$lib/ui/WorkflowCanvas.svelte';
   import RecipeDrawer from '$lib/ui/RecipeDrawer.svelte';
@@ -58,6 +59,8 @@
   let sysWrapEl: HTMLDivElement | null = $state(null);
   let moreWrapEl: HTMLDivElement | null = $state(null);
   let firstRunAck = $state(false);
+  let showOnboarding = $state(false);
+  let showSeqParentBackbone = $state(false);
   let pendingRun = $state<{
     bypassCache: boolean;
     upToNodeId?: string;
@@ -205,7 +208,7 @@
   }
 
   function handleWindowKeydown(ev: KeyboardEvent) {
-    if (pendingRun) return;
+    if (pendingRun || showOnboarding) return;
     if (ev.key === 'Escape') {
       sysMenuOpen = false;
       moreMenuOpen = false;
@@ -284,6 +287,7 @@
     webMcpReady = webMcpRegistered;
 
     // Load shared workflow from URL hash (#p=... or #g=...) if present
+    let loadedFromHash = false;
     if (window.location.hash.length > 2) {
       try {
         const decoded = await decodeHashToGraph(window.location.hash);
@@ -292,10 +296,20 @@
           selectedPresetId = decoded.id;
           setSingleSelection(decoded.nodes[0]?.id ?? '');
           showToastMessage('Loaded shared workflow from URL', 3000);
+          loadedFromHash = true;
         }
       } catch {
         /* ignore malformed hash */
       }
+    }
+
+    // Show welcome onboarding once on first direct visit (never interrupt shared links)
+    try {
+      if (!loadedFromHash && localStorage.getItem('denovo-onboarding-seen') !== '1') {
+        showOnboarding = true;
+      }
+    } catch {
+      /* ignore */
     }
 
     await refreshCacheStats();
@@ -338,10 +352,25 @@
     lastPickedResidue = null;
   }
 
+  function dismissOnboarding() {
+    showOnboarding = false;
+    try {
+      localStorage.setItem('denovo-onboarding-seen', '1');
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function selectOnboardingPreset(presetId: string) {
+    dismissOnboarding();
+    selectPreset(presetId);
+  }
+
   function handleSelectNode(nodeId: string) {
     setSingleSelection(nodeId);
     selectedPeekSlotId = null;
     selectedEdgeId = null;
+    showSeqParentBackbone = false;
     const clicked = graph.nodes.find((n) => n.id === nodeId);
     const hasOutputs = Boolean(
       nodeId && outputsByNode[nodeId] && Object.keys(outputsByNode[nodeId]).length > 0,
@@ -357,6 +386,7 @@
     setSingleSelection(nodeId);
     selectedPeekSlotId = null;
     selectedEdgeId = null;
+    showSeqParentBackbone = false;
     rightPanelTab = 'params';
   }
 
@@ -364,12 +394,14 @@
     setSingleSelection(edge.toNode);
     selectedPeekSlotId = `in:${edge.toPort}`;
     selectedEdgeId = makeEdgeId(edge.fromNode, edge.fromPort, edge.toNode, edge.toPort);
+    showSeqParentBackbone = false;
     rightPanelTab = 'peek';
   }
 
   function handlePeekPort(nodeId: string, direction: 'in' | 'out', portName: string) {
     setSingleSelection(nodeId);
     selectedPeekSlotId = `${direction}:${portName}`;
+    showSeqParentBackbone = false;
     if (direction === 'in') {
       const edge = graph.edges.find((e) => e.toNode === nodeId && e.toPort === portName);
       selectedEdgeId = edge ? makeEdgeId(edge.fromNode, edge.fromPort, edge.toNode, edge.toPort) : null;
@@ -381,6 +413,7 @@
 
   function handleSelectPeekSlot(slotId: string) {
     selectedPeekSlotId = slotId;
+    showSeqParentBackbone = false;
     const slot = peekSlots.find((s) => s.id === slotId);
     selectedEdgeId = slot?.direction === 'in' ? (slot.edgeId ?? null) : null;
   }
@@ -780,12 +813,19 @@
     peekFoldSet?.folds[selectedFoldIdx] ?? peekFoldSet?.folds[0] ?? null,
   );
 
+  let isPeekingSequenceSlot = $derived(Boolean(peekSequences && rightPanelTab === 'peek'));
+
   // 3D Mol* viewport bindings derived strictly from the active peek modality
   let viewerDesignedPdb = $derived.by((): string | null => {
     if (peekMetrics) return activeRow?.designedPdb ?? contextStructure?.pdbText ?? null;
     if (peekStructure) return peekStructure.pdbText;
     if (peekCondition) return peekCondition.inputCif ?? contextStructure?.pdbText ?? null;
-    if (peekSequences) return contextStructure?.pdbText ?? null;
+    if (peekSequences) {
+      // Clear 3D viewport when peeking a sequence-only wire/port unless user explicitly
+      // previews the parent backbone (keeps Parameters-tab 3D residue picking intact).
+      if (rightPanelTab === 'peek' && !showSeqParentBackbone) return null;
+      return contextStructure?.pdbText ?? null;
+    }
     // Standalone folds are not Kabsch-aligned to the designed backbone, so keep designedPdb null
     return null;
   });
@@ -797,8 +837,21 @@
   });
 
   let viewerStructureMeta = $derived<StructureArtifact | null>(
-    peekStructure ?? (peekMetrics || peekSequences || peekCondition ? contextStructure : null),
+    peekStructure ??
+      (peekMetrics || peekCondition || (peekSequences && (!isPeekingSequenceSlot || showSeqParentBackbone))
+        ? contextStructure
+        : null),
   );
+
+  let viewerEmptyMessage = $derived.by((): string | undefined => {
+    if (isPeekingSequenceSlot && peekSequences && !showSeqParentBackbone) {
+      const n = peekSequences.candidates.length;
+      const len = peekSequences.candidates[0]?.sequence.length ?? 0;
+      const seqNote = n > 0 ? `${n} sequence${n === 1 ? '' : 's'}${len > 0 ? ` · ${len} aa` : ''}` : 'sequences';
+      return `Sequence-only connection (${seqNote}) — no 3D coordinates flow on this wire.`;
+    }
+    return undefined;
+  });
 
   let viewerLabel = $derived.by((): string => {
     const dirTag = activePeekSlot
@@ -814,8 +867,13 @@
       const fromTag = activePeekSlot?.peerNodeLabel ? ` ← ${activePeekSlot.peerNodeLabel}` : '';
       return `${dirTag}${fromTag} · ${peekStructure.label}`;
     }
-    if (peekSequences && contextStructure) {
-      return `Context backbone (${contextStructure.label}) · peeking ${dirTag}`;
+    if (peekSequences) {
+      if (isPeekingSequenceSlot && !showSeqParentBackbone) {
+        return `${dirTag} · sequences only`;
+      }
+      if (contextStructure) {
+        return `Parent backbone (${contextStructure.label}) · peeking ${dirTag}`;
+      }
     }
     if (peekCondition) {
       return viewerDesignedPdb
@@ -1081,6 +1139,17 @@
               onchange={importGraphJson}
             />
           </label>
+          <button
+            type="button"
+            class="menu-item"
+            role="menuitem"
+            onclick={() => {
+              moreMenuOpen = false;
+              showOnboarding = true;
+            }}
+          >
+            <span>Quick Tour</span>
+          </button>
           <div class="menu-sep"></div>
           <button
             type="button"
@@ -1276,6 +1345,16 @@
             {#if lastPickedResidue}
               <span class="picked">Clicked: <code>{lastPickedResidue}</code></span>
             {/if}
+            {#if isPeekingSequenceSlot && showSeqParentBackbone}
+              <button
+                type="button"
+                class="cmp-exit-mini"
+                onclick={() => (showSeqParentBackbone = false)}
+                title="Hide parent backbone preview"
+              >
+                Hide backbone
+              </button>
+            {/if}
           {/if}
         </div>
 
@@ -1292,6 +1371,11 @@
           {theme}
           height={splitMode === 'horizontal' ? 350 : 460}
           label={isCompareMode ? compareViewerLabel : viewerLabel}
+          emptyMessage={isCompareMode ? undefined : viewerEmptyMessage}
+          emptyActionLabel={!isCompareMode && isPeekingSequenceSlot && !showSeqParentBackbone && contextStructure
+            ? 'Preview parent backbone'
+            : undefined}
+          onEmptyAction={() => (showSeqParentBackbone = true)}
           onResidueClick={handleResidueClick}
           onToggleModelVisibility={toggleCompareModelVisibility}
           onSoloModel={soloCompareModel}
@@ -1421,6 +1505,13 @@
     isPartialRun={Boolean(pendingRun.upToNodeId)}
     onConfirm={confirmPendingRun}
     onCancel={cancelPendingRun}
+  />
+{/if}
+
+{#if showOnboarding}
+  <OnboardingModal
+    onDismiss={dismissOnboarding}
+    onSelectPreset={selectOnboardingPreset}
   />
 {/if}
 

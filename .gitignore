@@ -23,6 +23,7 @@ dist/
 .vscode/
 *.swp
 *.swo
+.wrangler/
 
 # Local config / secrets
 .env
