@@ -6,6 +6,7 @@
   import type { NodeInputPreview, StudioBrushRole } from '$lib/engine/studio-types';
   import type { BioCompatibilityFix, WorkflowNode } from '$lib/engine/types';
   import AnnotatedFastaView, { type StudioBrushOption } from './AnnotatedFastaView.svelte';
+  import ModelCardPopover from './ModelCardPopover.svelte';
 
   interface Props {
     node: WorkflowNode;
@@ -268,6 +269,7 @@
       </div>
 
       <div class="head-actions">
+        <ModelCardPopover adapterId={node.adapterId} params={node.params} compact />
         <button
           type="button"
           class="run-btn"

@@ -57,18 +57,24 @@
   import ComparePeekPanel, { type CompareBranchMeta } from '$lib/ui/ComparePeekPanel.svelte';
   import CreditsModal from '$lib/ui/CreditsModal.svelte';
   import FirstRunModal from '$lib/ui/FirstRunModal.svelte';
+  import ModelCardPopover from '$lib/ui/ModelCardPopover.svelte';
   import OnboardingModal from '$lib/ui/OnboardingModal.svelte';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
+  import NodeStudioPopover from '$lib/ui/NodeStudioPopover.svelte';
   import { hasInvalidNumericInputs } from '$lib/ui/NumericInput.svelte';
   import WorkflowCanvas from '$lib/ui/WorkflowCanvas.svelte';
   import RecipeDrawer from '$lib/ui/RecipeDrawer.svelte';
+  import { compileNodeInputPreview } from '$lib/engine/input-preview';
 
   const scheduler = new ExecutionScheduler({
     checkpointStore: createIndexedDbCheckpointStore(),
   });
 
   let rightPanelTab = $state<'params' | 'peek'>('params');
-  let expandedPane = $state<'none' | 'viewer' | 'inspector'>('none');
+  let expandedPane = $state<'none' | 'viewer' | 'inspector' | 'studio'>('none');
+  let studioTab = $state<'input' | 'controls' | 'output'>('input');
+  let studioHoveredToken = $state<string | null>(null);
+  let studioFocusToken = $state<string | null>(null);
   let splitMode = $state<'horizontal' | 'vertical'>('horizontal');
   let splitPct = $state<number>(65);
   let draggingSplit = $state(false);
@@ -378,6 +384,47 @@
       if (!isRunning && validationErrors.length === 0) {
         ev.preventDefault();
         void runWorkflow(false);
+      }
+      return;
+    }
+
+    // Space toggles Node Studio when a block is selected and not typing in an input
+    if (
+      ev.key === ' ' &&
+      !ev.metaKey &&
+      !ev.ctrlKey &&
+      !ev.altKey &&
+      !isEditableElement(ev.target) &&
+      !isEditableElement(document.activeElement)
+    ) {
+      if (selectedNode) {
+        ev.preventDefault();
+        if (expandedPane === 'studio') {
+          expandedPane = 'none';
+        } else {
+          openStudioForNode(selectedNode.id);
+        }
+        return;
+      }
+    }
+
+    // [ and ] step upstream/downstream across workflow blocks while Node Studio is open
+    if (
+      expandedPane === 'studio' &&
+      (ev.key === '[' || ev.key === ']') &&
+      !ev.metaKey &&
+      !ev.ctrlKey &&
+      !ev.altKey &&
+      !isEditableElement(ev.target) &&
+      !isEditableElement(document.activeElement)
+    ) {
+      const idx = graph.nodes.findIndex((n) => n.id === selectedNodeId);
+      if (idx >= 0) {
+        const nextIdx = ev.key === '[' ? idx - 1 : idx + 1;
+        if (nextIdx >= 0 && nextIdx < graph.nodes.length) {
+          ev.preventDefault();
+          handleSelectNode(graph.nodes[nextIdx].id);
+        }
       }
       return;
     }
@@ -1257,9 +1304,9 @@
     }
   });
 
-  function applyBioFix(issue: BioCompatibilityIssue) {
-    if (!issue.fix || isRunning) return;
-    const { nodeId, paramsPatch, nodeLabel } = issue.fix;
+  function applyBioCompatibilityFix(fix: NonNullable<BioCompatibilityIssue['fix']>) {
+    if (isRunning) return;
+    const { nodeId, paramsPatch, nodeLabel } = fix;
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
     const nextGraph: WorkflowGraph = {
       ...prevSnapshot,
@@ -1277,6 +1324,21 @@
     scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
     invalidateNodes(getDownstreamNodeIds(nextGraph, [nodeId]));
     runError = null;
+  }
+
+  function applyBioFix(issue: BioCompatibilityIssue) {
+    if (!issue.fix) return;
+    applyBioCompatibilityFix(issue.fix);
+  }
+
+  function openStudioForNode(nodeId: string) {
+    setSingleSelection(nodeId);
+    selectedPeekSlotId = null;
+    selectedEdgeId = null;
+    studioTab = 'input';
+    studioHoveredToken = null;
+    studioFocusToken = null;
+    expandedPane = 'studio';
   }
 
   function confirmPendingRun(rememberChoice: boolean) {
@@ -1796,6 +1858,16 @@
   // Node- and port-scoped intermediate peek state (do not fall back to graph.nodes[0] when deselected)
   let selectedNode = $derived(
     selectedNodeId ? (graph.nodes.find((n) => n.id === selectedNodeId) ?? null) : null,
+  );
+
+  // Lazy single-source-of-truth compiled input preview (computed only while Node Studio is open)
+  let studioOpen = $derived(expandedPane === 'studio' && Boolean(selectedNode));
+  let studioPreview = $derived.by(() => {
+    if (!studioOpen || !selectedNode) return null;
+    return compileNodeInputPreview(graph, selectedNode.id, outputsByNode);
+  });
+  let studioInputViewerActive = $derived(
+    studioOpen && studioTab === 'input' && Boolean(studioPreview?.previewStructurePdb),
   );
 
   let peekSlots = $derived.by(() =>
@@ -2454,6 +2526,8 @@
           onBlockAdded={handleBlockAdded}
           onSelectEdge={handleSelectEdge}
           onPeekPort={handlePeekPort}
+          onNodeDoubleClick={openStudioForNode}
+          onOpenStudio={openStudioForNode}
           onOpenTour={() => (showOnboarding = true)}
         />
       </SvelteFlowProvider>
@@ -2523,7 +2597,11 @@
     {/if}
 
     <!-- Output & Inspector Pane (Right in Horizontal Split, Bottom in Vertical Split) -->
-    <section class="results-grid" class:stacked-pane={splitMode === 'horizontal'}>
+    <section
+      class="results-grid"
+      class:stacked-pane={splitMode === 'horizontal'}
+      class:is-studio-open={studioOpen}
+    >
       {#if expandedPane !== 'none'}
         <div
           class="expand-backdrop"
@@ -2678,22 +2756,37 @@
 
         <div class="viewer-stage">
           <MolSuperposeViewer
-            designedPdb={isCompareMode ? null : viewerDesignedPdb}
-            refoldPdb={isCompareMode ? null : viewerRefoldPdb}
+            designedPdb={isCompareMode
+              ? null
+              : studioInputViewerActive
+                ? (studioPreview?.previewStructurePdb ?? viewerDesignedPdb)
+                : viewerDesignedPdb}
+            refoldPdb={isCompareMode || studioInputViewerActive ? null : viewerRefoldPdb}
             models={isCompareMode && comparisonState ? comparisonState.models : null}
-            trajectoryPdb={isCompareMode ? null : (viewerStructureMeta?.trajectoryPdb ?? null)}
+            trajectoryPdb={isCompareMode || studioInputViewerActive
+              ? null
+              : (viewerStructureMeta?.trajectoryPdb ?? null)}
             frameIndex={showTrajectory ? trajFrame : undefined}
             {showDesigned}
-            {showRefold}
+            showRefold={studioInputViewerActive ? false : showRefold}
             {showTrajectory}
             {illustrative}
             spin={viewerSpin && !isRunning}
-            expanded={expandedPane === 'viewer'}
+            expanded={expandedPane === 'viewer' || studioOpen}
             {theme}
-            height={expandedPane === 'viewer' ? '100%' : splitMode === 'horizontal' ? 350 : 460}
-            label={isCompareMode ? compareViewerLabel : viewerLabel}
-            atomGranularity={viewerAtomGranularity}
-            bfactorSemantics={viewerBfactorSemantics}
+            height={expandedPane === 'viewer' || studioOpen ? '100%' : splitMode === 'horizontal' ? 350 : 460}
+            label={isCompareMode
+              ? compareViewerLabel
+              : studioInputViewerActive
+                ? (studioPreview?.previewStructureMeta?.label ?? viewerLabel)
+                : viewerLabel}
+            atomGranularity={studioInputViewerActive
+              ? (studioPreview?.previewStructureMeta?.atomGranularity ?? viewerAtomGranularity)
+              : viewerAtomGranularity}
+            bfactorSemantics={studioInputViewerActive ? 'none' : viewerBfactorSemantics}
+            highlightLayers={studioInputViewerActive ? studioPreview?.highlightLayers : undefined}
+            hoveredToken={studioOpen ? studioHoveredToken : null}
+            focusToken={studioOpen ? studioFocusToken : null}
             emptyMessage={isCompareMode ? undefined : viewerEmptyMessage}
             emptyActionLabel={!isCompareMode && isPeekingSequenceSlot && !showSeqParentBackbone && contextStructure
               ? 'Preview parent backbone'
@@ -2723,6 +2816,93 @@
       </div>
 
       <div class="right-panel" class:is-expanded={expandedPane === 'inspector'} data-tour="inspector-panel">
+        {#if studioOpen && selectedNode}
+          <NodeStudioPopover
+            node={selectedNode}
+            allNodes={graph.nodes}
+            preview={studioPreview}
+            activeTab={studioTab}
+            hoveredToken={studioHoveredToken}
+            {isRunning}
+            onSelectTab={(t) => (studioTab = t)}
+            onSelectNode={(id) => {
+              setSingleSelection(id);
+              selectedPeekSlotId = null;
+              selectedEdgeId = null;
+              studioHoveredToken = null;
+              studioFocusToken = null;
+            }}
+            onClose={() => {
+              expandedPane = 'none';
+              studioHoveredToken = null;
+              studioFocusToken = null;
+            }}
+            onRunUpstreamAndThis={() => runWorkflow(false, selectedNode.id)}
+            onUpdateNodeParams={updateNodeParams}
+            onApplyFix={applyBioCompatibilityFix}
+            onHoverToken={(tok) => (studioHoveredToken = tok)}
+            onFocusToken={(tok) => {
+              studioFocusToken = null;
+              queueMicrotask(() => {
+                studioFocusToken = tok;
+              });
+            }}
+          >
+            {#snippet controlsSlot()}
+              <NodeInspector
+                node={selectedNode}
+                embedded
+                disabled={isRunning}
+                nodeOutput={outputsByNode[selectedNode.id]}
+                nodeState={nodeStates[selectedNode.id]}
+                upstreamStructure={selectedUpstreamStructure}
+                hasStructureInput={graph.edges.some(
+                  (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
+                )}
+                siblingGeneratorIds={
+                  selectedNode.adapterId === 'genie3' || selectedNode.adapterId === 'rfd4-proteina'
+                    ? getSiblingGeneratorIds(selectedNode.id)
+                    : []
+                }
+                onUpdate={updateNodeParams}
+                onUpdateLabel={updateNodeLabel}
+                onSyncTaskToSiblings={handleSyncTaskToSiblings}
+                onRunUpTo={(id) => runWorkflow(false, id)}
+              />
+            {/snippet}
+            {#snippet outputSlot()}
+              <ArtifactPeekPanel
+                node={selectedNode}
+                embedded
+                slots={peekSlots}
+                activeSlot={activePeekSlot}
+                {contextStructure}
+                {selectedRowIdx}
+                {selectedFoldIdx}
+                {scRmsdThreshold}
+                {plddtThreshold}
+                {ipaeThreshold}
+                {motifRmsdThreshold}
+                {ipsaeThreshold}
+                {isRunning}
+                hasScorerResult={Boolean(latestScorerHit && latestScorerHit.nodeId !== selectedNode?.id)}
+                onSelectSlot={handleSelectPeekSlot}
+                onSelectRow={(idx) => (selectedRowIdx = idx)}
+                onSelectFold={(idx) => (selectedFoldIdx = idx)}
+                onRunUpToNode={(id) => runWorkflow(false, id)}
+                onJumpToScorer={() => {
+                  if (latestScorerHit) {
+                    setSingleSelection(latestScorerHit.nodeId);
+                    selectedPeekSlotId = null;
+                    selectedEdgeId = null;
+                    studioTab = 'output';
+                  }
+                }}
+                onDownloadText={downloadText}
+              />
+            {/snippet}
+          </NodeStudioPopover>
+        {:else}
         <div class="right-tabs" role="tablist" aria-label="Block inspector tabs">
           <button
             type="button"
@@ -2761,6 +2941,18 @@
               {isCompareMode ? 'Editing: ' : ''}{selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
             </span>
           {/if}
+          {#if selectedNode && !isCompareMode}
+            <ModelCardPopover adapterId={selectedNode.adapterId} params={selectedNode.params} compact />
+            <button
+              type="button"
+              class="pane-expand-btn studio-launch-btn"
+              onclick={() => openStudioForNode(selectedNode.id)}
+              title="Open Node Studio — inspect compiled inputs, annotated FASTA, and 3D overlays (Space)"
+              aria-label="Open Node Studio"
+            >
+              ⌖ Studio
+            </button>
+          {/if}
           <button
             type="button"
             class="pane-expand-btn tab-expand-btn"
@@ -2795,6 +2987,7 @@
                 onUpdateLabel={updateNodeLabel}
                 onSyncTaskToSiblings={handleSyncTaskToSiblings}
                 onRunUpTo={(id) => runWorkflow(false, id)}
+                onOpenStudio={() => openStudioForNode(selectedNode.id)}
               />
             {:else}
               <div class="empty-inspector">
@@ -2858,6 +3051,7 @@
             />
           {/if}
         </div>
+        {/if}
       </div>
     </section>
   </div>
@@ -3517,6 +3711,66 @@
     flex: 1;
     max-height: none !important;
     overflow-y: auto;
+  }
+  .results-grid.is-studio-open {
+    position: fixed;
+    inset: 16px;
+    z-index: 160;
+    display: grid !important;
+    grid-template-columns: minmax(340px, 46%) minmax(420px, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 12px;
+    padding: 12px;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-strong);
+    border-radius: 14px;
+    box-shadow: 0 28px 72px rgba(0, 0, 0, 0.58);
+    overflow: hidden;
+  }
+  .results-grid.is-studio-open > .expand-backdrop {
+    z-index: -1;
+  }
+  .results-grid.is-studio-open > .viewer-col {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 10px;
+  }
+  .results-grid.is-studio-open > .viewer-col .viewer-stage {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .results-grid.is-studio-open > .viewer-col .viewer-stage > :global(.mol-card) {
+    flex: 1;
+    height: 100% !important;
+  }
+  .results-grid.is-studio-open > .right-panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    border-radius: 10px;
+  }
+  @media (max-width: 1024px) {
+    .results-grid.is-studio-open {
+      inset: 0;
+      border-radius: 0;
+      padding: 8px;
+      gap: 8px;
+      grid-template-columns: 1fr;
+      grid-template-rows: 220px minmax(0, 1fr);
+    }
+  }
+  .studio-launch-btn {
+    margin-left: 6px;
+    margin-bottom: 4px;
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
   }
   .pane-expand-btn {
     margin-left: auto;
