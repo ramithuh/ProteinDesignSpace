@@ -9,10 +9,12 @@
     type PeekSlot,
   } from '$lib/engine/peek';
   import type {
+    ArtifactProvenance,
     CollectionKind,
     ConditionSpecArtifact,
     DesignabilityMetrics,
     FoldedStructure,
+    MsaMode,
     ReferenceRelation,
     SequenceSet,
     StructureArtifact,
@@ -31,6 +33,7 @@
     plddtThreshold: number;
     ipaeThreshold?: number;
     motifRmsdThreshold?: number;
+    ipsaeThreshold?: number;
     isRunning: boolean;
     embedded?: boolean;
     hasScorerResult?: boolean;
@@ -53,6 +56,7 @@
     plddtThreshold,
     ipaeThreshold = 10.0,
     motifRmsdThreshold = 1.0,
+    ipsaeThreshold = 0,
     isRunning,
     embedded = false,
     hasScorerResult = false,
@@ -140,6 +144,84 @@
     return id.startsWith('rfd4-proteina') || id.startsWith('genie3');
   }
 
+  function formatMsaBadge(msaMode?: MsaMode, msaDepth?: number): string {
+    const depth = isFiniteNum(msaDepth) && msaDepth > 0 ? Math.round(msaDepth) : null;
+    if (msaMode === 'mmseqs2') {
+      return depth !== null ? `MMseqs2 · ${depth} seqs` : 'MMseqs2';
+    }
+    if (msaMode === 'target-only') {
+      return depth !== null ? `Target MSA · ${depth} seqs` : 'Target MSA';
+    }
+    if (msaMode === 'a3m') {
+      return depth !== null ? `.a3m · ${depth} seqs` : '.a3m';
+    }
+    return 'single-seq';
+  }
+
+  function formatQuantChip(provenance?: ArtifactProvenance, foldModelId?: string): string | null {
+    if (provenance?.quantization) {
+      return provenance.quantization.toUpperCase();
+    }
+    if (foldModelId && foldModelId.toLowerCase().includes('-int5')) {
+      return 'INT5';
+    }
+    return null;
+  }
+
+  function computeIpaeFromPae(
+    pae: Float32Array | undefined,
+    chainLengths: readonly number[] | undefined,
+  ): number | null {
+    if (!pae || !chainLengths || chainLengths.length < 2) return null;
+    const L = chainLengths.reduce((acc, n) => acc + n, 0);
+    if (L <= 0 || pae.length < L * L) return null;
+    const dim = Math.round(Math.sqrt(pae.length));
+    if (dim < L || dim * dim !== pae.length) return null;
+    const chainOf = new Int32Array(L);
+    let off = 0;
+    for (let c = 0; c < chainLengths.length; c++) {
+      for (let k = 0; k < chainLengths[c]; k++) chainOf[off++] = c;
+    }
+    let sum = 0;
+    let count = 0;
+    for (let i = 0; i < L; i++) {
+      const ci = chainOf[i];
+      for (let j = 0; j < L; j++) {
+        if (ci === chainOf[j]) continue;
+        const v = pae[i * dim + j];
+        if (Number.isFinite(v)) {
+          sum += v;
+          count++;
+        }
+      }
+    }
+    return count > 0 ? sum / count : null;
+  }
+
+  function inferPdbChainLengths(pdbText?: string): number[] | undefined {
+    if (!pdbText) return undefined;
+    const counts: number[] = [];
+    const seen = new Set<string>();
+    let lastChain = '';
+    for (const line of pdbText.split('\n')) {
+      if (!line.startsWith('ATOM  ') || line.length < 27) continue;
+      if (line.slice(12, 16).trim() !== 'CA') continue;
+      const chain = line[21] || 'A';
+      const resKey = `${chain}:${line.slice(22, 27)}`;
+      if (seen.has(resKey)) continue;
+      seen.add(resKey);
+      if (counts.length === 0 || chain !== lastChain) {
+        counts.push(1);
+        lastChain = chain;
+      } else {
+        counts[counts.length - 1] += 1;
+      }
+    }
+    return counts.length > 1 ? counts : undefined;
+  }
+
+  let effectiveIpsaePass = $derived(ipsaeThreshold > 0 ? ipsaeThreshold : 0.6);
+
   let inSlots = $derived(slots.filter((s) => s.direction === 'in'));
   let outSlots = $derived(slots.filter((s) => s.direction === 'out'));
 
@@ -196,10 +278,33 @@
       ),
     ),
   );
+  let hasIptmMetrics = $derived(
+    Boolean(metricsArt?.rows.some((r) => isFiniteNum(r.iptm))),
+  );
+  let hasIpsaeMetrics = $derived(
+    Boolean(metricsArt?.rows.some((r) => isFiniteNum(r.ipsae))),
+  );
   let hasMotifMetrics = $derived(
     Boolean(
       metricsArt?.rows.some(
         (r) => isFiniteNum(r.refoldMotifRmsd) || isFiniteNum(r.genMotifRmsd),
+      ),
+    ),
+  );
+  let activeRowChainLengths = $derived.by((): number[] | undefined => {
+    if (!activeRow) return undefined;
+    const fromPdb = inferPdbChainLengths(activeRow.alignedFoldPdb);
+    if (fromPdb && fromPdb.length > 1) return fromPdb;
+    const ctxLens = contextStructure?.chainLengths ?? contextStructure?.diagnostics?.chainLengths;
+    return ctxLens && ctxLens.length > 1 ? ctxLens : undefined;
+  });
+  let hasFoldMultiChainMetrics = $derived(
+    Boolean(
+      foldArt?.folds.some(
+        (f) =>
+          isFiniteNum(f.iptm) ||
+          isFiniteNum(f.ipsae) ||
+          (f.chainLengths && f.chainLengths.length > 1),
       ),
     ),
   );
@@ -384,8 +489,16 @@
           <th>{metricsRefBadge && metricsRefBadge.tone !== 'ok' ? 'Ref TM' : 'scTM'}</th>
           <th>pLDDT</th>
           <th>pTM</th>
+          {#if hasIptmMetrics || hasBinderMetrics || hasIpsaeMetrics}
+            <th title="Interface predicted TM-score (multi-chain)">ipTM</th>
+          {/if}
           {#if hasBinderMetrics}
             <th title={`Mean interface PAE (Å, pass < ${ipaeThreshold})`}>iPAE</th>
+          {/if}
+          {#if hasIpsaeMetrics || hasBinderMetrics}
+            <th title={`Dunbrack ipSAE interface score (pass ≥ ${effectiveIpsaePass.toFixed(2)})`}>ipSAE</th>
+          {/if}
+          {#if hasBinderMetrics}
             <th title={`Target-aligned or independent binder Cα RMSD (Å, pass < ${scRmsdThreshold})`}>Binder RMSD</th>
           {/if}
           {#if hasMotifMetrics}
@@ -398,6 +511,7 @@
         {#each metricsArt.rows as row, i (`${row.sequenceId}_${i}`)}
           {@const bRmsd = isFiniteNum(row.targetAlignedBinderRmsd) ? row.targetAlignedBinderRmsd : row.binderScRmsd}
           {@const rowConfAvail = row.confidenceAvailable !== false && isFiniteNum(row.meanPlddt)}
+          {@const rowFailedGates = row.failedGates ?? []}
           <tr class:selected={i === selectedRowIdx} onclick={() => onSelectRow(i)}>
             <td><code>{row.sequenceId}</code></td>
             <td class:good-val={isFiniteNum(row.scRmsd) && row.scRmsd < scRmsdThreshold}>{fmtNum(row.scRmsd, 2, ' Å')}</td>
@@ -406,10 +520,20 @@
               {rowConfAvail ? fmtNum(row.meanPlddt, 1) : 'N/A'}
             </td>
             <td>{fmtNum(row.ptm, 2)}</td>
+            {#if hasIptmMetrics || hasBinderMetrics || hasIpsaeMetrics}
+              <td>{fmtNum(row.iptm, 2)}</td>
+            {/if}
             {#if hasBinderMetrics}
               <td class:good-val={isFiniteNum(row.ipae) && row.ipae < ipaeThreshold}>
                 {fmtNum(row.ipae, 1, ' Å')}
               </td>
+            {/if}
+            {#if hasIpsaeMetrics || hasBinderMetrics}
+              <td class:good-val={isFiniteNum(row.ipsae) && row.ipsae >= effectiveIpsaePass}>
+                {fmtNum(row.ipsae, 2)}
+              </td>
+            {/if}
+            {#if hasBinderMetrics}
               <td class:good-val={isFiniteNum(bRmsd) && bRmsd < scRmsdThreshold}>
                 {fmtNum(bRmsd, 2, ' Å')}
               </td>
@@ -420,9 +544,24 @@
               </td>
             {/if}
             <td>
-              <span class="verdict" class:pass={row.designable}>
-                {row.designable ? 'PASS' : 'FAIL'}
-              </span>
+              <div class="verdict-cell">
+                <span
+                  class="verdict"
+                  class:pass={row.designable}
+                  title={row.designable
+                    ? 'All designability gates passed'
+                    : rowFailedGates.length > 0
+                      ? `Failed gates: ${rowFailedGates.join(' · ')}`
+                      : 'Failed designability gate'}
+                >
+                  {row.designable ? 'PASS' : 'FAIL'}
+                </span>
+                {#if !row.designable && rowFailedGates.length > 0}
+                  <span class="gate-summary" title={rowFailedGates.join(' · ')}>
+                    {rowFailedGates[0]}{rowFailedGates.length > 1 ? ` +${rowFailedGates.length - 1}` : ''}
+                  </span>
+                {/if}
+              </div>
             </td>
           </tr>
         {/each}
@@ -431,6 +570,32 @@
 
     {#if activeRow && activeRowSeqStats}
       {@const designedIsCif = activeRow.designedPdb.trimStart().startsWith('data_')}
+      {@const activeFailedGates = activeRow.failedGates ?? []}
+      {@const activeMsaBadge = formatMsaBadge(activeRow.msaMode, activeRow.msaDepth)}
+      {#if !activeRow.designable && activeFailedGates.length > 0}
+        <div class="failed-gates-box" role="status">
+          <span class="failed-gates-lbl">Failed gates:</span>
+          {#each activeFailedGates as gate (gate)}
+            <span class="fail-gate-chip">{gate}</span>
+          {/each}
+        </div>
+      {/if}
+      <div class="stat-chips">
+        <span class="stat-chip cond-key" title="Multiple sequence alignment mode used during refolding">
+          MSA: {activeMsaBadge}
+        </span>
+        {#if contextStructure?.atomGranularity === 'ca-only'}
+          <span class="warn-chip" title="Designed reference structure contains Cα coordinates only">
+            Cα-only ref
+          </span>
+        {/if}
+        {#if contextStructure?.provenance?.quantization}
+          <span class="stat-chip">{contextStructure.provenance.quantization.toUpperCase()}</span>
+        {/if}
+        {#if contextStructure?.provenance?.degradedFallback}
+          <span class="warn-chip">⚠ {contextStructure.provenance.degradedFallback}</span>
+        {/if}
+      </div>
       <div class="seq-box">
         <div class="seq-head">
           <span>Selected Sequence ({activeRow.sequence.length} aa · {activeRowSeqStats.uniqueAaCount} unique AAs)</span>
@@ -473,14 +638,26 @@
       </div>
 
       <div class="pae-row">
-        <PaePlot pae={activeRow.pae} size={200} />
+        <PaePlot pae={activeRow.pae} chainLengths={activeRowChainLengths} size={200} />
         <div class="pae-notes">
           <div><b>Fold time:</b> {isFiniteNum(activeRow.foldElapsedMs) ? `${(activeRow.foldElapsedMs / 1000).toFixed(1)} s` : '—'}</div>
+          <div><b>MSA:</b> {activeMsaBadge}</div>
           {#if isFiniteNum(activeRow.iptm)}
             <div><b>ipTM:</b> {activeRow.iptm.toFixed(3)}</div>
           {/if}
           {#if isFiniteNum(activeRow.ipae)}
             <div><b>iPAE:</b> {activeRow.ipae.toFixed(2)} Å</div>
+          {/if}
+          {#if isFiniteNum(activeRow.ipsae)}
+            <div>
+              <b>ipSAE:</b>
+              <span class:good-val={activeRow.ipsae >= effectiveIpsaePass}>
+                {activeRow.ipsae.toFixed(2)}
+              </span>
+              {#if isFiniteNum(activeRow.ipsaeMin)}
+                <span class="sub-note">(min {activeRow.ipsaeMin.toFixed(2)})</span>
+              {/if}
+            </div>
           {/if}
           {#if isFiniteNum(activeRow.binderScRmsd)}
             <div><b>Binder scRMSD:</b> {activeRow.binderScRmsd.toFixed(2)} Å</div>
@@ -540,12 +717,18 @@
           <th>Len</th>
           <th>pLDDT</th>
           <th>pTM</th>
+          {#if hasFoldMultiChainMetrics}
+            <th title="Interface predicted TM-score (multi-chain)">ipTM</th>
+            <th title={`Mean interface PAE (Å, pass < ${ipaeThreshold})`}>iPAE</th>
+            <th title={`Dunbrack ipSAE interface score (pass ≥ ${effectiveIpsaePass.toFixed(2)})`}>ipSAE</th>
+          {/if}
           <th>Time</th>
         </tr>
       </thead>
       <tbody>
         {#each foldArt.folds as f, i (`${f.sequenceId}_${i}`)}
           {@const confAvail = f.confidenceAvailable !== false && isFiniteNum(f.meanPlddt)}
+          {@const fIpae = hasFoldMultiChainMetrics ? computeIpaeFromPae(f.pae, f.chainLengths) : null}
           <tr class:selected={i === selectedFoldIdx} onclick={() => onSelectFold(i)}>
             <td><code>{f.sequenceId}</code></td>
             <td>{f.sequence.length} aa</td>
@@ -553,6 +736,15 @@
               {confAvail ? fmtNum(f.meanPlddt, 1) : 'N/A'}
             </td>
             <td>{fmtNum(f.ptm, 2)}</td>
+            {#if hasFoldMultiChainMetrics}
+              <td>{fmtNum(f.iptm, 2)}</td>
+              <td class:good-val={isFiniteNum(fIpae) && fIpae < ipaeThreshold}>
+                {fmtNum(fIpae, 1, ' Å')}
+              </td>
+              <td class:good-val={isFiniteNum(f.ipsae) && f.ipsae >= effectiveIpsaePass}>
+                {fmtNum(f.ipsae, 2)}
+              </td>
+            {/if}
             <td>{isFiniteNum(f.elapsedMs) ? `${(f.elapsedMs / 1000).toFixed(1)}s` : '—'}</td>
           </tr>
         {/each}
@@ -562,6 +754,31 @@
     {#if activeFold}
       {@const activeFoldConfAvail = activeFold.confidenceAvailable !== false && isFiniteNum(activeFold.meanPlddt)}
       {@const pStats = activeFoldConfAvail ? plddtSummary(activeFold.plddt) : null}
+      {@const activeFoldMsa = formatMsaBadge(
+        activeFold.msaMode ?? activeFold.provenance?.msaMode,
+        activeFold.msaDepth ?? activeFold.provenance?.msaDepth,
+      )}
+      {@const activeFoldQuant = formatQuantChip(activeFold.provenance, activeFold.foldModelId)}
+      {@const activeFoldIpae = computeIpaeFromPae(activeFold.pae, activeFold.chainLengths)}
+      <div class="stat-chips">
+        <span class="stat-chip cond-key" title="Multiple sequence alignment mode & depth">
+          MSA: {activeFoldMsa}
+        </span>
+        {#if activeFoldQuant}
+          <span class="stat-chip" title="Weight quantization used for inference">{activeFoldQuant}</span>
+        {/if}
+        {#if activeFold.provenance?.recyclesRun !== undefined}
+          <span class="stat-chip">{activeFold.provenance.recyclesRun} recycles</span>
+        {/if}
+        {#if activeFold.provenance?.degradedFallback}
+          <span class="warn-chip">⚠ {activeFold.provenance.degradedFallback}</span>
+        {/if}
+        {#if activeFold.provenance?.warnings?.length}
+          {#each activeFold.provenance.warnings as pw (pw)}
+            <span class="warn-chip">⚠ {pw}</span>
+          {/each}
+        {/if}
+      </div>
       <div class="seq-box">
         <div class="seq-head">
           <span>{activeFold.sequenceId} · {formatFoldModelName(activeFold.foldModelId)}</span>
@@ -585,7 +802,7 @@
       </div>
 
       <div class="pae-row">
-        <PaePlot pae={activeFold.pae} size={200} />
+        <PaePlot pae={activeFold.pae} chainLengths={activeFold.chainLengths} size={200} />
         <div class="pae-notes">
           <div><b>Mean pLDDT:</b> {activeFoldConfAvail ? fmtNum(activeFold.meanPlddt, 1) : 'N/A'}</div>
           {#if pStats}
@@ -600,7 +817,24 @@
               <b>ipTM:</b> {activeFold.iptm.toFixed(3)}{activeFold.iptmIsMonomerApprox ? ' (monomer approx)' : ''}
             </div>
           {/if}
-          <div><b>MSA:</b> Single-sequence (no MSA)</div>
+          {#if isFiniteNum(activeFoldIpae)}
+            <div>
+              <b>iPAE:</b>
+              <span class:good-val={activeFoldIpae < ipaeThreshold}>{activeFoldIpae.toFixed(2)} Å</span>
+            </div>
+          {/if}
+          {#if isFiniteNum(activeFold.ipsae)}
+            <div>
+              <b>ipSAE:</b>
+              <span class:good-val={activeFold.ipsae >= effectiveIpsaePass}>
+                {activeFold.ipsae.toFixed(2)}
+              </span>
+              {#if isFiniteNum(activeFold.ipsaeMin)}
+                <span class="sub-note">(min {activeFold.ipsaeMin.toFixed(2)})</span>
+              {/if}
+            </div>
+          {/if}
+          <div><b>MSA:</b> {activeFoldMsa}</div>
           <div><b>Fold time:</b> {isFiniteNum(activeFold.elapsedMs) ? `${(activeFold.elapsedMs / 1000).toFixed(1)} s` : '—'}</div>
         </div>
       </div>
@@ -728,6 +962,27 @@
       {/if}
       {#if structArt.trajectoryFrameCount}
         <span class="stat-chip">{structArt.trajectoryFrameCount} traj frames</span>
+      {/if}
+      {#if structArt.atomGranularity === 'ca-only'}
+        <span class="warn-chip" title="Only Cα backbone coordinates were emitted by this model">
+          Cα-only
+        </span>
+      {/if}
+      {#if structArt.provenance?.quantization}
+        <span class="stat-chip" title="Weight quantization">{structArt.provenance.quantization.toUpperCase()}</span>
+      {/if}
+      {#if structArt.provenance?.msaMode}
+        <span class="stat-chip cond-key">
+          MSA: {formatMsaBadge(structArt.provenance.msaMode, structArt.provenance.msaDepth)}
+        </span>
+      {/if}
+      {#if structArt.provenance?.degradedFallback}
+        <span class="warn-chip">⚠ {structArt.provenance.degradedFallback}</span>
+      {/if}
+      {#if structArt.provenance?.warnings?.length}
+        {#each structArt.provenance.warnings as pw (pw)}
+          <span class="warn-chip">⚠ {pw}</span>
+        {/each}
       {/if}
     </div>
 
@@ -1113,6 +1368,49 @@
   .verdict.pass {
     background: var(--ok-bg);
     color: var(--ok-text);
+  }
+  .verdict-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+  .gate-summary {
+    font-size: 9.5px;
+    color: var(--err-strong);
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .failed-gates-box {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--err-bg);
+    border: 1px solid var(--err-border);
+    font-size: 10.5px;
+  }
+  .failed-gates-lbl {
+    font-weight: 700;
+    color: var(--err-strong);
+  }
+  .fail-gate-chip {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--bg-surface) 85%, transparent);
+    color: var(--err-strong);
+    border: 1px solid var(--err-border);
+  }
+  .sub-note {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    margin-left: 4px;
   }
 
   .seq-list {

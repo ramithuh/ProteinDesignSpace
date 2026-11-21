@@ -1,5 +1,6 @@
 <script lang="ts">
-  // Precomputed 256-entry RGBA color LUT (0 Å = deep green #004d25 -> 30 Å = near-white #f2f9fa)
+  // Precomputed 256-entry RGBA color LUT (0 Å = deep green #004d25 -> 31.75 Å = near-white #f2f9fa)
+  const MAX_PAE = 31.75;
   const PAE_LUT = (() => {
     const lut = new Uint32Array(256);
     const bytes = new Uint8ClampedArray(lut.buffer);
@@ -15,16 +16,32 @@
 
   interface Props {
     pae: Float32Array | number[] | undefined;
+    chainLengths?: number[];
     size?: number;
   }
 
-  let { pae, size = 210 }: Props = $props();
+  let { pae, chainLengths = undefined, size = 210 }: Props = $props();
   let canvas: HTMLCanvasElement | null = $state(null);
   let hoverInfo = $state<string | null>(null);
   let cachedRect: DOMRect | null = null;
 
   let L = $derived(pae ? Math.floor(Math.sqrt(pae.length)) : 0);
   let compact = $derived(size < 180);
+
+  let chainBoundaryPositions = $derived.by((): number[] => {
+    if (!chainLengths || chainLengths.length <= 1 || L <= 0) return [];
+    const valid = chainLengths.filter((n) => Number.isFinite(n) && n > 0);
+    if (valid.length <= 1) return [];
+    const out: number[] = [];
+    let cum = 0;
+    for (let i = 0; i < valid.length - 1; i++) {
+      cum += valid[i];
+      if (cum > 0 && cum < L) {
+        out.push((cum / L) * size);
+      }
+    }
+    return out;
+  });
 
   function refreshRect() {
     cachedRect = canvas ? canvas.getBoundingClientRect() : null;
@@ -56,13 +73,13 @@
     const img = ctx.createImageData(L, L);
     const pixels = new Uint32Array(img.data.buffer);
     const total = L * L;
-    const scale = 255 / 30;
+    const scale = 255 / MAX_PAE;
     for (let i = 0; i < total; i++) {
       const val = pae[i];
       const idx = Number.isFinite(val)
         ? val <= 0
           ? 0
-          : val >= 30
+          : val >= MAX_PAE
             ? 255
             : (val * scale + 0.5) | 0
         : 255;
@@ -91,20 +108,75 @@
 <div class="pae-box" style="width: {size}px">
   <div class="pae-head" class:compact>
     <span class="pae-title">{compact && hoverInfo ? 'PAE' : `PAE (${L}×${L})`}</span>
-    <span class="hover">{hoverInfo ?? '0–30 Å'}</span>
+    <span class="hover">{hoverInfo ?? (compact ? '0–31.75 Å' : '0 Å — 31.75 Å')}</span>
   </div>
   {#if pae && L > 0}
-    <canvas
-      bind:this={canvas}
-      class="pae-canvas"
-      style="width: {size}px; height: {size}px"
-      onmouseenter={refreshRect}
-      onmousemove={onMove}
-      onmouseleave={() => {
-        hoverInfo = null;
-        cachedRect = null;
-      }}
-    ></canvas>
+    <div class="pae-canvas-wrap" style="width: {size}px; height: {size}px">
+      <canvas
+        bind:this={canvas}
+        class="pae-canvas"
+        style="width: {size}px; height: {size}px"
+        onmouseenter={refreshRect}
+        onmousemove={onMove}
+        onmouseleave={() => {
+          hoverInfo = null;
+          cachedRect = null;
+        }}
+      ></canvas>
+      {#if chainBoundaryPositions.length > 0}
+        <svg
+          class="pae-dividers"
+          width={size}
+          height={size}
+          viewBox={`0 0 ${size} ${size}`}
+          aria-hidden="true"
+        >
+          {#each chainBoundaryPositions as pos, idx (`b_${idx}`)}
+            <line
+              x1={pos}
+              y1="0"
+              x2={pos}
+              y2={size}
+              stroke="rgba(15, 23, 42, 0.55)"
+              stroke-width="2"
+              stroke-dasharray="4 3"
+            />
+            <line
+              x1={pos}
+              y1="0"
+              x2={pos}
+              y2={size}
+              stroke="rgba(255, 255, 255, 0.9)"
+              stroke-width="1"
+              stroke-dasharray="4 3"
+            />
+            <line
+              x1="0"
+              y1={pos}
+              x2={size}
+              y2={pos}
+              stroke="rgba(15, 23, 42, 0.55)"
+              stroke-width="2"
+              stroke-dasharray="4 3"
+            />
+            <line
+              x1="0"
+              y1={pos}
+              x2={size}
+              y2={pos}
+              stroke="rgba(255, 255, 255, 0.9)"
+              stroke-width="1"
+              stroke-dasharray="4 3"
+            />
+          {/each}
+        </svg>
+      {/if}
+    </div>
+    <div class="pae-legend" class:compact aria-label="PAE scale 0 Å to 31.75 Å">
+      <span>0 Å</span>
+      <span class="pae-grad" aria-hidden="true"></span>
+      <span>31.75 Å</span>
+    </div>
   {:else}
     <div class="pae-empty" style="width: {size}px; height: {size}px">No PAE data</div>
   {/if}
@@ -142,11 +214,42 @@
     flex-shrink: 0;
     color: var(--text-secondary);
   }
-  .pae-canvas {
-    border: 1px solid var(--border);
+  .pae-canvas-wrap {
+    position: relative;
     border-radius: 4px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    box-sizing: border-box;
+  }
+  .pae-canvas {
+    display: block;
     image-rendering: pixelated;
     cursor: crosshair;
+  }
+  .pae-dividers {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .pae-legend {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .pae-legend.compact {
+    font-size: 8.5px;
+    gap: 4px;
+  }
+  .pae-grad {
+    flex: 1;
+    height: 5px;
+    border-radius: 999px;
+    border: 1px solid var(--border-subtle);
+    background: linear-gradient(90deg, #004d25 0%, #f2f9fa 100%);
   }
   .pae-empty {
     display: flex;

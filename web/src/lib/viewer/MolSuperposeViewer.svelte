@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import type { ViewerModelSpec } from '$lib/engine/compare';
+  import type { AtomGranularity, BfactorSemantics } from '$lib/engine/types';
 
   interface Props {
     designedPdb: string | null;
@@ -22,6 +23,8 @@
     theme?: 'dark' | 'light';
     height?: number | string;
     label?: string;
+    atomGranularity?: AtomGranularity;
+    bfactorSemantics?: BfactorSemantics;
     emptyMessage?: string;
     emptyActionLabel?: string;
     onEmptyAction?: () => void;
@@ -53,6 +56,8 @@
     theme = 'dark',
     height = 420,
     label = undefined,
+    atomGranularity = undefined,
+    bfactorSemantics = undefined,
     emptyMessage = undefined,
     emptyActionLabel = undefined,
     onEmptyAction = undefined,
@@ -120,6 +125,7 @@
   let cameraMode = $state<'perspective' | 'orthographic'>('perspective');
   let localSpinSpeed = $state<number | null>(null);
   let effectiveSpinSpeed = $derived(localSpinSpeed ?? spinSpeed);
+  let plddtAllowed = $derived(bfactorSemantics !== 'none' && bfactorSemantics !== 'crystal-b');
   let lastStructureKey = '';
   let lastRenderedKey = '';
 
@@ -463,6 +469,7 @@
       sidechains: boolean;
       surfaceOverlay: boolean;
       ligands: boolean;
+      plddtAllowed: boolean;
       preserveCamera: boolean;
       structureKey: string;
       fullKey: string;
@@ -536,9 +543,13 @@
             }
           }
         }
+        const effectiveDesignedColor =
+          styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
+            ? 'auto'
+            : styleOpts.color;
         const designedColorArg =
-          styleOpts.color !== 'auto'
-            ? { color: styleOpts.color }
+          effectiveDesignedColor !== 'auto'
+            ? { color: effectiveDesignedColor }
             : hasOverlay
               ? { color: 'uniform', colorParams: { value: Color(0x94a3b8) } }
               : isMultiChain
@@ -576,7 +587,13 @@
           params: {},
         });
         const refoldColorArg =
-          styleOpts.color !== 'auto' ? { color: styleOpts.color } : { color: 'plddt-confidence' };
+          styleOpts.color !== 'auto'
+            ? styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
+              ? { color: 'secondary-structure' }
+              : { color: styleOpts.color }
+            : styleOpts.plddtAllowed
+              ? { color: 'plddt-confidence' }
+              : { color: 'uniform', colorParams: { value: Color(0x60a5fa) } };
         await ctx.builders.structure.representation.addRepresentation(struct, {
           type: styleOpts.rep,
           ...refoldColorArg,
@@ -715,6 +732,7 @@
       sidechains: boolean;
       surfaceOverlay: boolean;
       ligands: boolean;
+      plddtAllowed: boolean;
       preserveCamera: boolean;
       structureKey: string;
       fullKey: string;
@@ -763,10 +781,14 @@
           name: 'model',
           params: {},
         });
+        const effectiveColor =
+          styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
+            ? 'auto'
+            : styleOpts.color;
         const modelColorArg =
-          styleOpts.color !== 'auto'
-            ? { color: styleOpts.color }
-            : m.colorByPlddt
+          effectiveColor !== 'auto'
+            ? { color: effectiveColor }
+            : m.colorByPlddt && styleOpts.plddtAllowed
               ? { color: 'plddt-confidence' }
               : { color: 'uniform', colorParams: { value: Color(m.colorHex) } };
         const repr = await ctx.builders.structure.representation.addRepresentation(struct, {
@@ -852,8 +874,9 @@
       sidechains: showSidechains,
       surfaceOverlay: showSurfaceOverlay,
       ligands: showLigands,
+      plddtAllowed,
     };
-    const styleKey = `${styleOpts.rep}|${styleOpts.color}|${styleOpts.sidechains ? 1 : 0}|${styleOpts.surfaceOverlay ? 1 : 0}|${styleOpts.ligands ? 1 : 0}`;
+    const styleKey = `${styleOpts.rep}|${styleOpts.color}|${styleOpts.sidechains ? 1 : 0}|${styleOpts.surfaceOverlay ? 1 : 0}|${styleOpts.ligands ? 1 : 0}|${styleOpts.plddtAllowed ? 1 : 0}`;
     if (multiRenderKey !== null) {
       const mKey = `multi:${multiRenderKey}`;
       const fullKey = `${mKey}##${styleKey}`;
@@ -999,8 +1022,20 @@
 </script>
 
 <div class="mol-card" style="height: {typeof height === 'number' ? `${height}px` : height}">
-  {#if label}
-    <div class="badge" class:has-style-menu={expanded && hasAnyStructure} title={label}>{label}</div>
+  {#if label || (atomGranularity === 'ca-only' && hasAnyStructure)}
+    <div class="hud-top-left" class:has-style-menu={expanded && hasAnyStructure}>
+      {#if label}
+        <div class="badge" title={label}>{label}</div>
+      {/if}
+      {#if atomGranularity === 'ca-only' && hasAnyStructure}
+        <div
+          class="granularity-pill"
+          title="Only Cα backbone coordinates are present; Mol* renders an inferred smooth ribbon."
+        >
+          Cα-only (inferred ribbon)
+        </div>
+      {/if}
+    </div>
   {/if}
   {#if expanded && hasAnyStructure}
     <div class="style-menu-wrap">
@@ -1032,7 +1067,9 @@
             <select bind:value={colorScheme}>
               <option value="auto">Auto (Default)</option>
               <option value="chain-id">By Chain</option>
-              <option value="plddt-confidence">pLDDT Confidence</option>
+              <option value="plddt-confidence" disabled={!plddtAllowed}>
+                {plddtAllowed ? 'pLDDT Confidence' : 'pLDDT Confidence (unavailable)'}
+              </option>
               <option value="secondary-structure">Secondary Structure</option>
               <option value="hydrophobicity">Hydrophobicity</option>
               <option value="sequence-id">Rainbow (N → C)</option>
@@ -1175,12 +1212,23 @@
     height: 100%;
     display: block;
   }
-  .badge {
+  .hud-top-left {
     position: absolute;
     top: 10px;
     left: 10px;
     z-index: 10;
     max-width: calc(100% - 20px);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
+    pointer-events: none;
+  }
+  .hud-top-left.has-style-menu {
+    max-width: calc(100% - 175px);
+  }
+  .badge {
+    max-width: 100%;
     box-sizing: border-box;
     white-space: nowrap;
     overflow: hidden;
@@ -1194,8 +1242,17 @@
     border-radius: 4px;
     pointer-events: none;
   }
-  .badge.has-style-menu {
-    max-width: calc(100% - 175px);
+  .granularity-pill {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--warn-text);
+    background: color-mix(in srgb, var(--warn-bg) 92%, transparent);
+    border: 1px solid var(--warn-border);
+    padding: 2px 7px;
+    border-radius: 999px;
+    pointer-events: auto;
+    white-space: nowrap;
   }
   .legend {
     position: absolute;
@@ -1481,8 +1538,10 @@
     cursor: not-allowed;
   }
   @media (max-width: 640px) {
-    .badge.has-style-menu {
+    .hud-top-left.has-style-menu {
       max-width: calc(100% - 155px);
+    }
+    .badge {
       font-size: 10px;
     }
     .style-toggle-btn {

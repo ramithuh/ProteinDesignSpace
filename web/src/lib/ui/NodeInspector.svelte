@@ -15,6 +15,7 @@
     validatePdbId,
     validateSequenceText,
     validateStructureText,
+    type NumericFieldSpec,
   } from '$lib/engine/param-validation';
   import {
     QUICK_PDB_EXAMPLES,
@@ -25,7 +26,13 @@
   import { resolveMotifSourceResidues, type SelectedMotifSourceResidue } from '$lib/engine/conditioning';
   import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
   import NumericInput from './NumericInput.svelte';
-  import type { CanonicalArtifact, NodeProgressEvent, StructureArtifact, WorkflowNode } from '$lib/engine/types';
+  import type {
+    CanonicalArtifact,
+    MsaMode,
+    NodeProgressEvent,
+    StructureArtifact,
+    WorkflowNode,
+  } from '$lib/engine/types';
 
   interface Props {
     node: WorkflowNode;
@@ -194,13 +201,14 @@
     titleDraft = node.label ?? '';
   });
 
-  // Debounced textarea drafts for large `pdbText` and `sequence` inputs (200 ms)
+  // Debounced textarea drafts for large `pdbText`, `sequence`, and `msaA3mText` inputs (200 ms)
   let pdbTextDraft = $state('');
   let sequenceDraft = $state('');
+  let msaA3mDraft = $state('');
   let pendingTextCommit: {
     timer: ReturnType<typeof setTimeout>;
     nodeId: string;
-    key: 'pdbText' | 'sequence';
+    key: 'pdbText' | 'sequence' | 'msaA3mText';
     value: string;
     baseParams: Record<string, unknown>;
   } | null = null;
@@ -213,9 +221,10 @@
     onUpdate(pending.nodeId, { ...pending.baseParams, [pending.key]: pending.value });
   }
 
-  function scheduleTextParam(key: 'pdbText' | 'sequence', value: string) {
+  function scheduleTextParam(key: 'pdbText' | 'sequence' | 'msaA3mText', value: string) {
     if (key === 'pdbText') pdbTextDraft = value;
-    else sequenceDraft = value;
+    else if (key === 'sequence') sequenceDraft = value;
+    else msaA3mDraft = value;
     const targetNodeId = node.id;
     const baseParams = { ...node.params };
     if (pendingTextCommit) {
@@ -238,17 +247,116 @@
     const id = node.id;
     const extPdb = String(node.params.pdbText ?? '');
     const extSeq = String(node.params.sequence ?? '');
+    const extA3m = String(node.params.msaA3mText ?? '');
     if (!pendingTextCommit || pendingTextCommit.nodeId !== id || pendingTextCommit.key !== 'pdbText') {
       pdbTextDraft = extPdb;
     }
     if (!pendingTextCommit || pendingTextCommit.nodeId !== id || pendingTextCommit.key !== 'sequence') {
       sequenceDraft = extSeq;
     }
+    if (!pendingTextCommit || pendingTextCommit.nodeId !== id || pendingTextCommit.key !== 'msaA3mText') {
+      msaA3mDraft = extA3m;
+    }
   });
 
   onDestroy(() => {
     flushPendingTextCommit();
   });
+
+  const SCORER_MOTIF_RMSD_SPEC: NumericFieldSpec = {
+    min: 0.1,
+    max: 10,
+    step: 0.1,
+    integer: false,
+    defaultValue: 1.0,
+    unit: 'Å',
+  };
+  const SCORER_IPAE_SPEC: NumericFieldSpec = {
+    min: 1,
+    max: 31.75,
+    step: 0.5,
+    integer: false,
+    defaultValue: 10.0,
+    unit: 'Å',
+  };
+  const SCORER_IPSAE_SPEC: NumericFieldSpec = {
+    min: 0,
+    max: 1,
+    step: 0.05,
+    integer: false,
+    defaultValue: 0,
+  };
+
+  function localFoldMaxRecycles(modelId: string, family: string): number {
+    return modelId === 'mol1' || family === 'af2-multimer' ? 20 : 10;
+  }
+
+  function localFoldDefaultRecyclesHint(modelId: string, family: string): string {
+    if (family === 'af2-multimer') return 'Upstream default: 20 (max 20)';
+    if (modelId === 'mol1') return 'Upstream default: 10 (max 20)';
+    if (family === 'af3') return 'Upstream default: 10 (max 10)';
+    return 'Upstream default: 3 (max 10)';
+  }
+
+  function formatLocalFoldMsaBadge(modeRaw: unknown): string {
+    const mode = String(modeRaw ?? 'single') as MsaMode;
+    if (mode === 'mmseqs2') return 'MMseqs2 MSA';
+    if (mode === 'target-only') return 'Target-only MSA';
+    if (mode === 'a3m') return 'Custom .a3m MSA';
+    return 'Single-sequence (no MSA)';
+  }
+
+  function parseA3mSequenceSummary(raw: string): { seqCount: number; queryLength: number } {
+    const trimmed = raw.trim();
+    if (!trimmed) return { seqCount: 0, queryLength: 0 };
+    const lines = trimmed.split(/\r?\n/);
+    let seqCount = 0;
+    let firstSeq = '';
+    let curSeq = '';
+    let seenHeader = false;
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      if (line.startsWith('>')) {
+        if (seenHeader && curSeq.length > 0) {
+          seqCount++;
+          if (!firstSeq) firstSeq = curSeq;
+        }
+        seenHeader = true;
+        curSeq = '';
+      } else {
+        const clean = line.replace(/\s+/g, '');
+        if (seenHeader) {
+          curSeq += clean;
+        } else {
+          seqCount++;
+          if (!firstSeq) firstSeq = clean;
+        }
+      }
+    }
+    if (seenHeader && curSeq.length > 0) {
+      seqCount++;
+      if (!firstSeq) firstSeq = curSeq;
+    }
+    const queryLength = firstSeq.replace(/[a-z.-]/g, '').length;
+    return { seqCount, queryLength };
+  }
+
+  async function handleA3mFileUpload(ev: Event) {
+    const input = ev.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    flushPendingTextCommit();
+    const targetNodeId = node.id;
+    const baseParams = { ...node.params };
+    try {
+      const text = await file.text();
+      msaA3mDraft = text;
+      onUpdate(targetNodeId, { ...baseParams, msaMode: 'a3m', msaA3mText: text });
+    } finally {
+      input.value = '';
+    }
+  }
 
   function isAutoLocalFoldLabel(label: string | undefined): { auto: boolean; suffix: string } {
     const raw = (label ?? '').trim();
@@ -296,7 +404,7 @@
     const p = node.params ?? {};
     switch (node.adapterId) {
       case 'localfold-af2':
-        return `${selectedLocalFoldMeta?.label ?? LOCALFOLD_MODEL_OPTIONS[0].label} · Single-sequence (no MSA)`;
+        return `${selectedLocalFoldMeta?.label ?? LOCALFOLD_MODEL_OPTIONS[0].label} · ${formatLocalFoldMsaBadge(p.msaMode)}`;
       case 'rfd4-proteina':
         return rfd4NeedsEncoder
           ? 'RFD4-Proteina · Conditioned + structure encoder'
@@ -1071,10 +1179,10 @@
         </label>
       {:else if rfdMode === 'partial'}
         <label class="full">
-          Partial diffusion noise fraction
+          Denoising step fraction (nonlinear schedule)
           <NumericInput
             {disabled}
-            ariaLabel="Partial diffusion fraction"
+            ariaLabel="Denoising step fraction"
             spec={NUMERIC_SPECS['rfd4-proteina'].partialFraction}
             value={Number(node.params.partialFraction ?? 0.5)}
             onChange={(v) => setParam('partialFraction', v)}
@@ -1150,6 +1258,7 @@
               <option value="none">None (fastest)</option>
               <option value="low">Low (balanced)</option>
               <option value="medium">Medium (higher quality)</option>
+              <option value="high">High (highest fidelity)</option>
             </select>
           </label>
           <label>
@@ -1162,14 +1271,23 @@
               onChange={(v) => setParam('seed', v)}
             />
           </label>
-          <label class="inline-check">
+          <label
+            class="inline-check"
+            class:is-muted={rfdMode === 'inverse-folding'}
+            title={rfdMode === 'inverse-folding'
+              ? 'Early stop is disabled in inverse-folding because the backbone coordinates are fixed.'
+              : 'Stop denoising early if backbone Cα displacement converges'}
+          >
             <input
               type="checkbox"
-              {disabled}
-              checked={node.params.earlyStop !== false}
+              disabled={disabled || rfdMode === 'inverse-folding'}
+              checked={rfdMode === 'inverse-folding' ? false : Boolean(node.params.earlyStop)}
               onchange={(e) => setParam('earlyStop', e.currentTarget.checked)}
             />
             Early stop on convergence
+            {#if rfdMode === 'inverse-folding'}
+              <span class="field-hint">(disabled in inverse-folding)</span>
+            {/if}
           </label>
           <label>
             H-Bond Constraint
@@ -1543,6 +1661,26 @@
     {:else if node.adapterId === 'localfold-af2'}
       {@const lfModelId = String(node.params.model ?? 'monomer')}
       {@const lfMeta = selectedLocalFoldMeta ?? LOCALFOLD_MODEL_OPTIONS[0]}
+      {@const lfMsaMode = String(node.params.msaMode ?? 'single') as MsaMode}
+      {@const lfMaxRecycles = localFoldMaxRecycles(lfModelId, lfMeta.family)}
+      {@const lfRecyclesSpec = {
+        ...NUMERIC_SPECS['localfold-af2'].recycles,
+        max: lfMaxRecycles,
+      }}
+      {@const lfDefaultTol = lfMeta.family === 'af2-multimer' ? 0.5 : 0}
+      {@const lfTolSpec = {
+        min: 0,
+        max: 5,
+        step: 0.1,
+        integer: false,
+        defaultValue: lfDefaultTol,
+        unit: 'Å',
+      }}
+      {@const lfA3mSummary = lfMsaMode === 'a3m' ? parseA3mSequenceSummary(msaA3mDraft) : null}
+      {@const lfHasHoloContext =
+        Boolean(String(node.params.ligandCcdCodes ?? '').trim()) ||
+        Boolean(String(node.params.dnaSequences ?? '').trim()) ||
+        Boolean(String(node.params.rnaSequences ?? '').trim())}
       <label class="wide">
         Model
         <select
@@ -1550,12 +1688,16 @@
           value={lfModelId}
           onchange={(e) => {
             const nextModel = e.currentTarget.value;
+            const nextMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === nextModel);
             const autoInfo = isAutoLocalFoldLabel(node.label);
-            if (autoInfo.auto) {
-              const nextMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === nextModel);
-              if (nextMeta) {
-                onUpdateLabel?.(node.id, `${nextMeta.shortLabel}${autoInfo.suffix}`);
-              }
+            if (autoInfo.auto && nextMeta) {
+              onUpdateLabel?.(node.id, `${nextMeta.shortLabel}${autoInfo.suffix}`);
+            }
+            const nextMaxRec = nextMeta ? localFoldMaxRecycles(nextModel, nextMeta.family) : 10;
+            const curRec = Number(node.params.recycles ?? 1);
+            if (Number.isFinite(curRec) && curRec > nextMaxRec) {
+              onUpdate(node.id, { ...node.params, model: nextModel, recycles: nextMaxRec });
+              return;
             }
             setParam('model', nextModel);
           }}
@@ -1576,17 +1718,74 @@
             {/each}
           </optgroup>
         </select>
-        <span class="field-hint">Single-sequence (no MSA) · Weights: ~{lfMeta.approxMB} MB · License: {lfMeta.license}</span>
+        <span class="field-hint">{formatLocalFoldMsaBadge(lfMsaMode)} · Weights: ~{lfMeta.approxMB} MB · License: {lfMeta.license}</span>
       </label>
+
+      <label class="full">
+        MSA Mode
+        <select
+          {disabled}
+          value={lfMsaMode}
+          onchange={(e) => {
+            flushPendingTextCommit();
+            setParam('msaMode', e.currentTarget.value);
+          }}
+        >
+          <option value="single">Single-sequence (100% local)</option>
+          <option value="mmseqs2">MMseqs2 MSA (ColabFold API)</option>
+          <option value="target-only">Target-only MSA (binders — skips de novo chain)</option>
+          <option value="a3m">Custom .a3m alignment (local)</option>
+        </select>
+        {#if lfMsaMode === 'mmseqs2' || lfMsaMode === 'target-only'}
+          <span class="field-hint">
+            Queries api.colabfold.com for evolutionary alignments; cached across candidates
+          </span>
+        {/if}
+      </label>
+
+      {#if lfMsaMode === 'a3m'}
+        <div class="a3m-box full">
+          <div class="a3m-head">
+            <label class="mu-upload-btn a3m-upload-btn" class:is-disabled={disabled}>
+              <span>↑ Upload .a3m file</span>
+              <input
+                type="file"
+                accept=".a3m,.fas,.fasta,.txt"
+                hidden
+                {disabled}
+                onchange={handleA3mFileUpload}
+              />
+            </label>
+            {#if lfA3mSummary && lfA3mSummary.seqCount > 0}
+              <span class="field-hint ok">
+                ✓ {lfA3mSummary.seqCount} sequence{lfA3mSummary.seqCount === 1 ? '' : 's'} parsed{lfA3mSummary.queryLength > 0 ? ` · ${lfA3mSummary.queryLength} aa query` : ''}
+              </span>
+            {:else}
+              <span class="field-hint warn">Paste or upload a .a3m alignment</span>
+            {/if}
+          </div>
+          <textarea
+            rows="4"
+            class:input-error={!lfA3mSummary || lfA3mSummary.seqCount === 0}
+            {disabled}
+            placeholder=">query&#10;MKTAYIAKQRQISFVK...&#10;>hit1&#10;MKTAYIAKQRQISFVK..."
+            value={msaA3mDraft}
+            oninput={(e) => scheduleTextParam('msaA3mText', e.currentTarget.value)}
+            onblur={flushPendingTextCommit}
+          ></textarea>
+        </div>
+      {/if}
+
       <label>
         Recycles
         <NumericInput
           {disabled}
           ariaLabel="Recycles"
-          spec={NUMERIC_SPECS['localfold-af2'].recycles}
+          spec={lfRecyclesSpec}
           value={Number(node.params.recycles ?? 1)}
           onChange={(v) => setParam('recycles', v)}
         />
+        <span class="field-hint">{localFoldDefaultRecyclesHint(lfModelId, lfMeta.family)}</span>
       </label>
       {#if lfMeta.family === 'af3'}
         <label>
@@ -1616,6 +1815,50 @@
         </div>
       {/if}
 
+      {#if lfMeta.family === 'af3'}
+        <details class="adv-details full" open={lfHasHoloContext}>
+          <summary>
+            Holo co-folding (ligands / DNA / RNA)
+            {#if lfHasHoloContext}
+              <span class="adv-badge">Active</span>
+            {/if}
+          </summary>
+          <div class="adv-fields">
+            <label class="full">
+              Ligand CCD codes
+              <input
+                type="text"
+                {disabled}
+                placeholder="e.g. SAM, ZN, ATP"
+                value={String(node.params.ligandCcdCodes ?? '')}
+                oninput={(e) => setParam('ligandCcdCodes', e.currentTarget.value)}
+              />
+              <span class="field-hint">Comma-separated PDB Chemical Component Dictionary (CCD) IDs.</span>
+            </label>
+            <label class="full">
+              DNA sequences
+              <input
+                type="text"
+                {disabled}
+                placeholder="e.g. ACGTACGT (separate multiple chains with : or ,)"
+                value={String(node.params.dnaSequences ?? '')}
+                oninput={(e) => setParam('dnaSequences', e.currentTarget.value)}
+              />
+            </label>
+            <label class="full">
+              RNA sequences
+              <input
+                type="text"
+                {disabled}
+                placeholder="e.g. AUGCAUGC (separate multiple chains with : or ,)"
+                value={String(node.params.rnaSequences ?? '')}
+                oninput={(e) => setParam('rnaSequences', e.currentTarget.value)}
+              />
+            </label>
+          </div>
+        </details>
+      {/if}
+
       <details class="adv-details full">
         <summary>Advanced parameters</summary>
         <div class="adv-fields">
@@ -1629,10 +1872,29 @@
               onChange={(v) => setParam('seed', v)}
             />
           </label>
+          {#if lfMeta.family === 'af2' || lfMeta.family === 'af2-multimer'}
+            <label>
+              Early-stop tolerance (Å)
+              <NumericInput
+                {disabled}
+                ariaLabel="Early-stop tolerance (Å)"
+                spec={lfTolSpec}
+                value={Number(node.params.tolerance ?? lfDefaultTol)}
+                onChange={(v) => setParam('tolerance', v)}
+              />
+              <span class="field-hint">
+                0 = run all recycles on AF2 monomer (0.5 Å default on AF2-Multimer).
+              </span>
+            </label>
+          {/if}
         </div>
       </details>
 
     {:else if node.adapterId === 'designability-scorer'}
+      {@const curMotifThresh = Number(node.params.motifRmsdThreshold ?? 1.0)}
+      {@const curIpaeThresh = Number(node.params.ipaeThreshold ?? 10.0)}
+      {@const curIpsaeThresh = Number(node.params.ipsaeThreshold ?? 0)}
+      {@const hasCustomAdvGate = curMotifThresh !== 1.0 || curIpaeThresh !== 10.0 || curIpsaeThresh > 0}
       <label>
         scRMSD &lt; Å
         <NumericInput
@@ -1653,6 +1915,47 @@
           onChange={(v) => setParam('plddtThreshold', v)}
         />
       </label>
+      <details class="adv-details full">
+        <summary>
+          Advanced thresholds
+          {#if hasCustomAdvGate}
+            <span class="adv-badge">Custom</span>
+          {/if}
+        </summary>
+        <div class="adv-fields">
+          <label>
+            Motif RMSD threshold (Å)
+            <NumericInput
+              {disabled}
+              ariaLabel="Motif RMSD threshold (Å)"
+              spec={SCORER_MOTIF_RMSD_SPEC}
+              value={curMotifThresh}
+              onChange={(v) => setParam('motifRmsdThreshold', v)}
+            />
+          </label>
+          <label>
+            iPAE threshold (Å)
+            <NumericInput
+              {disabled}
+              ariaLabel="iPAE threshold (Å)"
+              spec={SCORER_IPAE_SPEC}
+              value={curIpaeThresh}
+              onChange={(v) => setParam('ipaeThreshold', v)}
+            />
+          </label>
+          <label>
+            ipSAE threshold (0 = off)
+            <NumericInput
+              {disabled}
+              ariaLabel="ipSAE threshold"
+              spec={SCORER_IPSAE_SPEC}
+              value={curIpsaeThresh}
+              onChange={(v) => setParam('ipsaeThreshold', v)}
+            />
+            <span class="field-hint">Optional Dunbrack interface gate (e.g. 0.6; 0 disables).</span>
+          </label>
+        </div>
+      </details>
     {/if}
   </div>
 
@@ -1800,6 +2103,27 @@
     gap: 6px;
     padding-bottom: 6px;
     cursor: pointer;
+    flex-wrap: wrap;
+  }
+  label.inline-check.is-muted {
+    opacity: 0.72;
+    cursor: not-allowed;
+  }
+  .a3m-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .a3m-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .a3m-upload-btn {
+    padding: 3px 9px;
+    font-size: 10.5px;
   }
   .chip-field {
     display: flex;

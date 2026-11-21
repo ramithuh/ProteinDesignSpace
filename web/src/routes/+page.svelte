@@ -39,6 +39,8 @@
   import { estimateRunRequirements, type RunPreflightSummary } from '$lib/engine/run-preflight';
   import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
   import type {
+    AtomGranularity,
+    BfactorSemantics,
     BioCompatibilityIssue,
     CanonicalArtifact,
     DesignabilityMetrics,
@@ -1866,6 +1868,48 @@
         : null),
   );
 
+  let viewerAtomGranularity = $derived.by((): AtomGranularity | undefined => {
+    if (isCompareMode) return undefined;
+    if (peekStructure) return peekStructure.atomGranularity;
+    if (peekFoldSet) return 'all-atom';
+    if (peekMetrics) {
+      return showDesigned && !showRefold ? contextStructure?.atomGranularity : undefined;
+    }
+    if (peekSequences && (!isPeekingSequenceSlot || showSeqParentBackbone)) {
+      return contextStructure?.atomGranularity;
+    }
+    return undefined;
+  });
+
+  let viewerBfactorSemantics = $derived.by((): BfactorSemantics | undefined => {
+    if (isCompareMode) return undefined;
+    if (peekMetrics) {
+      if (showRefold) {
+        return activeRow?.confidenceAvailable === false ? 'none' : 'plddt-0-100';
+      }
+      return (
+        contextStructure?.bfactorSemantics ??
+        (contextStructure?.sourceModelId === 'pdb-input' ? 'crystal-b' : undefined)
+      );
+    }
+    if (peekFoldSet) {
+      return activeFold?.confidenceAvailable === false ? 'none' : 'plddt-0-100';
+    }
+    if (peekStructure) {
+      return (
+        peekStructure.bfactorSemantics ??
+        (peekStructure.sourceModelId === 'pdb-input' ? 'crystal-b' : undefined)
+      );
+    }
+    if (peekSequences && (!isPeekingSequenceSlot || showSeqParentBackbone)) {
+      return (
+        contextStructure?.bfactorSemantics ??
+        (contextStructure?.sourceModelId === 'pdb-input' ? 'crystal-b' : undefined)
+      );
+    }
+    return undefined;
+  });
+
   let viewerEmptyMessage = $derived.by((): string | undefined => {
     if (isPeekingSequenceSlot && peekSequences && !showSeqParentBackbone) {
       const n = peekSequences.candidates.length;
@@ -1938,10 +1982,11 @@
   let plddtThreshold = $derived(Number(activeScorerNode?.params.plddtThreshold ?? 70));
   let ipaeThreshold = $derived(Number(activeScorerNode?.params.ipaeThreshold ?? 10.0));
   let motifRmsdThreshold = $derived(Number(activeScorerNode?.params.motifRmsdThreshold ?? 1.0));
+  let ipsaeThreshold = $derived(Number(activeScorerNode?.params.ipsaeThreshold ?? 0));
 
   let thresholdsByNodeId = $derived.by(
-    (): Record<string, { scRmsd: number; plddt: number; ipae: number; motifRmsd: number }> => {
-      const map: Record<string, { scRmsd: number; plddt: number; ipae: number; motifRmsd: number }> = {};
+    (): Record<string, { scRmsd: number; plddt: number; ipae: number; motifRmsd: number; ipsae: number }> => {
+      const map: Record<string, { scRmsd: number; plddt: number; ipae: number; motifRmsd: number; ipsae: number }> = {};
       for (const n of graph.nodes) {
         if (n.adapterId === 'designability-scorer') {
           map[n.id] = {
@@ -1949,6 +1994,7 @@
             plddt: Number(n.params.plddtThreshold ?? 70),
             ipae: Number(n.params.ipaeThreshold ?? 10.0),
             motifRmsd: Number(n.params.motifRmsdThreshold ?? 1.0),
+            ipsae: Number(n.params.ipsaeThreshold ?? 0),
           };
         }
       }
@@ -1956,30 +2002,55 @@
     },
   );
 
-  // Per-branch lineage & collection metadata for ComparePeekPanel
+  // Per-branch lineage, MSA, ipSAE, failed-gate & provenance metadata for ComparePeekPanel
   let compareBranchMetaByNodeId = $derived.by((): Record<string, CompareBranchMeta> => {
     if (!isCompareMode) return {};
+    const selectedIdxByNode = new Map<string, number>();
+    if (comparisonState) {
+      for (const br of comparisonState.branches) {
+        selectedIdxByNode.set(br.nodeId, br.selectedIndex);
+      }
+    }
     const map: Record<string, CompareBranchMeta> = {};
     for (const id of selectedNodeIds) {
       const outs = outputsByNode[id];
       if (!outs) continue;
       const values = Object.values(outs);
+      const selIdx = selectedIdxByNode.get(id) ?? branchCandidateIdx[id] ?? 0;
       const metrics = values.find((a): a is DesignabilityMetrics => a.kind === 'DesignabilityMetrics');
       if (metrics) {
+        const row = metrics.rows[selIdx] ?? metrics.best ?? metrics.rows[0] ?? null;
+        const ctxStruct = findContextStructure(graph, id, outputsByNode);
         map[id] = {
-          referenceRelation: metrics.referenceRelation,
-          referenceLabel: metrics.referenceLabel,
+          referenceRelation: row?.referenceRelation ?? metrics.referenceRelation,
+          referenceLabel: row?.referenceLabel ?? metrics.referenceLabel,
           lineageWarning: metrics.lineageWarning,
-          lineageMismatch: metrics.lineageMismatch,
+          lineageMismatch: row?.lineageMismatch ?? metrics.lineageMismatch,
           collectionKind: metrics.collectionKind,
+          ipsae: row?.ipsae ?? null,
+          ipsaeMin: row?.ipsaeMin ?? null,
+          failedGates: row?.failedGates,
+          msaMode: row?.msaMode,
+          msaDepth: row?.msaDepth,
+          atomGranularity: ctxStruct?.atomGranularity,
+          provenance: ctxStruct?.provenance,
+          chainLengths: ctxStruct?.chainLengths ?? ctxStruct?.diagnostics?.chainLengths,
         };
         continue;
       }
       const folds = values.find((a): a is FoldedStructure => a.kind === 'FoldedStructure');
       if (folds) {
+        const fold = folds.folds[selIdx] ?? folds.folds[0] ?? null;
         map[id] = {
           representativeSelection: folds.representativeSelection,
           collectionKind: folds.collectionKind,
+          ipsae: fold?.ipsae ?? null,
+          ipsaeMin: fold?.ipsaeMin ?? null,
+          msaMode: fold?.msaMode ?? fold?.provenance?.msaMode,
+          msaDepth: fold?.msaDepth ?? fold?.provenance?.msaDepth,
+          provenance: fold?.provenance,
+          chainLengths: fold?.chainLengths,
+          foldModelId: fold?.foldModelId,
         };
         continue;
       }
@@ -1987,6 +2058,11 @@
       if (struct) {
         map[id] = {
           representativeSelection: struct.representativeSelection,
+          atomGranularity: struct.atomGranularity,
+          provenance: struct.provenance,
+          msaMode: struct.provenance?.msaMode,
+          msaDepth: struct.provenance?.msaDepth,
+          chainLengths: struct.chainLengths ?? struct.diagnostics?.chainLengths,
         };
       }
     }
@@ -2585,6 +2661,8 @@
             {theme}
             height={expandedPane === 'viewer' ? '100%' : splitMode === 'horizontal' ? 350 : 460}
             label={isCompareMode ? compareViewerLabel : viewerLabel}
+            atomGranularity={viewerAtomGranularity}
+            bfactorSemantics={viewerBfactorSemantics}
             emptyMessage={isCompareMode ? undefined : viewerEmptyMessage}
             emptyActionLabel={!isCompareMode && isPeekingSequenceSlot && !showSeqParentBackbone && contextStructure
               ? 'Preview parent backbone'
@@ -2699,6 +2777,7 @@
               {plddtThreshold}
               {ipaeThreshold}
               {motifRmsdThreshold}
+              {ipsaeThreshold}
               {thresholdsByNodeId}
               branchMetaByNodeId={compareBranchMetaByNodeId}
               {isRunning}
@@ -2729,6 +2808,7 @@
               {plddtThreshold}
               {ipaeThreshold}
               {motifRmsdThreshold}
+              {ipsaeThreshold}
               {isRunning}
               hasScorerResult={Boolean(latestScorerHit && latestScorerHit.nodeId !== selectedNode?.id)}
               onSelectSlot={handleSelectPeekSlot}

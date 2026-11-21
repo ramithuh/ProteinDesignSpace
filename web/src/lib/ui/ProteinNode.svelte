@@ -170,11 +170,20 @@
         const modelId = String(p.model ?? 'monomer');
         const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
         const rec = Number(p.recycles ?? 1);
+        const msaMode = String(p.msaMode ?? 'single');
+        const msaTag =
+          msaMode === 'mmseqs2'
+            ? 'MMseqs2'
+            : msaMode === 'target-only'
+              ? 'target MSA'
+              : msaMode === 'a3m'
+                ? '.a3m'
+                : 'single-seq';
         if (meta.family === 'af3') {
           const steps = Number(p.diffusionSteps ?? 25);
-          return `LocalFold · single-seq · ${steps} steps · ${rec} rec`;
+          return `LocalFold · ${msaTag} · ${steps} steps · ${rec} rec`;
         }
-        return `LocalFold · single-seq · ${rec} rec`;
+        return `LocalFold · ${msaTag} · ${rec} rec`;
       }
       case 'designability-scorer': {
         return `scRMSD < ${Number(p.scRmsdThreshold ?? 2.0).toFixed(1)} Å · pLDDT ≥ ${Number(p.plddtThreshold ?? 70)}`;

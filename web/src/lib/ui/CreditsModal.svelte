@@ -34,7 +34,7 @@
       name: 'LocalFold',
       role: 'WebGPU Structure Prediction Runtime',
       detail:
-        'Browser-native WebGPU engine by Sergey Ovchinnikov powering AlphaFold2, OpenFold, RF3, Boltz-2, Protenix, OpenBind & AlphaFold 3 refolding.',
+        'Browser-native WebGPU engine by Sergey Ovchinnikov powering AlphaFold2, AF2-Multimer v3, RoseTTAFold3, Boltz-2, Protenix-v2, OpenBind-0 (OpenFold3 v0.5.0), OpenDDE, Mol-1, IntelliFold-2 & AlphaFold 3 refolding.',
       license: 'Beer-Ware (code); upstream weight terms',
       url: 'https://github.com/sokrypton/localfold',
       linkLabel: 'sokrypton/localfold',
@@ -102,6 +102,24 @@
       url: 'https://www.rcsb.org',
       linkLabel: 'rcsb.org',
     },
+    {
+      name: 'ColabFold MMseqs2 API',
+      role: 'Evolutionary Multiple Sequence Alignments (Optional)',
+      detail:
+        'Fast MMseqs2 homology search service (api.colabfold.com; Mirdita et al., Nature Methods 2022) used only when MMseqs2 or Target-Only MSA mode is enabled on LocalFold.',
+      license: 'MIT (ColabFold)',
+      url: 'https://github.com/sokrypton/ColabFold',
+      linkLabel: 'sokrypton/ColabFold',
+    },
+    {
+      name: 'ipSAE',
+      role: 'Multi-Chain Interface Quality Scoring',
+      detail:
+        'Interface Predicted Structural Alignment Error (Dunbrack, 2025) for evaluating binder-target and complex interfaces directly from PAE matrices.',
+      license: 'MIT',
+      url: 'https://github.com/DunbrackLab/IPSAE',
+      linkLabel: 'DunbrackLab/IPSAE',
+    },
   ];
 </script>
 
@@ -134,9 +152,10 @@
       </div>
       <h2 id="credits-title">Built on open protein design tools</h2>
       <p class="hdr-sub">
-        <strong>denovo.run</strong> runs entirely in your browser over WebGPU — no server compute,
-        no data uploads. Huge thanks to the researchers and open-source maintainers whose models,
-        WebGPU runtimes, and libraries make this possible.
+        <strong>denovo.run</strong> runs entirely in your browser over WebGPU — no server compute
+        and no data uploads in default local mode (optional ColabFold MMseqs2 MSA queries only when
+        enabled). Huge thanks to the researchers and open-source maintainers whose models, WebGPU
+        runtimes, and libraries make this possible.
       </p>
     </div>
 
@@ -201,7 +220,7 @@
         Model weights are streamed directly from upstream repositories into your browser's local
         storage (OPFS) and remain subject to their respective upstream model licenses (e.g.,
         Google DeepMind AlphaFold2 / AlphaFold 3 terms, NVIDIA RFD4-Proteina BSD-3-Clause,
-        RosettaCommons RF3, MIT Boltz-2, ByteDance Protenix, and OpenFold).
+        RosettaCommons RF3, MIT Boltz-2, ByteDance Protenix, and OpenBind-0 (OpenFold3 v0.5.0)).
       </p>
     </div>
 

@@ -6,7 +6,10 @@
     type ComparisonState,
   } from '$lib/engine/compare';
   import type {
+    ArtifactProvenance,
+    AtomGranularity,
     CollectionKind,
+    MsaMode,
     ReferenceRelation,
     RepresentativeSelection,
   } from '$lib/engine/types';
@@ -18,6 +21,15 @@
     lineageMismatch?: boolean;
     representativeSelection?: RepresentativeSelection;
     collectionKind?: CollectionKind;
+    ipsae?: number | null;
+    ipsaeMin?: number | null;
+    failedGates?: string[];
+    msaMode?: MsaMode;
+    msaDepth?: number;
+    provenance?: ArtifactProvenance;
+    atomGranularity?: AtomGranularity;
+    chainLengths?: number[];
+    foldModelId?: string;
   }
 
   interface Props {
@@ -26,9 +38,10 @@
     plddtThreshold?: number;
     ipaeThreshold?: number;
     motifRmsdThreshold?: number;
+    ipsaeThreshold?: number;
     thresholdsByNodeId?: Record<
       string,
-      { scRmsd: number; plddt: number; ipae?: number; motifRmsd?: number }
+      { scRmsd: number; plddt: number; ipae?: number; motifRmsd?: number; ipsae?: number }
     >;
     branchMetaByNodeId?: Record<string, CompareBranchMeta>;
     isRunning?: boolean;
@@ -47,6 +60,7 @@
     plddtThreshold = 70,
     ipaeThreshold = 10.0,
     motifRmsdThreshold = 1.0,
+    ipsaeThreshold = 0,
     thresholdsByNodeId = undefined,
     branchMetaByNodeId = undefined,
     isRunning = false,
@@ -84,6 +98,32 @@
 
   function branchMotifRmsdThreshold(nodeId: string): number {
     return thresholdsByNodeId?.[nodeId]?.motifRmsd ?? motifRmsdThreshold;
+  }
+
+  function branchIpsaeThreshold(nodeId: string): number {
+    const t = thresholdsByNodeId?.[nodeId]?.ipsae ?? ipsaeThreshold;
+    return t > 0 ? t : 0.6;
+  }
+
+  function getBranchIpsae(b: ComparisonState['branches'][number]): number | null {
+    const direct = (b as { ipsae?: number | null }).ipsae;
+    if (isFiniteNum(direct)) return direct;
+    const metaVal = branchMetaByNodeId?.[b.nodeId]?.ipsae;
+    return isFiniteNum(metaVal) ? metaVal : null;
+  }
+
+  function formatMsaBadge(msaMode?: MsaMode, msaDepth?: number): string {
+    const depth = isFiniteNum(msaDepth) && msaDepth > 0 ? Math.round(msaDepth) : null;
+    if (msaMode === 'mmseqs2') return depth !== null ? `MMseqs2 · ${depth} seqs` : 'MMseqs2';
+    if (msaMode === 'target-only') return depth !== null ? `Target MSA · ${depth} seqs` : 'Target MSA';
+    if (msaMode === 'a3m') return depth !== null ? `.a3m · ${depth} seqs` : '.a3m';
+    return 'single-seq';
+  }
+
+  function formatQuantChip(meta?: CompareBranchMeta): string | null {
+    if (meta?.provenance?.quantization) return meta.provenance.quantization.toUpperCase();
+    if (meta?.foldModelId?.toLowerCase().includes('-int5')) return 'INT5';
+    return null;
   }
 
   function formatCollectionKind(kind?: CollectionKind): string | null {
@@ -147,6 +187,10 @@
     const vals = branches.map((b) => b.ipae).filter(isFiniteNum);
     return vals.length >= 2 ? Math.min(...vals) : null;
   });
+  let bestIpsae = $derived.by((): number | null => {
+    const vals = branches.map((b) => getBranchIpsae(b)).filter(isFiniteNum);
+    return vals.length >= 2 ? Math.max(...vals) : null;
+  });
   let bestBinderScRmsd = $derived.by((): number | null => {
     const vals = branches.map((b) => b.binderScRmsd).filter(isFiniteNum);
     return vals.length >= 2 ? Math.min(...vals) : null;
@@ -175,6 +219,23 @@
   let hasAnyPtm = $derived(branches.some((b) => isFiniteNum(b.ptm)));
   let hasAnyIptm = $derived(branches.some((b) => isFiniteNum(b.iptm)));
   let hasAnyIpae = $derived(branches.some((b) => isFiniteNum(b.ipae)));
+  let hasAnyIpsae = $derived(branches.some((b) => isFiniteNum(getBranchIpsae(b))));
+  let hasAnyMsa = $derived(
+    branches.some((b) => {
+      const meta = branchMetaByNodeId?.[b.nodeId];
+      return b.kind === 'fold' || b.kind === 'metrics' || Boolean(meta?.msaMode || meta?.provenance?.msaMode);
+    }),
+  );
+  let hasAnyProvenance = $derived(
+    branches.some((b) => {
+      const meta = branchMetaByNodeId?.[b.nodeId];
+      return Boolean(
+        formatQuantChip(meta) ||
+          meta?.atomGranularity === 'ca-only' ||
+          meta?.provenance?.degradedFallback,
+      );
+    }),
+  );
   let hasAnyBinderScRmsd = $derived(branches.some((b) => isFiniteNum(b.binderScRmsd)));
   let hasAnyTargetAlignedBinderRmsd = $derived(
     branches.some((b) => isFiniteNum(b.targetAlignedBinderRmsd)),
@@ -571,17 +632,97 @@
           </tr>
         {/if}
 
+        {#if hasAnyIpsae}
+          <tr>
+            <td class="m-k">ipSAE</td>
+            {#each branches as b (b.nodeId)}
+              {@const ipsaeVal = getBranchIpsae(b)}
+              <td
+                class:win={bestIpsae !== null && isFiniteNum(ipsaeVal) && ipsaeVal === bestIpsae}
+                class:pass-val={isFiniteNum(ipsaeVal) && ipsaeVal >= branchIpsaeThreshold(b.nodeId)}
+              >
+                {fmtNum(ipsaeVal, 2)}
+              </td>
+            {/each}
+          </tr>
+        {/if}
+
         {#if hasAnyRmsd}
           <tr>
             <td class="m-k">Pass</td>
             {#each branches as b (b.nodeId)}
-              <td>
+              {@const gates = branchMetaByNodeId?.[b.nodeId]?.failedGates ?? []}
+              <td class="pass-cell">
                 {#if b.designable !== null}
-                  <span class="verdict" class:pass={b.designable}>
-                    {b.designable ? 'PASS' : 'FAIL'}
-                  </span>
+                  <div class="verdict-wrap">
+                    <span
+                      class="verdict"
+                      class:pass={b.designable}
+                      title={b.designable
+                        ? 'All gates passed'
+                        : gates.length > 0
+                          ? `Failed gates: ${gates.join(' · ')}`
+                          : 'Failed designability gate'}
+                    >
+                      {b.designable ? 'PASS' : 'FAIL'}
+                    </span>
+                    {#if !b.designable && gates.length > 0}
+                      <div class="gate-chips">
+                        {#each gates as g (g)}
+                          <span class="gate-chip" title={g}>{g}</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
                 {:else}
                   —
+                {/if}
+              </td>
+            {/each}
+          </tr>
+        {/if}
+
+        {#if hasAnyMsa}
+          <tr>
+            <td class="m-k">MSA</td>
+            {#each branches as b (b.nodeId)}
+              {@const meta = branchMetaByNodeId?.[b.nodeId]}
+              {@const msaMode = meta?.msaMode ?? meta?.provenance?.msaMode}
+              {@const msaDepth = meta?.msaDepth ?? meta?.provenance?.msaDepth}
+              <td>
+                {#if b.kind === 'fold' || b.kind === 'metrics' || msaMode}
+                  <span class="msa-chip">{formatMsaBadge(msaMode, msaDepth)}</span>
+                {:else}
+                  <span class="dim">—</span>
+                {/if}
+              </td>
+            {/each}
+          </tr>
+        {/if}
+
+        {#if hasAnyProvenance}
+          <tr>
+            <td class="m-k">Provenance</td>
+            {#each branches as b (b.nodeId)}
+              {@const meta = branchMetaByNodeId?.[b.nodeId]}
+              {@const qChip = formatQuantChip(meta)}
+              <td class="prov-cell">
+                {#if qChip || meta?.atomGranularity === 'ca-only' || meta?.provenance?.degradedFallback}
+                  <div class="prov-chips">
+                    {#if qChip}
+                      <span class="prov-chip">{qChip}</span>
+                    {/if}
+                    {#if meta?.atomGranularity === 'ca-only'}
+                      <span class="prov-chip warn" title="Cα-only backbone coordinates">Cα-only</span>
+                    {/if}
+                    {#if meta?.provenance?.degradedFallback}
+                      <span class="prov-chip warn" title={meta.provenance.degradedFallback}>
+                        ⚠ {meta.provenance.degradedFallback}
+                      </span>
+                    {/if}
+                  </div>
+                {:else}
+                  <span class="dim">—</span>
                 {/if}
               </td>
             {/each}
@@ -621,7 +762,11 @@
             <span class="badge-dot sm" style="background: {b.colorCss}">{b.badge}</span>
             <span>{b.label}</span>
           </div>
-          <PaePlot pae={b.pae!} size={136} />
+          <PaePlot
+            pae={b.pae!}
+            chainLengths={b.chainLengths ?? branchMetaByNodeId?.[b.nodeId]?.chainLengths}
+            size={136}
+          />
         </div>
       {/each}
     </div>
@@ -942,6 +1087,53 @@
     background: var(--ok-bg);
     color: var(--ok-text);
     border-color: var(--ok-border);
+  }
+  .pass-cell,
+  .prov-cell {
+    white-space: normal;
+  }
+  .verdict-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .gate-chips,
+  .prov-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+  }
+  .gate-chip {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--err-bg);
+    color: var(--err-strong);
+    border: 1px solid var(--err-border);
+    white-space: nowrap;
+  }
+  .msa-chip {
+    font-size: 9.5px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+    border: 1px solid var(--border-strong);
+  }
+  .prov-chip {
+    font-size: 9.5px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--bg-surface-2);
+    color: var(--text-muted);
+    border: 1px solid var(--border-subtle);
+    white-space: nowrap;
+  }
+  .prov-chip.warn {
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border-color: var(--warn-border);
   }
   .pae-grid {
     display: flex;
