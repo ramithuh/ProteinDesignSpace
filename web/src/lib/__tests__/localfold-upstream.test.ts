@@ -133,16 +133,26 @@ describe('upstream localfold multi-model integration', () => {
     // 10 protein + 8 DNA + 1 ZN ligand = 19 tokens
     expect(holoDnaBatch.tokens).toBe(19);
 
-    // Verify localfold.worker.ts wires mergeChainA3ms, iptmIsMonomerApprox, recycles clamp 0..4,
-    // AF3 ligand/DNA passthrough, shared selectFoldWorkItems (Issue #4), and selectFoldRepresentative (Issue #5)
+    // Verify localfold.worker.ts wires mergeChainA3ms, iptmIsMonomerApprox, dynamic recycles clamp,
+    // MSA resolution + af3BatchFromA3m, fail-loud CCD ligands, provenance/bfactorSemantics/atomGranularity,
+    // shared selectFoldWorkItems, and multimer-aware selectLocalFoldRepresentative.
     const workerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/localfold.worker.ts'), 'utf8');
     expect(workerSrc).toContain('mergeChainA3ms');
     expect(workerSrc).toContain('iptmIsMonomerApprox');
-    expect(workerSrc).toContain('Math.min(4,');
+    expect(workerSrc).toContain('clampLocalFoldRecycles');
+    expect(workerSrc).toContain('resolveAf2Tolerance');
+    expect(workerSrc).toContain('resolveMsaForCandidate');
+    expect(workerSrc).toContain('af3BatchFromA3m');
+    expect(workerSrc).toContain('conformerSeed');
     expect(workerSrc).toContain('ligandCcdCodes');
+    expect(workerSrc).toContain('Failed to fetch/parse requested CCD ligand');
+    expect(workerSrc).not.toContain('console.warn(`[localfold] Failed to fetch/parse CCD ligand');
     expect(workerSrc).toContain('selectFoldWorkItems');
-    expect(workerSrc).toContain('selectFoldRepresentative');
+    expect(workerSrc).toContain('selectLocalFoldRepresentative');
     expect(workerSrc).toContain('representativeSelection');
     expect(workerSrc).toContain('excludedCandidates');
+    expect(workerSrc).toContain("bfactorSemantics: 'plddt-0-100'");
+    expect(workerSrc).toContain("atomGranularity: 'all-atom'");
+    expect(workerSrc).toContain("quantization: 'int5'");
   });
 });

@@ -7,12 +7,22 @@
 import { atom37ToPdb, chainIdsFromLengths, parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { normalizeLocalFoldChainScores } from '$lib/engine/conditioning';
-import { selectFoldRepresentative, selectFoldWorkItems } from '$lib/engine/bio-capabilities';
+import { selectFoldWorkItems } from '$lib/engine/bio-capabilities';
+import {
+  clampLocalFoldRecycles,
+  computeAf2MsaBudgets,
+  createMsaSearchCache,
+  resolveAf2Tolerance,
+  resolveMsaForCandidate,
+  selectLocalFoldRepresentative,
+  type MmseqsApi,
+} from '$lib/engine/localfold-msa';
 import { fetchCachedBytes } from '$lib/engine/opfs-cache';
 import type {
   CollectionItemOutcome,
   FoldedCandidate,
   FoldedStructure,
+  MsaMode,
   SequenceSet,
   StructureArtifact,
 } from '$lib/engine/types';
@@ -128,6 +138,8 @@ async function ensureCoreModules(id: number) {
     monomerMod,
     unifiedMod,
     chainsMod,
+    a3mMod,
+    mmseqsMod,
     fixtureMod,
     storeMod,
     deltaStoreMod,
@@ -138,6 +150,8 @@ async function ensureCoreModules(id: number) {
     importVendor('webgpu/af2/model/monomer.js'),
     importVendor('webgpu/af2/multimer/model.js'),
     importVendor('shared/input/chains.js'),
+    importVendor('shared/input/a3m.js'),
+    importVendor('shared/input/mmseqs2-api.js'),
     importVendor('shared/bundles/alphafold-fixture.js'),
     importVendor('shared/bundles/http-tensor-store.js'),
     importVendor('shared/bundles/delta-tensor-store.js'),
@@ -150,10 +164,17 @@ async function ensureCoreModules(id: number) {
     AlphaFoldUnifiedGpu: unifiedMod.AlphaFoldUnifiedGpu,
     mergeChainA3ms: chainsMod.mergeChainA3ms,
     mergeUnpairedChainA3ms: chainsMod.mergeUnpairedChainA3ms,
+    parseA3m: a3mMod.parseA3m,
+    generateMmseqs2Msa: mmseqsMod.generateMmseqs2Msa,
+    generateMmseqs2ComplexMsa: mmseqsMod.generateMmseqs2ComplexMsa,
+    expandSearchedChains: mmseqsMod.expandSearchedChains,
+    mergeSearchedChains: mmseqsMod.mergeSearchedChains,
+    singleSequenceA3m: mmseqsMod.singleSequenceA3m,
     AlphaFoldFixture: fixtureMod.AlphaFoldFixture,
     HttpTensorStore: storeMod.HttpTensorStore,
     DeltaTensorStore: deltaStoreMod.DeltaTensorStore,
     MODEL_BUNDLES: manifestsMod.MODEL_BUNDLES,
+    graphFamily: manifestsMod.graphFamily,
     bundleBaseUrl: manifestsMod.bundleBaseUrl,
     loadManifest: manifestsMod.loadManifest,
     requestAlphaFoldDevice: deviceMod.requestAlphaFoldDevice,
@@ -171,12 +192,13 @@ async function ensureAf3Modules(id: number) {
     progress: 0.04,
     detail: 'Loading LocalFold AF3 / RF3 / Boltz-2 WebGPU kernels...',
   });
-  const [foldMod, diffWeightsMod, weightsMod, featuriseMod, dialectMod, residentMod, ccdMod] =
+  const [foldMod, diffWeightsMod, weightsMod, featuriseMod, batchMod, dialectMod, residentMod, ccdMod] =
     await Promise.all([
       importVendor('webgpu/af3/fold.js'),
       importVendor('shared/af3/weights/diffusion-weights.js'),
       importVendor('shared/af3/weights/weights.js'),
       importVendor('shared/af3/featurise/featurise.js'),
+      importVendor('shared/af3/featurise/batch.js'),
       importVendor('shared/af3/dialect.js'),
       importVendor('webgpu/runtime/resident.js'),
       importVendor('shared/af3/featurise/ccd-component.js'),
@@ -186,6 +208,7 @@ async function ensureAf3Modules(id: number) {
     foldWeights: diffWeightsMod.foldWeights,
     releaseWeights: weightsMod.releaseWeights,
     featuriseProtein: featuriseMod.featuriseProtein,
+    af3BatchFromA3m: batchMod.af3BatchFromA3m,
     featuriserDialect: dialectMod.featuriserDialect,
     releaseResidentWeights: residentMod.releaseResidentWeights,
     ccdUrl: ccdMod.ccdUrl,
@@ -420,9 +443,25 @@ self.onmessage = async (ev: MessageEvent) => {
       if (!isAf2Mono && !isAf2Multi && !isAf3) {
         throw new Error(`Unsupported LocalFold model "${modelKey}"`);
       }
-      const recycles = Math.max(0, Math.min(4, Math.round(Number(p.recycles ?? 1))));
-      const tolerance = Math.max(0, Math.min(5, Number(p.tolerance ?? 0.5)));
+      const recycles = clampLocalFoldRecycles(modelKey, p.recycles, 1);
+      const tolerance = resolveAf2Tolerance(modelKey, p.tolerance);
       const diffusionSteps = Math.max(10, Math.min(200, Math.round(Number(p.diffusionSteps ?? 25))));
+      const rawMsaMode = String(p.msaMode ?? 'single').trim();
+      const msaMode: MsaMode =
+        rawMsaMode === 'mmseqs2' || rawMsaMode === 'target-only' || rawMsaMode === 'a3m'
+          ? rawMsaMode
+          : 'single';
+      const msaA3mText = typeof p.msaA3mText === 'string' ? p.msaA3mText : '';
+      const lockedChains: string[] | undefined = Array.isArray(seqSet.lockedChains)
+        ? seqSet.lockedChains
+        : Array.isArray(p.lockedChains)
+          ? (p.lockedChains as unknown[]).map((c) => String(c).trim()).filter(Boolean)
+          : undefined;
+      const chainRoles: Record<string, 'target' | 'binder' | 'scaffold'> | undefined =
+        seqSet.chainRoles ??
+        (p.chainRoles && typeof p.chainRoles === 'object'
+          ? (p.chainRoles as Record<string, 'target' | 'binder' | 'scaffold'>)
+          : undefined);
       const work = selectFoldWorkItems(seqSet, p);
       const maxSeqs = work.maxSequences;
       const seed = Number(p.seed ?? 0);
@@ -449,6 +488,16 @@ self.onmessage = async (ev: MessageEvent) => {
       const targets = work.selected;
       const folds: FoldedCandidate[] = [];
       const sourceStructureId = seqSet.sourceStructureId ?? seqSet.parentStructureId;
+      const msaCache = createMsaSearchCache();
+      const mmseqsApi: MmseqsApi = {
+        generateMmseqs2Msa: lfCore.generateMmseqs2Msa,
+        generateMmseqs2ComplexMsa: lfCore.generateMmseqs2ComplexMsa,
+        expandSearchedChains: lfCore.expandSearchedChains,
+        mergeSearchedChains: lfCore.mergeSearchedChains,
+        singleSequenceA3m: lfCore.singleSequenceA3m,
+        parseA3m: lfCore.parseA3m,
+        graphFamily: lfCore.graphFamily,
+      };
 
       if (!isAf3) {
         const runner = isAf2Multi
@@ -476,12 +525,31 @@ self.onmessage = async (ev: MessageEvent) => {
               ? cand.chainLengths
               : [cleanSeq.length];
           const chainSeqs = splitChainSequences(cleanSeq, chainLengths);
-          const a3m =
-            chainSeqs.length > 1
-              ? isAf2Multi
-                ? lfCore.mergeChainA3ms(chainSeqs.map((s) => `>q\n${s}\n`))
-                : lfCore.mergeUnpairedChainA3ms(chainSeqs.map((s) => `>q\n${s}\n`))
-              : `>query\n${cleanSeq}\n`;
+          const chainIds = chainIdsFromLengths(chainLengths);
+          const uniqueChains = [...new Set(chainIds)];
+
+          const msa = await resolveMsaForCandidate({
+            msaMode,
+            modelKey,
+            chainSeqs,
+            chainIds: uniqueChains,
+            lockedChains,
+            chainRoles,
+            msaA3mText,
+            mmseqsApi,
+            cache: msaCache,
+            onProgress: (ev) => {
+              self.postMessage({
+                id: msg.id,
+                type: 'progress',
+                phase: 'msa',
+                progress: i / targets.length,
+                detail: `${cand.id}: ${ev.detail}`,
+              });
+            },
+          });
+          const a3m = msa.a3m;
+          const msaBudgets = computeAf2MsaBudgets(msa.msaDepth, chainSeqs.length, msa.distinctDepth);
           const foldStart = performance.now();
 
           self.postMessage({
@@ -489,16 +557,16 @@ self.onmessage = async (ev: MessageEvent) => {
             type: 'progress',
             phase: 'fold',
             progress: i / targets.length,
-            detail: `Folding ${cand.id} with ${isAf2Multi ? 'AF2-Multimer' : 'AF2'} ${modelKey} (${cleanSeq.length} aa${chainLengths.length > 1 ? `, ${chainLengths.length} chains` : ''}, ${recycles} rec)...`,
+            detail: `Folding ${cand.id} with ${isAf2Multi ? 'AF2-Multimer' : 'AF2'} ${modelKey} (${cleanSeq.length} aa${chainLengths.length > 1 ? `, ${chainLengths.length} chains` : ''}, ${recycles} rec${msa.msaDepth > 1 ? `, MSA ${msa.msaDepth}` : ''})...`,
           });
 
           const predictOpts = isAf2Multi
             ? {
                 recycles,
                 randomSeed: seed + i,
-                maxMsaSequences: Math.max(1, chainSeqs.length + 1),
-                maxExtraSequences: 1,
-                maskFraction: 0,
+                maxMsaSequences: msaBudgets.maxMsaSequences,
+                maxExtraSequences: msaBudgets.maxExtraSequences,
+                maskFraction: msaBudgets.maskFraction,
                 chainLengths,
                 chainSequences: chainSeqs,
                 chainAware: true,
@@ -509,9 +577,9 @@ self.onmessage = async (ev: MessageEvent) => {
             : {
                 recycles,
                 randomSeed: seed + i,
-                maxMsaSequences: Math.max(1, chainSeqs.length + 1),
-                maxExtraSequences: 1,
-                maskFraction: 0,
+                maxMsaSequences: msaBudgets.maxMsaSequences,
+                maxExtraSequences: msaBudgets.maxExtraSequences,
+                maskFraction: msaBudgets.maskFraction,
                 chainLengths,
                 tolerance,
               };
@@ -536,13 +604,17 @@ self.onmessage = async (ev: MessageEvent) => {
           );
 
           const fin = prediction.final;
+          const passesRun =
+            Array.isArray(prediction.recycles) && prediction.recycles.length > 0
+              ? prediction.recycles.length
+              : recycles + 1;
+          const recyclesRun = Math.max(0, passesRun - 1);
+          const earlyStopped = recyclesRun < recycles;
           const plddt = new Float32Array(fin.confidence.plddt as Float32Array);
           let sumPlddt = 0;
           for (let k = 0; k < plddt.length; k++) sumPlddt += plddt[k];
           const meanPlddt = plddt.length ? sumPlddt / plddt.length : 0;
 
-          const chainIds = chainIdsFromLengths(chainLengths);
-          const uniqueChains = [...new Set(chainIds)];
           const { pdbText, caCoords } = atom37ToPdb(
             fin.structure.atom37 as Float32Array,
             fin.structure.atom37Mask as Float32Array,
@@ -597,6 +669,15 @@ self.onmessage = async (ev: MessageEvent) => {
             chainIds,
             resNums: sequentialResNumsFromChainLengths(chainLengths),
             pae: paeRaw ? new Float32Array(paeRaw) : undefined,
+            msaMode,
+            msaDepth: msa.msaDepth,
+            provenance: {
+              quantization: 'int5',
+              recyclesRun,
+              ...(earlyStopped ? { earlyStopped: true } : {}),
+              msaMode,
+              msaDepth: msa.msaDepth,
+            },
             elapsedMs: performance.now() - foldStart,
           });
         }
@@ -605,9 +686,14 @@ self.onmessage = async (ev: MessageEvent) => {
         const dialect = loadedAf3.weights.trunk.dialect;
         const featOpts = lfAf3.featuriserDialect(dialect);
 
-        // Optional ligand CCD passthrough for AF3-lineage holo refolding
+        // Optional ligand CCD passthrough for AF3-lineage holo refolding (fail loud — never silently fold apo!)
         const parsedLigands: unknown[] = [];
-        if (ligandCcdCodes.length > 0 && lfAf3.ccdUrl && lfAf3.parseCcdComponent) {
+        if (ligandCcdCodes.length > 0) {
+          if (!lfAf3.ccdUrl || !lfAf3.parseCcdComponent) {
+            throw new Error(
+              `Cannot co-fold requested CCD ligand(s) [${ligandCcdCodes.join(', ')}]: LocalFold CCD component parser is unavailable.`,
+            );
+          }
           const textDec = new TextDecoder();
           for (const code of ligandCcdCodes) {
             try {
@@ -615,7 +701,9 @@ self.onmessage = async (ev: MessageEvent) => {
               const bytes = await fetchCachedBytes(`lf-ccd-${code}`, url);
               parsedLigands.push(lfAf3.parseCcdComponent(textDec.decode(bytes)));
             } catch (err) {
-              console.warn(`[localfold] Failed to fetch/parse CCD ligand "${code}":`, err);
+              throw new Error(
+                `Failed to fetch/parse requested CCD ligand "${code}" for holo co-folding (${err instanceof Error ? err.message : String(err)}). Verify the CCD code or remove it to fold apo.`,
+              );
             }
           }
         }
@@ -641,6 +729,29 @@ self.onmessage = async (ev: MessageEvent) => {
               ? cand.chainLengths
               : [cleanSeq.length];
           const proteinChainSeqs = splitChainSequences(cleanSeq, chainLengths);
+          const proteinUniqueChains = [...new Set(chainIdsFromLengths(chainLengths))];
+
+          const msa = await resolveMsaForCandidate({
+            msaMode,
+            modelKey,
+            chainSeqs: proteinChainSeqs,
+            chainIds: proteinUniqueChains,
+            lockedChains,
+            chainRoles,
+            msaA3mText,
+            mmseqsApi,
+            cache: msaCache,
+            onProgress: (ev) => {
+              self.postMessage({
+                id: msg.id,
+                type: 'progress',
+                phase: 'msa',
+                progress: i / targets.length,
+                detail: `${cand.id}: ${ev.detail}`,
+              });
+            },
+          });
+
           const allPolymerSeqs = [...proteinChainSeqs, ...dnaSeqs, ...rnaSeqs];
           const chainKinds: Array<'protein' | 'dna' | 'rna'> = [
             ...proteinChainSeqs.map(() => 'protein' as const),
@@ -656,19 +767,23 @@ self.onmessage = async (ev: MessageEvent) => {
             type: 'progress',
             phase: 'fold',
             progress: i / targets.length,
-            detail: `Folding ${cand.id} with ${modelKey} (${cleanSeq.length} aa${parsedLigands.length ? ` + ${ligandCcdCodes.join(',')}` : ''}${dnaSeqs.length ? ` + ${dnaSeqs.length} DNA` : ''}, ${recycles} rec, ${diffusionSteps} steps)...`,
+            detail: `Folding ${cand.id} with ${modelKey} (${cleanSeq.length} aa${parsedLigands.length ? ` + ${ligandCcdCodes.join(',')}` : ''}${dnaSeqs.length ? ` + ${dnaSeqs.length} DNA` : ''}${rnaSeqs.length ? ` + ${rnaSeqs.length} RNA` : ''}, ${recycles} rec, ${diffusionSteps} steps${msa.msaDepth > 1 ? `, MSA ${msa.msaDepth}` : ''})...`,
           });
 
-          const batch = lfAf3.featuriseProtein(
-            colonSeq,
-            hasExtraContext
+          // Use upstream af3BatchFromA3m for BOTH single-sequence (alignment = null) and MSA paths:
+          // it enforces dialect boundary inversions (`dedupeSelfMsa === false` -> `duplicateQueryRow: true`
+          // for AF3/OpenBind-0 depth-2 parity, `dropTerminalAtoms` -> `terminalAtoms`, `seed` -> `conformerSeed`).
+          const { batch } = lfAf3.af3BatchFromA3m(colonSeq, msa.af3Alignment, {
+            ...featOpts,
+            seed: seed + i,
+            conformerSeed: seed + i,
+            ...(hasExtraContext
               ? {
-                  ...featOpts,
                   chainKinds,
                   ...(parsedLigands.length > 0 ? { ligands: parsedLigands } : {}),
                 }
-              : featOpts,
-          );
+              : {}),
+          });
           const result = await lfAf3.foldBatch(gpuDevice, batch, loadedAf3.weights, {
             mode: 'diffusion',
             steps: diffusionSteps,
@@ -713,6 +828,11 @@ self.onmessage = async (ev: MessageEvent) => {
             },
           });
 
+          const recyclesRun =
+            typeof result.reusable?.recycles === 'number' && Number.isFinite(result.reusable.recycles)
+              ? result.reusable.recycles
+              : recycles;
+          const earlyStopped = recyclesRun < recycles;
           const pdbText = String(result.pdb ?? '');
           const parsed = parsePdbBackbone(pdbText);
           const L = cleanSeq.length;
@@ -777,6 +897,15 @@ self.onmessage = async (ev: MessageEvent) => {
                 ? parsed.resNums
                 : sequentialResNumsFromChainLengths(chainLengths),
             pae: paeRaw ? new Float32Array(paeRaw) : undefined,
+            msaMode,
+            msaDepth: msa.msaDepth,
+            provenance: {
+              quantization: 'int5',
+              recyclesRun,
+              ...(earlyStopped ? { earlyStopped: true } : {}),
+              msaMode,
+              msaDepth: msa.msaDepth,
+            },
             elapsedMs: performance.now() - foldStart,
           });
         }
@@ -791,6 +920,8 @@ self.onmessage = async (ev: MessageEvent) => {
           diffusionSteps: isAf3 ? diffusionSteps : null,
           maxSequences: maxSeqs,
           seed,
+          msaMode,
+          msaA3mHash: msaMode === 'a3m' ? fnv1a(msaA3mText) : null,
           ligandCcdCodes: isAf3 ? ligandCcdCodes : [],
           dnaSeqs: isAf3 ? dnaSeqs : [],
           rnaSeqs: isAf3 ? rnaSeqs : [],
@@ -798,7 +929,7 @@ self.onmessage = async (ev: MessageEvent) => {
       );
 
       const collectionKind = seqSet.collectionKind ?? 'independent-candidates';
-      const rep = selectFoldRepresentative(folds, { collectionKind });
+      const rep = selectLocalFoldRepresentative(folds, { collectionKind });
       const itemOutcomes: CollectionItemOutcome[] = [
         ...folds.map((f): CollectionItemOutcome => ({
           key: f.key ?? f.sequenceId,
@@ -836,7 +967,9 @@ self.onmessage = async (ev: MessageEvent) => {
             : bestParsed.chainIds;
         const confTag =
           rep.selection.scoreValue !== null && rep.selection.scoreValue !== undefined
-            ? `pLDDT ${rep.selection.scoreValue.toFixed(1)}`
+            ? rep.selection.criterion === 'highest-multimer-score'
+              ? `score ${rep.selection.scoreValue.toFixed(2)}`
+              : `pLDDT ${rep.selection.scoreValue.toFixed(1)}`
             : 'no confidence';
         bestStructure = {
           kind: 'StructureArtifact',
@@ -845,6 +978,9 @@ self.onmessage = async (ev: MessageEvent) => {
           sourceModelId: 'localfold-af2',
           parentStructureId: sourceStructureId,
           representativeSelection: rep.selection,
+          bfactorSemantics: 'plddt-0-100',
+          atomGranularity: 'all-atom',
+          ...(bestFold.provenance ? { provenance: bestFold.provenance } : {}),
           length: bestParsed.nResidues,
           sequence: bestFold.sequence,
           caCoords: bestParsed.caCoords,
