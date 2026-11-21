@@ -216,7 +216,8 @@
         if (destroyed) return null;
 
         const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-        const pixelScale = Math.min(1, 1.5 / dpr);
+        // Target crisp 2x effective DPR on 2x/3x Retina phones & laptops (avoiding Mol*'s mobile 'auto' double-division by DPR)
+        const pixelScale = Math.min(1, 2 / dpr);
 
         const spec = DefaultPluginSpec();
         spec.behaviors.push(PluginSpec.Behavior(MAQualityAssessment));
@@ -257,7 +258,8 @@
           return null;
         }
 
-        ctx.canvas3dContext?.setProps?.({ pixelScale });
+        ctx.canvas3dContext?.setProps?.({ resolutionMode: 'native', pixelScale });
+        ctx.handleResize();
         ctx.canvas3d?.setProps({
           renderer: { backgroundColor: (theme === 'light' ? 0xf8fafc : 0x0d0e11) as unknown as never },
           cameraFog: { name: 'off', params: {} },
@@ -656,17 +658,15 @@
               transparentThreshold: 0.4,
             },
           },
-      antialiasing: spinning
-        ? { name: 'off' as const, params: {} }
-        : {
-            name: 'fxaa' as const,
-            params: {
-              edgeThresholdMin: 0.0312,
-              edgeThresholdMax: 0.063,
-              iterations: 12,
-              subpixelQuality: 0.3,
-            },
-          },
+      antialiasing: {
+        name: 'fxaa' as const,
+        params: {
+          edgeThresholdMin: 0.0312,
+          edgeThresholdMax: 0.063,
+          iterations: 12,
+          subpixelQuality: 0.3,
+        },
+      },
       outline: illustrativeOn
         ? {
             name: 'on' as const,
