@@ -509,7 +509,8 @@ function tryMaterializeLocalPdbInput(node: WorkflowNode): StructureArtifact | nu
     const cachedText = String(node.params.pdbText ?? '').trim();
     if (!normId || !cachedText || (fetchedFor && fetchedFor !== normId)) return null;
     rawText = cachedText;
-    filename = String(node.params.filename || `${normId}.cif`);
+    const rawFn = String(node.params.filename ?? '').trim();
+    filename = rawFn && rawFn !== 'demo_3helix_53aa.pdb' ? rawFn : `${normId}.cif`;
   } else {
     return null;
   }
@@ -875,12 +876,14 @@ export function compileNodeInputPreview(
       const normId = normalizePdbId(String(node.params.pdbId ?? ''));
       const fetchedFor = normalizePdbId(String(node.params.fetchedPdbId ?? ''));
       const cachedText = String(node.params.pdbText ?? '').trim();
+      const nonDemoFilename =
+        filename.trim() && filename.trim() !== 'demo_3helix_53aa.pdb' ? filename.trim() : '';
       if (normId && cachedText && (!fetchedFor || fetchedFor === normId)) {
         rawText = cachedText;
-        filename = filename || `${normId}.cif`;
+        filename = nonDemoFilename || `${normId}.cif`;
       } else if (outStruct) {
         rawText = outStruct.cifText ?? outStruct.pdbText;
-        filename = filename || outStruct.label;
+        filename = nonDemoFilename || outStruct.label || (normId ? `${normId}.cif` : 'structure.cif');
       } else {
         availability = 'partial';
         payload = {

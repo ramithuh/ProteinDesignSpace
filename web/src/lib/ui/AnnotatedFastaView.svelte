@@ -81,8 +81,9 @@
   let copiedKey = $state<string | null>(null);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Local hover state + floating tooltip position
-  let localHoveredRes = $state<PreviewResidue | null>(null);
+  // Local hover token + floating tooltip position (resolve residue live from residueByToken
+  // so locking/unlocking a residue updates its tooltip roles immediately without pointer exit)
+  let localHoveredToken = $state<string | null>(null);
   let tooltipPos = $state<{ x: number; y: number } | null>(null);
 
   // Drag-paint state
@@ -161,10 +162,13 @@
     return map;
   });
 
+  let localHoveredRes = $derived<PreviewResidue | null>(
+    localHoveredToken ? (residueByToken.get(localHoveredToken) ?? null) : null,
+  );
+
   let activeTooltipRes = $derived.by((): PreviewResidue | null => {
-    if (localHoveredRes) return localHoveredRes;
-    if (hoveredToken) return residueByToken.get(hoveredToken) ?? null;
-    return null;
+    const tok = localHoveredToken ?? hoveredToken;
+    return tok ? (residueByToken.get(tok) ?? null) : null;
   });
 
   // Flat virtualized row items when windowing is enabled
@@ -452,8 +456,8 @@
   function handleTrackPointerMove(ev: PointerEvent) {
     const hit = findCellMeta(ev.target);
     if (hit) {
-      if (localHoveredRes?.token !== hit.res.token) {
-        localHoveredRes = hit.res;
+      if (localHoveredToken !== hit.res.token) {
+        localHoveredToken = hit.res.token;
         onHoverToken?.(hit.token);
       }
       tooltipPos = { x: ev.clientX, y: ev.clientY };
@@ -462,16 +466,16 @@
           dragEndIdx = hit.resIdx;
         }
       }
-    } else if (localHoveredRes) {
-      localHoveredRes = null;
+    } else if (localHoveredToken) {
+      localHoveredToken = null;
       tooltipPos = null;
       onHoverToken?.(null);
     }
   }
 
   function handleTrackPointerLeave() {
-    if (localHoveredRes) {
-      localHoveredRes = null;
+    if (localHoveredToken) {
+      localHoveredToken = null;
       tooltipPos = null;
       onHoverToken?.(null);
     }

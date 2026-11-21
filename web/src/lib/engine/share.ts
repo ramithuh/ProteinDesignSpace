@@ -252,9 +252,13 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
     const qs = new URLSearchParams();
     qs.set('p', preset.id);
     let presetStripped = false;
+    const presetBaseline = preset.graph.nodes.some((n) => !n.position)
+      ? autoLayoutGraph(structuredClone(preset.graph))
+      : preset.graph;
     for (let i = 0; i < graph.nodes.length; i++) {
       const n = graph.nodes[i];
       const baseN = preset.graph.nodes[i];
+      const laidN = presetBaseline.nodes[i];
       const { diff, strippedPdb: s } = diffParams(n.adapterId, n.params, baseN.params, true);
       if (s) presetStripped = true;
       for (const [k, v] of Object.entries(diff)) {
@@ -264,6 +268,21 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
       const curLabel = n.label?.trim() ? n.label : baseLabel;
       if (curLabel && curLabel !== baseLabel) {
         qs.set(`${n.id}._label`, curLabel);
+      }
+      const basePos = baseN.position ?? laidN?.position;
+      if (
+        n.position &&
+        Number.isFinite(n.position.x) &&
+        Number.isFinite(n.position.y) &&
+        basePos
+      ) {
+        const rx = Math.round(n.position.x);
+        const ry = Math.round(n.position.y);
+        const lx = Math.round(basePos.x);
+        const ly = Math.round(basePos.y);
+        if (Math.abs(rx - lx) > 2 || Math.abs(ry - ly) > 2) {
+          qs.set(`${n.id}._pos`, `${rx},${ry}`);
+        }
       }
     }
     const hash = `#${qs.toString()}`;
@@ -294,10 +313,39 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
   });
 
   const compactEdges = graph.edges.map((e) => [e.fromNode, e.fromPort, e.toNode, e.toPort]);
-  const payload = JSON.stringify({ n: compactNodes, e: compactEdges });
+  const hasAllPositions =
+    graph.nodes.length > 0 &&
+    graph.nodes.every(
+      (n) =>
+        n.position !== undefined &&
+        Number.isFinite(n.position.x) &&
+        Number.isFinite(n.position.y),
+    );
+  const compactPositions = hasAllPositions
+    ? graph.nodes.map((n) => [Math.round(n.position!.x), Math.round(n.position!.y)])
+    : undefined;
+  const payload = JSON.stringify(
+    compactPositions
+      ? { n: compactNodes, e: compactEdges, p: compactPositions }
+      : { n: compactNodes, e: compactEdges },
+  );
   const compressed = await deflateRaw(payload);
   const hash = `#g=${toBase64Url(compressed)}`;
   return { hash, length: hash.length, mode: 'compressed-dag', strippedPdb };
+}
+
+function getSchemaTypeTemplate(adapterId: string, paramKey: string): unknown {
+  const schema = ADAPTER_REGISTRY[adapterId]?.paramSchema;
+  if (!schema) return undefined;
+  const field = schema.find((f) => f.key === paramKey);
+  if (!field) return undefined;
+  if (field.kind === 'integer' || field.kind === 'number') {
+    return typeof field.defaultValue === 'number' ? field.defaultValue : 0;
+  }
+  if (field.kind === 'boolean') {
+    return typeof field.defaultValue === 'boolean' ? field.defaultValue : false;
+  }
+  return typeof field.defaultValue === 'string' ? field.defaultValue : '';
 }
 
 function parseParamValue(raw: string, templateVal: unknown): unknown {
@@ -420,6 +468,7 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
     if (!preset) return null;
     const g = structuredClone(preset.graph);
     const byId = new Map(g.nodes.map((n) => [n.id, n]));
+    let hasCustomPositions = false;
     for (const [k, v] of qs.entries()) {
       if (k === 'p') continue;
       const dot = k.lastIndexOf('.');
@@ -433,14 +482,39 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
         if (v.trim()) node.label = v;
         continue;
       }
+      if (paramKey === '_pos') {
+        const parts = v.split(',');
+        if (parts.length === 2) {
+          const x = Number(parts[0]);
+          const y = Number(parts[1]);
+          if (Number.isFinite(x) && Number.isFinite(y)) {
+            node.position = { x, y };
+            hasCustomPositions = true;
+          }
+        }
+        continue;
+      }
       const defaults = defaultParamsForAdapter(node.adapterId);
+      const schemaVal = getSchemaTypeTemplate(node.adapterId, paramKey);
       const templateVal =
         node.params[paramKey] !== undefined
           ? node.params[paramKey]
           : defaults[paramKey] !== undefined
             ? defaults[paramKey]
-            : PARAM_TYPE_HINTS[paramKey];
+            : schemaVal !== undefined
+              ? schemaVal
+              : PARAM_TYPE_HINTS[paramKey];
       node.params[paramKey] = parseParamValue(v, templateVal);
+    }
+    if (hasCustomPositions) {
+      const laid = preset.graph.nodes.some((n) => !n.position)
+        ? autoLayoutGraph(structuredClone(preset.graph))
+        : preset.graph;
+      for (let i = 0; i < g.nodes.length; i++) {
+        if (!g.nodes[i].position && laid.nodes[i]?.position) {
+          g.nodes[i].position = { ...laid.nodes[i].position! };
+        }
+      }
     }
     return normalizeWorkflowGraph(g, preset.id, preset.name, false);
   }
@@ -467,8 +541,10 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
     }
     if (!isPlainObject(obj) || !Array.isArray(obj.n) || !Array.isArray(obj.e)) return null;
 
+    const rawPositions = Array.isArray(obj.p) ? obj.p : null;
     const nodes: WorkflowNode[] = [];
-    for (const tuple of obj.n) {
+    for (let i = 0; i < obj.n.length; i++) {
+      const tuple = obj.n[i];
       if (!Array.isArray(tuple) || tuple.length < 2) return null;
       const id = String(tuple[0]);
       const shortA = String(tuple[1]);
@@ -476,11 +552,22 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
       const rawOverrides = isPlainObject(tuple[2]) ? tuple[2] : {};
       const overrides = sanitizeParams(rawOverrides);
       const label = typeof tuple[3] === 'string' ? tuple[3] : ADAPTER_REGISTRY[adapterId]?.shortName ?? adapterId;
+      const posTuple = rawPositions?.[i];
+      const position =
+        Array.isArray(posTuple) &&
+        posTuple.length === 2 &&
+        typeof posTuple[0] === 'number' &&
+        Number.isFinite(posTuple[0]) &&
+        typeof posTuple[1] === 'number' &&
+        Number.isFinite(posTuple[1])
+          ? { x: posTuple[0], y: posTuple[1] }
+          : undefined;
       nodes.push({
         id,
         adapterId,
         label,
         params: { ...defaultParamsForAdapter(adapterId), ...overrides },
+        ...(position ? { position } : {}),
       });
     }
     const edges: WorkflowEdge[] = [];

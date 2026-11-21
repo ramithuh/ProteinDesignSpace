@@ -114,6 +114,9 @@
   // Active workflow state
   let selectedPresetId = $state(WORKFLOW_PRESETS[0].id);
   let graph = $state<WorkflowGraph>(autoLayoutGraph(structuredClone(WORKFLOW_PRESETS[0].graph)));
+  const MAX_GRAPH_HISTORY = 40;
+  let graphUndoStack: WorkflowGraph[] = [];
+  let graphRedoStack: WorkflowGraph[] = [];
   let selectedNodeIds = $state<string[]>([WORKFLOW_PRESETS[0].graph.nodes[0].id]);
   let selectedNodeId = $derived(selectedNodeIds[selectedNodeIds.length - 1] ?? '');
   let isCompareMode = $derived(selectedNodeIds.length >= 2);
@@ -377,6 +380,30 @@
       return;
     }
     if (pendingRun || showCredits || (showOnboarding && !onboardingInteractive)) return;
+
+    // Cmd/Ctrl + Z undo, Cmd/Ctrl + Shift + Z or Ctrl + Y redo (when not typing in a text field)
+    if (
+      (ev.metaKey || ev.ctrlKey) &&
+      !ev.altKey &&
+      !isEditableElement(ev.target) &&
+      !isEditableElement(document.activeElement)
+    ) {
+      const k = ev.key.toLowerCase();
+      if (k === 'z' && !ev.shiftKey) {
+        if (!isRunning && graphUndoStack.length > 0) {
+          ev.preventDefault();
+          undoGraphEdit();
+        }
+        return;
+      }
+      if ((k === 'z' && ev.shiftKey) || (k === 'y' && !ev.metaKey)) {
+        if (!isRunning && graphRedoStack.length > 0) {
+          ev.preventDefault();
+          redoGraphEdit();
+        }
+        return;
+      }
+    }
 
     // Cmd/Ctrl + Enter runs workflow from anywhere (never hijacks Cmd+R browser reload)
     if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey) && !ev.altKey) {
@@ -785,8 +812,41 @@
     if (stChanged) nodeStates = nextStates;
   }
 
-  function handleGraphChange(next: WorkflowGraph) {
+  function pushGraphUndo(snapshot: WorkflowGraph) {
+    graphUndoStack.push(structuredClone(snapshot));
+    if (graphUndoStack.length > MAX_GRAPH_HISTORY) {
+      graphUndoStack.shift();
+    }
+    graphRedoStack = [];
+  }
+
+  function undoGraphEdit() {
+    if (isRunning || graphUndoStack.length === 0) return;
+    const prev = graphUndoStack.pop()!;
+    graphRedoStack.push(structuredClone($state.snapshot(graph) as WorkflowGraph));
+    if (graphRedoStack.length > MAX_GRAPH_HISTORY) {
+      graphRedoStack.shift();
+    }
+    handleGraphChange(prev, { recordHistory: false });
+    showToastMessage('Undid graph edit', 1800);
+  }
+
+  function redoGraphEdit() {
+    if (isRunning || graphRedoStack.length === 0) return;
+    const next = graphRedoStack.pop()!;
+    graphUndoStack.push(structuredClone($state.snapshot(graph) as WorkflowGraph));
+    if (graphUndoStack.length > MAX_GRAPH_HISTORY) {
+      graphUndoStack.shift();
+    }
+    handleGraphChange(next, { recordHistory: false });
+    showToastMessage('Redid graph edit', 1800);
+  }
+
+  function handleGraphChange(next: WorkflowGraph, opts?: { recordHistory?: boolean }) {
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
+    if (opts?.recordHistory !== false) {
+      pushGraphUndo(prevSnapshot);
+    }
     const nextById = new Map(next.nodes.map((n) => [n.id, n]));
     const prevById = new Map(prevSnapshot.nodes.map((n) => [n.id, n]));
 
@@ -1558,6 +1618,8 @@
 
   function loadFullWorkflowGraph(next: WorkflowGraph, opts?: { clearOutputs?: boolean }) {
     const laid = next.nodes.some((n) => !n.position) ? autoLayoutGraph(next) : next;
+    graphUndoStack = [];
+    graphRedoStack = [];
     selectedPresetId = laid.id;
     graph = laid;
     setSingleSelection(laid.nodes[0]?.id ?? '');

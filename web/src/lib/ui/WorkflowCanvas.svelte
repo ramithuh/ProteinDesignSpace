@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import {
     Background,
     Controls,
@@ -243,6 +243,35 @@
     });
   }
 
+  // Re-fit workflow cleanly when the canvas container resizes across breakpoints
+  // (e.g. desktop -> tablet 768x1024 or mobile 390x844) so nodes never drift below the fold.
+  $effect(() => {
+    const el = canvasEl;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let lastW = el.clientWidth;
+    let lastH = el.clientHeight;
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const ro = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (!rect || rect.width <= 0 || rect.height <= 0) return;
+      const dw = Math.abs(rect.width - lastW);
+      const dh = Math.abs(rect.height - lastH);
+      if (dw < 20 && dh < 20) return;
+      lastW = rect.width;
+      lastH = rect.height;
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null;
+        scheduleFitView(180);
+      }, 90);
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      if (resizeTimer) clearTimeout(resizeTimer);
+    };
+  });
+
   // Cleanup timers/rAFs on destroy
   $effect(() => {
     return () => {
@@ -379,7 +408,12 @@
         ? selectedEdgeId
         : null;
     const selSet = new Set(selectedNodeIds.length > 0 ? selectedNodeIds : selectedNodeId ? [selectedNodeId] : []);
+    // Preserve SvelteFlow's measured dimensions on existing nodes so rebuilding flowNodes
+    // never resets NodeWrapper `hasDimensions` to false (which hides already-mounted nodes/handles
+    // because ResizeObserver does not re-fire when DOM box size is unchanged).
+    const prevFlowNodesById = untrack(() => new Map(flowNodes.map((fn) => [fn.id, fn])));
     flowNodes = laid.nodes.map((n) => {
+      const prevFlow = prevFlowNodesById.get(n.id);
       const inputPortsConnected: Record<string, boolean> = {};
       const inputPortsReady: Record<string, boolean> = {};
       for (const e of laid.edges) {
@@ -417,6 +451,9 @@
         }
       }
       return {
+        ...(prevFlow?.measured ? { measured: prevFlow.measured } : {}),
+        ...(prevFlow?.width !== undefined ? { width: prevFlow.width } : {}),
+        ...(prevFlow?.height !== undefined ? { height: prevFlow.height } : {}),
         id: n.id,
         type: 'protein',
         position: n.position ?? { x: 40, y: 80 },

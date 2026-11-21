@@ -5,6 +5,8 @@
 
 import { LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { getBenchmarkById } from './benchmarks';
+import { planLocalFoldFanout } from './work-plan';
+import type { CollectionMember } from './collections';
 import {
   BACKBONE_MASK_CA,
   BACKBONE_MASK_C,
@@ -145,15 +147,17 @@ function inspectArtifactBackboneCoverage(struct: StructureArtifact): {
 
 export interface FoldWorkItemSelection {
   maxSequences: number;
+  maxTotalFolds: number;
   selected: SequenceCandidate[];
   excludedCandidates: ExcludedCandidateRecord[];
   totalCandidates: number;
 }
 
 /**
- * Pure work-item resolver shared by preflight validation (`validateRuntimeNodeInputs`)
- * and `localfold.worker.ts` so both inspect the EXACT identical candidate slice and
- * surface excluded candidates explicitly.
+ * Pure work-item resolver shared by preflight validation (`validateRuntimeNodeInputs`),
+ * Studio input preview, and `localfold.worker.ts` so all three inspect the EXACT
+ * identical candidate slice (including multi-backbone round-robin fan-out) and
+ * surface excluded candidates accurately.
  */
 export function selectFoldWorkItems(
   seqSet: SequenceSet | undefined | null,
@@ -161,7 +165,93 @@ export function selectFoldWorkItems(
 ): FoldWorkItemSelection {
   const rawMax = Number(params?.maxSequences ?? 2);
   const maxSequences = Math.max(1, Math.min(8, Math.round(Number.isFinite(rawMax) ? rawMax : 2)));
+  const rawTotal = Number(params?.maxTotalFolds ?? 16);
+  const maxTotalFolds = Math.max(1, Math.min(64, Math.round(Number.isFinite(rawTotal) ? rawTotal : 16)));
   const all = seqSet?.candidates ?? [];
+
+  // Mirror localfold.worker.ts multi-backbone detection so preflight/preview never
+  // falsely warn about excluded candidates on multi-backbone campaigns.
+  const distinctAnchors = new Set<string>();
+  for (const cand of all) {
+    const anchor = (cand.designKey ?? cand.sourceStructureId ?? '').trim();
+    if (anchor && anchor.toLowerCase() !== 'none') {
+      distinctAnchors.add(anchor);
+    }
+  }
+
+  if (distinctAnchors.size > 1) {
+    const groupOrder = new Map<string, number>();
+    const origIndexByKey = new Map<string, number>();
+    const origIdByKey = new Map<string, string>();
+    const usedKeys = new Set<string>();
+    const members: CollectionMember<SequenceCandidate>[] = all.map((cand, idx) => {
+      const anchor = (cand.designKey ?? cand.sourceStructureId ?? '').trim();
+      const hasDesign = anchor.length > 0 && anchor.toLowerCase() !== 'none';
+      const designKey = hasDesign ? anchor : undefined;
+      let designIndex = cand.designIndex;
+      if (designKey !== undefined && designIndex === undefined) {
+        if (!groupOrder.has(designKey)) groupOrder.set(designKey, groupOrder.size);
+        designIndex = groupOrder.get(designKey);
+      }
+      let seqKey = (cand.sequenceKey ?? cand.key ?? cand.id).trim() || `seq-${idx}`;
+      if (usedKeys.has(seqKey)) seqKey = `${seqKey}::${idx}`;
+      usedKeys.add(seqKey);
+      origIndexByKey.set(seqKey, idx);
+      origIdByKey.set(seqKey, cand.id);
+      const ordinal =
+        typeof cand.sampleIndex === 'number' && Number.isInteger(cand.sampleIndex) && cand.sampleIndex >= 0
+          ? cand.sampleIndex
+          : idx;
+      return {
+        key: seqKey,
+        ordinal,
+        memberKind: 'SequenceCandidate',
+        lineage: {
+          ...(designKey ? { designKey, designIndex } : {}),
+          sequenceKey: seqKey,
+          sequenceIndex: ordinal,
+          parentKeys: designKey ? [designKey] : [],
+        },
+        payload: cand,
+        summary: {
+          label: cand.id,
+          residueCount: cand.sequence.length,
+          score: cand.score,
+          globalScore: cand.globalScore,
+        },
+      };
+    });
+
+    const plan = planLocalFoldFanout(members, {
+      foldModelId: String(params?.model ?? 'monomer'),
+      baseSeed: Number(params?.seed ?? 0),
+      perDesignTopK: maxSequences,
+      samplesPerSequence: 1,
+      maxFolds: maxTotalFolds,
+      ranking: 'mpnn-score',
+    });
+
+    const selected = plan.selected.map((p) => p.sequenceMember.payload!);
+    const excludedCandidates: ExcludedCandidateRecord[] = plan.excluded.map((ex, exIdx) => {
+      const refKey = ex.lineage?.sequenceKey ?? ex.key;
+      return {
+        key: ex.key,
+        id: origIdByKey.get(refKey) ?? ex.key,
+        index: origIndexByKey.get(refKey) ?? selected.length + exIdx,
+        reason:
+          ex.reason ??
+          `Excluded by LocalFold fan-out policy (maxSequences=${maxSequences}, maxTotalFolds=${maxTotalFolds})`,
+      };
+    });
+    return {
+      maxSequences,
+      maxTotalFolds,
+      selected,
+      excludedCandidates,
+      totalCandidates: all.length,
+    };
+  }
+
   const selected = all.slice(0, maxSequences);
   const excludedCandidates: ExcludedCandidateRecord[] = all
     .slice(maxSequences)
@@ -176,6 +266,7 @@ export function selectFoldWorkItems(
     });
   return {
     maxSequences,
+    maxTotalFolds,
     selected,
     excludedCandidates,
     totalCandidates: all.length,

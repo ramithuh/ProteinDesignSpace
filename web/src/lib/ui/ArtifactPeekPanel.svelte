@@ -333,29 +333,72 @@
     return out;
   }
 
+  function inferCanonicalDesignIndex(designKey: string, explicitIndex?: number): number | null {
+    if (typeof explicitIndex === 'number' && Number.isInteger(explicitIndex) && explicitIndex >= 0) {
+      return explicitIndex;
+    }
+    const trimmed = designKey.trim();
+    // 1-based suffixes: `design-3`, `d3`, `..._d3`, `...:d3`
+    const oneBased = trimmed.match(/(?:^|[:_/-])d(?:esign)?[-_]?(\d+)(?:$|[/-])/i);
+    if (oneBased) {
+      const n = Number(oneBased[1]);
+      if (Number.isInteger(n) && n >= 1) return n - 1;
+    }
+    // 0-based canonical member key suffix: `genie3:abc123:2`
+    const zeroBased = trimmed.match(/:(\d+)$/);
+    if (zeroBased) {
+      const n = Number(zeroBased[1]);
+      if (Number.isInteger(n) && n >= 0) return n;
+    }
+    return null;
+  }
+
   function buildDesignPills(
-    entries: readonly { designKey: string; passed?: boolean }[],
+    entries: readonly { designKey: string; designIndex?: number; passed?: boolean }[],
   ): DesignGroupPill[] {
     const order: string[] = [];
-    const counts = new Map<string, { count: number; passed: number; hasPassTrack: boolean }>();
+    const counts = new Map<
+      string,
+      { count: number; passed: number; hasPassTrack: boolean; firstSeen: number; canonicalIdx: number | null }
+    >();
     for (const entry of entries) {
       const k = entry.designKey.trim();
       if (!k) continue;
       let rec = counts.get(k);
+      const inferred = inferCanonicalDesignIndex(k, entry.designIndex);
       if (!rec) {
-        rec = { count: 0, passed: 0, hasPassTrack: entry.passed !== undefined };
+        rec = {
+          count: 0,
+          passed: 0,
+          hasPassTrack: entry.passed !== undefined,
+          firstSeen: order.length,
+          canonicalIdx: inferred,
+        };
         counts.set(k, rec);
         order.push(k);
+      } else if (rec.canonicalIdx === null && inferred !== null) {
+        rec.canonicalIdx = inferred;
       }
       rec.count++;
       if (entry.passed === true) rec.passed++;
     }
-    return order.map((key, idx) => {
+    const sortedKeys = [...order].sort((a, b) => {
+      const ra = counts.get(a)!;
+      const rb = counts.get(b)!;
+      if (ra.canonicalIdx !== null && rb.canonicalIdx !== null && ra.canonicalIdx !== rb.canonicalIdx) {
+        return ra.canonicalIdx - rb.canonicalIdx;
+      }
+      if (ra.canonicalIdx !== null && rb.canonicalIdx === null) return -1;
+      if (ra.canonicalIdx === null && rb.canonicalIdx !== null) return 1;
+      return ra.firstSeen - rb.firstSeen;
+    });
+    return sortedKeys.map((key, idx) => {
       const rec = counts.get(key)!;
+      const displayIdx = rec.canonicalIdx ?? idx;
       return {
         key,
-        index: idx,
-        label: `Design ${idx + 1}`,
+        index: displayIdx,
+        label: `Design ${displayIdx + 1}`,
         count: rec.count,
         ...(rec.hasPassTrack ? { passedCount: rec.passed } : {}),
       };
@@ -367,6 +410,7 @@
     return buildDesignPills(
       metricsArt.rows.map((r) => ({
         designKey: getDesignKeyFromRow(r),
+        designIndex: r.designIndex,
         passed: r.designable,
       })),
     );
@@ -417,6 +461,7 @@
     return buildDesignPills(
       foldArt.folds.map((f) => ({
         designKey: getDesignKeyFromFold(f),
+        designIndex: f.designIndex,
       })),
     );
   });
@@ -476,6 +521,7 @@
     return buildDesignPills(
       seqArt.candidates.map((c) => ({
         designKey: getDesignKeyFromSeq(c),
+        designIndex: c.designIndex,
       })),
     );
   });

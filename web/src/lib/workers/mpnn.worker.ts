@@ -57,10 +57,25 @@ async function ensureModel(id: number, family: ModelFamily, modelName: string) {
     const fetchedUrls: string[] = [];
     let anyFromCache = false;
     try {
+      // Suppress non-fatal ONNX Runtime WARNING logs (which ORT Web emits via console.error
+      // in DevTools) while preserving genuine ERROR/FATAL diagnostics.
+      try {
+        const ortWeb = await import('onnxruntime-web');
+        if (ortWeb?.env) ortWeb.env.logLevel = 'error';
+      } catch {
+        /* ignore if unavailable */
+      }
+      try {
+        const ortGpu = await import('onnxruntime-web/webgpu');
+        if (ortGpu?.env) ortGpu.env.logLevel = 'error';
+      } catch {
+        /* ignore if unavailable */
+      }
       return await ProteinMPNN.load(url, {
         backend: 'auto',
         wasmPaths: WASM_PATHS,
         numThreads: 1,
+        sessionOptions: { logSeverityLevel: 3 },
         fetch: makeCachedFetch((u, fromCache) => {
           fetchedUrls.push(u);
           if (fromCache) anyFromCache = true;

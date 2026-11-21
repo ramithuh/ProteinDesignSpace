@@ -108,7 +108,8 @@ export async function materializePdbInputNode(
     const fetchedFor = normalizePdbId(String(node.params.fetchedPdbId ?? ''));
     if (cachedText.length > 0 && fetchedFor === normId) {
       rawText = cachedText;
-      filename = String(node.params.filename || `${normId}.cif`);
+      const rawFn = String(node.params.filename ?? '').trim();
+      filename = rawFn && rawFn !== 'demo_3helix_53aa.pdb' ? rawFn : `${normId}.cif`;
     } else {
       onProgress?.({
         nodeId: node.id,
