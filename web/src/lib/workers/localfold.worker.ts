@@ -18,11 +18,15 @@ import {
   type MmseqsApi,
 } from '$lib/engine/localfold-msa';
 import { fetchCachedBytes } from '$lib/engine/opfs-cache';
+import { sha256Hex, type CollectionMember } from '$lib/engine/collections';
+import { planLocalFoldFanout } from '$lib/engine/work-plan';
 import type {
   CollectionItemOutcome,
+  ExcludedCandidateRecord,
   FoldedCandidate,
   FoldedStructure,
   MsaMode,
+  SequenceCandidate,
   SequenceSet,
   StructureArtifact,
 } from '$lib/engine/types';
@@ -464,6 +468,10 @@ self.onmessage = async (ev: MessageEvent) => {
           : undefined);
       const work = selectFoldWorkItems(seqSet, p);
       const maxSeqs = work.maxSequences;
+      const rawMaxTotalFolds = Number(p.maxTotalFolds ?? 16);
+      const maxTotalFolds = Number.isFinite(rawMaxTotalFolds)
+        ? Math.max(1, Math.min(64, Math.round(rawMaxTotalFolds)))
+        : 16;
       const seed = Number(p.seed ?? 0);
       const ligandCcdCodes: string[] = Array.isArray(p.ligandCcdCodes)
         ? (p.ligandCcdCodes as string[]).map((s) => String(s).trim().toUpperCase()).filter(Boolean)
@@ -485,7 +493,125 @@ self.onmessage = async (ev: MessageEvent) => {
             .filter(Boolean);
 
       await ensureModelLoaded(msg.id, modelKey);
-      const targets = work.selected;
+
+      interface ResolvedFoldTarget {
+        cand: SequenceCandidate;
+        seed: number;
+        designKey?: string;
+        designIndex?: number;
+        sequenceKey?: string;
+        foldKey?: string;
+      }
+
+      // Detect multi-backbone SequenceSet via distinct non-empty designKey / sourceStructureId anchors
+      const distinctParentAnchors = new Set<string>();
+      for (const cand of seqSet.candidates) {
+        const anchor = (cand.designKey ?? cand.sourceStructureId ?? '').trim();
+        if (anchor && anchor.toLowerCase() !== 'none') {
+          distinctParentAnchors.add(anchor);
+        }
+      }
+      const isMultiBackbone = distinctParentAnchors.size > 1;
+
+      let targets: ResolvedFoldTarget[];
+      let excludedCandidates: ExcludedCandidateRecord[];
+
+      if (!isMultiBackbone) {
+        // Legacy single-backbone path: exact selectFoldWorkItems slice & seed + i semantics
+        targets = work.selected.map((cand, i) => ({
+          cand,
+          seed: seed + i,
+          ...(cand.designKey ? { designKey: cand.designKey } : {}),
+          ...(cand.designIndex !== undefined ? { designIndex: cand.designIndex } : {}),
+          ...(cand.sequenceKey ? { sequenceKey: cand.sequenceKey } : {}),
+        }));
+        excludedCandidates = work.excludedCandidates;
+      } else {
+        // Multi-backbone fan-out via authoritative planLocalFoldFanout (round-robin across backbones, capped at maxTotalFolds)
+        const groupOrder = new Map<string, number>();
+        const origIndexByKey = new Map<string, number>();
+        const origIdByKey = new Map<string, string>();
+        const usedKeys = new Set<string>();
+
+        const seqMembers: CollectionMember<SequenceCandidate>[] = seqSet.candidates.map((cand, idx) => {
+          const designAnchor = (cand.designKey ?? cand.sourceStructureId ?? '').trim();
+          const hasDesign = designAnchor.length > 0 && designAnchor.toLowerCase() !== 'none';
+          const designKey = hasDesign ? designAnchor : undefined;
+          let designIndex = cand.designIndex;
+          if (designKey !== undefined && designIndex === undefined) {
+            if (!groupOrder.has(designKey)) groupOrder.set(designKey, groupOrder.size);
+            designIndex = groupOrder.get(designKey);
+          }
+          let seqKey = (cand.sequenceKey ?? cand.key ?? cand.id).trim() || `seq-${idx}`;
+          if (usedKeys.has(seqKey)) {
+            seqKey = `${seqKey}::${idx}`;
+          }
+          usedKeys.add(seqKey);
+          origIndexByKey.set(seqKey, idx);
+          origIdByKey.set(seqKey, cand.id);
+          const ordinal =
+            typeof cand.sampleIndex === 'number' && Number.isInteger(cand.sampleIndex) && cand.sampleIndex >= 0
+              ? cand.sampleIndex
+              : idx;
+          return {
+            key: seqKey,
+            ordinal,
+            memberKind: 'SequenceCandidate',
+            lineage: {
+              ...(designKey ? { designKey, designIndex } : {}),
+              sequenceKey: seqKey,
+              sequenceIndex: ordinal,
+              ...(cand.sourceStructureId && cand.sourceStructureId.toLowerCase() !== 'none'
+                ? {
+                    sourceStructure: {
+                      artifactId: cand.sourceStructureId,
+                      payloadDigest: '',
+                      ...(designKey ? { designKey } : {}),
+                    },
+                  }
+                : {}),
+              parentKeys: designKey ? [designKey] : [],
+            },
+            payload: cand,
+            summary: {
+              label: cand.id,
+              residueCount: cand.sequence.length,
+              sequenceDigest: sha256Hex(cand.sequence),
+              score: cand.score,
+              globalScore: cand.globalScore,
+            },
+          };
+        });
+
+        const fanoutPlan = planLocalFoldFanout(seqMembers, {
+          foldModelId: modelKey,
+          baseSeed: seed,
+          perDesignTopK: maxSeqs,
+          samplesPerSequence: 1,
+          maxFolds: maxTotalFolds,
+          ranking: 'mpnn-score',
+        });
+
+        targets = fanoutPlan.selected.map((planned) => ({
+          cand: planned.sequenceMember.payload!,
+          seed: planned.seed,
+          designKey: planned.designKey ?? planned.sequenceMember.payload?.designKey,
+          designIndex: planned.designIndex ?? planned.sequenceMember.payload?.designIndex,
+          sequenceKey: planned.sequenceKey,
+          foldKey: planned.foldKey,
+        }));
+
+        excludedCandidates = fanoutPlan.excluded.map((ex, exIdx) => {
+          const refKey = ex.lineage?.sequenceKey ?? ex.key;
+          return {
+            key: ex.key,
+            id: origIdByKey.get(refKey) ?? ex.key,
+            index: origIndexByKey.get(refKey) ?? targets.length + exIdx,
+            reason: ex.reason ?? `Excluded by LocalFold fan-out policy (maxSequences=${maxSeqs}, maxTotalFolds=${maxTotalFolds})`,
+          };
+        });
+      }
+
       const folds: FoldedCandidate[] = [];
       const sourceStructureId = seqSet.sourceStructureId ?? seqSet.parentStructureId;
       const msaCache = createMsaSearchCache();
@@ -504,7 +630,9 @@ self.onmessage = async (ev: MessageEvent) => {
           ? new lfCore.AlphaFoldUnifiedGpu(gpuDevice)
           : new lfCore.AlphaFoldMonomerGpu(gpuDevice);
         for (let i = 0; i < targets.length; i++) {
-          const cand = targets[i];
+          const target = targets[i];
+          const cand = target.cand;
+          const itemSeed = target.seed;
           const stripped = cand.sequence.toUpperCase().replace(/[\s/:,]+/g, '');
           if (stripped.length === 0) {
             throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
@@ -563,7 +691,7 @@ self.onmessage = async (ev: MessageEvent) => {
           const predictOpts = isAf2Multi
             ? {
                 recycles,
-                randomSeed: seed + i,
+                randomSeed: itemSeed,
                 maxMsaSequences: msaBudgets.maxMsaSequences,
                 maxExtraSequences: msaBudgets.maxExtraSequences,
                 maskFraction: msaBudgets.maskFraction,
@@ -576,7 +704,7 @@ self.onmessage = async (ev: MessageEvent) => {
               }
             : {
                 recycles,
-                randomSeed: seed + i,
+                randomSeed: itemSeed,
                 maxMsaSequences: msaBudgets.maxMsaSequences,
                 maxExtraSequences: msaBudgets.maxExtraSequences,
                 maskFraction: msaBudgets.maskFraction,
@@ -650,7 +778,12 @@ self.onmessage = async (ev: MessageEvent) => {
 
           folds.push({
             sequenceId: cand.id,
-            key: cand.key ?? cand.id,
+            key: target.sequenceKey ?? cand.key ?? cand.id,
+            ...(target.designKey ? { designKey: target.designKey } : {}),
+            ...(target.designIndex !== undefined ? { designIndex: target.designIndex } : {}),
+            ...(target.sequenceKey ? { sequenceKey: target.sequenceKey } : {}),
+            ...(target.foldKey ? { foldKey: target.foldKey } : {}),
+            seed: itemSeed,
             sequence: cleanSeq,
             foldModelId: `localfold-af2-${modelKey}-int5`,
             sourceStructureId: cand.sourceStructureId ?? sourceStructureId,
@@ -709,7 +842,9 @@ self.onmessage = async (ev: MessageEvent) => {
         }
 
         for (let i = 0; i < targets.length; i++) {
-          const cand = targets[i];
+          const target = targets[i];
+          const cand = target.cand;
+          const itemSeed = target.seed;
           const stripped = cand.sequence.toUpperCase().replace(/[\s/:,]+/g, '');
           if (stripped.length === 0) {
             throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
@@ -775,8 +910,8 @@ self.onmessage = async (ev: MessageEvent) => {
           // for AF3/OpenBind-0 depth-2 parity, `dropTerminalAtoms` -> `terminalAtoms`, `seed` -> `conformerSeed`).
           const { batch } = lfAf3.af3BatchFromA3m(colonSeq, msa.af3Alignment, {
             ...featOpts,
-            seed: seed + i,
-            conformerSeed: seed + i,
+            seed: itemSeed,
+            conformerSeed: itemSeed,
             ...(hasExtraContext
               ? {
                   chainKinds,
@@ -788,7 +923,7 @@ self.onmessage = async (ev: MessageEvent) => {
             mode: 'diffusion',
             steps: diffusionSteps,
             recycles,
-            seed: seed + i,
+            seed: itemSeed,
             onStage: (name: string, detail: Record<string, unknown> = {}) => {
               let sub = 0.1;
               let label = name;
@@ -876,7 +1011,12 @@ self.onmessage = async (ev: MessageEvent) => {
 
           folds.push({
             sequenceId: cand.id,
-            key: cand.key ?? cand.id,
+            key: target.sequenceKey ?? cand.key ?? cand.id,
+            ...(target.designKey ? { designKey: target.designKey } : {}),
+            ...(target.designIndex !== undefined ? { designIndex: target.designIndex } : {}),
+            ...(target.sequenceKey ? { sequenceKey: target.sequenceKey } : {}),
+            ...(target.foldKey ? { foldKey: target.foldKey } : {}),
+            seed: itemSeed,
             sequence: cleanSeq,
             foldModelId: `localfold-${modelKey}-int5`,
             sourceStructureId: cand.sourceStructureId ?? sourceStructureId,
@@ -919,6 +1059,7 @@ self.onmessage = async (ev: MessageEvent) => {
           tolerance: isAf3 ? null : tolerance,
           diffusionSteps: isAf3 ? diffusionSteps : null,
           maxSequences: maxSeqs,
+          ...(isMultiBackbone ? { maxTotalFolds } : {}),
           seed,
           msaMode,
           msaA3mHash: msaMode === 'a3m' ? fnv1a(msaA3mText) : null,
@@ -932,10 +1073,10 @@ self.onmessage = async (ev: MessageEvent) => {
       const rep = selectLocalFoldRepresentative(folds, { collectionKind });
       const itemOutcomes: CollectionItemOutcome[] = [
         ...folds.map((f): CollectionItemOutcome => ({
-          key: f.key ?? f.sequenceId,
+          key: f.foldKey ?? f.key ?? f.sequenceId,
           status: 'completed',
         })),
-        ...work.excludedCandidates.map((ex): CollectionItemOutcome => ({
+        ...excludedCandidates.map((ex): CollectionItemOutcome => ({
           key: ex.key,
           status: 'excluded',
           reason: ex.reason,
@@ -948,7 +1089,7 @@ self.onmessage = async (ev: MessageEvent) => {
         parentStructureId: seqSet.parentStructureId,
         sourceStructureId,
         collectionKind,
-        ...(work.excludedCandidates.length > 0 ? { excludedCandidates: work.excludedCandidates } : {}),
+        ...(excludedCandidates.length > 0 ? { excludedCandidates } : {}),
         itemOutcomes,
         ...(rep ? { representativeSelection: rep.selection } : {}),
         folds,

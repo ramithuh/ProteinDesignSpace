@@ -60,7 +60,7 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
   { title: 'Structure Generation', ids: ['rfd4-proteina', 'genie3'] },
   { title: 'Sequence Design', ids: ['web-protein-mpnn'] },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
-  { title: 'Evaluation', ids: ['designability-scorer'] },
+  { title: 'Evaluation', ids: ['top-k-filter', 'designability-scorer'] },
 ];
 
 export const CONCISE_BLOCK_ROLES: Record<string, string> = {
@@ -70,6 +70,7 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   genie3: 'Fast de novo backbone diffusion (23.3M parameters)',
   'web-protein-mpnn': 'Inverse folding (SolubleMPNN, ProteinMPNN, Cα-only)',
   'localfold-af2': 'Predict 3D structures (AlphaFold2, RF3, Boltz-2, AlphaFold 3 & more)',
+  'top-k-filter': 'Rank and filter top-K sequences per backbone or globally before folding',
   'designability-scorer': 'Kabsch alignment, scRMSD, scTM & pLDDT pass rate',
 };
 
@@ -423,7 +424,15 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
   })(),
   (() => {
     const sc = ADAPTER_REGISTRY['designability-scorer'];
+    const tk = ADAPTER_REGISTRY['top-k-filter'];
     const items: CatalogSubItem[] = [
+      {
+        key: 'top-k-filter',
+        label: tk.displayName,
+        subtitle: CONCISE_BLOCK_ROLES['top-k-filter'],
+        insert: { adapterId: 'top-k-filter' },
+        searchBlob: `${tk.id} ${tk.shortName} ${tk.displayName} ${CONCISE_BLOCK_ROLES['top-k-filter']} topk top-k filter ranker rank sequence batch multi-design`.toLowerCase(),
+      },
       {
         key: 'designability-scorer',
         label: sc.shortName,
@@ -432,14 +441,14 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         searchBlob: `${sc.id} ${sc.shortName} ${sc.displayName} ${CONCISE_BLOCK_ROLES['designability-scorer']} score evaluation designability kabsch scrmsd sctm plddt`.toLowerCase(),
       },
     ];
-    const subGroups: CatalogSubGroup[] = [{ title: 'Designability Metrics', items }];
-    const identityBlob = 'evaluation score scoring metrics designability scrmsd sctm';
+    const subGroups: CatalogSubGroup[] = [{ title: 'Filtering & Designability Metrics', items }];
+    const identityBlob = 'evaluation score scoring metrics designability scrmsd sctm filter ranker top-k';
     const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
     return {
       id: 'evaluation',
       title: 'Evaluation',
       stage: 'score',
-      subtitle: 'Kabsch scRMSD, scTM & pLDDT pass rate',
+      subtitle: 'Top-K sequence filter, Kabsch scRMSD, scTM & pLDDT pass rate',
       countLabel: `${items.length}`,
       subGroups,
       identityBlob,

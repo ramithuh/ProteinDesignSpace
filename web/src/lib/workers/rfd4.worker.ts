@@ -15,7 +15,14 @@ import {
   resolveRfd4CompiledInput,
   type Rfd4TemplateContext,
 } from '$lib/engine/conditioning';
-import type { ConditionSpecArtifact, SequenceSet, StructureArtifact } from '$lib/engine/types';
+import { makeSequenceKey } from '$lib/engine/collections';
+import { deriveStableItemSeed, planGeneratorDesigns } from '$lib/engine/work-plan';
+import type {
+  ConditionSpecArtifact,
+  SequenceCandidate,
+  SequenceSet,
+  StructureArtifact,
+} from '$lib/engine/types';
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -281,10 +288,15 @@ self.onmessage = async (ev: MessageEvent) => {
       const modeParam = String(p.mode ?? 'unconditional');
       const requestedEarlyStop = Boolean(p.earlyStop);
       const effectiveEarlyStop = modeParam === 'inverse-folding' ? false : requestedEarlyStop;
+      const rawNumDesigns = Number(p.numDesigns ?? 1);
+      const numDesigns = Number.isFinite(rawNumDesigns)
+        ? Math.max(1, Math.min(16, Math.round(rawNumDesigns)))
+        : 1;
       // Keep explicit p.<key> reads intact for param-schema bidirectional coverage guards
       const rawParams: Record<string, unknown> = {
         mode: modeParam,
         length: p.length,
+        numDesigns,
         nsteps: p.nsteps,
         recycleSchedule: p.recycleSchedule,
         earlyStop: effectiveEarlyStop,
@@ -343,29 +355,20 @@ self.onmessage = async (ev: MessageEvent) => {
 
       await ensureLoaded(msg.id, needEncoder);
 
-      // Build input batch + generation options
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let built: { batch: Record<string, any>; atoms?: any; n?: number };
-      const genOpts: Record<string, unknown> = {
-        seed,
+      // Prepare static inputs / template / preset CIF ONCE before the resident-weight design loop
+      const baseGenOpts: Record<string, unknown> = {
         nsteps,
         recycleSchedule,
         earlyStop,
         inputFrame: true,
-        onStep: (info: { step: number; nsteps: number }) => {
-          self.postMessage({
-            id: msg.id,
-            type: 'progress',
-            phase: 'sampling',
-            progress: (info.step + 1) / Math.max(1, info.nsteps),
-            detail: `RFD4 step ${info.step + 1}/${info.nsteps}`,
-          });
-        },
       };
 
       let runLabel = preResolved.runLabel;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let buildBatchForSeed: (itemSeed: number) => { batch: Record<string, any>; atoms?: any; n?: number };
 
-      const buildFromPreset = async (presetId: string) => {
+      if (preResolved.kind === 'preset') {
+        const presetId = activePresetId!;
         const presetsList = Array.isArray(rfd4Mod.RFD4P_PRESETS) ? rfd4Mod.RFD4P_PRESETS : [];
         // Validate directly against RFD4P_PRESETS instead of getRfd4pPresetById (which falls back to RFD4P_PRESETS[0])
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -382,41 +385,39 @@ self.onmessage = async (ev: MessageEvent) => {
         }
 
         if (preset.partialTrajectoryFractionSteps != null) {
-          genOpts.partialTrajectoryFractionSteps = preset.partialTrajectoryFractionSteps;
+          baseGenOpts.partialTrajectoryFractionSteps = preset.partialTrajectoryFractionSteps;
         }
         if (preset.inverseFolding) {
-          genOpts.inverseFolding = true;
-          genOpts.earlyStop = false;
+          baseGenOpts.inverseFolding = true;
+          baseGenOpts.earlyStop = false;
         }
-
-        if (preset.cifUrl) {
-          const cifBytes = await fetchExampleCifBytes(msg.id, preset.cifUrl);
-          if (preset.specMode) {
-            return rfd4Mod.buildBatch(
-              { contig: preset.contig, conditions: preset.conditions ?? {} },
-              { inputCif: cifBytes, seed },
-            );
-          }
-          // Annotated upstream .cif.zst already carries condition columns
-          return rfd4Mod.buildBatch(cifBytes, { seed });
-        }
-        return rfd4Mod.buildBatch(
-          { contig: preset.contig, conditions: preset.conditions ?? {} },
-          { seed },
-        );
-      };
-
-      if (preResolved.kind === 'preset') {
-        built = await buildFromPreset(activePresetId!);
         if (preResolved.effectivePartialFraction != null) {
           await ensureLoaded(msg.id, true);
-          genOpts.partialTrajectoryFractionSteps = preResolved.effectivePartialFraction;
+          baseGenOpts.partialTrajectoryFractionSteps = preResolved.effectivePartialFraction;
         }
         if (preResolved.inverseFolding) {
           await ensureLoaded(msg.id, true);
-          genOpts.inverseFolding = true;
-          genOpts.earlyStop = false;
+          baseGenOpts.inverseFolding = true;
+          baseGenOpts.earlyStop = false;
         }
+
+        const presetCifBytes = preset.cifUrl ? await fetchExampleCifBytes(msg.id, preset.cifUrl) : null;
+        buildBatchForSeed = (itemSeed: number) => {
+          if (presetCifBytes) {
+            if (preset.specMode) {
+              return rfd4Mod.buildBatch(
+                { contig: preset.contig, conditions: preset.conditions ?? {} },
+                { inputCif: presetCifBytes, seed: itemSeed },
+              );
+            }
+            // Annotated upstream .cif.zst already carries condition columns
+            return rfd4Mod.buildBatch(presetCifBytes, { seed: itemSeed });
+          }
+          return rfd4Mod.buildBatch(
+            { contig: preset.contig, conditions: preset.conditions ?? {} },
+            { seed: itemSeed },
+          );
+        };
       } else {
         let inputCif: string | Uint8Array | undefined =
           mode === 'partial' || mode === 'inverse-folding'
@@ -435,11 +436,11 @@ self.onmessage = async (ev: MessageEvent) => {
         runLabel = resolved.runLabel;
 
         if (resolved.effectivePartialFraction != null) {
-          genOpts.partialTrajectoryFractionSteps = resolved.effectivePartialFraction;
+          baseGenOpts.partialTrajectoryFractionSteps = resolved.effectivePartialFraction;
         }
         if (resolved.inverseFolding) {
-          genOpts.inverseFolding = true;
-          genOpts.earlyStop = false;
+          baseGenOpts.inverseFolding = true;
+          baseGenOpts.earlyStop = false;
         }
 
         if (resolved.kind === 'template-custom-yaml') {
@@ -453,10 +454,11 @@ self.onmessage = async (ev: MessageEvent) => {
               rfd4SpecMod,
             );
           }
-          built = rfd4Mod.buildBatch(
-            parsedYaml?.contig ? parsedYaml : { input: 'template', conditions: yamlConds },
-            { inputAtomArray: prepared!.atomArray, seed },
-          );
+          buildBatchForSeed = (itemSeed: number) =>
+            rfd4Mod.buildBatch(
+              parsedYaml?.contig ? parsedYaml : { input: 'template', conditions: yamlConds },
+              { inputAtomArray: prepared!.atomArray, seed: itemSeed },
+            );
         } else if (resolved.kind === 'template-spec') {
           if (prepared && Object.keys(resolved.conditions).length > 0) {
             assertRfd4ConditionSelectorsMatch(
@@ -466,17 +468,19 @@ self.onmessage = async (ev: MessageEvent) => {
               rfd4SpecMod,
             );
           }
-          built = rfd4Mod.buildBatch(
-            { input: 'template', conditions: resolved.conditions },
-            { inputAtomArray: prepared!.atomArray, seed },
-          );
+          buildBatchForSeed = (itemSeed: number) =>
+            rfd4Mod.buildBatch(
+              { input: 'template', conditions: resolved.conditions },
+              { inputAtomArray: prepared!.atomArray, seed: itemSeed },
+            );
         } else if (resolved.kind === 'custom-yaml') {
-          built = rfd4Mod.buildBatch(
-            resolved.customSpecYaml,
-            prepared
-              ? { inputAtomArray: prepared.atomArray, seed }
-              : { inputCif: template?.cifText ?? template?.pdbText, seed },
-          );
+          buildBatchForSeed = (itemSeed: number) =>
+            rfd4Mod.buildBatch(
+              resolved.customSpecYaml,
+              prepared
+                ? { inputAtomArray: prepared.atomArray, seed: itemSeed }
+                : { inputCif: template?.cifText ?? template?.pdbText, seed: itemSeed },
+            );
         } else {
           if (prepared && Object.keys(resolved.conditions).length > 0) {
             assertRfd4ConditionSelectorsMatch(
@@ -486,27 +490,18 @@ self.onmessage = async (ev: MessageEvent) => {
               rfd4SpecMod,
             );
           }
-          built = rfd4Mod.buildBatch(
-            { contig: resolved.contig, conditions: resolved.conditions },
-            prepared
-              ? { inputAtomArray: prepared.atomArray, seed }
-              : inputCif && condArtifact
-                ? { inputCif, seed }
-                : { seed },
-          );
+          buildBatchForSeed = (itemSeed: number) =>
+            rfd4Mod.buildBatch(
+              { contig: resolved.contig, conditions: resolved.conditions },
+              prepared
+                ? { inputAtomArray: prepared.atomArray, seed: itemSeed }
+                : inputCif && condArtifact
+                  ? { inputCif, seed: itemSeed }
+                  : { seed: itemSeed },
+            );
         }
       }
 
-      if (built.atoms) {
-        genOpts.inputAtoms = built.atoms;
-      }
-
-      // Capture any silent WebGPU validation errors (which otherwise leave output buffers all-zero!)
-      const scopeDevice = gpuDevice;
-      const pushedScope = typeof scopeDevice?.pushErrorScope === 'function';
-      if (pushedScope) {
-        scopeDevice!.pushErrorScope('validation');
-      }
       const releaseGeneratorActivations = () => {
         try {
           generator?.releaseActivations?.();
@@ -517,39 +512,6 @@ self.onmessage = async (ev: MessageEvent) => {
           /* ignore */
         }
       };
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let res: any;
-      let gpuValErr: GPUError | null = null;
-      try {
-        res = await generator.generate(built.batch, genOpts);
-      } finally {
-        releaseGeneratorActivations();
-        if (pushedScope && typeof scopeDevice?.popErrorScope === 'function') {
-          gpuValErr = await scopeDevice.popErrorScope().catch(() => null);
-        }
-      }
-      if (gpuValErr) {
-        console.error('[rfd4] WebGPU validation error during generate():', gpuValErr.message);
-      }
-
-      // Inspect trunk sequence logits & decoded residueType to catch all-zero / poly-ALA collapse
-      const logitsArr = res.logits as Float32Array | null | undefined;
-      let logitsNonZero = 0;
-      let logitsNan = 0;
-      let logitsMin = Infinity;
-      let logitsMax = -Infinity;
-      if (logitsArr) {
-        for (let i = 0; i < logitsArr.length; i++) {
-          const v = logitsArr[i];
-          if (Number.isNaN(v)) logitsNan++;
-          else {
-            if (v !== 0) logitsNonZero++;
-            if (v < logitsMin) logitsMin = v;
-            if (v > logitsMax) logitsMax = v;
-          }
-        }
-      }
 
       const tokens: string[] = rfd4Mod.UNIFIED_ATOM37_TOKENS ?? [];
       const rtToSeq = (rtArr: ArrayLike<number>): string => {
@@ -563,116 +525,320 @@ self.onmessage = async (ev: MessageEvent) => {
         return s;
       };
 
-      let nativeSeq = rtToSeq(res.residueType ?? []);
-      const uniqueNativeAAs = new Set(nativeSeq.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, '').split('')).size;
-      let degradedFallback: string | undefined;
-
-      // Fallback recovery: if trunk logits were zero/NaN or collapsed to a single residue (e.g. poly-ALA)
-      // while local_latents are valid, decode sequence directly using the autoencoder decoder's own
-      // logit_linear head (by passing unconditioned C_SEQ from the batch).
-      if (nativeSeq.length >= 10 && (logitsNonZero === 0 || logitsNan > 0 || uniqueNativeAAs <= 1)) {
-        degradedFallback = 'Degenerate trunk logits; attempted autoencoder decoder logit_linear recovery';
-        console.warn('[rfd4] Degenerate trunk sequence readout detected; retrying via autoencoder decoder logit_linear head', {
-          logitsNonZero,
-          logitsNan,
-          logitsMin,
-          logitsMax,
-          uniqueNativeAAs,
-          seqSample: nativeSeq.slice(0, 24),
-          gpuValErr: gpuValErr?.message ?? null,
-        });
-        try {
-          const rawCondSeq = built.batch.condition_sequence_1_residue?.data ?? built.batch.condition_sequence_1_residue;
-          const maskedSeq = rawCondSeq ? Int32Array.from(rawCondSeq) : new Int32Array(res.n);
-          const decRecovered = await generator.decoder.decode(built.batch, {
-            n: res.n,
-            caNm: res.x.bb_ca,
-            z: res.x.local_latents,
-            seq: maskedSeq,
-          });
-          const formatted = rfd4Mod.formatSampleLocalLatents(built.batch, {
-            n: res.n,
-            caNm: res.x.bb_ca,
-            decoded: decRecovered,
-          });
-          const recSeq = rtToSeq(formatted.residueType ?? []);
-          const recUnique = new Set(recSeq.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, '').split('')).size;
-          if (recUnique > uniqueNativeAAs) {
-            const structure = rfd4Mod.processSampleToAtoms({
-              coors: formatted.coors,
-              atomMask: formatted.atomMask,
-              residueType: formatted.residueType,
-              paddingMask: built.batch.padding_mask?.data ?? built.batch.padding_mask,
-              insertionLogits: res.insertionLogits,
-              inputAtoms: built.atoms ?? built.batch.__atoms ?? null,
-              batch: built.batch,
-              inputFrame: true,
+      const runOneDesign = async (
+        designIndex: number,
+        totalDesigns: number,
+        itemSeed: number,
+        designKey?: string,
+      ): Promise<{
+        struct: StructureArtifact;
+        candidate: SequenceCandidate;
+        designMeta: ReturnType<typeof extractRfd4DesignMetadata>;
+      }> => {
+        const built = buildBatchForSeed(itemSeed);
+        const genOpts: Record<string, unknown> = {
+          ...baseGenOpts,
+          seed: itemSeed,
+          ...(built.atoms ? { inputAtoms: built.atoms } : {}),
+          onStep: (info: { step: number; nsteps: number }) => {
+            const stepFrac = (info.step + 1) / Math.max(1, info.nsteps);
+            const progress =
+              totalDesigns > 1 ? (designIndex + stepFrac) / totalDesigns : stepFrac;
+            const detail =
+              totalDesigns > 1
+                ? `Design ${designIndex + 1}/${totalDesigns} · RFD4 step ${info.step + 1}/${info.nsteps}`
+                : `RFD4 step ${info.step + 1}/${info.nsteps}`;
+            self.postMessage({
+              id: msg.id,
+              type: 'progress',
+              phase: 'sampling',
+              progress,
+              detail,
             });
-            res = {
-              ...res,
-              residueType: formatted.residueType,
-              structure,
-              cif: rfd4Mod.toCifString(structure),
-              pdb: rfd4Mod.toPdbString(structure),
-            };
-            nativeSeq = recSeq;
-            degradedFallback = 'Recovered sequence via autoencoder decoder logit_linear head (trunk logits degraded)';
-            console.info('[rfd4] Recovered sequence via decoder head:', recSeq.slice(0, 30), `(${recUnique} unique AAs)`);
-          }
-        } catch (recErr) {
-          console.warn('[rfd4] Decoder-head sequence recovery failed:', recErr);
+          },
+        };
+
+        // Capture any silent WebGPU validation errors (which otherwise leave output buffers all-zero!)
+        const scopeDevice = gpuDevice;
+        const pushedScope = typeof scopeDevice?.pushErrorScope === 'function';
+        if (pushedScope) {
+          scopeDevice!.pushErrorScope('validation');
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let res: any;
+        let gpuValErr: GPUError | null = null;
+        try {
+          res = await generator.generate(built.batch, genOpts);
         } finally {
           releaseGeneratorActivations();
+          if (pushedScope && typeof scopeDevice?.popErrorScope === 'function') {
+            gpuValErr = await scopeDevice.popErrorScope().catch(() => null);
+          }
         }
-      }
+        if (gpuValErr) {
+          console.error('[rfd4] WebGPU validation error during generate():', gpuValErr.message);
+        }
 
-      const pdbText: string = res.pdb;
-      const cifText: string = res.cif;
-      const parsed = parsePdbBackbone(pdbText);
-      const finalSeq =
-        parsed.sequence.length === parsed.nResidues && !parsed.sequence.includes('X')
-          ? parsed.sequence
-          : nativeSeq.length === parsed.nResidues
-            ? nativeSeq
-            : parsed.sequence;
+        // Inspect trunk sequence logits & decoded residueType to catch all-zero / poly-ALA collapse
+        const logitsArr = res.logits as Float32Array | null | undefined;
+        let logitsNonZero = 0;
+        let logitsNan = 0;
+        let logitsMin = Infinity;
+        let logitsMax = -Infinity;
+        if (logitsArr) {
+          for (let i = 0; i < logitsArr.length; i++) {
+            const v = logitsArr[i];
+            if (Number.isNaN(v)) logitsNan++;
+            else {
+              if (v !== 0) logitsNonZero++;
+              if (v < logitsMin) logitsMin = v;
+              if (v > logitsMax) logitsMax = v;
+            }
+          }
+        }
 
-      const uniqueFinal = new Set(finalSeq.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, '').split('')).size;
-      console.info(
-        `[rfd4] L=${parsed.nResidues} steps=${res.stepsRun}/${res.nsteps} half=true logits=[${logitsMin.toFixed(2)},${logitsMax.toFixed(2)}] nz=${logitsNonZero} uniqueAA=${uniqueFinal} seq=${finalSeq.slice(0, 25)}...`,
-      );
-      if (parsed.nResidues >= 15 && uniqueFinal <= 1) {
-        const errHint = gpuValErr ? ` (WebGPU validation error: ${gpuValErr.message})` : '';
-        const stepHint =
-          nsteps < 58
-            ? ` Steps=${nsteps} is below the recommended minimum (58) — set Steps to 60 and Recycle to none for reliable convergence.`
-            : ' Try reloading the page or switching browser/GPU backend.';
-        throw new Error(
-          `RFD4-Proteina produced a degenerate single-residue sequence (${finalSeq.slice(0, 12)}…, logits nz=${logitsNonZero}, nan=${logitsNan})${errHint}.${stepHint}`,
+        let nativeSeq = rtToSeq(res.residueType ?? []);
+        const uniqueNativeAAs = new Set(nativeSeq.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, '').split('')).size;
+        let degradedFallback: string | undefined;
+
+        // Fallback recovery: if trunk logits were zero/NaN or collapsed to a single residue (e.g. poly-ALA)
+        // while local_latents are valid, decode sequence directly using the autoencoder decoder's own
+        // logit_linear head (by passing unconditioned C_SEQ from the batch).
+        if (nativeSeq.length >= 10 && (logitsNonZero === 0 || logitsNan > 0 || uniqueNativeAAs <= 1)) {
+          degradedFallback = 'Degenerate trunk logits; attempted autoencoder decoder logit_linear recovery';
+          console.warn('[rfd4] Degenerate trunk sequence readout detected; retrying via autoencoder decoder logit_linear head', {
+            logitsNonZero,
+            logitsNan,
+            logitsMin,
+            logitsMax,
+            uniqueNativeAAs,
+            seqSample: nativeSeq.slice(0, 24),
+            gpuValErr: gpuValErr?.message ?? null,
+          });
+          try {
+            const rawCondSeq = built.batch.condition_sequence_1_residue?.data ?? built.batch.condition_sequence_1_residue;
+            const maskedSeq = rawCondSeq ? Int32Array.from(rawCondSeq) : new Int32Array(res.n);
+            const decRecovered = await generator.decoder.decode(built.batch, {
+              n: res.n,
+              caNm: res.x.bb_ca,
+              z: res.x.local_latents,
+              seq: maskedSeq,
+            });
+            const formatted = rfd4Mod.formatSampleLocalLatents(built.batch, {
+              n: res.n,
+              caNm: res.x.bb_ca,
+              decoded: decRecovered,
+            });
+            const recSeq = rtToSeq(formatted.residueType ?? []);
+            const recUnique = new Set(recSeq.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, '').split('')).size;
+            if (recUnique > uniqueNativeAAs) {
+              const structure = rfd4Mod.processSampleToAtoms({
+                coors: formatted.coors,
+                atomMask: formatted.atomMask,
+                residueType: formatted.residueType,
+                paddingMask: built.batch.padding_mask?.data ?? built.batch.padding_mask,
+                insertionLogits: res.insertionLogits,
+                inputAtoms: built.atoms ?? built.batch.__atoms ?? null,
+                batch: built.batch,
+                inputFrame: true,
+              });
+              res = {
+                ...res,
+                residueType: formatted.residueType,
+                structure,
+                cif: rfd4Mod.toCifString(structure),
+                pdb: rfd4Mod.toPdbString(structure),
+              };
+              nativeSeq = recSeq;
+              degradedFallback = 'Recovered sequence via autoencoder decoder logit_linear head (trunk logits degraded)';
+              console.info('[rfd4] Recovered sequence via decoder head:', recSeq.slice(0, 30), `(${recUnique} unique AAs)`);
+            }
+          } catch (recErr) {
+            console.warn('[rfd4] Decoder-head sequence recovery failed:', recErr);
+          } finally {
+            releaseGeneratorActivations();
+          }
+        }
+
+        const pdbText: string = res.pdb;
+        const cifText: string = res.cif;
+        const parsed = parsePdbBackbone(pdbText);
+        const finalSeq =
+          parsed.sequence.length === parsed.nResidues && !parsed.sequence.includes('X')
+            ? parsed.sequence
+            : nativeSeq.length === parsed.nResidues
+              ? nativeSeq
+              : parsed.sequence;
+
+        const uniqueFinal = new Set(finalSeq.replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, '').split('')).size;
+        console.info(
+          `[rfd4] L=${parsed.nResidues} steps=${res.stepsRun}/${res.nsteps} half=true logits=[${logitsMin.toFixed(2)},${logitsMax.toFixed(2)}] nz=${logitsNonZero} uniqueAA=${uniqueFinal} seq=${finalSeq.slice(0, 25)}...`,
         );
+        if (parsed.nResidues >= 15 && uniqueFinal <= 1) {
+          const errHint = gpuValErr ? ` (WebGPU validation error: ${gpuValErr.message})` : '';
+          const stepHint =
+            nsteps < 58
+              ? ` Steps=${nsteps} is below the recommended minimum (58) — set Steps to 60 and Recycle to none for reliable convergence.`
+              : ' Try reloading the page or switching browser/GPU backend.';
+          throw new Error(
+            `RFD4-Proteina produced a degenerate single-residue sequence (${finalSeq.slice(0, 12)}…, logits nz=${logitsNonZero}, nan=${logitsNan})${errHint}.${stepHint}`,
+          );
+        }
+
+        const geometry = computeGeometryStats(
+          parsed.caCoords,
+          parsed.chainIds,
+          parsed.resNums,
+          parsed.insCodes,
+        );
+        const chainLengths = computeChainLengths(parsed.chainIds);
+        const candChainLengths =
+          chainLengths.length > 0 && chainLengths.reduce((a, b) => a + b, 0) === finalSeq.length
+            ? chainLengths
+            : undefined;
+
+        const runHash = fnv1a(
+          JSON.stringify({
+            mode,
+            length: mode === 'unconditional' && !customSpecYaml ? length : null,
+            nsteps,
+            recycleSchedule,
+            earlyStop: Boolean(genOpts.earlyStop),
+            seed: itemSeed,
+            activePresetId,
+            condId: condArtifact?.id ?? null,
+            inlineContig,
+            inlineLock,
+            inlineHotspots,
+            inlineMotif,
+            inlineUnidx,
+            inlineHbondMode,
+            inlineHbondSel,
+            inlineCath,
+            customSpecYaml,
+            partialFraction: mode === 'partial' ? partialFraction : null,
+            templateId: template?.id ?? null,
+          }),
+        );
+
+        const designMeta = extractRfd4DesignMetadata(parsed, res.structure?.atoms, built.batch);
+        const earlyStopped =
+          typeof res.stepsRun === 'number' &&
+          typeof res.nsteps === 'number' &&
+          res.stepsRun < res.nsteps;
+
+        const structId =
+          totalDesigns > 1
+            ? `rfd4-${mode}-d${designIndex + 1}-L${parsed.nResidues}-s${itemSeed}-${runHash}`
+            : `rfd4-${mode}-L${parsed.nResidues}-s${itemSeed}-${runHash}`;
+        const label =
+          totalDesigns > 1
+            ? `${runLabel} #${designIndex + 1}/${totalDesigns} (L=${parsed.nResidues}, steps=${res.stepsRun})`
+            : `${runLabel} (L=${parsed.nResidues}, steps=${res.stepsRun})`;
+
+        const struct: StructureArtifact = {
+          kind: 'StructureArtifact',
+          id: structId,
+          label,
+          sourceModelId: 'rfd4-proteina',
+          length: parsed.nResidues,
+          sequence: finalSeq,
+          caCoords: parsed.caCoords,
+          backbone4Coords: parsed.backbone4Coords,
+          pdbText,
+          cifText,
+          chainIds: parsed.chainIds,
+          chainLengths: parsed.diagnostics.chainLengths,
+          insCodes: parsed.insCodes,
+          sourceResidues: parsed.sourceResidues,
+          chainIdMap: parsed.chainIdMap,
+          atomPresence: parsed.atomPresence,
+          observedBackboneMask: parsed.observedBackboneMask,
+          diagnostics: parsed.diagnostics,
+          bfactorSemantics: 'crystal-b',
+          atomGranularity: 'all-atom',
+          provenance: {
+            quantization: 'int8',
+            earlyStopped,
+            ...(degradedFallback ? { degradedFallback } : {}),
+          },
+          ...(designKey ? { designKey, designIndex, seed: itemSeed } : {}),
+          ...designMeta,
+          geometry,
+        };
+
+        const candBaseId = mode === 'inverse-folding' ? 'rfd4-invfold' : 'rfd4-native';
+        const candidate: SequenceCandidate =
+          totalDesigns > 1
+            ? {
+                id: `${candBaseId}-d${designIndex + 1}`,
+                ...(designKey ? { designKey, designIndex } : {}),
+                sourceStructureId: struct.id,
+                sampleIndex: designIndex,
+                sequence: finalSeq,
+                score: null,
+                globalScore: null,
+                sourceModelId: 'rfd4-proteina',
+                seed: itemSeed,
+                ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
+              }
+            : {
+                id: `${candBaseId}-1`,
+                sequence: finalSeq,
+                score: null,
+                globalScore: null,
+                sourceModelId: 'rfd4-proteina',
+                seed: itemSeed,
+                ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
+              };
+
+        return { struct, candidate, designMeta };
+      };
+
+      if (numDesigns === 1) {
+        // Legacy singleton path: exact seed, artifact ID, and singleton StructureArtifact semantics
+        const { struct: structArtifact, candidate, designMeta } = await runOneDesign(0, 1, seed);
+        const seqSet: SequenceSet = {
+          kind: 'SequenceSet',
+          id: `rfd4-seq-${structArtifact.id}`,
+          parentStructureId: structArtifact.id,
+          sourceStructureId: structArtifact.id,
+          sourceModelId: `rfd4-proteina (${mode})`,
+          ...(designMeta.lockedChains ? { lockedChains: designMeta.lockedChains } : {}),
+          ...(designMeta.chainRoles ? { chainRoles: designMeta.chainRoles } : {}),
+          candidates: [candidate],
+        };
+
+        const transferables = collectOwnedTransferables([
+          structArtifact.caCoords,
+          structArtifact.backbone4Coords,
+          structArtifact.observedBackboneMask,
+        ]);
+        self.postMessage(
+          {
+            id: msg.id,
+            type: 'result',
+            outputs: { structure: structArtifact, sequences: seqSet },
+            elapsedMs: performance.now() - t0,
+          },
+          transferables,
+        );
+        return;
       }
 
-      const geometry = computeGeometryStats(
-        parsed.caCoords,
-        parsed.chainIds,
-        parsed.resNums,
-        parsed.insCodes,
-      );
-      const chainLengths = computeChainLengths(parsed.chainIds);
-      const candChainLengths =
-        chainLengths.length > 0 && chainLengths.reduce((a, b) => a + b, 0) === finalSeq.length
-          ? chainLengths
-          : undefined;
-
-      const runHash = fnv1a(
-        JSON.stringify({
+      // Multi-design resident-weight sequential loop (weights loaded ONCE above)
+      const plan = planGeneratorDesigns({
+        modelId: 'rfd4-proteina',
+        numDesigns,
+        baseSeed: seed,
+        scientificParams: {
           mode,
           length: mode === 'unconditional' && !customSpecYaml ? length : null,
           nsteps,
           recycleSchedule,
-          earlyStop: Boolean(genOpts.earlyStop),
-          seed,
+          earlyStop: Boolean(baseGenOpts.earlyStop),
           activePresetId,
-          condId: condArtifact?.id ?? null,
           inlineContig,
           inlineLock,
           inlineHotspots,
@@ -683,72 +849,72 @@ self.onmessage = async (ev: MessageEvent) => {
           inlineCath,
           customSpecYaml,
           partialFraction: mode === 'partial' ? partialFraction : null,
-          templateId: template?.id ?? null,
-        }),
-      );
-
-      const designMeta = extractRfd4DesignMetadata(parsed, res.structure?.atoms, built.batch);
-      const earlyStopped =
-        typeof res.stepsRun === 'number' &&
-        typeof res.nsteps === 'number' &&
-        res.stepsRun < res.nsteps;
-
-      const structArtifact: StructureArtifact = {
-        kind: 'StructureArtifact',
-        id: `rfd4-${mode}-L${parsed.nResidues}-s${seed}-${runHash}`,
-        label: `${runLabel} (L=${parsed.nResidues}, steps=${res.stepsRun})`,
-        sourceModelId: 'rfd4-proteina',
-        length: parsed.nResidues,
-        sequence: finalSeq,
-        caCoords: parsed.caCoords,
-        backbone4Coords: parsed.backbone4Coords,
-        pdbText,
-        cifText,
-        chainIds: parsed.chainIds,
-        chainLengths: parsed.diagnostics.chainLengths,
-        insCodes: parsed.insCodes,
-        sourceResidues: parsed.sourceResidues,
-        chainIdMap: parsed.chainIdMap,
-        atomPresence: parsed.atomPresence,
-        observedBackboneMask: parsed.observedBackboneMask,
-        diagnostics: parsed.diagnostics,
-        bfactorSemantics: 'crystal-b',
-        atomGranularity: 'all-atom',
-        provenance: {
-          quantization: 'int8',
-          earlyStopped,
-          ...(degradedFallback ? { degradedFallback } : {}),
         },
-        ...designMeta,
-        geometry,
+        inputDigest: fnv1a(
+          JSON.stringify({
+            condId: condArtifact?.id ?? null,
+            templateId: template?.id ?? null,
+          }),
+        ),
+      });
+
+      const designs: StructureArtifact[] = [];
+      const candidates: SequenceCandidate[] = [];
+      for (let d = 0; d < plan.items.length; d++) {
+        const planned = plan.items[d];
+        const itemSeed = deriveStableItemSeed(seed, 'generation', planned.key);
+        const { struct, candidate } = await runOneDesign(d, numDesigns, itemSeed, planned.key);
+        const seqKey = makeSequenceKey(plan.familyKey, planned.key, 0);
+        candidate.key = seqKey;
+        candidate.sequenceKey = seqKey;
+        designs.push(struct);
+        candidates.push(candidate);
+      }
+
+      const representative = designs[0];
+      const repSelection = {
+        selectedKey: representative.designKey ?? representative.id,
+        criterion: 'lowest-creation-ordinal',
+        totalMembers: designs.length,
+        selectedIndex: 0,
+        scoreValue: null,
+      };
+      const structArtifact: StructureArtifact = {
+        ...representative,
+        label: `${runLabel} (${numDesigns} designs · L=${representative.length})`,
+        representativeSelection: repSelection,
+        collection: {
+          kind: 'Collection',
+          schema: 'denovo.collection/v1',
+          id: `rfd4-col-${plan.planDigest.slice(0, 16)}`,
+          familyKey: plan.familyKey,
+          collectionKind: 'independent-candidates',
+          requestedCount: numDesigns,
+          complete: true,
+          items: designs,
+          keys: designs.map((item) => item.designKey ?? item.id),
+          representativeSelection: repSelection,
+        },
       };
 
       const seqSet: SequenceSet = {
         kind: 'SequenceSet',
-        id: `rfd4-seq-${structArtifact.id}`,
-        parentStructureId: structArtifact.id,
-        sourceStructureId: structArtifact.id,
+        id: `rfd4-seq-col-${plan.planDigest.slice(0, 16)}`,
+        parentStructureId: representative.id,
+        sourceStructureId: representative.id,
+        sourceStructureIds: designs.map((item) => item.id),
         sourceModelId: `rfd4-proteina (${mode})`,
-        ...(designMeta.lockedChains ? { lockedChains: designMeta.lockedChains } : {}),
-        ...(designMeta.chainRoles ? { chainRoles: designMeta.chainRoles } : {}),
-        candidates: [
-          {
-            id: mode === 'inverse-folding' ? 'rfd4-invfold-1' : 'rfd4-native-1',
-            sequence: finalSeq,
-            score: null,
-            globalScore: null,
-            sourceModelId: 'rfd4-proteina',
-            seed,
-            ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
-          },
-        ],
+        collectionKind: 'independent-candidates',
+        ...(representative.lockedChains ? { lockedChains: representative.lockedChains } : {}),
+        ...(representative.chainRoles ? { chainRoles: representative.chainRoles } : {}),
+        candidates,
       };
 
-      const transferables = collectOwnedTransferables([
-        structArtifact.caCoords,
-        structArtifact.backbone4Coords,
-        structArtifact.observedBackboneMask,
-      ]);
+      const transferViews: Array<ArrayBufferView | undefined> = [];
+      for (const item of designs) {
+        transferViews.push(item.caCoords, item.backbone4Coords, item.observedBackboneMask);
+      }
+      const transferables = collectOwnedTransferables(transferViews);
       self.postMessage(
         {
           id: msg.id,

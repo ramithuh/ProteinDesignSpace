@@ -122,6 +122,9 @@ const VALID_RFD4_RECYCLE_SCHEDULES = new Set(['none', 'low', 'medium', 'high']);
 const VALID_GENIE3_TASK_MODES = new Set(['unconditional', 'binder', 'motif']);
 const VALID_LOCALFOLD_MODELS = new Set(LOCALFOLD_MODEL_OPTIONS.map((m) => m.id));
 const VALID_MSA_MODES = new Set(['single', 'mmseqs2', 'target-only', 'a3m']);
+const VALID_TOPK_MODES = new Set(['per-backbone', 'global']);
+const VALID_TOPK_METRICS = new Set(['score', 'globalScore']);
+const VALID_TOPK_DIRECTIONS = new Set(['min', 'max']);
 const VALID_MPNN_CATALOG: Record<string, ReadonlySet<string>> = Object.fromEntries(
   Object.entries(MPNN_CHECKPOINTS_BY_FAMILY).map(([fam, opts]) => [
     fam,
@@ -151,6 +154,7 @@ export interface ValidationFeedback {
 export const NUMERIC_SPECS: Record<string, Record<string, NumericFieldSpec>> = {
   'rfd4-proteina': {
     length: { min: 30, max: 256, step: 1, integer: true, defaultValue: 70, unit: 'aa' },
+    numDesigns: { min: 1, max: 16, step: 1, integer: true, defaultValue: 1 },
     partialFraction: { min: 0.05, max: 0.95, step: 0.05, integer: false, defaultValue: 0.5 },
     nsteps: {
       min: 10,
@@ -167,6 +171,7 @@ export const NUMERIC_SPECS: Record<string, Record<string, NumericFieldSpec>> = {
   },
   genie3: {
     length: { min: 30, max: 256, step: 1, integer: true, defaultValue: 80, unit: 'aa' },
+    numDesigns: { min: 1, max: 16, step: 1, integer: true, defaultValue: 1 },
     nSampleStep: { min: 10, max: 250, step: 10, integer: true, defaultValue: 100 },
     directionScale: { min: 0.0, max: 1.5, step: 0.1, integer: false, defaultValue: 0.8 },
     noiseScale: { min: 0, max: 1.5, step: 0.1, integer: false, defaultValue: 1.0 },
@@ -183,7 +188,12 @@ export const NUMERIC_SPECS: Record<string, Record<string, NumericFieldSpec>> = {
     tolerance: { min: 0, max: 5, step: 0.1, integer: false, defaultValue: 0, unit: 'Å' },
     diffusionSteps: { min: 10, max: 200, step: 5, integer: true, defaultValue: 25 },
     maxSequences: { min: 1, max: 8, step: 1, integer: true, defaultValue: 2 },
+    maxTotalFolds: { min: 1, max: 64, step: 1, integer: true, defaultValue: 16 },
     seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 0 },
+  },
+  'top-k-filter': {
+    topK: { min: 1, max: 16, step: 1, integer: true, defaultValue: 2 },
+    maxTotal: { min: 1, max: 64, step: 1, integer: true, defaultValue: 8 },
   },
   'designability-scorer': {
     scRmsdThreshold: { min: 0.5, max: 10, step: 0.1, integer: false, defaultValue: 2.0, unit: 'Å' },
@@ -819,6 +829,24 @@ export function validateNodeParams(node: WorkflowNode): string[] {
     }
   }
 
+  if (node.adapterId === 'top-k-filter') {
+    if (p.mode !== undefined && !VALID_TOPK_MODES.has(String(p.mode))) {
+      errs.push(
+        `"${label}": Invalid mode "${String(p.mode)}" (expected per-backbone or global).`,
+      );
+    }
+    if (p.metric !== undefined && !VALID_TOPK_METRICS.has(String(p.metric))) {
+      errs.push(
+        `"${label}": Invalid metric "${String(p.metric)}" (expected score or globalScore).`,
+      );
+    }
+    if (p.direction !== undefined && !VALID_TOPK_DIRECTIONS.has(String(p.direction))) {
+      errs.push(
+        `"${label}": Invalid direction "${String(p.direction)}" (expected min or max).`,
+      );
+    }
+  }
+
   // Schema-driven fallback for any plug-and-play adapter not in the built-in hand-tuned set
   const BUILTIN_HAND_VALIDATED = new Set([
     'pdb-input',
@@ -827,6 +855,7 @@ export function validateNodeParams(node: WorkflowNode): string[] {
     'genie3',
     'web-protein-mpnn',
     'localfold-af2',
+    'top-k-filter',
     'designability-scorer',
   ]);
   if (!BUILTIN_HAND_VALIDATED.has(node.adapterId)) {

@@ -2,6 +2,7 @@
 // for the model-agnostic denovo.run node-graph canvas.
 
 import { ADAPTER_REGISTRY } from './registry';
+import { getDefaultParamsFromSchema } from './param-schema';
 import { validateNodeParams } from './param-validation';
 import type { PortType, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 
@@ -103,10 +104,22 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
       };
     case 'localfold-af2':
       return { model: 'monomer', recycles: 1, diffusionSteps: 25, maxSequences: 2, seed: 0 };
+    case 'top-k-filter':
+      return {
+        mode: 'per-backbone',
+        topK: 2,
+        maxTotal: 8,
+        metric: 'score',
+        direction: 'min',
+      };
     case 'designability-scorer':
       return { scRmsdThreshold: 2.0, plddtThreshold: 70 };
-    default:
-      return {};
+    default: {
+      const manifest = Object.hasOwn(ADAPTER_REGISTRY, adapterId)
+        ? ADAPTER_REGISTRY[adapterId]
+        : undefined;
+      return manifest?.paramSchema ? getDefaultParamsFromSchema(manifest) : {};
+    }
   }
 }
 

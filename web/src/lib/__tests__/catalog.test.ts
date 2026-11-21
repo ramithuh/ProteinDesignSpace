@@ -54,11 +54,12 @@ describe('engine/catalog & biologist terminology', () => {
     }
   });
 
-  it('organizes all 7 blocks into workflow groups with structured sub-items for LocalFold and ProteinMPNN', () => {
+  it('organizes all 8 blocks into workflow groups with structured sub-items for LocalFold and ProteinMPNN', () => {
     const groupedIds = CATALOG_STAGE_GROUPS.flatMap((g) => g.ids);
     expect(new Set(groupedIds)).toEqual(new Set(Object.keys(ADAPTER_REGISTRY)));
     expect(CATALOG_ITEMS).toHaveLength(Object.keys(ADAPTER_REGISTRY).length);
-    expect(CATALOG_ITEMS).toHaveLength(7);
+    expect(CATALOG_ITEMS).toHaveLength(8);
+    expect(ADAPTER_REGISTRY['top-k-filter']).toBeDefined();
     expect(ADAPTER_REGISTRY['rfd4-conditioner']).toBeUndefined();
 
     const lf = CATALOG_ITEMS.find((i) => i.id === 'localfold-af2')!;

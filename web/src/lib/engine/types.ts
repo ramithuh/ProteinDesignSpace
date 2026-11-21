@@ -165,6 +165,33 @@ export interface ExcludedCandidateRecord {
   reason: string;
 }
 
+export interface ArtifactCollection<T = unknown> {
+  kind: 'Collection';
+  schema?: 'denovo.collection/v1';
+  id: string;
+  familyKey?: string;
+  collectionKind: CollectionKind;
+  requestedCount: number;
+  complete?: boolean;
+  /** Ordered list of materialized members (e.g., N independent generated backbones). */
+  items: T[];
+  /** Optional deterministic member keys aligned 1:1 with `items`. */
+  keys?: string[];
+  representativeSelection?: RepresentativeSelection;
+}
+
+export interface SequenceFilterMetadata {
+  mode: 'per-backbone' | 'global';
+  topK: number;
+  maxTotal: number | null;
+  metric: 'score' | 'globalScore';
+  direction: 'min' | 'max';
+  totalInput: number;
+  selectedCount: number;
+  excludedCount: number;
+  description: string;
+}
+
 export interface ReferenceResidueMapping {
   /** Explicit 0-based [foldIndex, referenceIndex] residue pairs. */
   pairs?: Array<[number, number]>;
@@ -243,6 +270,14 @@ export interface StructureArtifact {
   nativeMotifCoords?: number[][];
   /** Optional parent structure ID when this structure was derived from an upstream structure/collection. */
   parentStructureId?: string;
+  /** Deterministic immutable design key when produced as part of a multi-design collection. */
+  designKey?: string;
+  /** 0-based creation ordinal within a multi-design collection. */
+  designIndex?: number;
+  /** Seed used to generate this specific backbone. */
+  seed?: number;
+  /** Optional multi-backbone collection envelope flowing cleanly over the existing `'structure'` port. */
+  collection?: ArtifactCollection<StructureArtifact>;
   /** Optional provenance recording how this structure was selected from a multi-member collection. */
   representativeSelection?: RepresentativeSelection;
   /** Semantic meaning of PDB/mmCIF B-factor values for faithful viewer coloring. */
@@ -285,6 +320,12 @@ export interface SequenceCandidate {
   id: string;
   /** Canonical immutable candidate key across workflow stages (defaults to `id`). */
   key?: string;
+  /** Deterministic immutable sequence key (independent of score sorting / Top-K). */
+  sequenceKey?: string;
+  /** Parent backbone design key when derived from a multi-backbone collection. */
+  designKey?: string;
+  /** 0-based parent design ordinal when derived from a multi-backbone collection. */
+  designIndex?: number;
   sequence: string;
   score: number | null;
   globalScore: number | null;
@@ -302,12 +343,20 @@ export interface SequenceSet {
   parentStructureId: string;
   /** Explicit source structure lineage (mirrors `parentStructureId` when derived from a structure). */
   sourceStructureId?: string;
+  /** Distinct parent backbone IDs when candidates span multiple designs. */
+  sourceStructureIds?: string[];
   sourceModelId: string;
   collectionKind?: CollectionKind;
   /** Locked target chain IDs propagated from upstream structures (used by target-only MSA). */
   lockedChains?: string[];
   /** Chain roles propagated from upstream structures (used by target-only MSA & binder scoring). */
   chainRoles?: Record<string, 'target' | 'binder' | 'scaffold'>;
+  /** Explicit excluded candidates recorded by Top-K filtering or pre-folding caps. */
+  excludedCandidates?: ExcludedCandidateRecord[];
+  /** Item-level outcomes recorded by Top-K filtering. */
+  itemOutcomes?: CollectionItemOutcome[];
+  /** Metadata describing the Top-K filter policy applied to produce this SequenceSet. */
+  filterMetadata?: SequenceFilterMetadata;
   candidates: SequenceCandidate[];
 }
 
@@ -315,6 +364,16 @@ export interface FoldedCandidate {
   sequenceId: string;
   /** Canonical immutable candidate key across workflow stages (defaults to `sequenceId`). */
   key?: string;
+  /** Deterministic parent design key when folding multi-backbone designs. */
+  designKey?: string;
+  /** 0-based parent design ordinal. */
+  designIndex?: number;
+  /** Deterministic parent sequence key. */
+  sequenceKey?: string;
+  /** Deterministic model-specific fold key (distinct from `sequenceKey`). */
+  foldKey?: string;
+  /** Stable seed used to fold this candidate. */
+  seed?: number;
   sequence: string;
   foldModelId: string;
   sourceStructureId?: string;
@@ -371,6 +430,14 @@ export interface DesignabilityRow {
   sequenceId: string;
   /** Canonical immutable candidate key (defaults to `sequenceId`). */
   candidateKey?: string;
+  /** Deterministic parent design key when evaluated against a multi-backbone collection. */
+  designKey?: string;
+  /** 0-based parent design ordinal. */
+  designIndex?: number;
+  /** Deterministic parent sequence key. */
+  sequenceKey?: string;
+  /** Deterministic fold key. */
+  foldKey?: string;
   /** Recorded source structure lineage of the folded candidate. */
   sourceStructureId?: string;
   sequence: string;
@@ -448,6 +515,12 @@ export interface DesignabilityMetrics {
   lineageWarning?: string;
   referenceMapping?: ReferenceResidueMapping;
   collectionKind?: CollectionKind;
+  /** True when evaluated against a multi-backbone structure collection. */
+  multiDesign?: boolean;
+  /** Number of distinct backbones evaluated in multi-design scoring. */
+  evaluatedDesignCount?: number;
+  /** Fraction of evaluated backbones with at least one passing sequence (`null` when 0 evaluated). */
+  designHitRate?: number | null;
 }
 
 export interface CanonicalConditionIntent {

@@ -323,6 +323,11 @@ describe('declarative ParamSchema & modes single source of truth', () => {
         end: 'function topoSort(',
       },
       {
+        adapterId: 'top-k-filter',
+        start: "if (node.adapterId === 'top-k-filter') {",
+        end: "if (node.adapterId === 'designability-scorer') {",
+      },
+      {
         adapterId: 'designability-scorer',
         start: "if (node.adapterId === 'designability-scorer') {",
         end: 'throw new Error(`Unknown CPU adapter',
