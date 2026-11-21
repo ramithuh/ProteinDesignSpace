@@ -182,7 +182,7 @@
   class:err={st?.status === 'error'}
   style="--stage-color: {stageColor}{data.compareColor ? `; --compare-color: ${data.compareColor}` : ''}"
 >
-  <div class="stripe"></div>
+  <div class="stripe-clip" aria-hidden="true"><div class="stripe"></div></div>
 
   {#if data.compareBadge && data.compareColor}
     <span
@@ -313,7 +313,9 @@
     position: relative;
     width: 224px;
     background: var(--bg-surface);
-    border: 1px solid var(--border);
+    --node-border-w: 1px;
+    --node-border-style: solid;
+    --node-border-color: var(--border);
     border-radius: 8px;
     color: var(--text-body);
     font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
@@ -322,19 +324,33 @@
     transition:
       opacity 180ms ease,
       filter 180ms ease,
-      border-color 180ms ease,
       box-shadow 180ms ease;
+  }
+  /* Crisp card border rendered in front of internal fills & top stage stripe */
+  .p-node::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    border: var(--node-border-w) var(--node-border-style) var(--node-border-color);
+    pointer-events: none;
+    z-index: 2;
+    transition: border-color 180ms ease;
+  }
+  .p-node :global(.svelte-flow__handle) {
+    z-index: 4;
   }
   .p-node.running {
     opacity: 1;
-    border: 1.5px solid #f59e0b;
+    --node-border-w: 1.5px;
+    --node-border-color: #f59e0b;
     box-shadow:
       0 0 0 3px rgba(245, 158, 11, 0.22),
       0 8px 22px rgba(245, 158, 11, 0.16);
     animation: runner-breathe 2s ease-in-out infinite;
   }
   .p-node.done {
-    border-color: rgba(34, 197, 94, 0.7);
+    --node-border-color: rgba(34, 197, 94, 0.7);
   }
   .p-node.pipeline-running.done {
     opacity: 0.86;
@@ -345,15 +361,15 @@
   .p-node.queued {
     opacity: 0.48;
     filter: saturate(0.35);
-    border-style: dashed;
-    border-color: var(--border-strong);
+    --node-border-style: dashed;
+    --node-border-color: var(--border-strong);
   }
   .p-node.queued:hover {
     opacity: 0.8;
     filter: saturate(0.75);
   }
   .p-node.comparing {
-    border-color: var(--compare-color);
+    --node-border-color: var(--compare-color);
     box-shadow:
       0 0 0 2.5px color-mix(in srgb, var(--compare-color) 42%, transparent),
       var(--node-shadow);
@@ -379,39 +395,49 @@
   .p-node.err {
     opacity: 1;
     filter: none;
-    border: 1.5px solid #ef4444;
+    --node-border-w: 1.5px;
+    --node-border-color: #ef4444;
     box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.22), var(--node-shadow);
   }
   /* Selected / peeking focus ring stays visible alongside state border & overrides dimming */
   .p-node.selected {
     opacity: 1;
     filter: none;
-    border-color: var(--accent);
+    --node-border-color: var(--accent);
     box-shadow: 0 0 0 2.5px rgba(59, 130, 246, 0.35), var(--node-shadow);
   }
   .p-node.selected.running {
-    border-color: #f59e0b;
+    --node-border-w: 1.5px;
+    --node-border-color: #f59e0b;
     box-shadow:
       0 0 0 2.5px var(--accent),
       0 0 0 5px rgba(245, 158, 11, 0.24),
       var(--node-shadow);
   }
   .p-node.selected.done {
-    border-color: #22c55e;
+    --node-border-color: #22c55e;
     box-shadow: 0 0 0 2.5px rgba(59, 130, 246, 0.4), var(--node-shadow);
   }
   .p-node.selected.err {
-    border-color: #ef4444;
+    --node-border-w: 1.5px;
+    --node-border-color: #ef4444;
     box-shadow:
       0 0 0 2.5px var(--accent),
       0 0 0 5px rgba(239, 68, 68, 0.22),
       var(--node-shadow);
   }
+  .stripe-clip {
+    position: relative;
+    height: 8px;
+    border-radius: 8px 8px 0 0;
+    overflow: hidden;
+    margin-bottom: -4px;
+    pointer-events: none;
+  }
   .stripe {
     position: relative;
-    height: 3px;
+    height: 4px;
     background: var(--stage-color);
-    border-radius: 7px 7px 0 0;
     overflow: hidden;
   }
   .p-node.loading .stripe::after,
