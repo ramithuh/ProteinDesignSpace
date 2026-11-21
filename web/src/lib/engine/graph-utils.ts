@@ -145,12 +145,12 @@ export function validateConnection(
   const dst = graph.nodes.find((n) => n.id === toNode);
   if (!src || !dst) return { valid: false, reason: 'Missing source or target node' };
 
-  const srcManifest = ADAPTER_REGISTRY[src.adapterId];
-  const dstManifest = ADAPTER_REGISTRY[dst.adapterId];
+  const srcManifest = Object.hasOwn(ADAPTER_REGISTRY, src.adapterId) ? ADAPTER_REGISTRY[src.adapterId] : undefined;
+  const dstManifest = Object.hasOwn(ADAPTER_REGISTRY, dst.adapterId) ? ADAPTER_REGISTRY[dst.adapterId] : undefined;
   if (!srcManifest || !dstManifest) return { valid: false, reason: 'Unknown adapter' };
 
-  const outSpec = srcManifest.outputs[fromPort];
-  const inSpec = dstManifest.inputs[toPort];
+  const outSpec = Object.hasOwn(srcManifest.outputs, fromPort) ? srcManifest.outputs[fromPort] : undefined;
+  const inSpec = Object.hasOwn(dstManifest.inputs, toPort) ? dstManifest.inputs[toPort] : undefined;
   if (!outSpec) return { valid: false, reason: `Unknown output port "${fromPort}"` };
   if (!inSpec) return { valid: false, reason: `Unknown input port "${toPort}"` };
 
@@ -169,21 +169,24 @@ export function validateConnection(
 }
 
 /** Validate the full graph before execution (unique IDs, valid typed edges, single edge per target port, required inputs, cycle-free). */
-export function validateGraph(graph: WorkflowGraph): string[] {
+export function validateGraph(graph: WorkflowGraph, { requireRunnable = true } = {}): string[] {
   const errors: string[] = [];
   if (graph.nodes.length === 0) {
-    errors.push('Canvas is empty — click + Add Block to place a block.');
+    if (requireRunnable) errors.push('Canvas is empty — click + Add Block to place a block.');
     return errors;
   }
 
   const byId = new Map<string, WorkflowNode>();
   for (const node of graph.nodes) {
+    if (!node.id || ['__proto__', 'constructor', 'prototype'].includes(node.id)) {
+      errors.push(`Invalid or reserved node ID "${node.id}".`);
+    }
     if (byId.has(node.id)) {
       errors.push(`Duplicate node ID "${node.id}".`);
     } else {
       byId.set(node.id, node);
     }
-    if (!ADAPTER_REGISTRY[node.adapterId]) {
+    if (!Object.hasOwn(ADAPTER_REGISTRY, node.adapterId)) {
       errors.push(`Node "${node.id}" references unknown adapter "${node.adapterId}".`);
     }
   }
@@ -213,12 +216,12 @@ export function validateGraph(graph: WorkflowGraph): string[] {
       errors.push(`Self-loop detected on node "${e.fromNode}".`);
     }
 
-    const srcManifest = ADAPTER_REGISTRY[src.adapterId];
-    const dstManifest = ADAPTER_REGISTRY[dst.adapterId];
-    let edgePortsOk = true;
+    const srcManifest = Object.hasOwn(ADAPTER_REGISTRY, src.adapterId) ? ADAPTER_REGISTRY[src.adapterId] : undefined;
+    const dstManifest = Object.hasOwn(ADAPTER_REGISTRY, dst.adapterId) ? ADAPTER_REGISTRY[dst.adapterId] : undefined;
+    let edgePortsOk = Boolean(srcManifest && dstManifest);
     if (srcManifest && dstManifest) {
-      const outSpec = srcManifest.outputs[e.fromPort];
-      const inSpec = dstManifest.inputs[e.toPort];
+      const outSpec = Object.hasOwn(srcManifest.outputs, e.fromPort) ? srcManifest.outputs[e.fromPort] : undefined;
+      const inSpec = Object.hasOwn(dstManifest.inputs, e.toPort) ? dstManifest.inputs[e.toPort] : undefined;
       if (!outSpec) {
         errors.push(`Node "${src.id}" has unknown output port "${e.fromPort}".`);
         edgePortsOk = false;
@@ -253,6 +256,7 @@ export function validateGraph(graph: WorkflowGraph): string[] {
 
   // Check required inputs and node parameter validity
   for (const node of byId.values()) {
+    if (!requireRunnable || !Object.hasOwn(ADAPTER_REGISTRY, node.adapterId)) continue;
     const manifest = ADAPTER_REGISTRY[node.adapterId];
     if (!manifest) continue;
     for (const [portName, spec] of Object.entries(manifest.inputs)) {

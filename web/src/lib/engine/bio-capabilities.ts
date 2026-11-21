@@ -5,7 +5,7 @@
 
 import { LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { getBenchmarkById } from './benchmarks';
-import { parseStructureText } from '$lib/protein-ops/pdb';
+import { cropParsedStructure, parseStructureText } from '$lib/protein-ops/pdb';
 import { checkGenie3ConditionCompatibility } from './conditioning';
 import type {
   BioCompatibilityIssue,
@@ -119,7 +119,11 @@ function inferNodeOutputProfile(
     const bench = benchId ? getBenchmarkById(benchId) : undefined;
     if ((mode === 'custom' || mode === 'pdb-id') && pdbText.length > 0) {
       try {
-        const parsed = parseStructureText(pdbText);
+        let parsed = parseStructureText(pdbText);
+        const cropSpec = String(node.params.cropSegments ?? '').trim();
+        if (cropSpec) {
+          parsed = cropParsedStructure(parsed, cropSpec);
+        }
         const entities = new Set<BioEntityKind>(['protein']);
         if (bench) {
           for (const e of bench.entities) entities.add(e);

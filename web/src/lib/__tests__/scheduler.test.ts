@@ -65,6 +65,54 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     vi.unstubAllGlobals();
   });
 
+  it('rejects invalid programmatic runs before emitting progress or launching workers', async () => {
+    const scheduler = new ExecutionScheduler();
+    const progress = vi.fn();
+    const graph: WorkflowGraph = {
+      id: 'invalid', name: 'Invalid',
+      nodes: [{ id: 'gen', adapterId: 'genie3', params: { length: 80.5 } }], edges: [],
+    };
+    await expect(scheduler.run(graph, progress)).rejects.toThrow(/integer/i);
+    expect(progress).not.toHaveBeenCalled();
+    expect(mockWorkerRunCalls).toBe(0);
+    graph.nodes = [{ id: 'p', adapterId: 'pdb-input', params: { mode: 'custom', pdbText: '' } }];
+    await expect(scheduler.run(graph, progress)).rejects.toThrow(/structure|PDB/i);
+    graph.nodes = [{ id: 'p', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } }];
+    graph.edges = [{ fromNode: 'missing', fromPort: 'structure', toNode: 'p', toPort: 'structure' }];
+    await expect(scheduler.run(graph, progress)).rejects.toThrow(/missing|unknown/i);
+    expect(progress).not.toHaveBeenCalled();
+    graph.edges = [];
+    await expect(scheduler.run(graph, progress)).resolves.toBeDefined();
+  });
+
+  it('keeps FASTA candidate IDs unique when explicit headers collide with generated suffixes', async () => {
+    const result = await new ExecutionScheduler().run({
+      id: 'headers', name: 'Headers',
+      nodes: [{ id: 's', adapterId: 'sequence-input', params: {
+        sequence: '>dup\nAAAAA\n>dup\nGGGGG\n>dup_2\nLLLLL\n>dup\nVVVVV',
+      } }], edges: [],
+    }, () => {});
+    const candidates = (result.outputsByNode.s.sequences as SequenceSet).candidates;
+    expect(new Set(candidates.map(c => c.id)).size).toBe(candidates.length);
+    expect(candidates.map(c => c.sequence)).toEqual(['AAAAA', 'GGGGG', 'LLLLL', 'VVVVV']);
+  });
+
+  it('invalidates downstream memoization when a sequence candidate is renamed', async () => {
+    const scheduler = new ExecutionScheduler();
+    const graph: WorkflowGraph = {
+      id: 'rename', name: 'Rename', nodes: [
+        { id: 's', adapterId: 'sequence-input', params: { label: 'before', sequence: 'ACDEFGHIKL' } },
+        { id: 'f', adapterId: 'localfold-af2', params: {} },
+      ], edges: [{ fromNode: 's', fromPort: 'sequences', toNode: 'f', toPort: 'sequences' }],
+    };
+    const before = await scheduler.run(graph, () => {});
+    graph.nodes[0].params.label = 'after';
+    const after = await scheduler.run(graph, () => {});
+    expect(after.outputsByNode.s.sequences.id).not.toBe(before.outputsByNode.s.sequences.id);
+    expect(mockWorkerRunCalls).toBe(2);
+    await scheduler.releaseActiveGpu();
+  });
+
   it('executes pdb-input in demo-bundle and custom PDB/mmCIF modes, and rejects < 3 residues', async () => {
     const scheduler = new ExecutionScheduler();
     const events: NodeProgressEvent[] = [];
@@ -159,7 +207,7 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
           {
             id: 's',
             adapterId: 'sequence-input',
-            params: { label: 'helix-1', sequence: '  mktay iakqr 123 qisfv  ' },
+            params: { label: 'helix-1', sequence: '  mktay iakqr qisfv  ' },
           },
         ],
         edges: [],
@@ -207,7 +255,7 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
         },
         () => {},
       ),
-    ).rejects.toThrow(/empty/i);
+    ).rejects.toThrow(/Enter at least one amino acid sequence/);
 
     // Only invalid / < 5 aa input throws
     await expect(
@@ -220,7 +268,7 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
         },
         () => {},
       ),
-    ).rejects.toThrow(/No valid amino acid/);
+    ).rejects.toThrow(/Invalid residue/);
   });
 
   it('executes rfd4-conditioner for hotspots, indexed/unindexed motifs, H-bonds, CATH, rawJson, and taskPreset', async () => {

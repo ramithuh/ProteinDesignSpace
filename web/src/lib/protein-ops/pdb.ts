@@ -758,6 +758,108 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
 }
 
 /**
+ * Crop a ParsedStructure to specific chains or residue ranges (e.g. "A163-181", "A16-35, A52-71", "A").
+ * Preserves exact original PDB chain IDs and residue numbers so downstream hotspots/motif spans match verbatim.
+ */
+export function cropParsedStructure(parsed: ParsedStructure, segmentSpec: string): ParsedStructure {
+  const tokens = segmentSpec
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (tokens.length === 0) return parsed;
+
+  interface CropRule {
+    chain: string;
+    start: number | null;
+    end: number | null;
+  }
+  const rules: CropRule[] = [];
+  for (const tok of tokens) {
+    const chainOnly = /^([A-Za-z])$/.exec(tok);
+    if (chainOnly) {
+      rules.push({ chain: chainOnly[1].toUpperCase(), start: null, end: null });
+      continue;
+    }
+    const rangeMatch = /^([A-Za-z])?:?(\d+)(?:-(\d+))?$/.exec(tok);
+    if (rangeMatch) {
+      const chain = (rangeMatch[1] || 'A').toUpperCase();
+      const start = parseInt(rangeMatch[2], 10);
+      const end = rangeMatch[3] ? parseInt(rangeMatch[3], 10) : start;
+      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+        rules.push({ chain, start, end });
+      }
+    }
+  }
+  if (rules.length === 0) return parsed;
+
+  const keptIndices: number[] = [];
+  for (let i = 0; i < parsed.nResidues; i++) {
+    const ch = (parsed.chainIds[i] || 'A').toUpperCase();
+    const rn = parsed.resNums[i] ?? i + 1;
+    const match = rules.some(
+      (r) => r.chain === ch && (r.start === null || (rn >= r.start && rn <= (r.end ?? r.start))),
+    );
+    if (match) keptIndices.push(i);
+  }
+
+  if (keptIndices.length < 3) {
+    throw new Error(
+      `Segment crop "${segmentSpec}" matched only ${keptIndices.length} residue(s) (need at least 3). Clear the crop or check chain/residue numbers.`,
+    );
+  }
+
+  const L = keptIndices.length;
+  const caCoords = new Float32Array(L * 3);
+  const backbone4Coords = new Float32Array(L * 4 * 3);
+  const chainIds: string[] = [];
+  const resNums: number[] = [];
+  const resSeqs: string[] = [];
+  let seq = '';
+
+  for (let j = 0; j < L; j++) {
+    const src = keptIndices[j];
+    seq += parsed.sequence[src] ?? 'A';
+    chainIds.push(parsed.chainIds[src] ?? 'A');
+    const rn = parsed.resNums[src] ?? src + 1;
+    resNums.push(rn);
+    resSeqs.push(String(rn));
+    caCoords[j * 3 + 0] = parsed.caCoords[src * 3 + 0];
+    caCoords[j * 3 + 1] = parsed.caCoords[src * 3 + 1];
+    caCoords[j * 3 + 2] = parsed.caCoords[src * 3 + 2];
+    for (let k = 0; k < 12; k++) {
+      backbone4Coords[j * 12 + k] = parsed.backbone4Coords[src * 12 + k];
+    }
+  }
+
+  const chainLengths = computeChainLengthsFromIds(chainIds);
+  const pdbText = coordsToBackbonePdb(backbone4Coords, L, {
+    atomsPerRes: 4,
+    sequence: seq,
+    chainIds,
+    resSeqs,
+  });
+
+  return {
+    sequence: seq,
+    nResidues: L,
+    caCoords,
+    backbone4Coords,
+    chainIds,
+    resNums,
+    pdbText,
+    format: 'pdb',
+    diagnostics: {
+      chainCount: chainLengths.length,
+      chainLengths,
+      hasLigands: false,
+      ligandNames: [],
+      hasNucleicAcids: false,
+      nucleicAcidChains: [],
+    },
+  };
+}
+
+/**
  * Generates an ideal 53-residue de novo 3-helix bundle backbone with exact ~3.80 Å
  * Cα-Cα spacing, 0 chain breaks, 0 clashes, and proper N/CA/C/O peptide planes so
  * users can test ProteinMPNN -> LocalFold AF2 -> Kabsch scRMSD in 1 click.

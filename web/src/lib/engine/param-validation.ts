@@ -333,6 +333,8 @@ export function validateNodeParams(node: WorkflowNode): string[] {
       if (!Number.isFinite(val) || val < spec.min || val > spec.max) {
         const unit = spec.unit ? ` ${spec.unit}` : '';
         errs.push(`"${label}": ${key} must be between ${spec.min} and ${spec.max}${unit}.`);
+      } else if (spec.integer && !Number.isInteger(val)) {
+        errs.push(`"${label}": ${key} must be an integer.`);
       }
     }
   }

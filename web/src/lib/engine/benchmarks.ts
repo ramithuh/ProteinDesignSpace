@@ -16,6 +16,8 @@ export interface BenchmarkTargetMeta {
   supportsGenie3: boolean;
   entities: ('protein' | 'ligand' | 'dna')[];
   biology: string;
+  /** Optional segment crop applied to the raw RCSB structure so only the benchmark domain/motif is loaded. */
+  cropSegments?: string;
   /** Canonical conditioning parameters applied to the Conditioning block in 1 click. */
   conditionParams: {
     taskPreset: 'custom' | string;
@@ -43,6 +45,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: 'Viral prefusion neutralizing helix–strand epitope (A163–181)',
+    cropSegments: 'A163-181',
     conditionParams: {
       taskPreset: 'custom',
       contig: '25-25,A163-181,30-30',
@@ -61,6 +64,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: 'Twin Ca²⁺-binding EF-hand loops (A16–35 & A52–71)',
+    cropSegments: 'A16-35, A52-71',
     conditionParams: {
       taskPreset: 'custom',
       contig: '10-10,A16-35,16-16,A52-71,10-10',
@@ -79,6 +83,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: '3-island catalytic His₃ Zn²⁺ binding site',
+    cropSegments: 'A93-97, A118-120, A198-200',
     conditionParams: {
       taskPreset: 'custom',
       contig: '15-15,A93-97,20-20,A118-120,20-20,A198-200,10-10',
@@ -97,6 +102,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: '9-aa cancer-suppressor helical motif (B19–27, F19/W23/L26 triad)',
+    cropSegments: 'B19-27',
     conditionParams: {
       taskPreset: 'custom',
       contig: '28-28,B19-27,28-28',
@@ -115,6 +121,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: '4-island bacterioferritin di-iron coordinating helices',
+    cropSegments: 'A18-25, A47-54, A92-99, A123-130',
     conditionParams: {
       taskPreset: 'custom',
       contig: '15-15,A18-25,20-20,A47-54,20-20,A92-99,20-20,A123-130,18-18',
@@ -133,6 +140,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: 'Metal-free Ser–His–Asp catalytic triad + oxyanion hole',
+    cropSegments: 'A55, A99, A190-192',
     conditionParams: {
       taskPreset: 'custom',
       contig: '35-35,A55-55,35-35,A99-99,45-45,A190-192,30-30',
@@ -153,6 +161,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: 'Immune checkpoint PD-L1 IgV (A17–132) with hydrophobic hotspots',
+    cropSegments: 'A17-132',
     conditionParams: {
       taskPreset: 'custom',
       contig: 'A17-132,/0,70-70',
@@ -172,6 +181,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: 'Compact 85-aa oncology target (A25–109) with deep p53 pocket',
+    cropSegments: 'A25-109',
     conditionParams: {
       taskPreset: 'custom',
       contig: 'A25-109,/0,60-60',
@@ -191,6 +201,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: 'Neurotrophin receptor TrkA D5 (X282–382)',
+    cropSegments: 'X282-382',
     conditionParams: {
       taskPreset: 'custom',
       contig: 'X282-382,/0,70-70',
@@ -210,6 +221,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: 'Insulin receptor L1 domain (E6–155)',
+    cropSegments: 'E6-155',
     conditionParams: {
       taskPreset: 'custom',
       contig: 'E6-155,/0,70-70',
@@ -229,6 +241,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: 'Epstein–Barr virus anti-apoptotic Bcl-2 homolog (A2–158)',
+    cropSegments: 'A2-158',
     conditionParams: {
       taskPreset: 'custom',
       contig: 'A2-158,/0,80-80',
@@ -248,6 +261,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     supportsGenie3: true,
     entities: ['protein'],
     biology: 'Canonical Adaptyv Bio oncology binder target (A310–505)',
+    cropSegments: 'A310-505',
     conditionParams: {
       taskPreset: 'custom',
       contig: 'A310-505,/0,70-70',

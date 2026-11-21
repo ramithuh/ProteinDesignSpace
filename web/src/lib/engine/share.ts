@@ -2,7 +2,7 @@
 // + clean human/LLM-readable YAML/JSON workflow recipe serializer.
 
 import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
-import { autoLayoutGraph, defaultParamsForAdapter } from './graph-utils';
+import { autoLayoutGraph, defaultParamsForAdapter, validateGraph } from './graph-utils';
 import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 
 const ADAPTER_TO_SHORT: Record<string, string> = {
@@ -215,7 +215,7 @@ export function normalizeWorkflowGraph(
     seenIds.add(id);
 
     const adapterId = String(n.adapterId ?? '');
-    if (!ADAPTER_REGISTRY[adapterId]) {
+    if (!Object.hasOwn(ADAPTER_REGISTRY, adapterId)) {
       throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
     }
     const rawParams = n.params && typeof n.params === 'object' ? sanitizeParams(n.params) : {};
@@ -266,6 +266,9 @@ export function normalizeWorkflowGraph(
     edges: validatedEdges,
   };
 
+  // Recipes may be unfinished, but their existing wires must be valid before layout/rendering.
+  const errors = validateGraph(normalized, { requireRunnable: false });
+  if (errors.length) throw new Error(errors.join('\n'));
   return normalized.nodes.some((n) => !n.position) ? autoLayoutGraph(normalized) : normalized;
 }
 
@@ -317,7 +320,7 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
     const nodes: WorkflowNode[] = obj.n.map((tuple) => {
       const id = String(tuple[0]);
       const shortA = String(tuple[1]);
-      const adapterId = SHORT_TO_ADAPTER[shortA] ?? shortA;
+      const adapterId = Object.hasOwn(SHORT_TO_ADAPTER, shortA) ? SHORT_TO_ADAPTER[shortA] : shortA;
       const rawOverrides = (tuple[2] && typeof tuple[2] === 'object' ? tuple[2] : {}) as Record<string, unknown>;
       const overrides = sanitizeParams(rawOverrides);
       const label = typeof tuple[3] === 'string' ? tuple[3] : ADAPTER_REGISTRY[adapterId]?.shortName ?? adapterId;
@@ -434,7 +437,7 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
       const bodyStr = line.slice(colon + 1).trim();
       const obj = JSON.parse(bodyStr) as Record<string, unknown>;
       const adapterId = String(obj.adapterId ?? obj.model ?? '');
-      if (!ADAPTER_REGISTRY[adapterId]) {
+      if (!Object.hasOwn(ADAPTER_REGISTRY, adapterId)) {
         throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
       }
       const label = typeof obj.label === 'string' ? obj.label : ADAPTER_REGISTRY[adapterId].shortName;

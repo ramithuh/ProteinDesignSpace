@@ -19,6 +19,20 @@ import {
 import type { WorkflowGraph } from '$lib/engine/types';
 
 describe('engine/registry & engine/graph-utils', () => {
+  it('rejects inherited registry and port properties without throwing', () => {
+    const graph: WorkflowGraph = {
+      id: 'inherited', name: 'Inherited', nodes: [
+        { id: 'a', adapterId: 'pdb-input', params: {} },
+        { id: 'b', adapterId: 'web-protein-mpnn', params: {} },
+      ], edges: [{ fromNode: 'a', fromPort: 'toString', toNode: 'b', toPort: 'toString' }],
+    };
+    expect(validateConnection(graph, 'a', 'toString', 'b', 'toString').valid).toBe(false);
+    expect(validateGraph(graph).join(' ')).toMatch(/unknown output port/);
+    graph.nodes[0].adapterId = 'constructor';
+    expect(validateConnection(graph, 'a', 'structure', 'b', 'structure').valid).toBe(false);
+    expect(validateGraph(graph).join(' ')).toMatch(/unknown adapter/);
+  });
+
   it('all WORKFLOW_PRESETS pass validateGraph with 0 errors and have valid typed acyclic edges', () => {
     expect(WORKFLOW_PRESETS.length).toBeGreaterThanOrEqual(5);
 

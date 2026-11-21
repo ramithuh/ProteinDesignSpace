@@ -9,6 +9,7 @@
   } from '$lib/engine/scheduler';
   import { isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
   import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from '$lib/engine/registry';
+  import { getBenchmarkById } from '$lib/engine/benchmarks';
   import { autoLayoutGraph, defaultParamsForAdapter, insertBlockSmart, validateGraph } from '$lib/engine/graph-utils';
   import {
     extractSubgraphUpTo,
@@ -539,20 +540,21 @@
     const p = node.params ?? {};
     if (node.adapterId === 'pdb-input') {
       const mode = String(p.mode ?? 'demo-bundle');
+      const crop = String(p.cropSegments ?? '').trim();
       if (mode === 'pdb-id') {
         const normId = normalizePdbId(String(p.pdbId ?? ''));
         if (!isValidPdbId(normId)) return null;
         const cachedFor = normalizePdbId(String(p.fetchedPdbId ?? ''));
         const txt = String(p.pdbText ?? '');
         const hasCached = txt.trim().length > 0 && cachedFor === normId;
-        return `pdb-id|${normId}|${hasCached ? txt.length : 0}|${String(p.benchmarkId ?? '')}`;
+        return `pdb-id|${normId}|${hasCached ? txt.length : 0}|${String(p.benchmarkId ?? '')}|${crop}`;
       }
       if (mode === 'custom') {
         const txt = String(p.pdbText ?? '').trim();
         if (txt.length === 0) return null;
-        return `custom|${txt.length}|${txt.slice(0, 64)}|${String(p.filename ?? '')}|${String(p.benchmarkId ?? '')}`;
+        return `custom|${txt.length}|${txt.slice(0, 64)}|${String(p.filename ?? '')}|${String(p.benchmarkId ?? '')}|${crop}`;
       }
-      return `demo-bundle|${String(p.benchmarkId ?? '')}`;
+      return `demo-bundle|${String(p.benchmarkId ?? '')}|${crop}`;
     }
     if (node.adapterId === 'sequence-input') {
       const raw = String(p.sequence ?? '').trim();
@@ -561,6 +563,61 @@
     }
     return null;
   }
+
+  // Auto-populate untouched (or previously auto-synced) Conditioning blocks when wired to a
+  // curated benchmark PDB Input so contig, motif spans, lockChain, and hotspots stay in sync.
+  $effect(() => {
+    if (isRunning) return;
+    let patches: Record<string, Record<string, unknown>> | null = null;
+    for (const condNode of graph.nodes) {
+      if (condNode.adapterId !== 'rfd4-conditioner') continue;
+      const tplEdge = graph.edges.find((e) => e.toNode === condNode.id && e.toPort === 'template');
+      if (!tplEdge) continue;
+      const srcNode = graph.nodes.find((n) => n.id === tplEdge.fromNode);
+      if (!srcNode || srcNode.adapterId !== 'pdb-input') continue;
+      const benchId = String(srcNode.params.benchmarkId ?? '').trim();
+      if (!benchId) continue;
+      const bench = getBenchmarkById(benchId);
+      if (!bench) continue;
+
+      const cp = condNode.params ?? {};
+      const syncedId = String(cp.autoSyncedBenchmarkId ?? '').trim();
+      if (syncedId === bench.id) continue;
+
+      const isUntouchedDefault =
+        String(cp.taskPreset ?? 'custom') === 'custom' &&
+        (String(cp.contig ?? '70-70').trim() === '' || String(cp.contig ?? '70-70').trim() === '70-70') &&
+        !String(cp.lockChain ?? '').trim() &&
+        !String(cp.hotspots ?? '').trim() &&
+        !String(cp.motifSpan ?? '').trim() &&
+        !String(cp.cathCode ?? '').trim() &&
+        String(cp.hbondMode ?? 'none') === 'none' &&
+        !String(cp.rawJsonOverride ?? '').trim();
+
+      if (!isUntouchedDefault && !syncedId) continue;
+
+      patches ??= {};
+      patches[condNode.id] = {
+        ...cp,
+        taskPreset: bench.conditionParams.taskPreset,
+        contig: bench.conditionParams.contig,
+        lockChain: bench.conditionParams.lockChain ?? '',
+        hotspots: bench.conditionParams.hotspots ?? '',
+        motifSpan: bench.conditionParams.motifSpan ?? '',
+        unindexedMotif: Boolean(bench.conditionParams.unindexedMotif),
+        hbondMode: bench.conditionParams.hbondMode ?? 'none',
+        hbondSelection: bench.conditionParams.hbondSelection ?? '',
+        autoSyncedBenchmarkId: bench.id,
+      };
+    }
+    if (patches) {
+      const map = patches;
+      graph = {
+        ...graph,
+        nodes: graph.nodes.map((n) => (map[n.id] ? { ...n, params: map[n.id] } : n)),
+      };
+    }
+  });
 
   $effect(() => {
     if (isRunning) return;

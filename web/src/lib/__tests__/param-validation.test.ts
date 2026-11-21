@@ -12,6 +12,15 @@ import {
 } from '../engine/param-validation';
 
 describe('parameter validation & numeric sanitization', () => {
+  it('rejects fractional count parameters but preserves continuous parameters', () => {
+    expect(validateNodeParams({ id: 'g', adapterId: 'genie3', params: { length: 80.5 } }).join(' '))
+      .toMatch(/integer/);
+    expect(validateNodeParams({ id: 'm', adapterId: 'web-protein-mpnn', params: { numSequences: 1.5 } }).join(' '))
+      .toMatch(/integer/);
+    expect(validateNodeParams({ id: 'm', adapterId: 'web-protein-mpnn', params: { temperature: 0.15 } }))
+      .toEqual([]);
+  });
+
   it('strips stray letters like "5r" or scientific notation "1e5" immediately', () => {
     expect(sanitizeNumericDraft('5r', true)).toBe('5');
     expect(sanitizeNumericDraft('70aa', true)).toBe('70');

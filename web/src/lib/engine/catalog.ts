@@ -360,6 +360,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
           filename: `${b.pdbId}.cif`,
           pdbText: '',
           benchmarkId: b.id,
+          ...(b.cropSegments ? { cropSegments: b.cropSegments } : {}),
         },
         label: `PDB: ${b.name} (${b.pdbId})`,
       },

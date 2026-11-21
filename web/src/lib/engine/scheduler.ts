@@ -6,10 +6,12 @@ import MpnnWorker from '$lib/workers/mpnn.worker?worker';
 import LocalFoldWorker from '$lib/workers/localfold.worker?worker';
 import Rfd4Worker from '$lib/workers/rfd4.worker?worker';
 import Genie3Worker from '$lib/workers/genie3.worker?worker';
-import { generateSampleHelixBundlePdb, parseStructureText } from '$lib/protein-ops/pdb';
+import { cropParsedStructure, generateSampleHelixBundlePdb, parseStructureText } from '$lib/protein-ops/pdb';
 import { fetchStructureByPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
 import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/protein-ops/kabsch';
 import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
+import { validateGraph } from './graph-utils';
+import { normalizeWorkflowGraph } from './share';
 import { splitMultiChainSequence, validateRuntimeNodeInputs } from './bio-capabilities';
 import { buildCanonicalConditionIntent, compileConditionToRfd4 } from './conditioning';
 import type {
@@ -74,23 +76,30 @@ export async function materializePdbInputNode(
     rawText = generateSampleHelixBundlePdb();
     filename = 'demo_3helix_53aa.pdb';
   }
-  const parsed = parseStructureText(rawText);
+  let parsed = parseStructureText(rawText);
   if (parsed.nResidues < 3) {
     throw new Error('Input PDB/mmCIF must contain at least 3 residues with Cα atoms');
+  }
+  const cropSpec = String(node.params.cropSegments ?? '').trim();
+  const isCropped = cropSpec.length > 0;
+  if (isCropped) {
+    parsed = cropParsedStructure(parsed, cropSpec);
   }
   const geometry = computeGeometryStats(parsed.caCoords, parsed.chainIds);
   const benchmarkId = String(node.params.benchmarkId ?? '').trim() || undefined;
   return {
     kind: 'StructureArtifact',
-    id: `pdb-${fnv1a(rawText)}`,
-    label: `${filename} (L=${parsed.nResidues})`,
+    id: `pdb-${fnv1a(`${rawText}::${cropSpec}`)}`,
+    label: isCropped
+      ? `${filename} [${cropSpec}] (L=${parsed.nResidues})`
+      : `${filename} (L=${parsed.nResidues})`,
     sourceModelId: 'pdb-input',
     length: parsed.nResidues,
     sequence: parsed.sequence,
     caCoords: parsed.caCoords,
     backbone4Coords: parsed.backbone4Coords,
     pdbText: parsed.pdbText,
-    cifText: parsed.format === 'mmcif' ? rawText : undefined,
+    cifText: !isCropped && parsed.format === 'mmcif' ? rawText : undefined,
     chainIds: parsed.chainIds,
     chainLengths: parsed.diagnostics.chainLengths,
     diagnostics: parsed.diagnostics,
@@ -129,15 +138,16 @@ export function materializeSequenceInputNode(node: WorkflowNode): {
   }> = [];
   if (raw.includes('>')) {
     const blocks = raw.split(/^>/m).filter((b) => b.trim().length > 0);
-    const seenIds = new Map<string, number>();
+    const seenIds = new Set<string>();
     blocks.forEach((b, idx) => {
       const lines = b.split('\n');
       const baseHeader = lines[0].trim().split(/\s+/)[0] || `seq-${idx + 1}`;
       const split = splitMultiChainSequence(lines.slice(1).join(''));
       if (split.concatenated.length >= 5) {
-        const count = seenIds.get(baseHeader) ?? 0;
-        seenIds.set(baseHeader, count + 1);
-        const id = count === 0 ? baseHeader : `${baseHeader}_${count + 1}`;
+        let id = baseHeader;
+        let suffix = 2;
+        while (seenIds.has(id)) id = `${baseHeader}_${suffix++}`;
+        seenIds.add(id);
         candidates.push({
           id,
           sequence: split.concatenated,
@@ -164,7 +174,7 @@ export function materializeSequenceInputNode(node: WorkflowNode): {
   if (candidates.length === 0) throw new Error('No valid amino acid sequences (>= 5 aa) found');
   return {
     kind: 'SequenceSet',
-    id: `seqin-${fnv1a(raw)}`,
+    id: `seqin-${fnv1a(JSON.stringify(candidates))}`,
     parentStructureId: 'none',
     sourceModelId: 'sequence-input',
     candidates,
@@ -525,6 +535,10 @@ export class ExecutionScheduler {
     const refsByNode: Record<string, Record<string, ArtifactRef>> = {};
 
     try {
+      // Apply the same guards to UI, console, and WebMCP callers before any work starts.
+      graph = normalizeWorkflowGraph(graph, graph?.id, graph?.name, false);
+      const errors = validateGraph(graph);
+      if (errors.length) throw new Error(errors.join('\n'));
       const order = topoSort(graph);
 
       for (const node of order) {

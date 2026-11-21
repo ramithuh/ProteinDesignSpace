@@ -96,7 +96,11 @@
   });
 
   function setParam(key: string, value: unknown) {
-    onUpdate(node.id, { ...node.params, [key]: value });
+    const next: Record<string, unknown> = { ...node.params, [key]: value };
+    if (node.adapterId === 'rfd4-conditioner' && 'autoSyncedBenchmarkId' in next) {
+      next.autoSyncedBenchmarkId = '';
+    }
+    onUpdate(node.id, next);
   }
 
   function parseResidueTokens(raw: unknown): string[] {
@@ -253,6 +257,7 @@
                   ...node.params,
                   pdbId: e.currentTarget.value.toUpperCase(),
                   benchmarkId: '',
+                  cropSegments: '',
                 });
               }}
               onkeydown={(e) => {
@@ -305,6 +310,7 @@
                   filename: `${bench.pdbId}.cif`,
                   pdbText: '',
                   benchmarkId: bench.id,
+                  cropSegments: bench.cropSegments ?? '',
                 });
               }}
             >
@@ -368,6 +374,36 @@
             </span>
           {/if}
         </label>
+      {/if}
+
+      {#if node.params.mode === 'pdb-id' || node.params.mode === 'custom'}
+        {@const cropVal = String(node.params.cropSegments ?? '')}
+        <div class="full pdb-fetch-wrap">
+          <span class="field-lbl">Segment / Chain Crop (optional)</span>
+          <div class="pdb-fetch-row">
+            <input
+              type="text"
+              {disabled}
+              placeholder="Full structure (or e.g. A163-181, A17-132)"
+              value={cropVal}
+              oninput={(e) => setParam('cropSegments', e.currentTarget.value)}
+            />
+            {#if cropVal.trim().length > 0}
+              <button
+                type="button"
+                class="fetch-btn"
+                {disabled}
+                onclick={() => setParam('cropSegments', '')}
+                title="Clear crop and show the full RCSB structure"
+              >
+                Full PDB
+              </button>
+            {/if}
+          </div>
+          <span class="field-hint">
+            Extracts exact chains or residue spans while preserving original PDB residue numbers for hotspots &amp; motifs.
+          </span>
+        </div>
       {/if}
 
     {:else if node.adapterId === 'sequence-input'}

@@ -58,15 +58,17 @@
     const p = data.params ?? {};
     switch (data.adapterId) {
       case 'pdb-input': {
+        const crop = String(p.cropSegments ?? '').trim();
+        const cropTag = crop ? ` · ${crop}` : '';
         if (p.mode === 'pdb-id') {
           const id = String(p.pdbId ?? '').trim().toUpperCase();
-          return id ? `RCSB ${id}` : 'Fetch by PDB ID';
+          return id ? `RCSB ${id}${cropTag}` : 'Fetch by PDB ID';
         }
         if (p.mode === 'custom') {
           const fname = String(p.filename ?? '').trim();
-          return fname || 'custom PDB';
+          return `${fname || 'custom PDB'}${cropTag}`;
         }
-        return '53 aa 3-helix demo';
+        return `53 aa 3-helix demo${cropTag}`;
       }
       case 'sequence-input': {
         const raw = String(p.sequence ?? '');

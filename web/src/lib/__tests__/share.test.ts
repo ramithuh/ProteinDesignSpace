@@ -13,6 +13,31 @@ import { generateSampleHelixBundlePdb } from '$lib/protein-ops/pdb';
 import type { WorkflowGraph } from '$lib/engine/types';
 
 describe('engine/share', () => {
+  it.each(['__proto__', 'constructor', 'toString'])('rejects inherited adapter names: %s', (adapterId) => {
+    expect(() => normalizeWorkflowGraph({ nodes: [{ id: 'n', adapterId, params: {} }], edges: [] }))
+      .toThrow(/Unknown model/);
+  });
+
+  it('rejects unsafe node IDs and invalid wires while allowing unfinished recipes', () => {
+    const graph: WorkflowGraph = { id: 'import', name: 'Import', nodes: [
+      { id: 'a', adapterId: 'rfd4-proteina', params: {} },
+      { id: 'b', adapterId: 'rfd4-proteina', params: {} },
+    ], edges: [] };
+    expect(normalizeWorkflowGraph(graph).nodes).toHaveLength(2);
+    graph.nodes[0].id = '__proto__';
+    expect(() => normalizeWorkflowGraph(graph)).toThrow(/reserved|invalid/i);
+    graph.nodes[0].id = 'a';
+    graph.edges = [{ fromNode: 'a', fromPort: 'toString', toNode: 'b', toPort: 'toString' }];
+    expect(() => normalizeWorkflowGraph(graph)).toThrow(/unknown.*port/i);
+    graph.edges = [{ fromNode: 'a', fromPort: 'sequences', toNode: 'b', toPort: 'template' }];
+    expect(() => normalizeWorkflowGraph(graph)).toThrow(/type mismatch/i);
+    graph.edges = [{ fromNode: 'a', fromPort: 'structure', toNode: 'b', toPort: 'template' }];
+    graph.edges.push({ ...graph.edges[0] });
+    expect(() => normalizeWorkflowGraph(graph)).toThrow(/multiple incoming/i);
+    graph.edges[1] = { fromNode: 'b', fromPort: 'structure', toNode: 'a', toPort: 'template' };
+    expect(() => normalizeWorkflowGraph(graph)).toThrow(/cycle/i);
+  });
+
   it('round-trips every WORKFLOW_PRESETS entry via compact #p= preset-diff URL hash', async () => {
     for (const preset of WORKFLOW_PRESETS) {
       const encoded = await encodeGraphToHash(preset.graph);

@@ -10,7 +10,7 @@ import {
 } from '$lib/engine/conditioning';
 import { BENCHMARK_TARGETS } from '$lib/engine/benchmarks';
 import { isValidPdbId } from '$lib/protein-ops/rcsb';
-import { generateSampleHelixBundlePdb, parseStructureText } from '$lib/protein-ops/pdb';
+import { cropParsedStructure, generateSampleHelixBundlePdb, parseStructureText } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
 import { validateConnection } from '$lib/engine/graph-utils';
@@ -229,5 +229,29 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
     };
     const rfd4Issues = validateBioCapabilities(rfd4UnusedTpl);
     expect(rfd4Issues.some((i) => i.code === 'rfd4-unused-template' && i.fix?.paramsPatch?.mode === 'partial')).toBe(true);
+  });
+
+  it('cropParsedStructure extracts exact benchmark residue segments while preserving original PDB numbering', () => {
+    const rawPdb = generateSampleHelixBundlePdb();
+    const parsed = parseStructureText(rawPdb);
+    expect(parsed.nResidues).toBe(53);
+
+    const cropped = cropParsedStructure(parsed, 'A16-25, A40-44');
+    expect(cropped.nResidues).toBe(15);
+    expect(cropped.resNums.slice(0, 10)).toEqual([16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
+    expect(cropped.resNums.slice(10)).toEqual([40, 41, 42, 43, 44]);
+
+    // Re-parsing the emitted cropped PDB retains exact original residue numbers
+    const reparsed = parseStructureText(cropped.pdbText);
+    expect(reparsed.nResidues).toBe(15);
+    expect(reparsed.resNums).toEqual(cropped.resNums);
+    expect(reparsed.chainIds.every((c) => c === 'A')).toBe(true);
+
+    // Every motif & PPI binder benchmark defines explicit cropSegments
+    const croppedBenchmarks = BENCHMARK_TARGETS.filter((b) => b.category !== 'enzyme-ligand');
+    expect(croppedBenchmarks.length).toBe(12);
+    for (const b of croppedBenchmarks) {
+      expect(b.cropSegments && b.cropSegments.length > 0, `Missing cropSegments on ${b.id}`).toBe(true);
+    }
   });
 });
