@@ -6,10 +6,16 @@
   onMount(() => {
     const el = document.getElementById('denovo-preloader');
     if (!el) return;
-    requestAnimationFrame(() => {
-      el.classList.add('is-done');
-      setTimeout(() => el.remove(), 260);
-    });
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const started = (window as unknown as { __denovoPreloaderStart?: number }).__denovoPreloaderStart ?? performance.now();
+    const minVisibleMs = reduced ? 0 : 700;
+    const remaining = Math.max(0, minVisibleMs - (performance.now() - started));
+    setTimeout(() => {
+      requestAnimationFrame(() => {
+        el.classList.add('is-done');
+        setTimeout(() => el.remove(), 300);
+      });
+    }, remaining);
   });
 </script>
 

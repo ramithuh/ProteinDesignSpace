@@ -10,6 +10,7 @@
   <meta property="og:type" content="website" />
   <script>
     (function () {
+      window.__denovoPreloaderStart = performance.now();
       try {
         var t = localStorage.getItem('denovo-theme');
         if (t !== 'light' && t !== 'dark') {
@@ -28,11 +29,11 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 12px;
+      gap: 16px;
       background: #0b0c10;
       color: #f8fafc;
       font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
-      transition: opacity 220ms ease, visibility 220ms ease;
+      transition: opacity 280ms ease, visibility 280ms ease;
     }
     :root[data-theme='light'] #denovo-preloader {
       background: #f5f7fb;
@@ -44,26 +45,26 @@
       pointer-events: none;
     }
     #denovo-preloader .pl-mark {
-      width: 48px;
-      height: 48px;
-      filter: drop-shadow(0 6px 18px rgba(37, 99, 235, 0.22));
+      width: 84px;
+      height: 84px;
+      filter: drop-shadow(0 10px 26px rgba(37, 99, 235, 0.26));
     }
     #denovo-preloader .pl-ribbon {
       stroke-dasharray: 36;
       stroke-dashoffset: 36;
-      animation: pl-draw 1.2s ease-in-out infinite alternate;
+      animation: pl-draw 0.85s ease-in-out infinite alternate;
     }
     #denovo-preloader .pl-dot {
       transform-box: fill-box;
       transform-origin: center;
-      animation: pl-pulse 1.2s ease-in-out infinite;
+      animation: pl-pulse 0.85s ease-in-out infinite;
     }
-    #denovo-preloader .pl-dot-2 { animation-delay: 180ms; }
-    #denovo-preloader .pl-dot-3 { animation-delay: 360ms; }
+    #denovo-preloader .pl-dot-2 { animation-delay: 140ms; }
+    #denovo-preloader .pl-dot-3 { animation-delay: 280ms; }
     #denovo-preloader .pl-word {
-      font-size: 16px;
+      font-size: 24px;
       font-weight: 700;
-      letter-spacing: -0.35px;
+      letter-spacing: -0.5px;
     }
     #denovo-preloader .pl-accent {
       color: #60a5fa;
