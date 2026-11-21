@@ -406,7 +406,7 @@
         <div>
           <h2 id="onb-title">Welcome to <span class="brand-accent">denovo</span>.run</h2>
           <p class="onb-sub">
-            Browser-native protein design, inverse folding, and 3D structure prediction — running 100% locally on your GPU via WebGPU.
+            Protein design and structure prediction, running locally on your GPU.
           </p>
         </div>
       </div>
