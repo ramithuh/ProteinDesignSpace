@@ -290,9 +290,73 @@ export function validateGraph(graph: WorkflowGraph): string[] {
 }
 
 // Pixel geometry of ProteinNode.svelte (used for exact handle-to-handle alignment)
-const NODE_HEIGHT_1PORT = 122;
 const PORT0_Y = 70; // vertical offset of 1st port handle center from node top
-const PORT_STEP = 24; // vertical spacing between consecutive port handles
+export const PORT_STEP = 26; // exact port-row pitch: height 20px + col gap 6px
+
+function getPortIndexForAdapter(
+  adapterId: string,
+  dir: 'inputs' | 'outputs',
+  portName: string,
+): number {
+  const keys = Object.keys(ADAPTER_REGISTRY[adapterId]?.[dir] ?? {});
+  const idx = keys.indexOf(portName);
+  return idx >= 0 ? idx : 0;
+}
+
+/**
+ * Magnetically snap a node's Y coordinate so its connected wire(s) become razor-straight
+ * horizontal lines whenever `pos.y` is within `threshold` px of an exact port-row alignment.
+ */
+export function snapNodePositionToPorts(
+  graph: WorkflowGraph,
+  nodeId: string,
+  pos: { x: number; y: number },
+  threshold = 18,
+  extraEdges: WorkflowEdge[] = [],
+): { x: number; y: number } {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const node = byId.get(nodeId);
+  if (!node) return { x: Math.round(pos.x), y: Math.round(pos.y) };
+
+  const allEdges = extraEdges.length > 0 ? [...graph.edges, ...extraEdges] : graph.edges;
+  let bestY: number | null = null;
+  let bestDist = threshold + 1;
+  let bestHorizontalSpan = Infinity;
+
+  for (const e of allEdges) {
+    let peer: WorkflowNode | undefined;
+    let peerPortIdx = 0;
+    let myPortIdx = 0;
+
+    if (e.toNode === nodeId) {
+      peer = byId.get(e.fromNode);
+      if (!peer?.position) continue;
+      peerPortIdx = getPortIndexForAdapter(peer.adapterId, 'outputs', e.fromPort);
+      myPortIdx = getPortIndexForAdapter(node.adapterId, 'inputs', e.toPort);
+    } else if (e.fromNode === nodeId) {
+      peer = byId.get(e.toNode);
+      if (!peer?.position) continue;
+      peerPortIdx = getPortIndexForAdapter(peer.adapterId, 'inputs', e.toPort);
+      myPortIdx = getPortIndexForAdapter(node.adapterId, 'outputs', e.fromPort);
+    } else {
+      continue;
+    }
+
+    const idealY = peer.position.y + (peerPortIdx - myPortIdx) * PORT_STEP;
+    const dist = Math.abs(pos.y - idealY);
+    const span = Math.abs(pos.x - peer.position.x);
+    if (dist <= threshold && (dist < bestDist - 1 || (Math.abs(dist - bestDist) <= 1 && span < bestHorizontalSpan))) {
+      bestDist = dist;
+      bestHorizontalSpan = span;
+      bestY = idealY;
+    }
+  }
+
+  return {
+    x: Math.round(pos.x),
+    y: Math.round(bestY !== null ? bestY : pos.y),
+  };
+}
 
 /**
  * Compute clean, crossing-minimized, handle-aligned left-to-right layout:
@@ -340,14 +404,12 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
     return idx >= 0 ? idx : 0;
   };
 
-  // Columns bridged by a long skip-edge (colSpan >= 2) need a clear top corridor
-  const skipTargetCols = new Set<number>();
+  // Columns bridged by a long skip-edge (colSpan >= 2) need clear top headroom for the arch
   const spannedCols = new Set<number>();
   for (const e of graph.edges) {
     const c1 = depth.get(e.fromNode) ?? 0;
     const c2 = depth.get(e.toNode) ?? 0;
     if (c2 - c1 >= 2) {
-      skipTargetCols.add(c2);
       for (let c = c1 + 1; c < c2; c++) spannedCols.add(c);
     }
   }
@@ -355,7 +417,8 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
   const X_START = 40;
   const X_GAP = 300;
   const TOP_Y = 24;
-  const CORRIDOR_Y = TOP_Y + NODE_HEIGHT_1PORT + 48; // 194px — completely below top skip wire!
+  // Leave clean top headroom whenever any skip-edge arches over the main row
+  const MAIN_Y = spannedCols.size > 0 ? 84 : TOP_Y + 36;
   const ROW_GAP = 188;
 
   const posMap = new Map<string, { x: number; y: number }>();
@@ -371,7 +434,7 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
         if (inc.length === 0) return 0;
         let sum = 0;
         for (const e of inc) {
-          const upY = posMap.get(e.fromNode)?.y ?? TOP_Y;
+          const upY = posMap.get(e.fromNode)?.y ?? MAIN_Y;
           const outI = portIdx(e.fromNode, 'outputs', e.fromPort);
           sum += upY + PORT0_Y + outI * PORT_STEP;
         }
@@ -385,53 +448,32 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
     if (list.length === 1) {
       const n = list[0];
       const inc = graph.edges.filter((e) => e.toNode === n.id);
-      let y = TOP_Y;
+      let y = MAIN_Y;
 
-      if (spannedCols.has(col)) {
-        // Intermediate node sitting beneath a top skip-edge: drop cleanly into the lower lane
-        const prevSingle = inc.find(
-          (e) => (depth.get(e.fromNode) ?? 0) === col - 1 && spannedCols.has(col - 1),
-        );
-        if (prevSingle) {
-          // Align exact handle Y with previous lower-lane node for a dead-straight wire!
-          const upY = posMap.get(prevSingle.fromNode)?.y ?? CORRIDOR_Y;
-          const outI = portIdx(prevSingle.fromNode, 'outputs', prevSingle.fromPort);
-          const inI = portIdx(n.id, 'inputs', prevSingle.toPort);
-          y = upY + (outI - inI) * PORT_STEP;
-        } else {
-          y = CORRIDOR_Y;
-        }
-      } else if (skipTargetCols.has(col)) {
-        // Sink receiving a top skip-edge: align exact port Y with the skip-edge source!
-        const skipEdge = inc.find((e) => col - (depth.get(e.fromNode) ?? 0) >= 2);
-        if (skipEdge) {
-          const upY = posMap.get(skipEdge.fromNode)?.y ?? TOP_Y;
-          const outI = portIdx(skipEdge.fromNode, 'outputs', skipEdge.fromPort);
-          const inI = portIdx(n.id, 'inputs', skipEdge.toPort);
-          y = Math.max(TOP_Y, upY + (outI - inI) * PORT_STEP);
-        }
-      } else if (inc.length === 1) {
-        // Pure 1-to-1 connection: align target handle exactly with source handle!
-        const e = inc[0];
-        const upY = posMap.get(e.fromNode)?.y ?? TOP_Y;
-        const outI = portIdx(e.fromNode, 'outputs', e.fromPort);
-        const inI = portIdx(n.id, 'inputs', e.toPort);
+      // Prefer aligning straight with the immediate upstream wire (col - 1) so the main
+      // chain flows as a dead-straight horizontal line while skip-edges arch cleanly overhead.
+      const adjacentEdge = inc.find((e) => (depth.get(e.fromNode) ?? 0) === col - 1);
+      const primaryEdge = adjacentEdge ?? inc[0];
+      if (primaryEdge) {
+        const upY = posMap.get(primaryEdge.fromNode)?.y ?? MAIN_Y;
+        const outI = portIdx(primaryEdge.fromNode, 'outputs', primaryEdge.fromPort);
+        const inI = portIdx(n.id, 'inputs', primaryEdge.toPort);
         y = Math.max(TOP_Y, upY + (outI - inI) * PORT_STEP);
       }
 
       posMap.set(n.id, { x, y: Math.round(y) });
     } else {
       // Multi-row column (branched DAG): place rows with generous non-overlapping spacing
-      let cursorY = spannedCols.has(col) ? CORRIDOR_Y - 30 : TOP_Y;
+      let cursorY = MAIN_Y;
       for (const n of list) {
         const inc = graph.edges.filter((e) => e.toNode === n.id);
         let idealY = cursorY;
-        if (inc.length === 1) {
-          const e = inc[0];
-          const upY = posMap.get(e.fromNode)?.y;
+        const adjacentEdge = inc.find((e) => (depth.get(e.fromNode) ?? 0) === col - 1) ?? inc[0];
+        if (adjacentEdge) {
+          const upY = posMap.get(adjacentEdge.fromNode)?.y;
           if (upY !== undefined) {
-            const outI = portIdx(e.fromNode, 'outputs', e.fromPort);
-            const inI = portIdx(n.id, 'inputs', e.toPort);
+            const outI = portIdx(adjacentEdge.fromNode, 'outputs', adjacentEdge.fromPort);
+            const inI = portIdx(n.id, 'inputs', adjacentEdge.toPort);
             idealY = Math.max(cursorY, upY + (outI - inI) * PORT_STEP);
           }
         }
@@ -715,6 +757,41 @@ export function insertBlockSmart(
   };
 
   const proposedEdges = proposeConnectionsForNode(graphWithNode, nodeId, selectedNodeId, dropPos);
+
+  // Align new node's Y to make its primary connecting wire dead-straight horizontal!
+  if (proposedEdges.length > 0) {
+    if (!dropPos) {
+      const primary = proposedEdges[0];
+      const peerId = primary.fromNode === nodeId ? primary.toNode : primary.fromNode;
+      const peerNode = graph.nodes.find((n) => n.id === peerId);
+      if (peerNode?.position) {
+        const peerIdx =
+          primary.fromNode === nodeId
+            ? getPortIndexForAdapter(peerNode.adapterId, 'inputs', primary.toPort)
+            : getPortIndexForAdapter(peerNode.adapterId, 'outputs', primary.fromPort);
+        const myIdx =
+          primary.fromNode === nodeId
+            ? getPortIndexForAdapter(adapterId, 'outputs', primary.fromPort)
+            : getPortIndexForAdapter(adapterId, 'inputs', primary.toPort);
+        let alignedY = Math.max(24, Math.round(peerNode.position.y + (peerIdx - myIdx) * PORT_STEP));
+        let guard = 0;
+        while (isOccupied(newNode.position!.x, alignedY) && guard < 24) {
+          alignedY += 160;
+          guard++;
+        }
+        newNode.position = { x: newNode.position!.x, y: alignedY };
+      }
+    } else {
+      newNode.position = snapNodePositionToPorts(
+        graphWithNode,
+        nodeId,
+        newNode.position!,
+        18,
+        proposedEdges,
+      );
+    }
+  }
+
   const autoCommit = options?.autoCommit !== false;
   const wiredEdge = autoCommit ? proposedEdges[0] : undefined;
 

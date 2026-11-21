@@ -21,6 +21,7 @@
     PORT_COLORS,
     autoLayoutGraph,
     insertBlockSmart,
+    snapNodePositionToPorts,
     validateConnection,
   } from '$lib/engine/graph-utils';
   import type {
@@ -496,10 +497,10 @@
     if (disabled) return;
     const moved = new Map<string, { x: number; y: number }>();
     for (const dn of draggedNodes ?? []) {
-      moved.set(dn.id, { x: Math.round(dn.position.x), y: Math.round(dn.position.y) });
+      moved.set(dn.id, snapNodePositionToPorts(graph, dn.id, dn.position, 18));
     }
     if (targetNode) {
-      moved.set(targetNode.id, { x: Math.round(targetNode.position.x), y: Math.round(targetNode.position.y) });
+      moved.set(targetNode.id, snapNodePositionToPorts(graph, targetNode.id, targetNode.position, 18));
     }
     if (moved.size === 0) return;
     onGraphChange({

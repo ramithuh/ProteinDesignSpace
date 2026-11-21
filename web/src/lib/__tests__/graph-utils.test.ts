@@ -6,10 +6,12 @@ import {
 } from '$lib/engine/registry';
 import {
   PORT_COLORS,
+  PORT_STEP,
   STAGE_COLORS,
   autoLayoutGraph,
   defaultParamsForAdapter,
   insertBlockSmart,
+  snapNodePositionToPorts,
   validateConnection,
   validateGraph,
   wouldCreateCycle,
@@ -405,5 +407,39 @@ describe('engine/registry & engine/graph-utils', () => {
     const added = r.graph.nodes.find((n) => n.id === r.nodeId)!;
     expect(added.label).toBe('ProteinMPNN #3');
     expect(new Set(r.graph.nodes.map((n) => n.id)).size).toBe(3);
+  });
+
+  it('snaps placed and dragged blocks so connected port handles align on straight horizontal lines', () => {
+    // Classic 4-block Genie 3 pipeline: Genie 3 -> SolubleMPNN -> LocalFold -> scRMSD / scTM
+    const start: WorkflowGraph = {
+      id: 'straight-wires',
+      name: 'Straight Wires',
+      nodes: [
+        { id: 'g3', adapterId: 'genie3', params: {}, position: { x: 40, y: 100 } },
+      ],
+      edges: [],
+    };
+    const rMpnn = insertBlockSmart(start, 'web-protein-mpnn', 'g3');
+    const rFold = insertBlockSmart(rMpnn.graph, 'localfold-af2', rMpnn.nodeId);
+    const rScore = insertBlockSmart(rFold.graph, 'designability-scorer', rFold.nodeId);
+
+    const g3Pos = rScore.graph.nodes.find((n) => n.id === 'g3')!.position!;
+    const mpnnPos = rScore.graph.nodes.find((n) => n.id === rMpnn.nodeId)!.position!;
+    const foldPos = rScore.graph.nodes.find((n) => n.id === rFold.nodeId)!.position!;
+    const scorePos = rScore.graph.nodes.find((n) => n.id === rScore.nodeId)!.position!;
+
+    // Row 0 -> Row 0 stays at exact same Y
+    expect(mpnnPos.y).toBe(g3Pos.y);
+    expect(foldPos.y).toBe(mpnnPos.y);
+    // LocalFold.folds (row 0) -> scRMSD.folds (row 1) shifts up by exact PORT_STEP (26px)
+    expect(scorePos.y).toBe(foldPos.y - PORT_STEP);
+
+    // Magnetic snap on manual drag within ±18px snaps straight back to foldPos.y - PORT_STEP
+    const snapped = snapNodePositionToPorts(rScore.graph, rScore.nodeId, { x: 960, y: scorePos.y + 11 }, 18);
+    expect(snapped).toEqual({ x: 960, y: scorePos.y });
+
+    // Dragging far away (>18px) does not fight the user
+    const free = snapNodePositionToPorts(rScore.graph, rScore.nodeId, { x: 960, y: scorePos.y + 60 }, 18);
+    expect(free).toEqual({ x: 960, y: scorePos.y + 60 });
   });
 });
