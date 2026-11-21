@@ -800,7 +800,6 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         label: 'Tied positions (symmetry)',
         kind: 'text',
         tier: 'advanced',
-        studioRole: 'tied',
         defaultValue: '',
         placeholder: 'e.g. A10=B10; A11=B11',
         description: 'Groups of symmetry-linked residues that receive identical amino acids across chains.',

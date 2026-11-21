@@ -714,10 +714,10 @@
     </div>
   </div>
 
-  <!-- Interactive Paint Brush Bar -->
-  {#if viewMode === 'annotated' && availableBrushes.length > 0}
-    <div class="brush-bar" role="toolbar" aria-label="Residue constraint paint brushes">
-      <span class="brush-lbl">Paint brush:</span>
+  <!-- Interactive Residue Selection Bar (shown only when a sequence is loaded) -->
+  {#if viewMode === 'annotated' && chains.length > 0 && availableBrushes.length > 0}
+    <div class="brush-bar" role="toolbar" aria-label="Residue selection controls">
+      <span class="brush-lbl">Click/drag to set:</span>
       {#each availableBrushes as b (b.fieldKey)}
         {@const meta = BRUSH_META[b.role]}
         {@const isActive = activeBrush?.fieldKey === b.fieldKey}
