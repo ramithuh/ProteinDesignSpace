@@ -813,6 +813,7 @@
       zoomOnDoubleClick={false}
       multiSelectionKey={['Meta', 'Control', 'Shift']}
       deleteKey={disabled ? null : ['Backspace', 'Delete']}
+      minZoom={0.2}
       fitView
       fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
       {isValidConnection}
@@ -985,6 +986,8 @@
   }
   @media (max-width: 1024px) {
     .flow-wrap.fill-height {
+      /* The panes stack here, so the parent no longer supplies a flex height. */
+      flex: none;
       height: 340px;
       min-height: 300px;
     }
