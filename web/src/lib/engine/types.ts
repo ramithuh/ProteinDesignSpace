@@ -528,6 +528,8 @@ export interface AdapterParamField {
   modes?: string[];
   /** Optional upstream default hint shown next to the field label. */
   upstreamDefaultHint?: string;
+  /** Optional interactive Node Studio brush role for residue-list / tied-position fields. */
+  studioRole?: 'fixed' | 'hotspot' | 'motif' | 'tied' | 'crop';
 }
 
 export interface AdapterModeSpec {
