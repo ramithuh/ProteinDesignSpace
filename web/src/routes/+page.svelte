@@ -866,6 +866,16 @@
     showToastMessage('Redid graph edit', 1800);
   }
 
+  function handleApplyPlannedGraph(next: WorkflowGraph, summary: string) {
+    if (isRunning) return;
+    handleGraphChange(next);
+    const firstId = next.nodes[0]?.id ?? '';
+    setSingleSelection(firstId);
+    rightPanelTab = 'params';
+    canvasFitViewTrigger += 1;
+    showToastMessage(`Drafted workflow: ${summary} (⌘Z to undo)`, 3200);
+  }
+
   function handleGraphChange(next: WorkflowGraph, opts?: { recordHistory?: boolean }) {
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
     if (opts?.recordHistory !== false) {
@@ -2739,6 +2749,7 @@
           autoCommitProposed={showOnboarding && onboardingInteractive}
           fitViewTrigger={canvasFitViewTrigger}
           onGraphChange={handleGraphChange}
+          onApplyPlannedGraph={handleApplyPlannedGraph}
           onSelectNode={handleSelectNode}
           onSelectNodes={handleSelectNodes}
           onBlockAdded={handleBlockAdded}

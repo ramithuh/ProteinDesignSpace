@@ -34,6 +34,7 @@
   import ProteinNode, { type ProteinNodeData } from './ProteinNode.svelte';
   import SmartEdge from './SmartEdge.svelte';
   import BlockCatalogPopover from './BlockCatalogPopover.svelte';
+  import WorkflowPlannerPopover from './WorkflowPlannerPopover.svelte';
 
   interface Props {
     graph: WorkflowGraph;
@@ -59,6 +60,7 @@
     onNodeDoubleClick?: (nodeId: string) => void;
     onOpenStudio?: (nodeId: string) => void;
     onOpenTour?: () => void;
+    onApplyPlannedGraph?: (next: WorkflowGraph, summary: string) => void;
   }
 
   let {
@@ -85,6 +87,7 @@
     onNodeDoubleClick = undefined,
     onOpenStudio = undefined,
     onOpenTour = undefined,
+    onApplyPlannedGraph = undefined,
   }: Props = $props();
 
   let canvasHintDismissed = $state(false);
@@ -101,9 +104,11 @@
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let canvasEl: HTMLDivElement | null = $state(null);
   let addBtnEl: HTMLButtonElement | null = $state(null);
+  let plannerBtnEl: HTMLButtonElement | null = $state(null);
   let wireBtnEl: HTMLButtonElement | null = $state(null);
   let wirePopoverEl: HTMLDivElement | null = $state(null);
   let catalogOpen = $state(false);
+  let plannerOpen = $state(false);
   let wireLegendOpen = $state(false);
   let clearConfirmPending = $state(false);
   let clearConfirmTimer: ReturnType<typeof setTimeout> | null = null;
@@ -879,6 +884,23 @@
     />
   {/if}
 
+  {#if plannerOpen}
+    <WorkflowPlannerPopover
+      {disabled}
+      triggerEl={plannerBtnEl}
+      onApply={(nextGraph, summary) => {
+        clearProposals();
+        if (onApplyPlannedGraph) {
+          onApplyPlannedGraph(nextGraph, summary);
+        } else {
+          onGraphChange(nextGraph);
+        }
+        scheduleFitView(260);
+      }}
+      onClose={() => (plannerOpen = false)}
+    />
+  {/if}
+
   <!-- Floating Top-Right: Utility controls (Wire legend & Clear) -->
   <div class="canvas-tools canvas-overlay">
     <button
@@ -888,6 +910,7 @@
       class:active={wireLegendOpen}
       onclick={() => {
         catalogOpen = false;
+        plannerOpen = false;
         wireLegendOpen = !wireLegendOpen;
       }}
       title="Typed wire colors"
@@ -935,7 +958,7 @@
     </div>
   {/if}
 
-  <!-- Floating Bottom-Center Action Dock: Primary + Add Block & Auto Layout -->
+  <!-- Floating Bottom-Center Action Dock: Primary + Add Block, Describe Workflow & Auto Layout -->
   <div class="canvas-action-dock canvas-overlay" role="toolbar" aria-label="Canvas authoring actions">
     <button
       bind:this={addBtnEl}
@@ -946,12 +969,31 @@
       {disabled}
       onclick={() => {
         wireLegendOpen = false;
+        plannerOpen = false;
         catalogOpen = !catalogOpen;
       }}
       title="Add a workflow block (shortcut: / or Shift+A, or double-click canvas)"
     >
       <span class="plus">+</span> Add Block
       <kbd class="kbd-hint">/</kbd>
+    </button>
+    <span class="dock-divider" aria-hidden="true"></span>
+    <button
+      bind:this={plannerBtnEl}
+      type="button"
+      class="dock-ai-btn"
+      class:open={plannerOpen}
+      {disabled}
+      onclick={() => {
+        wireLegendOpen = false;
+        catalogOpen = false;
+        plannerOpen = !plannerOpen;
+      }}
+      title="Type your workflow in high level (uses Cloudflare Workers AI)"
+    >
+      <span class="ai-sparkle" aria-hidden="true">✦</span>
+      <span class="ai-label-full">Describe Workflow</span>
+      <span class="ai-label-short">Describe</span>
     </button>
     <span class="dock-divider" aria-hidden="true"></span>
     <button
@@ -988,12 +1030,14 @@
         clearProposals();
         cancelClearConfirm();
         catalogOpen = false;
+        plannerOpen = false;
         wireLegendOpen = false;
         onSelectNode('');
       }}
       onnodeclick={({ node, event }) => {
         cancelClearConfirm();
         catalogOpen = false;
+        plannerOpen = false;
         wireLegendOpen = false;
         if (proposedForNodeId && node.id !== proposedForNodeId) {
           clearProposals();
@@ -1216,6 +1260,38 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+  .dock-ai-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: transparent;
+    color: var(--text-primary);
+    border: 1px solid transparent;
+    border-radius: 999px;
+    padding: 5px 11px;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .dock-ai-btn:hover:not(:disabled),
+  .dock-ai-btn.open {
+    background: var(--accent-soft);
+    border-color: var(--accent-border);
+    color: var(--accent-bright);
+  }
+  .dock-ai-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .ai-sparkle {
+    color: var(--accent-bright);
+    font-size: 12px;
+    line-height: 1;
+  }
+  .ai-label-short {
+    display: none;
+  }
   .dock-tool-btn {
     display: inline-flex;
     align-items: center;
@@ -1247,6 +1323,16 @@
     .add-block-btn {
       padding: 5px 10px;
       font-size: 11.5px;
+    }
+    .dock-ai-btn {
+      padding: 5px 9px;
+      font-size: 11px;
+    }
+    .ai-label-full {
+      display: none;
+    }
+    .ai-label-short {
+      display: inline;
     }
     .dock-tool-btn {
       padding: 5px 9px;
