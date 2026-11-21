@@ -15,6 +15,36 @@ export type PortType =
 
 export type BioEntityKind = 'protein' | 'dna' | 'rna' | 'ligand';
 
+export type MsaMode = 'single' | 'mmseqs2' | 'target-only' | 'a3m';
+
+export type BfactorSemantics = 'none' | 'plddt-0-100' | 'plddt-0-1' | 'dynamics-prob' | 'crystal-b';
+
+export type AtomGranularity = 'ca-only' | 'backbone4' | 'all-atom';
+
+export interface ArtifactProvenance {
+  quantization?: 'fp32' | 'fp16' | 'int8' | 'int5';
+  recyclesRun?: number;
+  earlyStopped?: boolean;
+  msaMode?: MsaMode;
+  msaDepth?: number;
+  degradedFallback?: string;
+  warnings?: string[];
+}
+
+export interface ResidueTrackArtifact {
+  kind: 'ResidueTrack';
+  id: string;
+  label?: string;
+  sourceModelId: string;
+  parentStructureId?: string;
+  quantity: string;
+  unit?: string;
+  range?: [number, number];
+  residues: string;
+  values: Float32Array;
+  rawLogits?: Float32Array;
+}
+
 export type CollectionKind = 'independent-candidates' | 'multi-sample' | 'ordered-frames';
 
 export type ReferenceRelation =
@@ -124,6 +154,12 @@ export interface StructureArtifact {
   parentStructureId?: string;
   /** Optional provenance recording how this structure was selected from a multi-member collection. */
   representativeSelection?: RepresentativeSelection;
+  /** Semantic meaning of PDB/mmCIF B-factor values for faithful viewer coloring. */
+  bfactorSemantics?: BfactorSemantics;
+  /** True atomic resolution of emitted coordinates (avoids pretending Cα-only is all-atom). */
+  atomGranularity?: AtomGranularity;
+  /** Execution provenance (quantization, early stopping, fallback warnings). */
+  provenance?: ArtifactProvenance;
   geometry: GeometryStats;
 }
 
@@ -175,6 +211,10 @@ export interface SequenceSet {
   sourceStructureId?: string;
   sourceModelId: string;
   collectionKind?: CollectionKind;
+  /** Locked target chain IDs propagated from upstream structures (used by target-only MSA). */
+  lockedChains?: string[];
+  /** Chain roles propagated from upstream structures (used by target-only MSA & binder scoring). */
+  chainRoles?: Record<string, 'target' | 'binder' | 'scaffold'>;
   candidates: SequenceCandidate[];
 }
 
@@ -210,6 +250,13 @@ export interface FoldedCandidate {
   chainIds?: string[];
   resNums?: number[];
   pae?: Float32Array;
+  /** Dunbrack-lab ipSAE interface score (max directional ipSAE in [0, 1]) for multi-chain complexes. */
+  ipsae?: number;
+  ipsaeMin?: number;
+  /** MSA mode & alignment depth used for this fold. */
+  msaMode?: MsaMode;
+  msaDepth?: number;
+  provenance?: ArtifactProvenance;
   elapsedMs: number;
 }
 
@@ -243,6 +290,9 @@ export interface DesignabilityRow {
   iptm?: number | null;
   /** Mean interface PAE (Å) across cross-chain residue pairs for multi-chain complexes. */
   ipae?: number;
+  /** Dunbrack-lab ipSAE interface score (max directional ipSAE in [0, 1]) for multi-chain complexes. */
+  ipsae?: number;
+  ipsaeMin?: number;
   /** Mean pLDDT on the designed binder chain(s). */
   binderPlddt?: number;
   /** Mean pLDDT on the locked target chain(s). */
@@ -270,6 +320,11 @@ export interface DesignabilityRow {
   /** Number of aligned residue pairs used in Kabsch superposition. */
   alignedResidueCount?: number;
   designable: boolean; // scRMSD < 2.0 Å && meanPlddt >= 70
+  /** Explicit list of human-readable gate failures when `designable === false`. */
+  failedGates?: string[];
+  /** MSA mode & depth carried from the evaluated fold. */
+  msaMode?: MsaMode;
+  msaDepth?: number;
   alignedFoldPdb: string;
   designedPdb: string;
   pae?: Float32Array;
