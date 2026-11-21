@@ -196,8 +196,8 @@
             position={Position.Left}
             id={portName}
             style={connected
-              ? 'background: transparent; border: none; width: 10px; height: 14px; left: -1px;'
-              : `background: ${color}; border: 2px solid var(--bg-surface); width: 13px; height: 13px; left: -7px;`}
+              ? 'background: transparent; border: none; width: 8px; height: 12px; left: -1px;'
+              : `background: ${color}; border: 1.5px solid var(--bg-surface); width: 8px; height: 8px; left: -4px;`}
           />
           <button
             type="button"
@@ -236,7 +236,7 @@
             type="source"
             position={Position.Right}
             id={portName}
-            style="background: {color}; border: 2px solid var(--bg-surface); width: 13px; height: 13px; right: -7px;"
+            style="background: {color}; border: 1.5px solid var(--bg-surface); width: 8px; height: 8px; right: -4px;"
           />
         </div>
       {/each}
@@ -485,11 +485,17 @@
     height: 20px;
   }
   .port-row.left {
-    padding-left: 15px;
+    padding-left: 11px;
   }
   .port-row.right {
-    padding-right: 15px;
+    padding-right: 11px;
     justify-content: flex-end;
+  }
+  .p-node :global(.svelte-flow__handle)::after {
+    content: '';
+    position: absolute;
+    inset: -6px;
+    border-radius: 50%;
   }
   .port-label {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
