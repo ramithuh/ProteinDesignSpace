@@ -159,4 +159,112 @@ describe('estimateRunRequirements (first-run preflight)', () => {
     };
     expect(estimateRunRequirements(af2MultiCombo).totalDownloadMB).toBe(74 + 44);
   });
+
+  it('scales planned items and emits fanoutSummary for numDesigns=4 while keeping weight download MB unchanged', () => {
+    const basePreset = WORKFLOW_PRESETS.find((p) => p.id === 'genie3-mpnn-af2')!;
+    const baseSummary = estimateRunRequirements(basePreset.graph);
+    expect(baseSummary.fanoutSummary).toBeUndefined();
+    expect(baseSummary.estimatedComputeScale).toBe(1);
+
+    const multiGraph: WorkflowGraph = {
+      ...basePreset.graph,
+      id: 'genie3-mpnn-af2-batch4',
+      nodes: basePreset.graph.nodes.map((n) => {
+        if (n.adapterId === 'genie3') {
+          return { ...n, params: { ...n.params, numDesigns: 4 } };
+        }
+        if (n.adapterId === 'web-protein-mpnn') {
+          return { ...n, params: { ...n.params, numSequences: 2 } };
+        }
+        if (n.adapterId === 'localfold-af2') {
+          return { ...n, params: { ...n.params, maxSequences: 1, maxTotalFolds: 16 } };
+        }
+        return n;
+      }),
+    };
+
+    const multiSummary = estimateRunRequirements(multiGraph);
+    // Weights are downloaded & loaded ONCE per stage — never multiplied by numDesigns.
+    expect(multiSummary.totalDownloadMB).toBe(baseSummary.totalDownloadMB);
+    expect(multiSummary.totalDownloadMB).toBe(45 + 10 + 97);
+    expect(multiSummary.peakVramMB).toBe(baseSummary.peakVramMB);
+    expect(multiSummary.weightsLoadedOnce).toBe(true);
+
+    expect(multiSummary.plannedBackbones).toBe(4);
+    expect(multiSummary.plannedSequences).toBe(8);
+    expect(multiSummary.plannedFolds).toBe(4);
+    expect(multiSummary.fanoutSummary).toBe('4 backbones → 8 sequences → 4 refolds');
+    expect(multiSummary.models.find((m) => m.key === 'genie3')?.plannedItems).toBe(4);
+    expect(multiSummary.models.find((m) => m.key.startsWith('mpnn:'))?.plannedItems).toBe(8);
+    expect(multiSummary.models.find((m) => m.key === 'localfold:monomer')?.plannedItems).toBe(4);
+    expect(multiSummary.totalGpuWorkItems).toBe(16);
+    expect(multiSummary.estimatedComputeScale).toBeGreaterThan(1);
+  });
+
+  it('respects maxTotalFolds cap and RFD4 native multi-design fan-out without inflating weight MB', () => {
+    const rfdPreset = WORKFLOW_PRESETS.find((p) => p.id === 'rfd4-refold-native')!;
+    const rfdBase = estimateRunRequirements(rfdPreset.graph);
+    const rfdBatch: WorkflowGraph = {
+      ...rfdPreset.graph,
+      id: 'rfd4-batch4',
+      nodes: rfdPreset.graph.nodes.map((n) =>
+        n.adapterId === 'rfd4-proteina'
+          ? { ...n, params: { ...n.params, numDesigns: 4 } }
+          : n,
+      ),
+    };
+    const rfdSummary = estimateRunRequirements(rfdBatch);
+    expect(rfdSummary.totalDownloadMB).toBe(rfdBase.totalDownloadMB);
+    expect(rfdSummary.peakVramMB).toBe(rfdBase.peakVramMB);
+    expect(rfdSummary.plannedBackbones).toBe(4);
+    expect(rfdSummary.plannedSequences).toBe(4);
+    expect(rfdSummary.plannedFolds).toBe(4);
+    expect(rfdSummary.fanoutSummary).toBe('4 backbones → 4 sequences → 4 refolds');
+    expect(rfdSummary.estimatedComputeScale).toBe(4);
+
+    // Campaign cap via maxTotalFolds (4 backbones x 4 seqs = 16 seqs, maxSequences=2/backbone -> 8, capped to 6)
+    const cappedGraph: WorkflowGraph = {
+      id: 'capped-batch',
+      name: 'Capped Batch',
+      nodes: [
+        { id: 'g', adapterId: 'genie3', params: { numDesigns: 4 } },
+        { id: 'm', adapterId: 'web-protein-mpnn', params: { numSequences: 4 } },
+        { id: 'f', adapterId: 'localfold-af2', params: { model: 'monomer', maxSequences: 2, maxTotalFolds: 6 } },
+      ],
+      edges: [
+        { fromNode: 'g', fromPort: 'structure', toNode: 'm', toPort: 'structure' },
+        { fromNode: 'm', fromPort: 'sequences', toNode: 'f', toPort: 'sequences' },
+      ],
+    };
+    const capped = estimateRunRequirements(cappedGraph);
+    expect(capped.totalDownloadMB).toBe(45 + 10 + 97);
+    expect(capped.plannedBackbones).toBe(4);
+    expect(capped.plannedSequences).toBe(16);
+    expect(capped.plannedFolds).toBe(6);
+    expect(capped.fanoutSummary).toBe('4 backbones → 16 sequences → 6 refolds');
+  });
+
+  it('accounts for top-k-filter reduction between MPNN and LocalFold', () => {
+    const filteredGraph: WorkflowGraph = {
+      id: 'filtered-batch',
+      name: 'Filtered Batch',
+      nodes: [
+        { id: 'g', adapterId: 'genie3', params: { numDesigns: 4 } },
+        { id: 'm', adapterId: 'web-protein-mpnn', params: { numSequences: 4 } },
+        { id: 'k', adapterId: 'top-k-filter', params: { mode: 'per-backbone', topK: 1, maxTotal: 8 } },
+        { id: 'f', adapterId: 'localfold-af2', params: { model: 'monomer', maxSequences: 2, maxTotalFolds: 16 } },
+      ],
+      edges: [
+        { fromNode: 'g', fromPort: 'structure', toNode: 'm', toPort: 'structure' },
+        { fromNode: 'm', fromPort: 'sequences', toNode: 'k', toPort: 'sequences' },
+        { fromNode: 'k', fromPort: 'sequences', toNode: 'f', toPort: 'sequences' },
+      ],
+    };
+    const summary = estimateRunRequirements(filteredGraph);
+    expect(summary.totalDownloadMB).toBe(45 + 10 + 97);
+    expect(summary.plannedBackbones).toBe(4);
+    expect(summary.plannedSequences).toBe(16);
+    expect(summary.plannedFolds).toBe(4);
+    expect(summary.fanoutSummary).toBe('4 backbones → 16 sequences → 4 selected → 4 refolds');
+  });
 });

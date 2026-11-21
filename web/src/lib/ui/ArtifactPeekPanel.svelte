@@ -8,16 +8,33 @@
     previewTextLines,
     type PeekSlot,
   } from '$lib/engine/peek';
+  import {
+    computeCampaignSummary,
+    normalizeToCollection,
+    type CampaignSummary,
+    type CollectionMember,
+    type DesignCollection,
+    type FoldEvaluationRecord,
+    type SequenceCollection,
+  } from '$lib/engine/collections';
+  import {
+    exportCollectionCsv,
+    exportCollectionFasta,
+    type CollectionCsvRowInput,
+  } from '$lib/engine/export-collection';
   import type {
     ArtifactProvenance,
     CollectionKind,
     ConditionSpecArtifact,
     DesignabilityMetrics,
+    DesignabilityRow,
+    FoldedCandidate,
     FoldedStructure,
     MsaMode,
     MutationMatrixArtifact,
     ReferenceRelation,
     ResidueTrackArtifact,
+    SequenceCandidate,
     SequenceEmbeddingArtifact,
     SequenceSet,
     StructureArtifact,
@@ -77,6 +94,7 @@
   let copyFailedKey = $state<string | null>(null);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
   let rawPreviewOpen = $state(false);
+  let selectedDesignFilter = $state<string>('all');
 
   async function copyText(text: string, key: string) {
     if (copyTimer) clearTimeout(copyTimer);
@@ -242,14 +260,306 @@
   let embStats = $derived(embArt ? embeddingSummary(embArt.pooled) : null);
 
   $effect(() => {
-    void structArt?.id;
+    void artifact?.id;
+    selectedDesignFilter = 'all';
     rawPreviewOpen = false;
   });
 
-  let activeRow = $derived(metricsArt?.rows[selectedRowIdx] ?? metricsArt?.best ?? null);
-  let activeFold = $derived(foldArt?.folds[selectedFoldIdx] ?? foldArt?.folds[0] ?? null);
+  interface DesignGroupPill {
+    key: string;
+    index: number;
+    label: string;
+    count: number;
+    passedCount?: number;
+  }
+
+  function fmtPct(v: number | null | undefined): string {
+    if (!isFiniteNum(v)) return '—';
+    return `${Math.round(v * 100)}%`;
+  }
+
+  function getDesignKeyFromRow(row: DesignabilityRow): string {
+    const ext = row as DesignabilityRow & { designKey?: string };
+    return (ext.designKey ?? row.sourceStructureId ?? row.structureId ?? '').trim();
+  }
+
+  function getDesignKeyFromFold(fold: FoldedCandidate): string {
+    const ext = fold as FoldedCandidate & { designKey?: string };
+    return (ext.designKey ?? fold.sourceStructureId ?? '').trim();
+  }
+
+  function getDesignKeyFromSeq(cand: SequenceCandidate): string {
+    const ext = cand as SequenceCandidate & { designKey?: string };
+    return (ext.designKey ?? cand.sourceStructureId ?? '').trim();
+  }
+
+  function getDesignKeyFromStruct(struct: StructureArtifact, idx: number): string {
+    const ext = struct as StructureArtifact & { designKey?: string };
+    return (ext.designKey ?? struct.id ?? `design-${idx + 1}`).trim();
+  }
+
+  function extractCollectionStructures(struct: StructureArtifact | null): StructureArtifact[] {
+    if (!struct) return [];
+    const ext = struct as StructureArtifact & {
+      collection?: { items?: unknown[]; members?: unknown[] };
+      structureCollection?: { items?: unknown[]; members?: unknown[] };
+    };
+    const rawList =
+      ext.collection?.items ??
+      ext.collection?.members ??
+      ext.structureCollection?.items ??
+      ext.structureCollection?.members;
+    if (!Array.isArray(rawList) || rawList.length === 0) return [];
+    const out: StructureArtifact[] = [];
+    for (const entry of rawList) {
+      if (!entry || typeof entry !== 'object') continue;
+      const obj = entry as Record<string, unknown>;
+      if (obj.kind === 'StructureArtifact') {
+        out.push(entry as StructureArtifact);
+      } else if (obj.payload && typeof obj.payload === 'object' && (obj.payload as { kind?: unknown }).kind === 'StructureArtifact') {
+        out.push(obj.payload as StructureArtifact);
+      }
+    }
+    return out;
+  }
+
+  function buildDesignPills(
+    entries: readonly { designKey: string; passed?: boolean }[],
+  ): DesignGroupPill[] {
+    const order: string[] = [];
+    const counts = new Map<string, { count: number; passed: number; hasPassTrack: boolean }>();
+    for (const entry of entries) {
+      const k = entry.designKey.trim();
+      if (!k) continue;
+      let rec = counts.get(k);
+      if (!rec) {
+        rec = { count: 0, passed: 0, hasPassTrack: entry.passed !== undefined };
+        counts.set(k, rec);
+        order.push(k);
+      }
+      rec.count++;
+      if (entry.passed === true) rec.passed++;
+    }
+    return order.map((key, idx) => {
+      const rec = counts.get(key)!;
+      return {
+        key,
+        index: idx,
+        label: `Design ${idx + 1}`,
+        count: rec.count,
+        ...(rec.hasPassTrack ? { passedCount: rec.passed } : {}),
+      };
+    });
+  }
+
+  let metricsDesignPills = $derived.by((): DesignGroupPill[] => {
+    if (!metricsArt || metricsArt.rows.length === 0) return [];
+    return buildDesignPills(
+      metricsArt.rows.map((r) => ({
+        designKey: getDesignKeyFromRow(r),
+        passed: r.designable,
+      })),
+    );
+  });
+
+  let metricsMultiDesign = $derived(metricsDesignPills.length > 1);
+
+  let metricsCampaignSummary = $derived.by((): CampaignSummary | null => {
+    if (!metricsArt || !metricsMultiDesign) return null;
+    const designKeys = metricsDesignPills.map((p) => p.key);
+    const records: FoldEvaluationRecord[] = metricsArt.rows.map((row, idx) => {
+      const ext = row as DesignabilityRow & { designKey?: string; sequenceKey?: string; foldKey?: string };
+      const designKey = getDesignKeyFromRow(row) || `design-${idx + 1}`;
+      const sequenceKey = (ext.sequenceKey ?? row.candidateKey ?? row.sequenceId ?? `seq-${idx + 1}`).trim();
+      const foldKey = (ext.foldKey ?? `${sequenceKey}:fold:${idx}`).trim();
+      const confAvail = row.confidenceAvailable !== false && isFiniteNum(row.meanPlddt);
+      return {
+        foldKey,
+        designKey,
+        sequenceKey,
+        status: 'completed',
+        designable: row.designable,
+        confidenceAvailable: confAvail,
+        evaluable: !row.lineageMismatch,
+      };
+    });
+    return computeCampaignSummary(records, {
+      designKeys,
+      requestedDesigns: designKeys.length,
+    });
+  });
+
+  let filteredMetricsRows = $derived.by(() => {
+    if (!metricsArt) return [] as Array<{ row: DesignabilityRow; origIdx: number; designLabel: string }>;
+    const labelByKey = new Map(metricsDesignPills.map((p) => [p.key, p.label]));
+    return metricsArt.rows
+      .map((row, origIdx) => ({
+        row,
+        origIdx,
+        designKey: getDesignKeyFromRow(row),
+        designLabel: labelByKey.get(getDesignKeyFromRow(row)) ?? '',
+      }))
+      .filter((entry) => !metricsMultiDesign || selectedDesignFilter === 'all' || entry.designKey === selectedDesignFilter);
+  });
+
+  let foldDesignPills = $derived.by((): DesignGroupPill[] => {
+    if (!foldArt || foldArt.folds.length === 0) return [];
+    return buildDesignPills(
+      foldArt.folds.map((f) => ({
+        designKey: getDesignKeyFromFold(f),
+      })),
+    );
+  });
+
+  let foldMultiDesign = $derived(foldDesignPills.length > 1);
+
+  let foldCampaignSummary = $derived.by((): CampaignSummary | null => {
+    if (!foldArt || !foldMultiDesign) return null;
+    const designKeys = foldDesignPills.map((p) => p.key);
+    const records: FoldEvaluationRecord[] = foldArt.folds.map((f, idx) => {
+      const ext = f as FoldedCandidate & { designKey?: string; sequenceKey?: string; foldKey?: string };
+      const designKey = getDesignKeyFromFold(f) || `design-${idx + 1}`;
+      const sequenceKey = (ext.sequenceKey ?? f.key ?? f.sequenceId ?? `seq-${idx + 1}`).trim();
+      const foldKey = (ext.foldKey ?? `${sequenceKey}:fold:${idx}`).trim();
+      const confAvail = f.confidenceAvailable !== false && isFiniteNum(f.meanPlddt);
+      return {
+        foldKey,
+        designKey,
+        sequenceKey,
+        status: 'completed',
+        designable: null,
+        confidenceAvailable: confAvail,
+      };
+    });
+    for (const excl of foldArt.excludedCandidates ?? []) {
+      const extExcl = excl as typeof excl & { designKey?: string; sourceStructureId?: string };
+      const dk = (extExcl.designKey ?? extExcl.sourceStructureId ?? designKeys[0] ?? 'design-1').trim();
+      records.push({
+        foldKey: `excl:${excl.key || excl.id}`,
+        designKey: dk,
+        sequenceKey: excl.key || excl.id,
+        status: 'excluded',
+        reason: excl.reason,
+      });
+    }
+    return computeCampaignSummary(records, {
+      designKeys,
+      requestedDesigns: designKeys.length,
+    });
+  });
+
+  let filteredFolds = $derived.by(() => {
+    if (!foldArt) return [] as Array<{ fold: FoldedCandidate; origIdx: number; designLabel: string }>;
+    const labelByKey = new Map(foldDesignPills.map((p) => [p.key, p.label]));
+    return foldArt.folds
+      .map((fold, origIdx) => ({
+        fold,
+        origIdx,
+        designKey: getDesignKeyFromFold(fold),
+        designLabel: labelByKey.get(getDesignKeyFromFold(fold)) ?? '',
+      }))
+      .filter((entry) => !foldMultiDesign || selectedDesignFilter === 'all' || entry.designKey === selectedDesignFilter);
+  });
+
+  let seqDesignPills = $derived.by((): DesignGroupPill[] => {
+    if (!seqArt || seqArt.candidates.length === 0) return [];
+    return buildDesignPills(
+      seqArt.candidates.map((c) => ({
+        designKey: getDesignKeyFromSeq(c),
+      })),
+    );
+  });
+
+  let seqMultiDesign = $derived(seqDesignPills.length > 1);
+
+  let seqCampaignSummary = $derived.by((): CampaignSummary | null => {
+    if (!seqArt || !seqMultiDesign) return null;
+    const designKeys = seqDesignPills.map((p) => p.key);
+    const records: FoldEvaluationRecord[] = seqArt.candidates.map((c, idx) => {
+      const ext = c as SequenceCandidate & { designKey?: string; sequenceKey?: string };
+      const designKey = getDesignKeyFromSeq(c) || `design-${idx + 1}`;
+      const sequenceKey = (ext.sequenceKey ?? c.key ?? c.id ?? `seq-${idx + 1}`).trim();
+      return {
+        foldKey: sequenceKey,
+        designKey,
+        sequenceKey,
+        status: 'completed',
+        designable: null,
+      };
+    });
+    return computeCampaignSummary(records, {
+      designKeys,
+      requestedDesigns: designKeys.length,
+    });
+  });
+
+  let filteredSeqEntries = $derived.by(() => {
+    if (!seqArt) return [] as Array<{ cand: SequenceCandidate; origIdx: number; designLabel: string }>;
+    const labelByKey = new Map(seqDesignPills.map((p) => [p.key, p.label]));
+    return seqArt.candidates
+      .map((cand, origIdx) => ({
+        cand,
+        origIdx,
+        designKey: getDesignKeyFromSeq(cand),
+        designLabel: labelByKey.get(getDesignKeyFromSeq(cand)) ?? '',
+      }))
+      .filter((entry) => !seqMultiDesign || selectedDesignFilter === 'all' || entry.designKey === selectedDesignFilter);
+  });
+
+  let structCollectionItems = $derived(extractCollectionStructures(structArt));
+  let structMultiDesign = $derived(structCollectionItems.length > 1);
+  let structDesignPills = $derived.by((): DesignGroupPill[] => {
+    if (!structMultiDesign) return [];
+    return structCollectionItems.map((item, idx) => ({
+      key: getDesignKeyFromStruct(item, idx),
+      index: idx,
+      label: `Design ${idx + 1}`,
+      count: 1,
+    }));
+  });
+  let structCampaignSummary = $derived.by((): CampaignSummary | null => {
+    if (!structMultiDesign) return null;
+    const designKeys = structDesignPills.map((p) => p.key);
+    const records: FoldEvaluationRecord[] = structCollectionItems.map((item, idx) => {
+      const dk = getDesignKeyFromStruct(item, idx);
+      return {
+        foldKey: dk,
+        designKey: dk,
+        sequenceKey: dk,
+        status: 'completed',
+        designable: null,
+      };
+    });
+    return computeCampaignSummary(records, {
+      designKeys,
+      requestedDesigns: designKeys.length,
+    });
+  });
+  let displayedStruct = $derived.by((): StructureArtifact | null => {
+    if (!structArt) return null;
+    if (!structMultiDesign || selectedDesignFilter === 'all') return structArt;
+    const idx = structCollectionItems.findIndex(
+      (item, i) => getDesignKeyFromStruct(item, i) === selectedDesignFilter,
+    );
+    return idx >= 0 ? structCollectionItems[idx] : structArt;
+  });
+
+  let activeRow = $derived.by(() => {
+    if (!metricsArt) return null;
+    const exact = filteredMetricsRows.find((r) => r.origIdx === selectedRowIdx);
+    if (exact) return exact.row;
+    if (filteredMetricsRows.length > 0) return filteredMetricsRows[0].row;
+    return metricsArt.rows[selectedRowIdx] ?? metricsArt.best ?? null;
+  });
+  let activeFold = $derived.by(() => {
+    if (!foldArt) return null;
+    const exact = filteredFolds.find((f) => f.origIdx === selectedFoldIdx);
+    if (exact) return exact.fold;
+    if (filteredFolds.length > 0) return filteredFolds[0].fold;
+    return foldArt.folds[selectedFoldIdx] ?? foldArt.folds[0] ?? null;
+  });
   let activeRowSeqStats = $derived(activeRow ? analyzeSequence(activeRow.sequence) : null);
-  let structSeqStats = $derived(structArt ? analyzeSequence(structArt.sequence) : null);
+  let structSeqStats = $derived(displayedStruct ? analyzeSequence(displayedStruct.sequence) : null);
   let skipSelfRecovery = $derived(
     Boolean(
       seqArt &&
@@ -262,10 +572,165 @@
     const refSeq = skipSelfRecovery ? undefined : contextStructure?.sequence;
     return seqArt.candidates.map((c) => analyzeSequence(c.sequence, refSeq));
   });
-  let rawStructText = $derived(structArt ? (structArt.cifText ?? structArt.pdbText) : '');
+  let rawStructText = $derived(displayedStruct ? (displayedStruct.cifText ?? displayedStruct.pdbText) : '');
   let rawPrev = $derived(
-    rawPreviewOpen && structArt ? previewTextLines(rawStructText, 36) : null,
+    rawPreviewOpen && displayedStruct ? previewTextLines(rawStructText, 36) : null,
   );
+
+  function downloadMetricsCampaignFasta(m: DesignabilityMetrics) {
+    const members: CollectionMember<SequenceCandidate>[] = m.rows.map((row, idx) => {
+      const ext = row as DesignabilityRow & { designKey?: string; sequenceKey?: string; foldKey?: string };
+      const designKey = getDesignKeyFromRow(row) || undefined;
+      const seqKey = (ext.sequenceKey ?? row.candidateKey ?? row.sequenceId ?? `seq-${idx + 1}`).trim();
+      const foldKey = ext.foldKey?.trim();
+      return {
+        key: seqKey,
+        ordinal: idx,
+        memberKind: 'SequenceCandidate',
+        lineage: {
+          ...(designKey ? { designKey } : {}),
+          sequenceKey: seqKey,
+          ...(foldKey ? { foldKey } : {}),
+          parentKeys: designKey ? [designKey] : [],
+        },
+        payload: {
+          id: row.sequenceId,
+          key: seqKey,
+          sequence: row.sequence,
+          score: null,
+          globalScore: null,
+          sourceModelId: 'scorer',
+          ...(row.sourceStructureId ? { sourceStructureId: row.sourceStructureId } : {}),
+        },
+        summary: {
+          label: row.sequenceId,
+          residueCount: row.sequence.length,
+          confidence: row.confidenceAvailable === false ? null : row.meanPlddt,
+          confidenceAvailable: row.confidenceAvailable !== false,
+          designable: row.designable,
+          scRmsd: row.scRmsd,
+        },
+      };
+    });
+    const col: SequenceCollection = {
+      kind: 'Collection',
+      schema: 'denovo.collection/v1',
+      id: m.id,
+      familyKey: m.id,
+      revision: 1,
+      memberKind: 'SequenceCandidate',
+      collectionKind: m.collectionKind ?? 'independent-candidates',
+      label: m.id,
+      sourceModelId: 'scorer',
+      members,
+      outcomes: [],
+      requestedCount: members.length,
+      complete: true,
+    };
+    onDownloadText(exportCollectionFasta(col), safeFilename(`${m.id}_campaign.fasta`));
+  }
+
+  function downloadMetricsCampaignCsv(m: DesignabilityMetrics) {
+    const col = normalizeToCollection(m);
+    const csv = exportCollectionCsv(col, {
+      snapshotId: m.id,
+      thresholds: {
+        scRmsd: scRmsdThreshold,
+        plddt: plddtThreshold,
+        ...(ipsaeThreshold > 0 ? { ipsae: ipsaeThreshold } : {}),
+      },
+      ...(metricsCampaignSummary ? { aggregationPolicy: metricsCampaignSummary.aggregationPolicy } : {}),
+    });
+    onDownloadText(csv, safeFilename(`${m.id}_campaign.csv`));
+  }
+
+  function downloadFoldCampaignFasta(f: FoldedStructure) {
+    const col = normalizeToCollection(f);
+    onDownloadText(exportCollectionFasta(col), safeFilename(`${f.id}_campaign.fasta`));
+  }
+
+  function downloadFoldCampaignCsv(f: FoldedStructure) {
+    const col = normalizeToCollection(f);
+    const csv = exportCollectionCsv(col, {
+      snapshotId: f.id,
+      thresholds: {
+        scRmsd: scRmsdThreshold,
+        plddt: plddtThreshold,
+        ...(ipsaeThreshold > 0 ? { ipsae: ipsaeThreshold } : {}),
+      },
+    });
+    onDownloadText(csv, safeFilename(`${f.id}_campaign.csv`));
+  }
+
+  function downloadSeqCampaignFasta(s: SequenceSet) {
+    const col = normalizeToCollection(s);
+    onDownloadText(exportCollectionFasta(col), safeFilename(`${s.id}_campaign.fasta`));
+  }
+
+  function downloadSeqCampaignCsv(s: SequenceSet) {
+    const rows: CollectionCsvRowInput[] = s.candidates.map((c, idx) => {
+      const ext = c as SequenceCandidate & { designKey?: string; sequenceKey?: string };
+      return {
+        designKey: getDesignKeyFromSeq(c) || undefined,
+        sequenceKey: (ext.sequenceKey ?? c.key ?? c.id ?? `seq-${idx + 1}`).trim(),
+        referenceStructureId: c.sourceStructureId ?? s.sourceStructureId ?? s.parentStructureId,
+        status: 'completed',
+        modelId: c.sourceModelId || s.sourceModelId,
+        seed: c.seed,
+        length: c.sequence.length,
+        mpnnScore: c.score,
+      };
+    });
+    onDownloadText(exportCollectionCsv(rows, { snapshotId: s.id }), safeFilename(`${s.id}_campaign.csv`));
+  }
+
+  function downloadStructCampaignFasta(items: StructureArtifact[], baseId: string) {
+    const members: CollectionMember<StructureArtifact>[] = items.map((item, idx) => {
+      const dk = getDesignKeyFromStruct(item, idx);
+      return {
+        key: dk,
+        ordinal: idx,
+        memberKind: 'StructureArtifact',
+        lineage: {
+          designKey: dk,
+          designIndex: idx,
+          parentKeys: [],
+        },
+        payload: item,
+        summary: {
+          label: item.label || item.id,
+          residueCount: item.length,
+        },
+      };
+    });
+    const col: DesignCollection<StructureArtifact> = {
+      kind: 'Collection',
+      schema: 'denovo.collection/v1',
+      id: baseId,
+      familyKey: baseId,
+      revision: 1,
+      memberKind: 'StructureArtifact',
+      collectionKind: 'independent-candidates',
+      label: baseId,
+      sourceModelId: items[0]?.sourceModelId ?? 'generator',
+      members,
+      outcomes: [],
+      requestedCount: members.length,
+      complete: true,
+    };
+    onDownloadText(exportCollectionFasta(col), safeFilename(`${baseId}_campaign.fasta`));
+  }
+
+  function downloadStructCampaignCsv(items: StructureArtifact[], baseId: string) {
+    const rows: CollectionCsvRowInput[] = items.map((item, idx) => ({
+      designKey: getDesignKeyFromStruct(item, idx),
+      referenceStructureId: item.id,
+      status: 'completed',
+      modelId: item.sourceModelId,
+      length: item.length,
+    }));
+    onDownloadText(exportCollectionCsv(rows, { snapshotId: baseId }), safeFilename(`${baseId}_campaign.csv`));
+  }
   let metricsRefBadge = $derived(
     metricsArt
       ? formatReferenceRelationBadge(
@@ -569,9 +1034,76 @@
       </div>
     {/if}
 
+    {#if metricsMultiDesign && metricsCampaignSummary}
+      <div class="campaign-bar">
+        <div class="campaign-top">
+          <div class="campaign-stats">
+            <span class="campaign-badge">{metricsDesignPills.length} backbones</span>
+            <span class="campaign-metric" title="Designs with at least one passing sequence / evaluated designs">
+              Design hit rate: <b>{fmtPct(metricsCampaignSummary.designHitRate)}</b>
+              <span class="campaign-sub">({metricsCampaignSummary.passingDesigns}/{metricsCampaignSummary.evaluatedDesigns})</span>
+            </span>
+            <span class="campaign-metric" title="Passing folds / evaluable folds">
+              Fold pass rate: <b>{fmtPct(metricsCampaignSummary.foldPassRate)}</b>
+              <span class="campaign-sub">({metricsCampaignSummary.passedFolds}/{metricsCampaignSummary.evaluableFolds})</span>
+            </span>
+            <span class="campaign-metric" title="Completed & evaluable folds vs planned folds">
+              Coverage: <b>{fmtPct(metricsCampaignSummary.coverage.evaluableFraction)}</b>
+              <span class="campaign-sub">({metricsCampaignSummary.coverage.evaluableFolds}/{metricsCampaignSummary.coverage.plannedFolds})</span>
+            </span>
+          </div>
+          <div class="campaign-exports">
+            <button
+              type="button"
+              class="link-btn"
+              onclick={() => downloadMetricsCampaignFasta(metricsArt)}
+              title="Export campaign sequences as FASTA with stable design & sequence lineage headers"
+            >
+              ↓ Campaign FASTA
+            </button>
+            <button
+              type="button"
+              class="link-btn"
+              onclick={() => downloadMetricsCampaignCsv(metricsArt)}
+              title="Export campaign scores, lineage keys, and thresholds as CSV"
+            >
+              ↓ Campaign CSV
+            </button>
+          </div>
+        </div>
+        <div class="design-pills" role="group" aria-label="Filter by design backbone">
+          <button
+            type="button"
+            class="design-pill"
+            class:active={selectedDesignFilter === 'all'}
+            aria-pressed={selectedDesignFilter === 'all'}
+            onclick={() => (selectedDesignFilter = 'all')}
+          >
+            All designs ({metricsDesignPills.length})
+          </button>
+          {#each metricsDesignPills as pill (pill.key)}
+            <button
+              type="button"
+              class="design-pill"
+              class:active={selectedDesignFilter === pill.key}
+              aria-pressed={selectedDesignFilter === pill.key}
+              title={`Filter to ${pill.label} (${pill.key})`}
+              onclick={() => (selectedDesignFilter = pill.key)}
+            >
+              {pill.label}
+              <span class="pill-count">{pill.passedCount ?? 0}/{pill.count}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     <table class="scores">
       <thead>
         <tr>
+          {#if metricsMultiDesign}
+            <th>Design</th>
+          {/if}
           <th>Seq</th>
           <th>{metricsRefBadge && metricsRefBadge.tone !== 'ok' ? 'Ref RMSD' : 'scRMSD'}</th>
           <th>{metricsRefBadge && metricsRefBadge.tone !== 'ok' ? 'Ref TM' : 'scTM'}</th>
@@ -596,11 +1128,16 @@
         </tr>
       </thead>
       <tbody>
-        {#each metricsArt.rows as row, i (`${row.sequenceId}_${i}`)}
+        {#each filteredMetricsRows as entry (`${entry.row.sequenceId}_${entry.origIdx}`)}
+          {@const row = entry.row}
+          {@const i = entry.origIdx}
           {@const bRmsd = isFiniteNum(row.targetAlignedBinderRmsd) ? row.targetAlignedBinderRmsd : row.binderScRmsd}
           {@const rowConfAvail = row.confidenceAvailable !== false && isFiniteNum(row.meanPlddt)}
           {@const rowFailedGates = row.failedGates ?? []}
           <tr class:selected={i === selectedRowIdx} onclick={() => onSelectRow(i)}>
+            {#if metricsMultiDesign}
+              <td><span class="design-tag">{entry.designLabel || '—'}</span></td>
+            {/if}
             <td><code>{row.sequenceId}</code></td>
             <td class:good-val={isFiniteNum(row.scRmsd) && row.scRmsd < scRmsdThreshold}>{fmtNum(row.scRmsd, 2, ' Å')}</td>
             <td>{fmtNum(row.scTm, 3)}</td>
@@ -798,9 +1335,74 @@
       </div>
     {/if}
 
+    {#if foldMultiDesign && foldCampaignSummary}
+      <div class="campaign-bar">
+        <div class="campaign-top">
+          <div class="campaign-stats">
+            <span class="campaign-badge">{foldDesignPills.length} backbones</span>
+            <span class="campaign-metric" title="Completed folds vs planned folds">
+              Coverage: <b>{fmtPct(foldCampaignSummary.coverage.completedFraction)}</b>
+              <span class="campaign-sub">({foldCampaignSummary.completedFolds}/{foldCampaignSummary.plannedFolds})</span>
+            </span>
+            <span class="campaign-metric" title="Connect Designability Scorer to compute hit & pass rates">
+              Design hit rate: <b>{fmtPct(foldCampaignSummary.designHitRate)}</b>
+            </span>
+            <span class="campaign-metric" title="Connect Designability Scorer to compute fold pass rate">
+              Fold pass rate: <b>{fmtPct(foldCampaignSummary.foldPassRate)}</b>
+            </span>
+          </div>
+          <div class="campaign-exports">
+            <button
+              type="button"
+              class="link-btn"
+              onclick={() => downloadFoldCampaignFasta(foldArt)}
+              title="Export folded campaign sequences as FASTA with lineage keys"
+            >
+              ↓ Campaign FASTA
+            </button>
+            <button
+              type="button"
+              class="link-btn"
+              onclick={() => downloadFoldCampaignCsv(foldArt)}
+              title="Export campaign fold metrics & exclusions as CSV"
+            >
+              ↓ Campaign CSV
+            </button>
+          </div>
+        </div>
+        <div class="design-pills" role="group" aria-label="Filter folds by design backbone">
+          <button
+            type="button"
+            class="design-pill"
+            class:active={selectedDesignFilter === 'all'}
+            aria-pressed={selectedDesignFilter === 'all'}
+            onclick={() => (selectedDesignFilter = 'all')}
+          >
+            All designs ({foldDesignPills.length})
+          </button>
+          {#each foldDesignPills as pill (pill.key)}
+            <button
+              type="button"
+              class="design-pill"
+              class:active={selectedDesignFilter === pill.key}
+              aria-pressed={selectedDesignFilter === pill.key}
+              title={`Filter folds to ${pill.label} (${pill.key})`}
+              onclick={() => (selectedDesignFilter = pill.key)}
+            >
+              {pill.label}
+              <span class="pill-count">{pill.count}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     <table class="scores">
       <thead>
         <tr>
+          {#if foldMultiDesign}
+            <th>Design</th>
+          {/if}
           <th>Seq</th>
           <th>Len</th>
           <th>pLDDT</th>
@@ -814,10 +1416,15 @@
         </tr>
       </thead>
       <tbody>
-        {#each foldArt.folds as f, i (`${f.sequenceId}_${i}`)}
+        {#each filteredFolds as entry (`${entry.fold.sequenceId}_${entry.origIdx}`)}
+          {@const f = entry.fold}
+          {@const i = entry.origIdx}
           {@const confAvail = f.confidenceAvailable !== false && isFiniteNum(f.meanPlddt)}
           {@const fIpae = hasFoldMultiChainMetrics ? computeIpaeFromPae(f.pae, f.chainLengths) : null}
           <tr class:selected={i === selectedFoldIdx} onclick={() => onSelectFold(i)}>
+            {#if foldMultiDesign}
+              <td><span class="design-tag">{entry.designLabel || '—'}</span></td>
+            {/if}
             <td><code>{f.sequenceId}</code></td>
             <td>{f.sequence.length} aa</td>
             <td class:good-val={confAvail && f.meanPlddt >= plddtThreshold}>
@@ -949,13 +1556,77 @@
       </div>
     </div>
 
+    {#if seqMultiDesign && seqCampaignSummary}
+      <div class="campaign-bar">
+        <div class="campaign-top">
+          <div class="campaign-stats">
+            <span class="campaign-badge">{seqDesignPills.length} backbones</span>
+            <span class="campaign-metric">
+              Sequences: <b>{seqArt.candidates.length}</b>
+            </span>
+            <span class="campaign-metric">
+              Coverage: <b>{fmtPct(seqCampaignSummary.coverage.completedFraction)}</b>
+              <span class="campaign-sub">({seqCampaignSummary.completedFolds}/{seqCampaignSummary.plannedFolds})</span>
+            </span>
+          </div>
+          <div class="campaign-exports">
+            <button
+              type="button"
+              class="link-btn"
+              onclick={() => downloadSeqCampaignFasta(seqArt)}
+              title="Export all campaign sequences as FASTA with design & sequence lineage keys"
+            >
+              ↓ Campaign FASTA
+            </button>
+            <button
+              type="button"
+              class="link-btn"
+              onclick={() => downloadSeqCampaignCsv(seqArt)}
+              title="Export campaign sequences & scores as CSV"
+            >
+              ↓ Campaign CSV
+            </button>
+          </div>
+        </div>
+        <div class="design-pills" role="group" aria-label="Filter sequences by design backbone">
+          <button
+            type="button"
+            class="design-pill"
+            class:active={selectedDesignFilter === 'all'}
+            aria-pressed={selectedDesignFilter === 'all'}
+            onclick={() => (selectedDesignFilter = 'all')}
+          >
+            All designs ({seqDesignPills.length})
+          </button>
+          {#each seqDesignPills as pill (pill.key)}
+            <button
+              type="button"
+              class="design-pill"
+              class:active={selectedDesignFilter === pill.key}
+              aria-pressed={selectedDesignFilter === pill.key}
+              title={`Filter sequences to ${pill.label} (${pill.key})`}
+              onclick={() => (selectedDesignFilter = pill.key)}
+            >
+              {pill.label}
+              <span class="pill-count">{pill.count}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     <div class="seq-list">
-      {#each seqArt.candidates as c, i (`${c.id}_${i}`)}
+      {#each filteredSeqEntries as entry (`${entry.cand.id}_${entry.origIdx}`)}
+        {@const c = entry.cand}
+        {@const i = entry.origIdx}
         {@const st = seqCandidateStats[i]}
         {@const displaySeq = formatCandidateSequence(c.sequence, c.chainLengths)}
         <div class="seq-box">
           <div class="seq-head">
             <span class="cand-title">
+              {#if seqMultiDesign && entry.designLabel}
+                <span class="design-tag">{entry.designLabel}</span>
+              {/if}
               <code>{c.id}</code> · {st.length} aa
               {#if c.chainLengths && c.chainLengths.length > 1}
                 · chains [{c.chainLengths.join('+')}]
@@ -991,84 +1662,170 @@
         </div>
       {/each}
     </div>
-  {:else if structArt && structSeqStats}
+  {:else if displayedStruct && structSeqStats}
+    {@const activeStruct = displayedStruct}
     {@const hasValidPdb = Boolean(
-      structArt.pdbText &&
-        structArt.pdbText.trim().length > 0 &&
-        !structArt.pdbText.trimStart().startsWith('data_'),
+      activeStruct.pdbText &&
+        activeStruct.pdbText.trim().length > 0 &&
+        !activeStruct.pdbText.trimStart().startsWith('data_'),
     )}
-    {@const isCifPreview = Boolean(structArt.cifText) || rawStructText.trimStart().startsWith('data_')}
+    {@const isCifPreview = Boolean(activeStruct.cifText) || rawStructText.trimStart().startsWith('data_')}
+    {#if structMultiDesign && structCampaignSummary}
+      <div class="campaign-bar">
+        <div class="campaign-top">
+          <div class="campaign-stats">
+            <span class="campaign-badge">{structCollectionItems.length} backbones</span>
+            <span class="campaign-metric">
+              Coverage: <b>{fmtPct(structCampaignSummary.coverage.completedFraction)}</b>
+              <span class="campaign-sub">({structCampaignSummary.completedFolds}/{structCampaignSummary.plannedFolds})</span>
+            </span>
+            <span class="campaign-metric">
+              Design hit rate: <b>{fmtPct(structCampaignSummary.designHitRate)}</b>
+            </span>
+            <span class="campaign-metric">
+              Fold pass rate: <b>{fmtPct(structCampaignSummary.foldPassRate)}</b>
+            </span>
+          </div>
+          <div class="campaign-exports">
+            <button
+              type="button"
+              class="link-btn"
+              onclick={() => downloadStructCampaignFasta(structCollectionItems, structArt?.id ?? activeStruct.id)}
+              title="Export all backbone sequences as FASTA with stable design keys"
+            >
+              ↓ Campaign FASTA
+            </button>
+            <button
+              type="button"
+              class="link-btn"
+              onclick={() => downloadStructCampaignCsv(structCollectionItems, structArt?.id ?? activeStruct.id)}
+              title="Export backbone collection summary as CSV"
+            >
+              ↓ Campaign CSV
+            </button>
+          </div>
+        </div>
+        <div class="design-pills" role="group" aria-label="Select generated backbone design">
+          <button
+            type="button"
+            class="design-pill"
+            class:active={selectedDesignFilter === 'all'}
+            aria-pressed={selectedDesignFilter === 'all'}
+            onclick={() => (selectedDesignFilter = 'all')}
+          >
+            All designs ({structDesignPills.length})
+          </button>
+          {#each structDesignPills as pill (pill.key)}
+            <button
+              type="button"
+              class="design-pill"
+              class:active={selectedDesignFilter === pill.key}
+              aria-pressed={selectedDesignFilter === pill.key}
+              title={`Inspect ${pill.label} (${pill.key})`}
+              onclick={() => (selectedDesignFilter = pill.key)}
+            >
+              {pill.label}
+            </button>
+          {/each}
+        </div>
+      </div>
+      {#if selectedDesignFilter === 'all'}
+        <table class="scores">
+          <thead>
+            <tr>
+              <th>Design</th>
+              <th>ID</th>
+              <th>Len</th>
+              <th>R<sub>g</sub></th>
+              <th>α / β</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each structCollectionItems as item, idx (`${item.id}_${idx}`)}
+              {@const dk = getDesignKeyFromStruct(item, idx)}
+              <tr onclick={() => (selectedDesignFilter = dk)}>
+                <td><span class="design-tag">Design {idx + 1}</span></td>
+                <td><code>{item.id}</code></td>
+                <td>{item.length} aa</td>
+                <td>{fmtNum(item.geometry?.rg, 1, ' Å')}</td>
+                <td>{fmtNum(item.geometry?.helixPct, 0, '%')} / {fmtNum(item.geometry?.sheetPct, 0, '%')}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    {/if}
     <div class="meta-bar">
-      <span><b>{structArt.label}</b> · <span>{formatAdapterName(structArt.sourceModelId)}</span></span>
+      <span><b>{activeStruct.label}</b> · <span>{formatAdapterName(activeStruct.sourceModelId)}</span></span>
       <div class="dl-links">
         {#if hasValidPdb}
-          <button class="link-btn" onclick={() => onDownloadText(structArt.pdbText, safeFilename(`${structArt.id}.pdb`))}>
+          <button class="link-btn" onclick={() => onDownloadText(activeStruct.pdbText, safeFilename(`${activeStruct.id}.pdb`))}>
             ↓ PDB
           </button>
         {/if}
-        {#if structArt.cifText || (!hasValidPdb && structArt.pdbText.trimStart().startsWith('data_'))}
+        {#if activeStruct.cifText || (!hasValidPdb && activeStruct.pdbText.trimStart().startsWith('data_'))}
           <button
             class="link-btn"
-            onclick={() => onDownloadText(structArt.cifText ?? structArt.pdbText, safeFilename(`${structArt.id}.cif`))}
+            onclick={() => onDownloadText(activeStruct.cifText ?? activeStruct.pdbText, safeFilename(`${activeStruct.id}.cif`))}
           >
             ↓ mmCIF
           </button>
         {/if}
-        {#if structArt.trajectoryPdb}
+        {#if activeStruct.trajectoryPdb}
           <button
             class="link-btn"
-            onclick={() => onDownloadText(structArt.trajectoryPdb!, safeFilename(`${structArt.id}_traj.pdb`))}
+            onclick={() => onDownloadText(activeStruct.trajectoryPdb!, safeFilename(`${activeStruct.id}_traj.pdb`))}
           >
-            ↓ Trajectory ({structArt.trajectoryFrameCount ?? '?'}f)
+            ↓ Trajectory ({activeStruct.trajectoryFrameCount ?? '?'}f)
           </button>
         {/if}
       </div>
     </div>
 
     <div class="stat-chips">
-      <span class="stat-chip">L = {structArt.length} aa</span>
-      {#if structArt.diagnostics?.chainCount && structArt.diagnostics.chainCount > 1}
-        <span class="stat-chip">{structArt.diagnostics.chainCount} chains</span>
+      <span class="stat-chip">L = {activeStruct.length} aa</span>
+      {#if activeStruct.diagnostics?.chainCount && activeStruct.diagnostics.chainCount > 1}
+        <span class="stat-chip">{activeStruct.diagnostics.chainCount} chains</span>
       {/if}
-      <span class="stat-chip">R<sub>g</sub> = {fmtNum(structArt.geometry?.rg, 1, ' Å')}</span>
-      <span class="stat-chip">α {fmtNum(structArt.geometry?.helixPct, 0, '%')} · β {fmtNum(structArt.geometry?.sheetPct, 0, '%')}</span>
-      <span class="stat-chip">breaks: {structArt.geometry?.chainBreaks ?? '—'}</span>
-      <span class="stat-chip">clashes: {structArt.geometry?.clashes ?? '—'}</span>
-      {#if structArt.representativeSelection}
+      <span class="stat-chip">R<sub>g</sub> = {fmtNum(activeStruct.geometry?.rg, 1, ' Å')}</span>
+      <span class="stat-chip">α {fmtNum(activeStruct.geometry?.helixPct, 0, '%')} · β {fmtNum(activeStruct.geometry?.sheetPct, 0, '%')}</span>
+      <span class="stat-chip">breaks: {activeStruct.geometry?.chainBreaks ?? '—'}</span>
+      <span class="stat-chip">clashes: {activeStruct.geometry?.clashes ?? '—'}</span>
+      {#if activeStruct.representativeSelection}
         <span
           class="stat-chip cond-key"
-          title={`Selected ${structArt.representativeSelection.selectedKey} from ${structArt.representativeSelection.totalMembers} member(s) by ${structArt.representativeSelection.criterion}`}
+          title={`Selected ${activeStruct.representativeSelection.selectedKey} from ${activeStruct.representativeSelection.totalMembers} member(s) by ${activeStruct.representativeSelection.criterion}`}
         >
-          Rep: {structArt.representativeSelection.selectedKey} · {structArt.representativeSelection.criterion} ({structArt.representativeSelection.totalMembers})
+          Rep: {activeStruct.representativeSelection.selectedKey} · {activeStruct.representativeSelection.criterion} ({activeStruct.representativeSelection.totalMembers})
         </span>
       {/if}
-      {#if structArt.diagnostics?.ligandNames?.length}
-        <span class="stat-chip cond-key">Ligands: {structArt.diagnostics.ligandNames.join(', ')}</span>
+      {#if activeStruct.diagnostics?.ligandNames?.length}
+        <span class="stat-chip cond-key">Ligands: {activeStruct.diagnostics.ligandNames.join(', ')}</span>
       {/if}
-      {#if structArt.diagnostics?.nucleicAcidChains?.length}
-        <span class="stat-chip cond-key">Nucleic acid: {structArt.diagnostics.nucleicAcidChains.join(', ')}</span>
+      {#if activeStruct.diagnostics?.nucleicAcidChains?.length}
+        <span class="stat-chip cond-key">Nucleic acid: {activeStruct.diagnostics.nucleicAcidChains.join(', ')}</span>
       {/if}
-      {#if structArt.trajectoryFrameCount}
-        <span class="stat-chip">{structArt.trajectoryFrameCount} traj frames</span>
+      {#if activeStruct.trajectoryFrameCount}
+        <span class="stat-chip">{activeStruct.trajectoryFrameCount} traj frames</span>
       {/if}
-      {#if structArt.atomGranularity === 'ca-only'}
+      {#if activeStruct.atomGranularity === 'ca-only'}
         <span class="warn-chip" title="Only Cα backbone coordinates were emitted by this model">
           Cα-only
         </span>
       {/if}
-      {#if structArt.provenance?.quantization}
-        <span class="stat-chip" title="Weight quantization">{structArt.provenance.quantization.toUpperCase()}</span>
+      {#if activeStruct.provenance?.quantization}
+        <span class="stat-chip" title="Weight quantization">{activeStruct.provenance.quantization.toUpperCase()}</span>
       {/if}
-      {#if structArt.provenance?.msaMode}
+      {#if activeStruct.provenance?.msaMode}
         <span class="stat-chip cond-key">
-          MSA: {formatMsaBadge(structArt.provenance.msaMode, structArt.provenance.msaDepth)}
+          MSA: {formatMsaBadge(activeStruct.provenance.msaMode, activeStruct.provenance.msaDepth)}
         </span>
       {/if}
-      {#if structArt.provenance?.degradedFallback}
-        <span class="warn-chip">⚠ {structArt.provenance.degradedFallback}</span>
+      {#if activeStruct.provenance?.degradedFallback}
+        <span class="warn-chip">⚠ {activeStruct.provenance.degradedFallback}</span>
       {/if}
-      {#if structArt.provenance?.warnings?.length}
-        {#each structArt.provenance.warnings as pw (pw)}
+      {#if activeStruct.provenance?.warnings?.length}
+        {#each activeStruct.provenance.warnings as pw (pw)}
           <span class="warn-chip">⚠ {pw}</span>
         {/each}
       {/if}
@@ -1076,8 +1833,8 @@
 
     <div class="seq-box">
       <div class="seq-head">
-        <span>Backbone residue sequence ({structArt.sequence.length} aa · {structSeqStats.uniqueAaCount} unique AAs)</span>
-        <button class="link-btn" onclick={() => copyText(structArt.sequence, 'struct-seq')}>
+        <span>Backbone residue sequence ({activeStruct.sequence.length} aa · {structSeqStats.uniqueAaCount} unique AAs)</span>
+        <button class="link-btn" onclick={() => copyText(activeStruct.sequence, 'struct-seq')}>
           {copyBtnLabel('struct-seq', 'Copy seq')}
         </button>
       </div>
@@ -1088,7 +1845,7 @@
           {/each}
         </div>
       {/if}
-      <div class="seq-text">{structArt.sequence}</div>
+      <div class="seq-text">{activeStruct.sequence}</div>
     </div>
 
     <details class="raw-details" bind:open={rawPreviewOpen}>
@@ -1522,6 +2279,105 @@
     background: var(--warn-bg);
     color: var(--warn-text);
     border: 1px solid var(--warn-border);
+  }
+  .campaign-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border);
+  }
+  .campaign-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .campaign-stats {
+    display: flex;
+    align-items: center;
+    gap: 8px 10px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .campaign-badge {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+    border: 1px solid var(--border-strong);
+  }
+  .campaign-metric {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .campaign-metric b {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    color: var(--text-primary);
+  }
+  .campaign-sub {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+  .campaign-exports {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .design-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    align-items: center;
+  }
+  .design-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    cursor: pointer;
+  }
+  .design-pill:hover {
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+  }
+  .design-pill.active {
+    border-color: var(--accent);
+    background: var(--bg-surface-selected);
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  .pill-count {
+    font-size: 9.5px;
+    color: var(--text-dim);
+  }
+  .design-tag {
+    display: inline-block;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+    border: 1px solid var(--border-strong);
+    margin-right: 4px;
+    white-space: nowrap;
   }
 
   table.scores {

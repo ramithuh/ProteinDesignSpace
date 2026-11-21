@@ -1,12 +1,14 @@
 // Preflight estimator for first-run confirmation dialog: calculates deduplicated
-// model weight downloads, peak VRAM (sequential VRAM-mutex scheduling), and WebGPU use.
+// model weight downloads, peak VRAM (sequential VRAM-mutex scheduling), WebGPU use,
+// and honest multi-design campaign fan-out / sequential GPU work counts.
 
 import {
   ADAPTER_REGISTRY,
   LOCALFOLD_MODEL_OPTIONS,
   RFD4_BENCHMARK_OPTIONS,
 } from './registry';
-import type { AdapterManifest, WorkflowGraph } from './types';
+import type { AdapterManifest, WorkflowGraph, WorkflowNode } from './types';
+import { MAX_DESIGNS, MAX_SEQUENCES_PER_DESIGN } from './work-plan';
 
 export interface PreflightModelItem {
   key: string;
@@ -15,6 +17,8 @@ export interface PreflightModelItem {
   estimatedVramMB: number;
   runtime: AdapterManifest['runtime'];
   nonCommercial?: boolean;
+  /** Number of sequential GPU work items planned for this model (weights downloaded & loaded once). */
+  plannedItems?: number;
 }
 
 export interface RunPreflightSummary {
@@ -23,6 +27,273 @@ export interface RunPreflightSummary {
   peakVramMB: number;
   usesWebGpu: boolean;
   hasNonCommercialModel: boolean;
+  /** Total planned backbones across generators. */
+  plannedBackbones?: number;
+  /** Total planned sequences across inverse-folding / native generator outputs. */
+  plannedSequences?: number;
+  /** Total planned refolds across LocalFold stages. */
+  plannedFolds?: number;
+  /** Total sequential GPU work items across GPU stages (weights are never multiplied by numDesigns). */
+  totalGpuWorkItems?: number;
+  /** Honest sequential compute multiplier vs a 1-design baseline (weights stay 1x). */
+  estimatedComputeScale?: number;
+  /** True when weights are downloaded & loaded once per stage across sequential B=1 items. */
+  weightsLoadedOnce?: boolean;
+  /** Human-readable multi-design fan-out summary when numDesigns > 1 (e.g. "4 backbones → 8 sequences → 4 refolds"). */
+  fanoutSummary?: string;
+}
+
+const MAX_TOTAL_FOLDS_CAP = 64;
+const DEFAULT_MAX_TOTAL_FOLDS = 16;
+
+function readClampedInt(value: unknown, fallback: number, min: number, max: number): number {
+  let n: number;
+  if (typeof value === 'number') {
+    n = value;
+  } else if (typeof value === 'string' && value.trim() !== '') {
+    n = Number(value);
+  } else {
+    return fallback;
+  }
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function readNumDesigns(node: WorkflowNode, forceSingle = false): number {
+  if (forceSingle) return 1;
+  if (node.adapterId !== 'genie3' && node.adapterId !== 'rfd4-proteina') return 1;
+  return readClampedInt(node.params?.numDesigns, 1, 1, MAX_DESIGNS);
+}
+
+function countFastaSequences(raw: unknown): number {
+  if (typeof raw !== 'string') return 1;
+  const trimmed = raw.trim();
+  if (!trimmed) return 1;
+  const headers = trimmed
+    .split(/\r?\n/)
+    .filter((line) => line.trim().startsWith('>')).length;
+  return Math.max(1, headers);
+}
+
+interface GraphWorkloadEstimate {
+  hasMultiDesign: boolean;
+  plannedBackbones: number;
+  plannedSequences: number;
+  plannedSelectedSequences: number | null;
+  plannedFolds: number;
+  hasMpnn: boolean;
+  hasTopKFilter: boolean;
+  hasLocalFold: boolean;
+  nodeWorkItems: Map<string, number>;
+  totalGpuWorkItems: number;
+}
+
+function estimateGraphWorkload(
+  graph: WorkflowGraph,
+  forceSingleDesign = false,
+): GraphWorkloadEstimate {
+  const nodeById = new Map<string, WorkflowNode>();
+  for (const n of graph.nodes) nodeById.set(n.id, n);
+
+  const findUpstreamNode = (nodeId: string, toPort: string): WorkflowNode | null => {
+    const edge = graph.edges.find((e) => e.toNode === nodeId && e.toPort === toPort);
+    return edge ? (nodeById.get(edge.fromNode) ?? null) : null;
+  };
+
+  const backboneMemo = new Map<string, number>();
+  const seqMemo = new Map<string, { backbones: number; sequences: number }>();
+
+  const backbonesOut = (node: WorkflowNode, visiting = new Set<string>()): number => {
+    const cached = backboneMemo.get(node.id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(node.id)) return 1;
+    visiting.add(node.id);
+
+    let count = 1;
+    if (node.adapterId === 'genie3' || node.adapterId === 'rfd4-proteina') {
+      count = readNumDesigns(node, forceSingleDesign);
+    } else if (node.adapterId === 'pdb-input' || node.adapterId === 'localfold-af2') {
+      count = 1;
+    } else {
+      const up = findUpstreamNode(node.id, 'structure') ?? findUpstreamNode(node.id, 'template');
+      count = up ? backbonesOut(up, visiting) : 1;
+    }
+    visiting.delete(node.id);
+    backboneMemo.set(node.id, count);
+    return count;
+  };
+
+  const sequencesOut = (
+    node: WorkflowNode,
+    visiting = new Set<string>(),
+  ): { backbones: number; sequences: number } => {
+    const cached = seqMemo.get(node.id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(node.id)) return { backbones: 1, sequences: 1 };
+    visiting.add(node.id);
+
+    let res: { backbones: number; sequences: number };
+    if (node.adapterId === 'genie3' || node.adapterId === 'rfd4-proteina') {
+      const n = readNumDesigns(node, forceSingleDesign);
+      res = { backbones: n, sequences: n };
+    } else if (node.adapterId === 'web-protein-mpnn') {
+      const up = findUpstreamNode(node.id, 'structure');
+      const n = up ? backbonesOut(up, visiting) : 1;
+      const k = readClampedInt(node.params?.numSequences, 2, 1, MAX_SEQUENCES_PER_DESIGN);
+      res = { backbones: n, sequences: n * k };
+    } else if (node.adapterId === 'top-k-filter') {
+      const up = findUpstreamNode(node.id, 'sequences');
+      const upInfo = up ? sequencesOut(up, visiting) : { backbones: 1, sequences: 1 };
+      const mode = String(node.params?.mode ?? 'per-backbone');
+      const topK = readClampedInt(node.params?.topK, 2, 1, 16);
+      const maxTotal = readClampedInt(node.params?.maxTotal, 8, 1, MAX_TOTAL_FOLDS_CAP);
+      let kept: number;
+      if (mode === 'global') {
+        kept = Math.min(upInfo.sequences, topK, maxTotal);
+      } else {
+        const perBackboneAvail =
+          upInfo.backbones > 0 ? Math.ceil(upInfo.sequences / upInfo.backbones) : upInfo.sequences;
+        kept = Math.min(
+          maxTotal,
+          upInfo.backbones * Math.min(perBackboneAvail, topK),
+          upInfo.sequences,
+        );
+      }
+      res = { backbones: upInfo.backbones, sequences: Math.max(0, kept) };
+    } else if (node.adapterId === 'sequence-input') {
+      res = { backbones: 1, sequences: countFastaSequences(node.params?.sequence) };
+    } else {
+      const up = findUpstreamNode(node.id, 'sequences');
+      res = up ? sequencesOut(up, visiting) : { backbones: 1, sequences: 1 };
+    }
+
+    visiting.delete(node.id);
+    seqMemo.set(node.id, res);
+    return res;
+  };
+
+  let hasMultiDesign = false;
+  let generatorBackbones = 0;
+  let generatorCount = 0;
+  let mpnnSequences = 0;
+  let hasMpnn = false;
+  let hasTopKFilter = false;
+  let topKSelectedSequences = 0;
+  let hasLocalFold = false;
+  let plannedFolds = 0;
+
+  const nodeWorkItems = new Map<string, number>();
+  let totalGpuWorkItems = 0;
+
+  for (const node of graph.nodes) {
+    const manifest = ADAPTER_REGISTRY[node.adapterId];
+    const isGpu = Boolean(manifest && manifest.runtime !== 'cpu-ts');
+
+    if (node.adapterId === 'genie3' || node.adapterId === 'rfd4-proteina') {
+      const n = readNumDesigns(node, forceSingleDesign);
+      generatorCount++;
+      generatorBackbones += n;
+      if (n > 1) hasMultiDesign = true;
+      nodeWorkItems.set(node.id, n);
+      if (isGpu) totalGpuWorkItems += n;
+      continue;
+    }
+
+    if (node.adapterId === 'web-protein-mpnn') {
+      hasMpnn = true;
+      const out = sequencesOut(node);
+      mpnnSequences += out.sequences;
+      nodeWorkItems.set(node.id, out.sequences);
+      if (isGpu) totalGpuWorkItems += out.sequences;
+      continue;
+    }
+
+    if (node.adapterId === 'top-k-filter') {
+      hasTopKFilter = true;
+      const out = sequencesOut(node);
+      topKSelectedSequences += out.sequences;
+      nodeWorkItems.set(node.id, out.sequences);
+      continue;
+    }
+
+    if (node.adapterId === 'localfold-af2') {
+      hasLocalFold = true;
+      const up = findUpstreamNode(node.id, 'sequences');
+      const upInfo = up ? sequencesOut(up) : { backbones: 1, sequences: 1 };
+      const maxSeqs = readClampedInt(node.params?.maxSequences, 2, 1, 8);
+      const maxTotalFolds = readClampedInt(
+        node.params?.maxTotalFolds,
+        DEFAULT_MAX_TOTAL_FOLDS,
+        1,
+        MAX_TOTAL_FOLDS_CAP,
+      );
+      let foldsForNode: number;
+      if (upInfo.backbones > 1) {
+        const perBackbone = Math.min(maxSeqs, Math.ceil(upInfo.sequences / upInfo.backbones));
+        foldsForNode = Math.min(maxTotalFolds, upInfo.backbones * perBackbone, upInfo.sequences);
+      } else {
+        foldsForNode = Math.min(maxSeqs, upInfo.sequences);
+      }
+      foldsForNode = Math.max(1, foldsForNode);
+      plannedFolds += foldsForNode;
+      nodeWorkItems.set(node.id, foldsForNode);
+      if (isGpu) totalGpuWorkItems += foldsForNode;
+      continue;
+    }
+
+    if (isGpu) {
+      const upStruct = findUpstreamNode(node.id, 'structure');
+      const upSeq = findUpstreamNode(node.id, 'sequences');
+      const items = upStruct
+        ? backbonesOut(upStruct)
+        : upSeq
+          ? sequencesOut(upSeq).sequences
+          : 1;
+      nodeWorkItems.set(node.id, items);
+      totalGpuWorkItems += items;
+    }
+  }
+
+  const plannedBackbones = generatorCount > 0 ? generatorBackbones : 0;
+  // When MPNN is present, report MPNN's planned sequence total; otherwise if a generator feeds
+  // LocalFold directly (e.g. RFD4 native sequences -> LocalFold), report the native sequence count.
+  const plannedSequences = hasMpnn
+    ? mpnnSequences
+    : generatorCount > 0
+      ? generatorBackbones
+      : 0;
+  const plannedSelectedSequences =
+    hasTopKFilter && topKSelectedSequences < plannedSequences ? topKSelectedSequences : null;
+
+  return {
+    hasMultiDesign,
+    plannedBackbones,
+    plannedSequences,
+    plannedSelectedSequences,
+    plannedFolds,
+    hasMpnn,
+    hasTopKFilter,
+    hasLocalFold,
+    nodeWorkItems,
+    totalGpuWorkItems,
+  };
+}
+
+function buildFanoutSummary(w: GraphWorkloadEstimate): string | undefined {
+  if (!w.hasMultiDesign || w.plannedBackbones <= 1) return undefined;
+  const parts: string[] = [
+    `${w.plannedBackbones} ${w.plannedBackbones === 1 ? 'backbone' : 'backbones'}`,
+  ];
+  if (w.hasMpnn || (w.hasLocalFold && w.plannedSequences > 0)) {
+    parts.push(`${w.plannedSequences} ${w.plannedSequences === 1 ? 'sequence' : 'sequences'}`);
+  }
+  if (w.plannedSelectedSequences !== null) {
+    parts.push(`${w.plannedSelectedSequences} selected`);
+  }
+  if (w.hasLocalFold && w.plannedFolds > 0) {
+    parts.push(`${w.plannedFolds} ${w.plannedFolds === 1 ? 'refold' : 'refolds'}`);
+  }
+  return parts.join(' → ');
 }
 
 function rfd4NeedsEncoder(graph: WorkflowGraph, nodeId: string): boolean {
@@ -71,10 +342,23 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
   }
   const countedAf2Bases = new Set<string>();
 
+  const workload = estimateGraphWorkload(graph, false);
+  const baselineWorkload = workload.hasMultiDesign
+    ? estimateGraphWorkload(graph, true)
+    : workload;
+
+  const addPlannedItems = (key: string, items: number) => {
+    const entry = byKey.get(key);
+    if (!entry) return;
+    entry.plannedItems = (entry.plannedItems ?? 0) + items;
+  };
+
   for (const node of graph.nodes) {
     const manifest = ADAPTER_REGISTRY[node.adapterId];
     if (!manifest) continue;
     if (manifest.runtime === 'cpu-ts' && manifest.approxWeightsMB === 0) continue;
+
+    const nodeItems = workload.nodeWorkItems.get(node.id) ?? 1;
 
     if (node.adapterId === 'localfold-af2') {
       const modelId = String(node.params.model ?? 'monomer');
@@ -108,8 +392,10 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
                 : manifest.estimatedVramMB,
           runtime: manifest.runtime,
           nonCommercial: meta.nonCommercial,
+          plannedItems: 0,
         });
       }
+      addPlannedItems(key, nodeItems);
       continue;
     }
 
@@ -123,16 +409,23 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
           approxMB: manifest.approxWeightsMB,
           estimatedVramMB: manifest.estimatedVramMB,
           runtime: manifest.runtime,
+          plannedItems: 0,
         });
       }
-      if (needsEnc && !byKey.has('rfd4-proteina:encoder')) {
-        byKey.set('rfd4-proteina:encoder', {
-          key: 'rfd4-proteina:encoder',
-          label: 'RFD4-Proteina Structure Encoder (Partial / Inverse Folding)',
-          approxMB: 138,
-          estimatedVramMB: 400,
-          runtime: manifest.runtime,
-        });
+      addPlannedItems(baseKey, nodeItems);
+      if (needsEnc) {
+        const encKey = 'rfd4-proteina:encoder';
+        if (!byKey.has(encKey)) {
+          byKey.set(encKey, {
+            key: encKey,
+            label: 'RFD4-Proteina Structure Encoder (Partial / Inverse Folding)',
+            approxMB: 138,
+            estimatedVramMB: 400,
+            runtime: manifest.runtime,
+            plannedItems: 0,
+          });
+        }
+        addPlannedItems(encKey, nodeItems);
       }
       continue;
     }
@@ -154,8 +447,10 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
           approxMB: manifest.approxWeightsMB,
           estimatedVramMB: manifest.estimatedVramMB,
           runtime: manifest.runtime,
+          plannedItems: 0,
         });
       }
+      addPlannedItems(key, nodeItems);
       continue;
     }
 
@@ -166,11 +461,14 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
         approxMB: manifest.approxWeightsMB,
         estimatedVramMB: manifest.estimatedVramMB,
         runtime: manifest.runtime,
+        plannedItems: 0,
       });
     }
+    addPlannedItems(manifest.id, nodeItems);
   }
 
   const models = [...byKey.values()];
+  // Weights are downloaded & loaded ONCE per stage — never multiplied by numDesigns.
   const totalDownloadMB = models.reduce((sum, m) => sum + m.approxMB, 0);
   let peakVramMB = models.reduce((mx, m) => Math.max(mx, m.estimatedVramMB), 0);
   // RFD4 trunk/decoder (900 MB) and autoencoder encoder (400 MB) are co-resident in the same GPU worker.
@@ -181,6 +479,11 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
   }
   const usesWebGpu = models.some((m) => m.runtime !== 'cpu-ts');
   const hasNonCommercialModel = models.some((m) => m.nonCommercial);
+  const fanoutSummary = buildFanoutSummary(workload);
+  const estimatedComputeScale =
+    baselineWorkload.totalGpuWorkItems > 0
+      ? Number((workload.totalGpuWorkItems / baselineWorkload.totalGpuWorkItems).toFixed(2))
+      : 1;
 
   return {
     models,
@@ -188,6 +491,13 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
     peakVramMB,
     usesWebGpu,
     hasNonCommercialModel,
+    plannedBackbones: workload.plannedBackbones,
+    plannedSequences: workload.plannedSequences,
+    plannedFolds: workload.plannedFolds,
+    totalGpuWorkItems: workload.totalGpuWorkItems,
+    estimatedComputeScale,
+    weightsLoadedOnce: true,
+    ...(fanoutSummary ? { fanoutSummary } : {}),
   };
 }
 

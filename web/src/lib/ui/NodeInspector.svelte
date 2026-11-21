@@ -27,12 +27,14 @@
   import { parseStructureText, type ParsedStructure } from '$lib/protein-ops/pdb';
   import { resolveMotifSourceResidues, type SelectedMotifSourceResidue } from '$lib/engine/conditioning';
   import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
+  import { MAX_DESIGNS } from '$lib/engine/work-plan';
   import NumericInput from './NumericInput.svelte';
   import SchemaParamFields from './SchemaParamFields.svelte';
   import type {
     CanonicalArtifact,
     MsaMode,
     NodeProgressEvent,
+    SequenceSet,
     StructureArtifact,
     WorkflowNode,
   } from '$lib/engine/types';
@@ -44,6 +46,7 @@
     nodeOutput?: Record<string, CanonicalArtifact>;
     nodeState?: NodeProgressEvent;
     upstreamStructure?: StructureArtifact | null;
+    upstreamSequences?: SequenceSet | null;
     hasStructureInput?: boolean;
     siblingGeneratorIds?: string[];
     onUpdate: (nodeId: string, params: Record<string, unknown>) => void;
@@ -60,6 +63,7 @@
     nodeOutput = undefined,
     nodeState = undefined,
     upstreamStructure = null,
+    upstreamSequences = null,
     hasStructureInput = false,
     siblingGeneratorIds = [],
     onUpdate,
@@ -68,6 +72,93 @@
     onRunUpTo = undefined,
     onOpenStudio = undefined,
   }: Props = $props();
+
+  const NUM_DESIGNS_SPEC: NumericFieldSpec = {
+    min: 1,
+    max: MAX_DESIGNS,
+    step: 1,
+    integer: true,
+    defaultValue: 1,
+  };
+  const MAX_TOTAL_FOLDS_SPEC: NumericFieldSpec = {
+    min: 1,
+    max: 64,
+    step: 1,
+    integer: true,
+    defaultValue: 16,
+  };
+
+  function getStructureBackboneCount(struct: StructureArtifact | null | undefined): number {
+    if (!struct) return 0;
+    const raw = struct as StructureArtifact & {
+      collection?: { items?: unknown[]; members?: unknown[] };
+      structureCollection?: { items?: unknown[]; members?: unknown[] };
+    };
+    const items =
+      raw.collection?.items ??
+      raw.collection?.members ??
+      raw.structureCollection?.items ??
+      raw.structureCollection?.members;
+    if (Array.isArray(items) && items.length > 0) {
+      return items.length;
+    }
+    const repTotal = struct.representativeSelection?.totalMembers;
+    if (typeof repTotal === 'number' && Number.isFinite(repTotal) && repTotal > 1) {
+      return Math.round(repTotal);
+    }
+    return 1;
+  }
+
+  function countDistinctBackbonesFromItems(
+    items: readonly { sourceStructureId?: string; designKey?: string }[] | undefined,
+  ): number {
+    if (!items || items.length === 0) return 0;
+    const keys = new Set<string>();
+    for (const item of items) {
+      const k = (item.designKey ?? item.sourceStructureId ?? '').trim();
+      if (k) keys.add(k);
+    }
+    return keys.size;
+  }
+
+  let upstreamBackboneCount = $derived.by((): number => {
+    const fromStruct = getStructureBackboneCount(upstreamStructure);
+    if (fromStruct > 1) return fromStruct;
+    const seqOut = nodeOutput?.sequences?.kind === 'SequenceSet' ? nodeOutput.sequences : null;
+    if (seqOut) {
+      const fromSeqOut = countDistinctBackbonesFromItems(
+        seqOut.candidates as Array<{ sourceStructureId?: string; designKey?: string }>,
+      );
+      if (fromSeqOut > 1) return fromSeqOut;
+    }
+    return fromStruct;
+  });
+
+  let lfMultiDesignInfo = $derived.by((): { backboneCount: number; sequenceCount: number | null } | null => {
+    if (node.adapterId !== 'localfold-af2') return null;
+    if (upstreamSequences && upstreamSequences.candidates.length > 0) {
+      const nBackbones = countDistinctBackbonesFromItems(
+        upstreamSequences.candidates as Array<{ sourceStructureId?: string; designKey?: string }>,
+      );
+      if (nBackbones > 1) {
+        return { backboneCount: nBackbones, sequenceCount: upstreamSequences.candidates.length };
+      }
+    }
+    const foldOut = nodeOutput?.folds?.kind === 'FoldedStructure' ? nodeOutput.folds : null;
+    if (foldOut && foldOut.folds.length > 0) {
+      const nBackbones = countDistinctBackbonesFromItems(
+        foldOut.folds as Array<{ sourceStructureId?: string; designKey?: string }>,
+      );
+      if (nBackbones > 1) {
+        return { backboneCount: nBackbones, sequenceCount: null };
+      }
+    }
+    const fromStruct = getStructureBackboneCount(upstreamStructure);
+    if (fromStruct > 1) {
+      return { backboneCount: fromStruct, sequenceCount: null };
+    }
+    return null;
+  });
 
   let liveStructure = $derived<StructureArtifact | null>(
     nodeOutput?.structure?.kind === 'StructureArtifact' ? nodeOutput.structure : null,
@@ -1023,6 +1114,7 @@
 
     {:else if node.adapterId === 'rfd4-proteina'}
       {@const rfdMode = String(node.params.mode ?? 'unconditional')}
+      {@const rfdNumDesigns = Math.max(1, Math.min(MAX_DESIGNS, Math.round(Number(node.params.numDesigns ?? 1)) || 1))}
       {@const hotspotTokens = parseResidueTokens(node.params.hotspots)}
       {@const motifTokens = parseResidueTokens(node.params.motifSpan)}
       {@const hasCustomContig =
@@ -1229,6 +1321,25 @@
         </span>
       {/if}
 
+      <label>
+        Backbones
+        <NumericInput
+          {disabled}
+          ariaLabel="Backbones (numDesigns)"
+          spec={NUM_DESIGNS_SPEC}
+          value={rfdNumDesigns}
+          onChange={(v) => setParam('numDesigns', v)}
+        />
+      </label>
+      {#if rfdNumDesigns > 1}
+        <div class="fanout-chip full" role="status">
+          <span class="fanout-dot" aria-hidden="true"></span>
+          <span>
+            <b>{rfdNumDesigns} backbones</b> · weights loaded once (B=1 sequential loop)
+          </span>
+        </div>
+      {/if}
+
       <details class="adv-details full">
         <summary>
           Advanced parameters
@@ -1342,6 +1453,7 @@
 
     {:else if node.adapterId === 'genie3'}
       {@const g3Mode = String(node.params.taskMode ?? 'unconditional')}
+      {@const g3NumDesigns = Math.max(1, Math.min(MAX_DESIGNS, Math.round(Number(node.params.numDesigns ?? 1)) || 1))}
       {@const g3Hotspots = parseResidueTokens(node.params.hotspots)}
       {@const g3Motifs = parseResidueTokens(node.params.motifSpan)}
       {@const g3HasCustomContig =
@@ -1495,6 +1607,24 @@
           onChange={(v) => setParam('nSampleStep', v)}
         />
       </label>
+      <label>
+        Backbones
+        <NumericInput
+          {disabled}
+          ariaLabel="Backbones (numDesigns)"
+          spec={NUM_DESIGNS_SPEC}
+          value={g3NumDesigns}
+          onChange={(v) => setParam('numDesigns', v)}
+        />
+      </label>
+      {#if g3NumDesigns > 1}
+        <div class="fanout-chip full" role="status">
+          <span class="fanout-dot" aria-hidden="true"></span>
+          <span>
+            <b>{g3NumDesigns} backbones</b> · weights loaded once (B=1 sequential loop)
+          </span>
+        </div>
+      {/if}
 
       <details class="adv-details full">
         <summary>
@@ -1620,6 +1750,15 @@
           onChange={(v) => setParam('temperature', v)}
         />
       </label>
+      {#if upstreamBackboneCount > 1}
+        {@const mpnnPerBackbone = Math.max(1, Math.min(8, Math.round(Number(node.params.numSequences ?? 2)) || 2))}
+        <div class="fanout-chip full" role="status">
+          <span class="fanout-dot" aria-hidden="true"></span>
+          <span>
+            Runs per backbone (<b>{upstreamBackboneCount} × {mpnnPerBackbone} = {upstreamBackboneCount * mpnnPerBackbone} total sequences</b> · weights loaded once)
+          </span>
+        </div>
+      {/if}
 
       <div class="chip-field full">
         <label>
@@ -1820,6 +1959,26 @@
           onChange={(v) => setParam('maxSequences', v)}
         />
       </label>
+      {#if lfMultiDesignInfo}
+        {@const lfPerBackboneCap = Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}
+        {@const lfCampaignCap = Math.max(1, Math.min(64, Math.round(Number(node.params.maxTotalFolds ?? 16)) || 16))}
+        {@const lfPlanned = Math.min(
+          lfCampaignCap,
+          lfMultiDesignInfo.backboneCount * lfPerBackboneCap,
+          lfMultiDesignInfo.sequenceCount ?? lfCampaignCap,
+        )}
+        <div class="fanout-chip full" role="status">
+          <span class="fanout-dot" aria-hidden="true"></span>
+          <span>
+            <b>{lfMultiDesignInfo.backboneCount} backbones</b>
+            {#if lfMultiDesignInfo.sequenceCount !== null}
+              → {lfMultiDesignInfo.sequenceCount} sequences
+            {/if}
+            → up to <b>{lfPlanned} refold{lfPlanned === 1 ? '' : 's'}</b>
+            (≤{lfPerBackboneCap}/backbone, cap {lfCampaignCap})
+          </span>
+        </div>
+      {/if}
       {#if lfMeta.nonCommercial}
         <div class="full" style="font-size: 10.5px; color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-border); padding: 6px 8px; border-radius: 5px;">
           AlphaFold 3 weights are subject to DeepMind's Non-Commercial Academic Terms. For permissive open weights, use <b>RoseTTAFold3</b> (BSD-3), <b>Boltz-2</b> (MIT), or <b>OpenBind-0</b> (Apache-2.0).
@@ -1871,8 +2030,26 @@
       {/if}
 
       <details class="adv-details full">
-        <summary>Advanced parameters</summary>
+        <summary>
+          Advanced parameters
+          {#if Number(node.params.maxTotalFolds ?? 16) !== 16}
+            <span class="adv-badge">Cap {Number(node.params.maxTotalFolds ?? 16)}</span>
+          {/if}
+        </summary>
         <div class="adv-fields">
+          <label>
+            Max total folds
+            <NumericInput
+              {disabled}
+              ariaLabel="Max total folds across designs"
+              spec={MAX_TOTAL_FOLDS_SPEC}
+              value={Number(node.params.maxTotalFolds ?? 16)}
+              onChange={(v) => setParam('maxTotalFolds', v)}
+            />
+            <span class="field-hint">
+              Campaign cap across multi-backbone batches (round-robin up to {Number(node.params.maxSequences ?? 2)}/backbone).
+            </span>
+          </label>
           <label>
             Seed
             <NumericInput
@@ -2485,6 +2662,27 @@
     background: var(--warn-bg);
     color: var(--warn-text);
     border-color: var(--warn-border);
+  }
+  .fanout-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    line-height: 1.4;
+    padding: 5px 8px;
+    border-radius: 5px;
+    background: var(--bg-pill);
+    color: var(--accent-soft);
+    border: 1px solid var(--border-strong);
+    box-sizing: border-box;
+  }
+  .fanout-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
   }
   .source-res-list {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
