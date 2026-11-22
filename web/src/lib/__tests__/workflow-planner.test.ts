@@ -1143,4 +1143,99 @@ describe('WorkflowPlan R1–R4 regressions & Q1–Q10 reconciliation', () => {
     );
     expect(allCapsReconciled.kind).toBe('de_novo');
   });
+
+  it('Iteration 2 remediation: AF2 selector targets only monomer on multi-oracle fork and uppercase English domain words do not hijack to sequence', () => {
+    // 1. Multi-oracle 3-way fork (AF2 Model 1, Boltz-2, RoseTTAFold 3): AF2/AlphaFold2 targets ONLY monomer
+    const forkGraph = compileWorkflowPlanToGraph({
+      kind: 'de_novo',
+      generators: ['rfd4-proteina'],
+      length: 90,
+      numDesigns: 1,
+      sequenceDesigners: ['web-protein-mpnn'],
+      numSequences: 2,
+      topK: null,
+      refold: true,
+      foldModels: ['monomer', 'boltz2', 'rosettafold3'],
+      score: true,
+      stabilityScan: false,
+      summary: '90aa 3-way fork',
+    }).graph;
+    const af2Node = forkGraph.nodes.find(
+      (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? 'monomer').startsWith('monomer'),
+    )!;
+    const boltzNode = forkGraph.nodes.find(
+      (n) => n.adapterId === 'localfold-af2' && n.params.model === 'boltz2',
+    )!;
+    const rf3Node = forkGraph.nodes.find(
+      (n) => n.adapterId === 'localfold-af2' && n.params.model === 'rosettafold3',
+    )!;
+    expect(af2Node).toBeDefined();
+    expect(boltzNode).toBeDefined();
+    expect(rf3Node).toBeDefined();
+
+    // Add ThermoMPNN after AlphaFold2 attaches specifically to AF2 Model 1, NOT RF3/Boltz-2
+    const addAfterAf2 = parseDeterministicEditOperations('Add ThermoMPNN after AlphaFold2', forkGraph)!;
+    expect(addAfterAf2).not.toBeNull();
+    expect(addAfterAf2.operations[0].attachToNodeId).toBe(af2Node.id);
+    const addedGraph = compileWorkflowPlanToGraph(addAfterAf2, forkGraph).graph;
+    expect(validateGraph(addedGraph)).toEqual([]);
+    const thermo = addedGraph.nodes.find((n) => n.adapterId === 'thermompnn')!;
+    expect(addedGraph.edges.some((e) => e.fromNode === af2Node.id && e.toNode === thermo.id)).toBe(true);
+    expect(addedGraph.edges.some((e) => e.fromNode === rf3Node.id && e.toNode === thermo.id)).toBe(false);
+
+    // Remove AF2 removes ONLY AF2 Model 1, keeping Boltz-2 and RoseTTAFold 3 intact
+    const removeAf2 = parseDeterministicEditOperations('Remove AF2', forkGraph)!;
+    expect(removeAf2).not.toBeNull();
+    expect(removeAf2.operations[0].targetNodeIds).toEqual([af2Node.id]);
+    const removedGraph = compileWorkflowPlanToGraph(removeAf2, forkGraph).graph;
+    expect(validateGraph(removedGraph)).toEqual([]);
+    expect(removedGraph.nodes.some((n) => n.id === af2Node.id)).toBe(false);
+    expect(removedGraph.nodes.some((n) => n.id === boltzNode.id)).toBe(true);
+    expect(removedGraph.nodes.some((n) => n.id === rf3Node.id)).toBe(true);
+
+    // 2. Uppercase English domain words (CHANNEL, ACIDIC, HELICAL, ACTIVITY, SPECIFICITY) do not trigger kind: 'sequence'
+    for (const domainPrompt of [
+      'Redesign this CHANNEL protein with SolubleMPNN and fold with AF2',
+      'Redesign this ACIDIC HELICAL domain with SolubleMPNN and fold with AF2',
+      'Optimize ACTIVITY and SPECIFICITY of this protein with SolubleMPNN and fold with AF2',
+    ]) {
+      const pdbFallback: PdbWorkflowPlan = {
+        kind: 'pdb',
+        pdbId: 'demo',
+        crop: null,
+        tasks: ['solublempnn'],
+        targetChain: null,
+        regions: null,
+        numSequences: 2,
+        topK: null,
+        refold: true,
+        foldModels: ['monomer'],
+        stabilityScan: false,
+        summary: 'demo -> SolubleMPNN -> AF2',
+      };
+      const reconciled = reconcilePlannedWorkflow(pdbFallback, domainPrompt);
+      expect(reconciled.kind).toBe('pdb');
+    }
+
+    // Real uppercase AA sequences (including shorter delimited or sequence-cued chains) remain preserved
+    const realSeq = reconcilePlannedWorkflow(
+      {
+        kind: 'pdb',
+        pdbId: 'demo',
+        crop: null,
+        tasks: ['thermompnn'],
+        targetChain: null,
+        regions: null,
+        numSequences: null,
+        topK: null,
+        refold: false,
+        foldModels: [],
+        stabilityScan: false,
+        summary: 'demo -> ThermoMPNN',
+      },
+      'Fold sequence MKTEAL:GGGGSVVVVV with AF2-Multimer',
+    ) as SequenceWorkflowPlan;
+    expect(realSeq.kind).toBe('sequence');
+    expect(realSeq.sequences).toEqual(['MKTEAL', 'GGGGSVVVVV']);
+  });
 });

@@ -2591,7 +2591,72 @@ const NON_SEQUENCE_UPPERCASE_WORDS = new Set([
   'VARIANTS',
   'ENERGY',
   'STATES',
+  'CHANNEL',
+  'CHANNELS',
+  'ACIDIC',
+  'HELICAL',
+  'ANCHOR',
+  'CHAIN',
+  'ACTIVITY',
+  'AFFINITY',
+  'CRYSTAL',
+  'SIDECHAIN',
+  'SIDECHAINS',
+  'INTERFACE',
+  'INTERFACES',
+  'TERMINAL',
+  'CHEMICAL',
+  'CLINICAL',
+  'CRITICAL',
+  'DISTANCE',
+  'DYNAMIC',
+  'DYNAMICS',
+  'EXTERNAL',
+  'INTERNAL',
+  'INITIAL',
+  'KINETIC',
+  'KINETICS',
+  'KINASE',
+  'LIGASE',
+  'PEPTIDASE',
+  'LINKAGE',
+  'LINKER',
+  'LINKERS',
+  'NITRATE',
+  'PACKING',
+  'PARTICLE',
+  'PATHWAY',
+  'PRIMARY',
+  'RADICAL',
+  'RESIDUAL',
+  'SECRETED',
+  'SYNTHETIC',
+  'VALENCY',
+  'VESICLE',
+  'VITAMIN',
+  'WATERS',
+  'WILDTYPE',
+  'PLASMID',
+  'FERRITIN',
+  'CASPASE',
+  'INTEGRIN',
+  'THYMIDINE',
+  'ADENINE',
+  'CYTIDINE',
+  'THYMINE',
+  'WEIGHTS',
+  'STRENGTH',
+  'STRENGTHS',
+  'HEIGHT',
+  'HEIGHTS',
+  'LENGTHS',
+  'SPECIFICITY',
+  'SOLUBILITY',
+  'CATALYST',
 ]);
+
+const ALL_CAPS_ENGLISH_SUFFIX_RE =
+  /(?:MENT|TION|SION|NESS|ABLE|IBLE|ICAL|ITY|IES|ANTS?|ENTS?|OUS|IVE|ICS?|ASES?|ISTS?|ITIS|SIS|CHAINS?|AGES?|IZES?|ENCY|ANCY)$/;
 
 function extractPromptPdbId(prompt: string): string | null {
   const matches = prompt.match(/\b([1-9][A-Za-z0-9]{3})\b/g);
@@ -2618,6 +2683,15 @@ function extractPromptSequences(prompt: string): string[] {
       if (upper.length < 6) continue;
       if (NON_SEQUENCE_UPPERCASE_WORDS.has(upper)) continue;
       if (isAllCapsPrompt && !hasChainSep && !hasExplicitSeqCue && upper.length < 10) continue;
+      if (
+        !hasChainSep &&
+        !hasExplicitSeqCue &&
+        ALL_CAPS_ENGLISH_SUFFIX_RE.test(upper) &&
+        !/(.)\1\1/.test(upper) &&
+        !/Q/.test(upper)
+      ) {
+        continue;
+      }
       out.push(upper);
     }
   }
@@ -2788,8 +2862,13 @@ function resolveCanvasNodesForKeyword(
   if (/\b(?:protenix[\s-]*v?2|protenix2|protenix)\b/i.test(clause)) {
     addMatch('protenix2', (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? '') === 'protenix2');
   }
-  if (/\b(?:af2|alphafold2|alphafold)\b/i.test(clause)) {
-    addMatch('localfold-af2', (n) => n.adapterId === 'localfold-af2');
+  if (/\b(?:af2[\s-]*multimer|alphafold2?[\s-]*multimer|multimer)\b/i.test(clause)) {
+    addMatch('multimer', (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? '') === 'multimer');
+  } else if (/\b(?:af2|alphafold2|alphafold)\b/i.test(clause)) {
+    addMatch(
+      'af2',
+      (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? 'monomer').startsWith('monomer'),
+    );
   }
   return { nodeIds, adapterIds };
 }
