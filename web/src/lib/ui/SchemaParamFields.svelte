@@ -179,6 +179,7 @@
         id={`param-${field.key}`}
         name={field.key}
         rows="3"
+        spellcheck="false"
         disabled={fieldDisabled}
         placeholder={field.placeholder ?? ''}
         value={String(params[field.key] ?? field.defaultValue ?? '')}

@@ -31,6 +31,7 @@
   import { MAX_DESIGNS } from '$lib/engine/work-plan';
   import NumericInput from './NumericInput.svelte';
   import SchemaParamFields from './SchemaParamFields.svelte';
+  import SequenceEditor from './SequenceEditor.svelte';
   import type { UpstreamLockSummary } from './node-display-helpers';
   import type {
     CanonicalArtifact,
@@ -1116,6 +1117,7 @@
           </span>
           <textarea
             rows="4"
+            spellcheck="false"
             class:input-error={pdbCheck.status === 'error'}
             {disabled}
             placeholder="Paste ATOM lines or mmCIF _atom_site block…"
@@ -1212,27 +1214,16 @@
 
     {:else if node.adapterId === 'sequence-input'}
       {@const seqCheck = validateSequenceText(sequenceDraft)}
-      <label class="full">
-        Amino acid sequence (plain or multi-FASTA)
-        <textarea
-          rows="5"
-          class:input-error={seqCheck.status === 'error'}
-          class:input-warn={seqCheck.status === 'warn'}
-          {disabled}
-          placeholder=">seq1&#10;MKTAYIAKQRQISFVK..."
+      <div class="full">
+        <SequenceEditor
+          nodeId={node.id}
           value={sequenceDraft}
-          oninput={(e) => scheduleTextParam('sequence', e.currentTarget.value)}
-          onblur={flushPendingTextCommit}
-        ></textarea>
-        <span
-          class="field-hint"
-          class:err={seqCheck.status === 'error'}
-          class:warn={seqCheck.status === 'warn'}
-          class:ok={seqCheck.status === 'ok'}
-        >
-          {seqCheck.message}
-        </span>
-      </label>
+          {disabled}
+          validation={seqCheck}
+          onChange={(nextVal) => scheduleTextParam('sequence', nextVal)}
+          onBlur={flushPendingTextCommit}
+        />
+      </div>
 
       <details class="adv-details full">
         <summary>Advanced parameters</summary>
@@ -1580,6 +1571,7 @@
             Custom constraint spec (YAML / JSON)
             <textarea
               rows="3"
+              spellcheck="false"
               {disabled}
               placeholder="Optional raw RFD4 YAML or JSON spec override."
               value={String(node.params.customSpecYaml ?? '')}
@@ -2094,6 +2086,7 @@
             </div>
             <textarea
               rows="4"
+              spellcheck="false"
               class:input-error={!lfA3mSummary || lfA3mSummary.seqCount === 0}
               {disabled}
               placeholder=">query&#10;MKTAYIAKQRQISFVK...&#10;>hit1&#10;MKTAYIAKQRQISFVK..."
@@ -2666,9 +2659,6 @@
   }
   .input-error {
     border-color: var(--err-strong) !important;
-  }
-  .input-warn {
-    border-color: var(--warn-border) !important;
   }
   .field-hint {
     font-size: 10.5px;
