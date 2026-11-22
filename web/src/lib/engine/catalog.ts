@@ -63,7 +63,7 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
     ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1'],
   },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
-  { title: 'Evaluation', ids: ['thermompnn', 'esmc', 'dyna1', 'top-k-filter', 'designability-scorer'] },
+  { title: 'Evaluation', ids: ['thermompnn', 'esmc', 'dyna1', 'top-k-filter', 'designability-scorer', 'structure-compare'] },
 ];
 
 export const CONCISE_BLOCK_ROLES: Record<string, string> = {
@@ -82,6 +82,7 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   dyna1: 'Millisecond conformational exchange & flexibility prediction (ESM-3 + Dyna-1)',
   'top-k-filter': 'Rank and filter top-K sequences per backbone or globally before folding',
   'designability-scorer': 'Kabsch alignment, scRMSD, scTM & pLDDT pass rate',
+  'structure-compare': 'Multi-model 3D Kabsch / motif overlay & pairwise RMSD',
 };
 
 function buildSubGroupsForAdapter(adapterId: string): {
@@ -652,6 +653,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
   })(),
   (() => {
     const sc = ADAPTER_REGISTRY['designability-scorer'];
+    const cmp = ADAPTER_REGISTRY['structure-compare'];
     const tk = ADAPTER_REGISTRY['top-k-filter'];
     const th = ADAPTER_REGISTRY.thermompnn;
     const ec = ADAPTER_REGISTRY.esmc;
@@ -697,6 +699,13 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         subtitle: CONCISE_BLOCK_ROLES['designability-scorer'],
         insert: { adapterId: 'designability-scorer' },
         searchBlob: `${sc.id} ${sc.shortName} ${sc.displayName} ${CONCISE_BLOCK_ROLES['designability-scorer']} score evaluation designability kabsch scrmsd sctm plddt`.toLowerCase(),
+      },
+      {
+        key: 'structure-compare',
+        label: cmp.shortName,
+        subtitle: CONCISE_BLOCK_ROLES['structure-compare'],
+        insert: { adapterId: 'structure-compare', label: '3D Compare' },
+        searchBlob: `${cmp.id} ${cmp.shortName} ${cmp.displayName} ${CONCISE_BLOCK_ROLES['structure-compare']} compare viewer superpose overlay align motif rmsd multi-model 3d`.toLowerCase(),
       },
     ];
     const subGroups: CatalogSubGroup[] = [{ title: 'Stability, Fitness, Dynamics & Designability', items }];

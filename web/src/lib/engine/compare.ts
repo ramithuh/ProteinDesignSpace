@@ -96,6 +96,8 @@ export const COMPARE_PALETTE: CompareColorSlot[] = [
   { badge: 'B', css: '#f59e0b', hex: 0xf59e0b }, // Amber
   { badge: 'C', css: '#c084fc', hex: 0xc084fc }, // Violet
   { badge: 'D', css: '#34d399', hex: 0x34d399 }, // Emerald
+  { badge: 'E', css: '#fb7185', hex: 0xfb7185 }, // Rose
+  { badge: 'F', css: '#22d3ee', hex: 0x22d3ee }, // Cyan
 ];
 
 export const REFERENCE_BACKBONE_COLOR = {

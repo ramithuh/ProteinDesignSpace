@@ -812,9 +812,27 @@
       flashToast(check.reason ?? 'Invalid connection');
       return;
     }
-    // Replace any existing wire occupying the same target input port (ComfyUI behavior)
-    const filtered = graph.edges.filter((e) => !(e.toNode === dst && e.toPort === toPort));
+    const dstNode = graph.nodes.find((n) => n.id === dst);
+    const dstInSpec = dstNode ? ADAPTER_REGISTRY[dstNode.adapterId]?.inputs?.[toPort] : undefined;
+    const isMultiInput = Boolean(dstInSpec?.multiple);
     const newEdge: WorkflowEdge = { fromNode: src, fromPort, toNode: dst, toPort };
+    let filtered: WorkflowEdge[];
+    if (isMultiInput) {
+      // Fan-in port (e.g. 3D Compare): append wire up to 6 unique connections
+      const alreadyExists = graph.edges.some(
+        (e) => e.fromNode === src && e.fromPort === fromPort && e.toNode === dst && e.toPort === toPort,
+      );
+      if (alreadyExists) return;
+      const existingCount = graph.edges.filter((e) => e.toNode === dst && e.toPort === toPort).length;
+      if (existingCount >= 6) {
+        flashToast('This compare input supports up to 6 connected structures');
+        return;
+      }
+      filtered = graph.edges;
+    } else {
+      // Replace any existing wire occupying the same single-input target port (ComfyUI behavior)
+      filtered = graph.edges.filter((e) => !(e.toNode === dst && e.toPort === toPort));
+    }
     // Clear any ghost proposal targeting the same input port
     proposedEdges = proposedEdges.filter((pe) => !(pe.toNode === dst && pe.toPort === toPort));
     if (proposedEdges.length === 0) proposedForNodeId = null;

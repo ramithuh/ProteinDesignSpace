@@ -1842,6 +1842,59 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       },
     ],
   },
+  'structure-compare': {
+    id: 'structure-compare',
+    displayName: '3D Superpose / Compare',
+    shortName: '3D Compare',
+    stage: 'score',
+    runtime: 'cpu-ts',
+    estimatedVramMB: 0,
+    approxWeightsMB: 0,
+    licenseNote: 'Built-in multi-model Kabsch / Motif superposition viewer',
+    description:
+      'Superimposes multiple structures or predicted folds (up to 6) in distinct colors with automatic Full or Motif Substructure Kabsch alignment and pairwise Cα RMSD — persisted cleanly in shareable #g= links.',
+    inputs: {
+      reference: { type: 'StructureArtifact', required: false },
+      structures: { type: 'StructureArtifact', multiple: true },
+    },
+    outputs: {
+      structure: { type: 'StructureArtifact' },
+    },
+    paramSchema: [
+      {
+        key: 'layout',
+        label: '3D Layout',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'overlay',
+        options: [
+          { value: 'overlay', label: 'Overlay (superposed)' },
+          { value: 'side-by-side', label: 'Side-by-Side' },
+        ],
+        description: 'Superimpose all connected structures in one frame or arrange side-by-side.',
+      },
+      {
+        key: 'colorMode',
+        label: 'Color By',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'by-model',
+        options: [
+          { value: 'by-model', label: 'Distinct color per input' },
+          { value: 'plddt', label: 'pLDDT confidence' },
+        ],
+        description: 'Color each connected structure/motif distinctly or by per-residue pLDDT.',
+      },
+      {
+        key: 'alignKabsch',
+        label: 'Kabsch align (Full / Motif)',
+        kind: 'boolean',
+        tier: 'primary',
+        defaultValue: true,
+        description: 'Align structures onto the reference/first model using Full or Motif Substructure Kabsch.',
+      },
+    ],
+  },
   'designability-scorer': {
     id: 'designability-scorer',
     displayName: 'Designability Scorer (Kabsch)',

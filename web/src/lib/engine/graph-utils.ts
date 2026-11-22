@@ -288,8 +288,9 @@ export function validateGraph(graph: WorkflowGraph, { requireRunnable = true } =
     }
   }
 
-  // Validate edges: endpoints, ports, matching PortType, single edge per target port, self-loops
-  const targetPorts = new Set<string>();
+  // Validate edges: endpoints, ports, matching PortType, single edge per target port (unless port.multiple), self-loops
+  const targetPortCounts = new Map<string, number>();
+  const seenExactEdges = new Set<string>();
   const validConnectedTargets = new Set<string>();
   const indeg = new Map<string, number>();
   const adj = new Map<string, string[]>();
@@ -315,10 +316,13 @@ export function validateGraph(graph: WorkflowGraph, { requireRunnable = true } =
 
     const srcManifest = Object.hasOwn(ADAPTER_REGISTRY, src.adapterId) ? ADAPTER_REGISTRY[src.adapterId] : undefined;
     const dstManifest = Object.hasOwn(ADAPTER_REGISTRY, dst.adapterId) ? ADAPTER_REGISTRY[dst.adapterId] : undefined;
+    const inSpec =
+      dstManifest && Object.hasOwn(dstManifest.inputs, e.toPort)
+        ? dstManifest.inputs[e.toPort]
+        : undefined;
     let edgePortsOk = Boolean(srcManifest && dstManifest);
     if (srcManifest && dstManifest) {
       const outSpec = Object.hasOwn(srcManifest.outputs, e.fromPort) ? srcManifest.outputs[e.fromPort] : undefined;
-      const inSpec = Object.hasOwn(dstManifest.inputs, e.toPort) ? dstManifest.inputs[e.toPort] : undefined;
       if (!outSpec) {
         errors.push(`Node "${src.id}" has unknown output port "${e.fromPort}".`);
         edgePortsOk = false;
@@ -337,11 +341,25 @@ export function validateGraph(graph: WorkflowGraph, { requireRunnable = true } =
       }
     }
 
-    const targetKey = `${e.toNode}:${e.toPort}`;
-    if (targetPorts.has(targetKey)) {
-      errors.push(`Input port "${e.toNode}.${e.toPort}" has multiple incoming edges.`);
+    const exactKey = `${e.fromNode}:${e.fromPort}->${e.toNode}:${e.toPort}`;
+    if (seenExactEdges.has(exactKey)) {
+      errors.push(`Duplicate edge "${e.fromNode}.${e.fromPort} → ${e.toNode}.${e.toPort}".`);
     } else {
-      targetPorts.add(targetKey);
+      seenExactEdges.add(exactKey);
+    }
+
+    const targetKey = `${e.toNode}:${e.toPort}`;
+    const prevCount = targetPortCounts.get(targetKey) ?? 0;
+    if (inSpec?.multiple) {
+      if (prevCount >= 6) {
+        errors.push(`Multi-input port "${e.toNode}.${e.toPort}" exceeds maximum 6 incoming edges.`);
+      }
+      targetPortCounts.set(targetKey, prevCount + 1);
+    } else if (prevCount >= 1) {
+      errors.push(`Input port "${e.toNode}.${e.toPort}" has multiple incoming edges.`);
+      targetPortCounts.set(targetKey, prevCount + 1);
+    } else {
+      targetPortCounts.set(targetKey, 1);
     }
     if (edgePortsOk) {
       validConnectedTargets.add(targetKey);

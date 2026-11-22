@@ -1442,6 +1442,25 @@ export class ExecutionScheduler {
       return { sequences: seqSet };
     }
 
+    if (node.adapterId === 'structure-compare') {
+      const ref = inputs.reference as StructureArtifact | undefined;
+      const primary = (inputs.structures as StructureArtifact | undefined) ?? ref;
+      if (!primary || primary.kind !== 'StructureArtifact') {
+        throw new Error('structure-compare requires at least one upstream StructureArtifact');
+      }
+      const layout = String(node.params.layout ?? 'overlay');
+      const colorMode = String(node.params.colorMode ?? 'by-model');
+      const alignKabsch = node.params.alignKabsch !== false;
+      onProgress?.({
+        nodeId: node.id,
+        status: 'running',
+        phase: 'compare',
+        progress: 0.5,
+        detail: `Comparing structures (${layout}, ${alignKabsch ? 'Kabsch' : 'raw'}, ${colorMode})...`,
+      });
+      return { structure: primary };
+    }
+
     if (node.adapterId === 'top-k-filter') {
       const seqIn = inputs.sequences as SequenceSet | undefined;
       if (!seqIn || seqIn.kind !== 'SequenceSet') {
@@ -2648,16 +2667,24 @@ export class ExecutionScheduler {
         };
         this.emitRunState();
 
-        // Gather upstream inputs
+        // Gather upstream inputs (preserving all upstream IDs on multi-input fan-in ports for cache keys)
         const inputs: Record<string, CanonicalArtifact> = {};
-        const inputIds: Record<string, string> = {};
+        const inputIds: Record<string, string | string[]> = {};
         let upstreamLineageHint: string | undefined;
         for (const edge of graph.edges) {
           if (edge.toNode !== node.id) continue;
           const up = outputsByNode[edge.fromNode]?.[edge.fromPort];
           if (up) {
-            inputs[edge.toPort] = up;
-            inputIds[edge.toPort] = up.id;
+            const isMulti = Boolean(manifest.inputs[edge.toPort]?.multiple);
+            if (!isMulti || !inputs[edge.toPort]) {
+              inputs[edge.toPort] = up;
+            }
+            if (isMulti) {
+              const prev = inputIds[edge.toPort];
+              inputIds[edge.toPort] = Array.isArray(prev) ? [...prev, up.id] : [up.id];
+            } else {
+              inputIds[edge.toPort] = up.id;
+            }
           }
           // Trace SequenceSet lineage feeding the upstream LocalFold node for designability-scorer
           if (node.adapterId === 'designability-scorer' && edge.toPort === 'folds') {

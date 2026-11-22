@@ -1620,6 +1620,15 @@ function resolveBlockEdgePorts(
     preferredPairs.push(['folds', 'folds']);
   } else if (toNode.adapterId === 'designability-scorer') {
     preferredPairs.push(['structure', 'structure'], ['folds', 'folds']);
+  } else if (toNode.adapterId === 'structure-compare') {
+    const hasRefAlready = existingEdges.some(
+      (e) => e.toNode === toNode.id && e.toPort === 'reference',
+    );
+    if (fromNode.adapterId === 'pdb-input' && !hasRefAlready) {
+      preferredPairs.push(['structure', 'reference'], ['structure', 'structures']);
+    } else {
+      preferredPairs.push(['structure', 'structures'], ['structure', 'reference']);
+    }
   } else if (toNode.adapterId === 'dyna1') {
     preferredPairs.push(['structure', 'structure'], ['sequences', 'sequences']);
   } else if (toNode.adapterId === 'esmc') {
@@ -1680,6 +1689,9 @@ function sanitizeBlockNodeParams(
     'mode',
     'taskMode',
     'pdbId',
+    'layout',
+    'colorMode',
+    'alignKabsch',
   ]);
   if (rawParams && typeof rawParams === 'object') {
     for (const [k, v] of Object.entries(rawParams)) {

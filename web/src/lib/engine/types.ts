@@ -582,6 +582,8 @@ export interface ArtifactRef {
 export interface PortSpec {
   type: PortType;
   required?: boolean;
+  /** When true, this input port accepts multiple incoming wires (fan-in, e.g. 3D Compare). */
+  multiple?: boolean;
 }
 
 export interface AdapterParamOption {

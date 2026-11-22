@@ -56,11 +56,12 @@ describe('engine/catalog & biologist terminology', () => {
     }
   });
 
-  it('organizes all 15 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, AntiFold/ESM-IF1, ProtPardelle-1c, ESM-C 300M, and Dyna-1', () => {
+  it('organizes all 16 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, AntiFold/ESM-IF1, ProtPardelle-1c, ESM-C 300M, Dyna-1, and 3D Superpose / Compare', () => {
     const groupedIds = CATALOG_STAGE_GROUPS.flatMap((g) => g.ids);
     expect(new Set(groupedIds)).toEqual(new Set(Object.keys(ADAPTER_REGISTRY)));
     expect(CATALOG_ITEMS).toHaveLength(Object.keys(ADAPTER_REGISTRY).length);
-    expect(CATALOG_ITEMS).toHaveLength(15);
+    expect(CATALOG_ITEMS).toHaveLength(16);
+    expect(ADAPTER_REGISTRY['structure-compare']).toBeDefined();
     expect(ADAPTER_REGISTRY['top-k-filter']).toBeDefined();
     expect(ADAPTER_REGISTRY.thermompnn).toBeDefined();
     expect(ADAPTER_REGISTRY.ligandmpnn).toBeDefined();
@@ -208,6 +209,7 @@ describe('engine/catalog & biologist terminology', () => {
       'dyna1',
       'top-k-filter',
       'designability-scorer',
+      'structure-compare',
     ]);
 
     expect(filterCatalogCategories('ligandmpnn')[0].matchingSubItems.map((s) => s.key)).toEqual([

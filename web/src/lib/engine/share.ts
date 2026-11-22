@@ -14,6 +14,7 @@ const ADAPTER_TO_SHORT: Record<string, string> = {
   'web-protein-mpnn': 'm',
   'localfold-af2': 'f',
   'designability-scorer': 's',
+  'structure-compare': 'c',
 };
 
 const SHORT_TO_ADAPTER: Record<string, string> = Object.fromEntries(

@@ -148,7 +148,40 @@
   let lastLabelUndo: LabelUndoMarker | null = null;
   let selectedNodeIds = $state<string[]>([WORKFLOW_PRESETS[0].graph.nodes[0].id]);
   let selectedNodeId = $derived(selectedNodeIds[selectedNodeIds.length - 1] ?? '');
-  let isCompareMode = $derived(selectedNodeIds.length >= 2);
+  let activeCompareNode = $derived.by(() => {
+    if (selectedNodeIds.length !== 1) return null;
+    const n = graph.nodes.find((node) => node.id === selectedNodeIds[0]);
+    return n?.adapterId === 'structure-compare' ? n : null;
+  });
+  let activeCompareInputIds = $derived.by((): string[] => {
+    if (!activeCompareNode) return [];
+    const ordered: string[] = [];
+    const seen = new Set<string>();
+    const refEdge = graph.edges.find(
+      (e) => e.toNode === activeCompareNode.id && e.toPort === 'reference',
+    );
+    if (refEdge && !seen.has(refEdge.fromNode)) {
+      seen.add(refEdge.fromNode);
+      ordered.push(refEdge.fromNode);
+    }
+    for (const e of graph.edges) {
+      if (e.toNode === activeCompareNode.id && e.toPort === 'structures' && !seen.has(e.fromNode)) {
+        seen.add(e.fromNode);
+        ordered.push(e.fromNode);
+      }
+    }
+    return ordered.slice(0, COMPARE_PALETTE.length);
+  });
+  let effectiveCompareNodeIds = $derived(
+    selectedNodeIds.length >= 2
+      ? selectedNodeIds.slice(0, COMPARE_PALETTE.length)
+      : activeCompareNode
+        ? activeCompareInputIds
+        : [],
+  );
+  let isCompareMode = $derived(
+    selectedNodeIds.length >= 2 || (Boolean(activeCompareNode) && activeCompareInputIds.length >= 1),
+  );
   let compareLayout = $state<'overlay' | 'side-by-side'>('overlay');
   let compareColorMode = $state<'by-model' | 'plddt'>('by-model');
   let compareAlignKabsch = $state(true);
@@ -1681,10 +1714,15 @@
         selectedPeekSlotId = null;
         selectedEdgeId = null;
       } else {
-        // Auto-focus the terminal output block (scorer -> fold -> generator -> last executed node)
-        // so its 3D structure appears in the viewport immediately without needing an scRMSD block.
+        // Auto-focus the terminal output block (3D Compare -> multi-scorer -> multi-fold -> scorer -> fold -> generator -> last executed node)
+        const lastCompare = [...graph.nodes]
+          .reverse()
+          .find((n) => n.adapterId === 'structure-compare' && outputsByNode[n.id]);
         const scorersWithData = graph.nodes.filter(
           (n) => n.adapterId === 'designability-scorer' && outputsByNode[n.id],
+        );
+        const foldsWithData = graph.nodes.filter(
+          (n) => n.adapterId === 'localfold-af2' && outputsByNode[n.id],
         );
         const lastScorer = [...graph.nodes].reverse().find((n) => n.adapterId === 'designability-scorer');
         const lastFold = [...graph.nodes].reverse().find((n) => n.adapterId === 'localfold-af2');
@@ -1698,9 +1736,16 @@
         const lastWithOutput = [...graph.nodes]
           .reverse()
           .find((n) => outputsByNode[n.id] && Object.keys(outputsByNode[n.id]).length > 0);
-        if (scorersWithData.length >= 2) {
+        if (lastCompare) {
+          setSingleSelection(lastCompare.id);
+          selectedPeekSlotId = null;
+          selectedEdgeId = null;
+        } else if (scorersWithData.length >= 2) {
           // Forked benchmark (e.g. AF2 vs RoseTTAFold3): auto-open multi-branch 3D comparison!
           handleSelectNodes(scorersWithData.slice(0, COMPARE_PALETTE.length).map((n) => n.id));
+        } else if (foldsWithData.length >= 2 && scorersWithData.length === 0) {
+          // Parallel pure-folding benchmark (e.g. AF3 vs AF2 vs ESMFold2): auto-open 3D Compare!
+          handleSelectNodes(foldsWithData.slice(0, COMPARE_PALETTE.length).map((n) => n.id));
         } else if (lastScorer) {
           setSingleSelection(lastScorer.id);
           selectedPeekSlotId = null;
@@ -2584,11 +2629,46 @@
     return map;
   });
 
-  // Multi-select 3D comparison derived state
+  // Multi-select & 3D Compare block derived state
+  let effectiveCompareLayout = $derived<'overlay' | 'side-by-side'>(
+    activeCompareNode
+      ? String(activeCompareNode.params.layout ?? 'overlay') === 'side-by-side'
+        ? 'side-by-side'
+        : 'overlay'
+      : compareLayout,
+  );
+  let effectiveCompareColorMode = $derived<'by-model' | 'plddt'>(
+    activeCompareNode
+      ? String(activeCompareNode.params.colorMode ?? 'by-model') === 'plddt'
+        ? 'plddt'
+        : 'by-model'
+      : compareColorMode,
+  );
+  let effectiveCompareAlignKabsch = $derived<boolean>(
+    activeCompareNode ? activeCompareNode.params.alignKabsch !== false : compareAlignKabsch,
+  );
+
+  function setActiveCompareOption(patch: {
+    layout?: 'overlay' | 'side-by-side';
+    colorMode?: 'by-model' | 'plddt';
+    alignKabsch?: boolean;
+  }) {
+    if (activeCompareNode) {
+      updateNodeParams(activeCompareNode.id, {
+        ...$state.snapshot(activeCompareNode.params),
+        ...patch,
+      });
+    } else {
+      if (patch.layout !== undefined) compareLayout = patch.layout;
+      if (patch.colorMode !== undefined) compareColorMode = patch.colorMode;
+      if (patch.alignKabsch !== undefined) compareAlignKabsch = patch.alignKabsch;
+    }
+  }
+
   let compareColors = $derived.by((): Record<string, { badge: string; css: string }> => {
     if (!isCompareMode) return {};
     const map: Record<string, { badge: string; css: string }> = {};
-    selectedNodeIds.slice(0, COMPARE_PALETTE.length).forEach((id, idx) => {
+    effectiveCompareNodeIds.forEach((id, idx) => {
       const slot = COMPARE_PALETTE[idx];
       map[id] = { badge: slot.badge, css: slot.css };
     });
@@ -2596,11 +2676,11 @@
   });
 
   let comparisonState = $derived.by(() => {
-    if (!isCompareMode) return null;
-    return buildComparisonState(graph, selectedNodeIds, outputsByNode, {
-      layout: compareLayout,
-      colorMode: compareColorMode,
-      alignKabsch: compareAlignKabsch,
+    if (!isCompareMode || effectiveCompareNodeIds.length === 0) return null;
+    return buildComparisonState(graph, effectiveCompareNodeIds, outputsByNode, {
+      layout: effectiveCompareLayout,
+      colorMode: effectiveCompareColorMode,
+      alignKabsch: effectiveCompareAlignKabsch,
       branchCandidateIdx,
       hiddenModelIds: new Set(hiddenCompareModelIds),
       pairingMode: comparePairingMode,
@@ -3150,7 +3230,7 @@
                 title={comparisonState.forcedSideBySide
                   ? 'Structures have different lengths — using side-by-side'
                   : 'Superpose models in one frame'}
-                onclick={() => (compareLayout = 'overlay')}
+                onclick={() => setActiveCompareOption({ layout: 'overlay' })}
               >
                 Overlay
               </button>
@@ -3158,7 +3238,7 @@
                 type="button"
                 class="seg-btn"
                 class:active={comparisonState.effectiveLayout === 'side-by-side'}
-                onclick={() => (compareLayout = 'side-by-side')}
+                onclick={() => setActiveCompareOption({ layout: 'side-by-side' })}
               >
                 Side-by-Side
               </button>
@@ -3167,16 +3247,16 @@
               <button
                 type="button"
                 class="seg-btn"
-                class:active={compareColorMode === 'by-model'}
-                onclick={() => (compareColorMode = 'by-model')}
+                class:active={effectiveCompareColorMode === 'by-model'}
+                onclick={() => setActiveCompareOption({ colorMode: 'by-model' })}
               >
                 By Model
               </button>
               <button
                 type="button"
                 class="seg-btn"
-                class:active={compareColorMode === 'plddt'}
-                onclick={() => (compareColorMode = 'plddt')}
+                class:active={effectiveCompareColorMode === 'plddt'}
+                onclick={() => setActiveCompareOption({ colorMode: 'plddt' })}
               >
                 pLDDT
               </button>
@@ -3191,13 +3271,13 @@
               <input
                 type="checkbox"
                 disabled={sharedPreAligned}
-                checked={sharedPreAligned || (compareAlignKabsch && comparisonState.effectiveLayout === 'overlay')}
+                checked={sharedPreAligned || (effectiveCompareAlignKabsch && comparisonState.effectiveLayout === 'overlay')}
                 onchange={(e) => {
                   const checked = e.currentTarget.checked;
-                  compareAlignKabsch = checked;
-                  if (checked && compareLayout === 'side-by-side') {
-                    compareLayout = 'overlay';
-                  }
+                  setActiveCompareOption({
+                    alignKabsch: checked,
+                    ...(checked && effectiveCompareLayout === 'side-by-side' ? { layout: 'overlay' } : {}),
+                  });
                 }}
               />
               {sharedPreAligned ? 'Kabsch align (shared)' : 'Kabsch align'}
