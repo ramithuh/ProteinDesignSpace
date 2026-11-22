@@ -1274,11 +1274,16 @@
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
+    transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
   }
-  .dock-ai-btn:hover:not(:disabled),
+  .dock-ai-btn:hover:not(:disabled) {
+    background: var(--bg-surface-hover);
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+  }
   .dock-ai-btn.open {
-    background: var(--accent-soft);
-    border-color: var(--accent-border);
+    background: var(--bg-surface-selected);
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border-strong));
     color: var(--accent-bright);
   }
   .dock-ai-btn:disabled {

@@ -308,8 +308,8 @@
     font-weight: 600;
     padding: 2px 7px;
     border-radius: 999px;
-    background: var(--accent-soft);
-    border: 1px solid var(--accent-border);
+    background: var(--bg-pill);
+    border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
     color: var(--accent-bright);
   }
   .pp-close {
@@ -371,8 +371,8 @@
   }
   .pp-textarea:focus {
     outline: none;
-    border-color: var(--accent-bright);
-    box-shadow: 0 0 0 2px var(--accent-soft);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .pp-input-foot {
     display: flex;
@@ -391,8 +391,8 @@
     gap: 6px;
     padding: 6px 12px;
     border-radius: 8px;
-    border: 1px solid var(--accent-border);
-    background: var(--accent-bright);
+    border: 1px solid var(--accent);
+    background: var(--accent);
     color: #fff;
     font-family: inherit;
     font-size: 12px;
@@ -459,16 +459,16 @@
   }
   .pp-ex-chip:hover:not(:disabled) {
     background: var(--bg-surface-hover);
-    border-color: var(--accent-border);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
     color: var(--text-primary);
   }
 
   .pp-error {
     padding: 8px 10px;
     border-radius: 8px;
-    border: 1px solid rgba(239, 68, 68, 0.35);
-    background: rgba(239, 68, 68, 0.1);
-    color: #ef4444;
+    border: 1px solid var(--err-border);
+    background: var(--err-bg);
+    color: var(--err-text);
     font-size: 11.5px;
     line-height: 1.4;
   }
@@ -479,8 +479,8 @@
     gap: 8px;
     padding: 10px;
     border-radius: 9px;
-    border: 1px solid var(--accent-border);
-    background: color-mix(in srgb, var(--accent-soft) 55%, var(--bg-surface));
+    border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border-strong));
+    background: var(--bg-surface-selected);
   }
   .pp-prev-head {
     display: flex;
@@ -548,8 +548,8 @@
   .pp-apply-btn {
     padding: 6px 13px;
     border-radius: 8px;
-    border: 1px solid var(--accent-border);
-    background: var(--accent-bright);
+    border: 1px solid var(--accent);
+    background: var(--accent);
     color: #fff;
     font-family: inherit;
     font-size: 12px;
