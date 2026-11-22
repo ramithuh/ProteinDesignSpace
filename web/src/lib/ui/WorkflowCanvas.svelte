@@ -121,6 +121,7 @@
   let plannerLoading = $state(false);
   let draftPreview = $state<PlannedWorkflowResult | null>(null);
   let wireLegendOpen = $state(false);
+  let dockCentered = $derived(graph.nodes.length === 0 && !draftPreview && !catalogOpen);
   let clearConfirmPending = $state(false);
   let clearConfirmTimer: ReturnType<typeof setTimeout> | null = null;
   let modKeyLabel = $state('Ctrl/⌘');
@@ -378,7 +379,7 @@
       dockEl.style.height = `${fromH}px`;
       void dockEl.offsetWidth;
       dockEl.style.transition =
-        'width 300ms cubic-bezier(0.22, 1, 0.36, 1), height 260ms cubic-bezier(0.22, 1, 0.36, 1), border-radius 260ms cubic-bezier(0.22, 1, 0.36, 1), border-color 220ms ease, box-shadow 260ms ease';
+        'width 300ms cubic-bezier(0.22, 1, 0.36, 1), height 260ms cubic-bezier(0.22, 1, 0.36, 1), bottom 340ms cubic-bezier(0.22, 1, 0.36, 1), transform 340ms cubic-bezier(0.22, 1, 0.36, 1), border-radius 260ms cubic-bezier(0.22, 1, 0.36, 1), border-color 220ms ease, box-shadow 260ms ease';
       dockEl.style.width = `${toW}px`;
       dockEl.style.height = `${toH}px`;
       dockMorphTimer = setTimeout(() => {
@@ -1098,10 +1099,11 @@
     </div>
   {/if}
 
-  <!-- Floating Bottom-Center Action Dock: morphs seamlessly into the inline workflow prompt bar -->
+  <!-- Floating Action Dock: centered hero when canvas is empty, glides smoothly to bottom once blocks exist -->
   <div
     bind:this={dockEl}
     class="canvas-action-dock canvas-overlay"
+    class:is-centered={dockCentered}
     class:planner-active={plannerOpen}
     class:planner-review={Boolean(draftPreview)}
     role="toolbar"
@@ -1161,16 +1163,18 @@
         <span class="ai-label-short">Describe</span>
         <kbd class="kbd-hint ai-kbd">{modKeyLabel}K</kbd>
       </button>
-      <span class="dock-divider" aria-hidden="true"></span>
-      <button
-        type="button"
-        class="dock-tool-btn"
-        {disabled}
-        onclick={handleAutoLayout}
-        title="Re-arrange DAG cleanly and fit view"
-      >
-        Auto Layout
-      </button>
+      {#if graph.nodes.length > 0}
+        <span class="dock-divider" aria-hidden="true"></span>
+        <button
+          type="button"
+          class="dock-tool-btn"
+          {disabled}
+          onclick={handleAutoLayout}
+          title="Re-arrange DAG cleanly and fit view"
+        >
+          Auto Layout
+        </button>
+      {/if}
     {/if}
   </div>
 
@@ -1419,7 +1423,7 @@
     position: absolute;
     bottom: calc(46px + env(safe-area-inset-bottom, 0px));
     left: 50%;
-    transform: translateX(-50%);
+    transform: translate(-50%, 0);
     z-index: 25;
     display: inline-flex;
     align-items: center;
@@ -1435,9 +1439,15 @@
     white-space: nowrap;
     box-sizing: border-box;
     transition:
+      bottom 360ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 360ms cubic-bezier(0.22, 1, 0.36, 1),
       border-radius 240ms cubic-bezier(0.22, 1, 0.36, 1),
       border-color 200ms ease,
       box-shadow 240ms ease;
+  }
+  .canvas-action-dock.is-centered {
+    bottom: 50%;
+    transform: translate(-50%, 50%);
   }
   .canvas-action-dock.planner-active {
     z-index: 32;
@@ -1545,6 +1555,10 @@
       bottom: calc(34px + env(safe-area-inset-bottom, 0px));
       width: calc(100% - 16px);
       border-radius: 18px;
+    }
+    .canvas-action-dock.is-centered {
+      bottom: 50%;
+      transform: translate(-50%, 50%);
     }
     .add-block-btn .kbd-hint,
     .dock-ai-btn .ai-kbd {
