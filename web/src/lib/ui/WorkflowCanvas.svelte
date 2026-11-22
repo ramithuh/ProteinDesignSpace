@@ -1415,7 +1415,7 @@
   }
   .canvas-action-dock {
     position: absolute;
-    bottom: calc(46px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(50px + env(safe-area-inset-bottom, 0px));
     left: 50%;
     transform: translate(-50%, 0);
     z-index: 25;
@@ -1423,7 +1423,7 @@
     align-items: center;
     justify-content: center;
     gap: 4px;
-    padding: 4px;
+    padding: 5px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
     -webkit-backdrop-filter: blur(14px);
@@ -1446,7 +1446,8 @@
   .canvas-action-dock.planner-active {
     z-index: 32;
     width: min(580px, calc(100% - 24px));
-    border-radius: 22px;
+    padding: 6px 8px;
+    border-radius: 26px;
     border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
     box-shadow:
       0 0 0 1.5px color-mix(in srgb, var(--accent) 28%, transparent),

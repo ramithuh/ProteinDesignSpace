@@ -429,9 +429,9 @@
   .above-strip {
     position: absolute;
     left: 50%;
-    bottom: calc(100% + 10px);
+    bottom: calc(100% + 16px);
     transform: translateX(-50%);
-    max-width: min(720px, calc(100vw - 24px));
+    max-width: min(760px, calc(100vw - 24px));
     z-index: 3;
     animation: strip-float-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
@@ -449,7 +449,7 @@
   .chip-row {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     overflow-x: auto;
     scrollbar-width: none;
     padding: 4px 4px;
@@ -463,8 +463,8 @@
   .ex-pill {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
+    gap: 6px;
+    padding: 5px 12px;
     border-radius: 999px;
     border: 1px solid var(--border-strong);
     background: var(--bg-surface);
@@ -569,9 +569,9 @@
   .input-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     width: 100%;
-    padding: 0 2px 0 10px;
+    padding: 1px 4px 1px 10px;
     overflow: hidden;
     animation: row-morph-in 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
@@ -658,7 +658,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 5px 11px;
+    padding: 6px 13px;
     border-radius: 999px;
     border: 1px solid var(--accent);
     background: var(--accent);
@@ -808,12 +808,12 @@
   .micro-footer {
     position: absolute;
     left: 50%;
-    top: calc(100% + 7px);
+    top: calc(100% + 14px);
     transform: translateX(-50%);
     z-index: 12;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     padding: 1px 6px;
     border-radius: 999px;
     background: transparent;
