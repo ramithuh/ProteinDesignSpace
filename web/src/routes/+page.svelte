@@ -119,8 +119,17 @@
   let sysMenuOpen = $state(false);
   let sysPopAlignLeft = $state(false);
   let moreMenuOpen = $state(false);
+  let shareMenuOpen = $state(false);
+  let sharePopoverState = $state<{
+    url: string;
+    mode: string;
+    strippedPdb: boolean;
+    copied: boolean;
+    error: string | null;
+  } | null>(null);
   let sysWrapEl: HTMLDivElement | null = $state(null);
   let moreWrapEl: HTMLDivElement | null = $state(null);
+  let shareWrapEl: HTMLDivElement | null = $state(null);
   let importFileInput: HTMLInputElement | null = $state(null);
   let firstRunAck = $state(false);
   let showOnboarding = $state(false);
@@ -473,6 +482,9 @@
     if (moreMenuOpen && !moreWrapEl?.contains(target)) {
       moreMenuOpen = false;
     }
+    if (shareMenuOpen && !shareWrapEl?.contains(target)) {
+      shareMenuOpen = false;
+    }
   }
 
   function isEditableElement(el: EventTarget | null): boolean {
@@ -493,6 +505,7 @@
       }
       sysMenuOpen = false;
       moreMenuOpen = false;
+      shareMenuOpen = false;
       return;
     }
     if (pendingRun || showCredits || (showOnboarding && !onboardingInteractive)) return;
@@ -1816,37 +1829,58 @@
     activeGpuWorker = null;
   }
 
-  async function copyQuickShareLink() {
+  async function openSharePopover() {
+    sysMenuOpen = false;
     moreMenuOpen = false;
+    if (shareMenuOpen) {
+      shareMenuOpen = false;
+      return;
+    }
+    shareMenuOpen = true;
+    sharePopoverState = null;
     try {
       const plain = $state.snapshot(graph) as WorkflowGraph;
       const { hash, mode, strippedPdb } = await encodeGraphToHash(plain);
       const url = `${window.location.origin}${window.location.pathname}${hash}`;
       window.history.replaceState(null, '', hash);
-      try {
-        if (!navigator.clipboard?.writeText) {
-          throw new Error('Clipboard API unavailable');
-        }
-        await navigator.clipboard.writeText(url);
-        showToastMessage(
-          strippedPdb
-            ? `Copied ${url.length}-char link (${mode}; large PDB omitted)`
-            : `Copied ${url.length}-char link (${mode})`,
-        );
-      } catch {
-        showToastMessage(
-          strippedPdb
-            ? `Share link updated in address bar (${mode}; large PDB omitted — copy from URL bar)`
-            : `Share link updated in address bar (${mode} — copy from URL bar)`,
-          4200,
-        );
-      }
+      sharePopoverState = { url, mode, strippedPdb, copied: false, error: null };
     } catch (err) {
+      sharePopoverState = {
+        url: '',
+        mode: '',
+        strippedPdb: false,
+        copied: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  async function copySharePopoverUrl() {
+    if (!sharePopoverState?.url) return;
+    const { url, mode, strippedPdb } = sharePopoverState;
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('Clipboard API unavailable');
+      }
+      await navigator.clipboard.writeText(url);
+      sharePopoverState = { ...sharePopoverState, copied: true };
       showToastMessage(
-        `Could not create share link: ${err instanceof Error ? err.message : String(err)}`,
+        strippedPdb
+          ? `Copied ${url.length}-char link (${mode}; large PDB omitted)`
+          : `Copied ${url.length}-char link (${mode})`,
+      );
+    } catch {
+      showToastMessage(
+        strippedPdb
+          ? `Share link updated in address bar (${mode}; large PDB omitted — copy from URL bar)`
+          : `Share link updated in address bar (${mode} — copy from URL bar)`,
         4200,
       );
     }
+  }
+
+  async function copyQuickShareLink() {
+    await openSharePopover();
   }
 
   function loadFullWorkflowGraph(next: WorkflowGraph, opts?: { clearOutputs?: boolean }) {
@@ -2821,6 +2855,7 @@
         aria-expanded={sysMenuOpen}
         onclick={() => {
           moreMenuOpen = false;
+          shareMenuOpen = false;
           const nextOpen = !sysMenuOpen;
           if (nextOpen && sysWrapEl) {
             const rect = sysWrapEl.getBoundingClientRect();
@@ -2906,6 +2941,82 @@
       {/if}
     </div>
 
+    <!-- Share Protocol Popover -->
+    <div class="pop-wrap" bind:this={shareWrapEl}>
+      <button
+        type="button"
+        class="hdr-share-btn"
+        class:active={shareMenuOpen}
+        aria-expanded={shareMenuOpen}
+        aria-label="Share workflow link"
+        title="Share workflow pipeline as a zero-install link"
+        onclick={() => void openSharePopover()}
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6.5 9.5l3-3" />
+          <path d="M8.5 4.5l1.3-1.3a2.6 2.6 0 013.7 3.7L12.2 8.2" />
+          <path d="M7.5 11.5l-1.3 1.3a2.6 2.6 0 01-3.7-3.7l1.3-1.3" />
+        </svg>
+        <span class="hdr-share-label">Share</span>
+      </button>
+
+      {#if shareMenuOpen}
+        <div class="hdr-popover share-pop" role="dialog" aria-label="Share workflow link">
+          <div class="share-pop-head">
+            <span class="share-pop-title">Share workflow pipeline</span>
+            {#if sharePopoverState?.url}
+              <span class="share-pop-meta">{sharePopoverState.url.length} chars</span>
+            {/if}
+          </div>
+          <p class="share-pop-note">
+            <strong>Only the workflow pipeline is shared</strong> (blocks, wiring &amp; parameters).
+            Computed outputs and 3D structures are <strong>not</strong> cached or uploaded — recipients run it locally in their browser.
+          </p>
+          {#if sharePopoverState?.strippedPdb}
+            <p class="share-pop-warn">
+              Uploaded local PDB coordinates were omitted to keep the URL compact; recipients will need to re-attach that file.
+            </p>
+          {/if}
+          {#if sharePopoverState?.error}
+            <p class="share-pop-warn">{sharePopoverState.error}</p>
+          {:else if sharePopoverState?.url}
+            <div class="share-pop-url-row">
+              <input
+                type="text"
+                class="share-pop-input"
+                readonly
+                value={sharePopoverState.url}
+                aria-label="Shareable workflow URL"
+                onclick={(e) => e.currentTarget.select()}
+              />
+              <button
+                type="button"
+                class="share-pop-copy"
+                class:copied={sharePopoverState.copied}
+                onclick={() => void copySharePopoverUrl()}
+              >
+                {sharePopoverState.copied ? '✓ Copied' : 'Copy'}
+              </button>
+            </div>
+          {:else}
+            <p class="share-pop-note">Generating compact workflow link…</p>
+          {/if}
+          <div class="share-pop-foot">
+            <button
+              type="button"
+              class="share-pop-link-btn"
+              onclick={() => {
+                shareMenuOpen = false;
+                showRecipe = true;
+              }}
+            >
+              Open &lt;/&gt; YAML / JSON Recipe
+            </button>
+          </div>
+        </div>
+      {/if}
+    </div>
+
     <!-- GitHub Repository Link -->
     <a
       class="hdr-icon-btn"
@@ -2958,6 +3069,7 @@
         title="Recipe, Share, Import/Export & Run options"
         onclick={() => {
           sysMenuOpen = false;
+          shareMenuOpen = false;
           moreMenuOpen = !moreMenuOpen;
         }}
       >
@@ -4003,6 +4115,123 @@
     background: var(--bg-surface-hover);
     color: var(--text-primary);
     border-color: var(--accent);
+  }
+
+  .hdr-share-btn {
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    height: 30px;
+    padding: 0 9px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .hdr-share-btn:hover,
+  .hdr-share-btn.active {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+    border-color: var(--accent);
+  }
+
+  .share-pop {
+    width: 310px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .share-pop-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .share-pop-title {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .share-pop-meta {
+    font-size: 10.5px;
+    color: var(--text-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .share-pop-note {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    background: var(--bg-muted, rgba(148, 163, 184, 0.08));
+    border: 1px solid var(--border-subtle, var(--border-strong));
+    border-radius: 6px;
+    padding: 7px 9px;
+  }
+  .share-pop-warn {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.4;
+    color: #d97706;
+  }
+  .share-pop-url-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .share-pop-input {
+    flex: 1;
+    min-width: 0;
+    height: 28px;
+    padding: 0 8px;
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text-primary);
+    background: var(--bg-canvas, var(--bg-surface));
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    outline: none;
+  }
+  .share-pop-input:focus {
+    border-color: var(--accent);
+  }
+  .share-pop-copy {
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #ffffff;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .share-pop-copy.copied {
+    background: #10b981;
+    border-color: #10b981;
+  }
+  .share-pop-foot {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 2px;
+  }
+  .share-pop-link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .share-pop-link-btn:hover {
+    color: var(--accent);
+    text-decoration: underline;
   }
 
   .hdr-popover {
