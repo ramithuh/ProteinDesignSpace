@@ -39,6 +39,18 @@ const EXPECTED_HOSTED_REVISIONS: Record<(typeof HOSTED_PORT_CARD_IDS)[number], {
     repo: 'https://huggingface.co/ramithuh/dyna1-webgpu',
     rev: 'eec62e7debef',
   },
+  'rfdiffusion-webgpu': {
+    repo: 'https://huggingface.co/ramithuh/rfdiffusion-webgpu',
+    rev: 'd98f06bf8256',
+  },
+  'boltzgen-webgpu': {
+    repo: 'https://huggingface.co/ramithuh/boltzgen-webgpu',
+    rev: '6193f31710d0',
+  },
+  'evodiff-webgpu': {
+    repo: 'https://huggingface.co/ramithuh/evodiff-webgpu',
+    rev: '682460d4262d',
+  },
 };
 
 describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
@@ -67,7 +79,7 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
 
   it('ensures every card in MODEL_CARDS has a valid activePrecisionId and complete provenance', () => {
     const cards = Object.values(MODEL_CARDS);
-    expect(cards.length).toBe(11); // All 11 GPU/ONNX adapters are live!
+    expect(cards.length).toBe(14); // All 14 GPU/ONNX adapters are live!
 
     for (const card of cards) {
       expect(card.precisions.length).toBeGreaterThan(0);
@@ -85,8 +97,8 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
     }
   });
 
-  it('includes all 7 HF-hosted WebGPU ports with exact measured parity metrics, pinned HF URLs, live promotion, and honest limitations', () => {
-    expect(HOSTED_PORT_CARD_IDS).toHaveLength(7);
+  it('includes all 10 HF-hosted WebGPU ports with exact measured parity metrics, pinned HF URLs, live promotion, and honest limitations', () => {
+    expect(HOSTED_PORT_CARD_IDS).toHaveLength(10);
     const liveWave7Cards: Record<string, { adapterId: string; defaultPrecision: string }> = {
       'thermompnn-webgpu': { adapterId: 'thermompnn', defaultPrecision: 'fp16' },
       'ligandmpnn-webgpu': { adapterId: 'ligandmpnn', defaultPrecision: 'fp16' },
@@ -94,6 +106,9 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
       'antifold-esmif1-webgpu': { adapterId: 'antifold-esmif1', defaultPrecision: 'fp16' },
       'esmc-webgpu': { adapterId: 'esmc', defaultPrecision: 'int8' },
       'protpardelle-webgpu': { adapterId: 'protpardelle', defaultPrecision: 'int8' },
+      'rfdiffusion-webgpu': { adapterId: 'rfdiffusion', defaultPrecision: 'int8' },
+      'boltzgen-webgpu': { adapterId: 'boltzgen', defaultPrecision: 'int8' },
+      'evodiff-webgpu': { adapterId: 'evodiff', defaultPrecision: 'int8' },
       'dyna1-webgpu': { adapterId: 'dyna1', defaultPrecision: 'int8' },
     };
 

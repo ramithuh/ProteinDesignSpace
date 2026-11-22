@@ -861,6 +861,8 @@ export function validateBioCapabilities(
           const isDeNovoGenerator =
             src.adapterId === 'rfd4-proteina' ||
             src.adapterId === 'protpardelle' ||
+            src.adapterId === 'rfdiffusion' ||
+            src.adapterId === 'boltzgen' ||
             src.adapterId === 'genie3';
           const isDemoBundle =
             src.adapterId === 'pdb-input' &&

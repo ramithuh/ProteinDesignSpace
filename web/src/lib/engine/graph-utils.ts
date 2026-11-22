@@ -160,6 +160,39 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         temperature: 0.1,
         seed: 42,
       };
+    case 'rfdiffusion':
+      return {
+        taskMode: 'unconditional',
+        precision: 'int8',
+        length: 80,
+        contig: '',
+        symmetry: 'c3',
+        numDesigns: 1,
+        numSteps: 25,
+        seed: 42,
+      };
+    case 'boltzgen':
+      return {
+        taskMode: 'unconditional',
+        variant: 'diverse',
+        precision: 'int8',
+        length: 48,
+        numDesigns: 1,
+        numSteps: 20,
+        recyclingSteps: 0,
+        motifOffset: 10,
+        seed: 42,
+      };
+    case 'evodiff':
+      return {
+        taskMode: 'unconditional',
+        precision: 'int8',
+        length: 64,
+        numSequences: 2,
+        fixedSequence: '',
+        maskPositions: '',
+        seed: 42,
+      };
     case 'esmc':
       return {
         mode: 'wildtype',

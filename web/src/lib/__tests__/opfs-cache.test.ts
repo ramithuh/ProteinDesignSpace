@@ -223,7 +223,7 @@ describe('engine/opfs-cache', () => {
     expect(await memStore.load('run-1')).toBeNull();
   });
 
-  it('QA #9: clearAllModelCaches clears all 7 vendor CacheStorage buckets, all 6 OPFS dirs, and IndexedDB databases while preserving unrelated caches', async () => {
+  it('QA #9: clearAllModelCaches clears all 10 vendor CacheStorage buckets, all 9 OPFS dirs, and IndexedDB databases while preserving unrelated caches', async () => {
     const deletedCaches: string[] = [];
     vi.stubGlobal('caches', {
       keys: vi.fn(async () => [
@@ -237,6 +237,9 @@ describe('engine/opfs-cache', () => {
         'lasermpnn-v1',
         'thermompnn-v1',
         'protpardelle-v1',
+        'rfdiffusion-v1',
+        'boltzgen-v1',
+        'evodiff-v1',
         'dyna1-v1',
         'gvp-transformer-v1',
         'unrelated-cache',
@@ -306,6 +309,9 @@ describe('engine/opfs-cache', () => {
       'lasermpnn-v1',
       'thermompnn-v1',
       'protpardelle-v1',
+      'rfdiffusion-v1',
+      'boltzgen-v1',
+      'evodiff-v1',
       'dyna1-v1',
       'gvp-transformer-v1',
     ]);
@@ -316,6 +322,9 @@ describe('engine/opfs-cache', () => {
       'esmc-v1',
       'thermompnn-v1',
       'protpardelle-v1',
+      'rfdiffusion-v1',
+      'boltzgen-v1',
+      'evodiff-v1',
       'dyna1-v1',
       'gvp-transformer-v1',
     ]);

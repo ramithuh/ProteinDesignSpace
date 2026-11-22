@@ -1692,6 +1692,11 @@ function sanitizeBlockNodeParams(
     'layout',
     'colorMode',
     'alignKabsch',
+    'symmetry',
+    'recyclingSteps',
+    'motifOffset',
+    'fixedSequence',
+    'maskPositions',
   ]);
   if (rawParams && typeof rawParams === 'object') {
     for (const [k, v] of Object.entries(rawParams)) {

@@ -127,6 +127,30 @@ const WAVE7A_SPECS = [
     hfBaseUrl: 'https://huggingface.co/ramithuh/dyna1-webgpu/resolve/main',
     expectedParamKeys: ['maxSequences', 'precision'],
   },
+  {
+    name: 'RFdiffusion (Base)',
+    vendorDir: 'static/vendor/rfdiffusion',
+    workerFile: 'src/lib/workers/rfdiffusion.worker.ts',
+    factoryExport: 'createRFdiffusionEngine',
+    hfBaseUrl: 'https://huggingface.co/ramithuh/rfdiffusion-webgpu/resolve/main',
+    expectedParamKeys: ['contig', 'length', 'numDesigns', 'numSteps', 'precision', 'seed', 'symmetry', 'taskMode'],
+  },
+  {
+    name: 'BoltzGen-1',
+    vendorDir: 'static/vendor/boltzgen',
+    workerFile: 'src/lib/workers/boltzgen.worker.ts',
+    factoryExport: 'createBoltzGenEngine',
+    hfBaseUrl: 'https://huggingface.co/ramithuh/boltzgen-webgpu/resolve/main',
+    expectedParamKeys: ['length', 'motifOffset', 'numDesigns', 'numSteps', 'precision', 'recyclingSteps', 'seed', 'taskMode', 'variant'],
+  },
+  {
+    name: 'EvoDiff-Seq (38M)',
+    vendorDir: 'static/vendor/evodiff',
+    workerFile: 'src/lib/workers/evodiff.worker.ts',
+    factoryExport: 'createEvoDiffEngine',
+    hfBaseUrl: 'https://huggingface.co/ramithuh/evodiff-webgpu/resolve/main/oa_dm_38m',
+    expectedParamKeys: ['fixedSequence', 'length', 'maskPositions', 'numSequences', 'precision', 'seed', 'taskMode'],
+  },
 ] as const;
 
 describe('Wave-7A WebGPU vendored engines & workers', () => {

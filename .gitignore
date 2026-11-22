@@ -57,4 +57,10 @@ web/static/vendor/protpardelle/weights/
 web/static/vendor/esmc/weights/
 !web/static/vendor/dyna1/
 web/static/vendor/dyna1/weights/
+!web/static/vendor/rfdiffusion/
+web/static/vendor/rfdiffusion/weights/
+!web/static/vendor/boltzgen/
+web/static/vendor/boltzgen/weights/
+!web/static/vendor/evodiff/
+web/static/vendor/evodiff/weights/
 .upstream-tmp/

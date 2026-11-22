@@ -12,6 +12,9 @@ const VENDOR_CACHE_NAMES = new Set([
   'lasermpnn-v1',
   'thermompnn-v1',
   'protpardelle-v1',
+  'rfdiffusion-v1',
+  'boltzgen-v1',
+  'evodiff-v1',
   'dyna1-v1',
   'gvp-transformer-v1',
 ]);
@@ -28,6 +31,9 @@ const OPFS_WEIGHT_DIRS = [
   'esmc-v1',
   'thermompnn-v1',
   'protpardelle-v1',
+  'rfdiffusion-v1',
+  'boltzgen-v1',
+  'evodiff-v1',
   'dyna1-v1',
   'gvp-transformer-v1',
 ];

@@ -57,10 +57,10 @@ export interface FilteredCatalogEntry {
 
 export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
   { title: 'Inputs', ids: ['pdb-input', 'sequence-input'] },
-  { title: 'Structure Generation', ids: ['rfd4-proteina', 'genie3', 'protpardelle'] },
+  { title: 'Structure Generation', ids: ['rfd4-proteina', 'genie3', 'rfdiffusion', 'boltzgen', 'protpardelle'] },
   {
     title: 'Sequence Design',
-    ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1'],
+    ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1', 'evodiff'],
   },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
   { title: 'Evaluation', ids: ['thermompnn', 'esmc', 'dyna1', 'top-k-filter', 'designability-scorer', 'structure-compare'] },
@@ -71,11 +71,14 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   'sequence-input': 'Paste amino acid sequences (plain text or FASTA)',
   'rfd4-proteina': 'All-atom backbone and sequence co-design',
   genie3: 'Fast de novo backbone diffusion (23.3M parameters)',
+  rfdiffusion: 'Original RFdiffusion backbone diffusion, motif contigs & Cn/Dn symmetry',
+  boltzgen: 'BoltzGen-1 all-atom unconditional, binder & motif diffusion',
   protpardelle: 'All-atom & backbone EDM diffusion, motif scaffolding & MiniMPNN co-design',
   'web-protein-mpnn': 'Inverse folding (SolubleMPNN, ProteinMPNN, Cα-only)',
   ligandmpnn: 'Ligand-, metal- & nucleic-acid-aware protein sequence design',
   lasermpnn: 'Ligand-aware sequence & all-atom sidechain rotamer co-design',
   'antifold-esmif1': 'Antibody CDR (AntiFold) & general protein inverse folding (ESM-IF1)',
+  evodiff: 'MSA-free discrete sequence diffusion & masked sequence inpainting (OA-DM 38M)',
   'localfold-af2': 'Predict 3D structures (AlphaFold2, RF3, Boltz-2, AlphaFold 3 & more)',
   thermompnn: 'Full L×20 site-saturation ΔΔG stability scan & B-factor painting',
   esmc: 'ESM-C 300M zero-shot L×20 LLR fitness heatmap, naturalness & masked fill',
@@ -252,6 +255,129 @@ function buildSubGroupsForAdapter(adapterId: string): {
     return {
       subCountLabel: `${items.length} variants`,
       subGroups: [{ title: 'Model Variants', items }],
+    };
+  }
+
+  if (adapterId === 'rfdiffusion') {
+    const items: CatalogSubItem[] = [
+      {
+        key: 'rfd-unconditional',
+        label: 'RFdiffusion · Unconditional De Novo',
+        subtitle: 'Original rigid-frame backbone diffusion (Base_ckpt.pt · ~69 MB)',
+        meta: '~69 MB · BSD',
+        insert: {
+          adapterId: 'rfdiffusion',
+          params: { taskMode: 'unconditional', precision: 'int8' },
+          label: 'RFdiffusion',
+        },
+        searchBlob: 'rfdiffusion rfd rfd1 base unconditional backbone se3 diffusion de novo'.toLowerCase(),
+      },
+      {
+        key: 'rfd-motif',
+        label: 'RFdiffusion · Motif Scaffolding (Contig)',
+        subtitle: 'Contig-driven motif scaffolding from a connected template PDB',
+        meta: '~69 MB · BSD',
+        insert: {
+          adapterId: 'rfdiffusion',
+          params: { taskMode: 'motif', precision: 'int8' },
+          label: 'RFdiffusion (Motif)',
+        },
+        searchBlob: 'rfdiffusion rfd motif scaffolding contig template'.toLowerCase(),
+      },
+      {
+        key: 'rfd-symmetry',
+        label: 'RFdiffusion · Symmetric Oligomer (C3)',
+        subtitle: 'Cyclic / dihedral symmetric assembly generation (C2–C6, D2–D3)',
+        meta: '~69 MB · BSD',
+        insert: {
+          adapterId: 'rfdiffusion',
+          params: { taskMode: 'symmetry', symmetry: 'c3', length: 90, precision: 'int8' },
+          label: 'RFdiffusion (C3)',
+        },
+        searchBlob: 'rfdiffusion rfd symmetry cyclic dihedral oligomer c2 c3 c4 c6 d2 d3'.toLowerCase(),
+      },
+    ];
+    return {
+      subCountLabel: `${items.length} modes`,
+      subGroups: [{ title: 'Design Modes', items }],
+    };
+  }
+
+  if (adapterId === 'boltzgen') {
+    const items: CatalogSubItem[] = [
+      {
+        key: 'bg-binder',
+        label: 'BoltzGen-1 · Binder Design (Diverse)',
+        subtitle: 'All-atom de novo binder generation against a connected target PDB',
+        meta: '~482 MB · MIT',
+        insert: {
+          adapterId: 'boltzgen',
+          params: { taskMode: 'binder', variant: 'diverse', precision: 'int8' },
+          label: 'BoltzGen (Binder)',
+        },
+        searchBlob: 'boltzgen boltzgen1 binder design all-atom target ppi diverse'.toLowerCase(),
+      },
+      {
+        key: 'bg-unconditional',
+        label: 'BoltzGen-1 · Unconditional De Novo',
+        subtitle: 'All-atom de novo monomer generation (boltzgen1_diverse)',
+        meta: '~482 MB · MIT',
+        insert: {
+          adapterId: 'boltzgen',
+          params: { taskMode: 'unconditional', variant: 'diverse', precision: 'int8' },
+          label: 'BoltzGen-1',
+        },
+        searchBlob: 'boltzgen boltzgen1 unconditional de novo all-atom diverse'.toLowerCase(),
+      },
+      {
+        key: 'bg-motif',
+        label: 'BoltzGen-1 · Motif Scaffolding (Adherence)',
+        subtitle: 'High-adherence all-atom motif scaffolding inside a de novo scaffold',
+        meta: '~482 MB · MIT',
+        insert: {
+          adapterId: 'boltzgen',
+          params: { taskMode: 'motif', variant: 'adherence', precision: 'int8' },
+          label: 'BoltzGen (Motif)',
+        },
+        searchBlob: 'boltzgen boltzgen1 motif scaffolding adherence all-atom'.toLowerCase(),
+      },
+    ];
+    return {
+      subCountLabel: `${items.length} presets`,
+      subGroups: [{ title: 'Design Modes', items }],
+    };
+  }
+
+  if (adapterId === 'evodiff') {
+    const items: CatalogSubItem[] = [
+      {
+        key: 'evodiff-unconditional',
+        label: 'EvoDiff-Seq · Unconditional De Novo (38M)',
+        subtitle: 'MSA-free order-agnostic discrete sequence diffusion (~37 MB)',
+        meta: '~37 MB · MIT / CC-BY-4.0',
+        insert: {
+          adapterId: 'evodiff',
+          params: { taskMode: 'unconditional', precision: 'int8' },
+          label: 'EvoDiff-38M',
+        },
+        searchBlob: 'evodiff oadm 38m sequence diffusion de novo msa-free generator'.toLowerCase(),
+      },
+      {
+        key: 'evodiff-infill',
+        label: 'EvoDiff-Seq · Masked Sequence Inpainting',
+        subtitle: 'Preserve sequence motif residues and diffuse # / masked scaffold spans',
+        meta: '~37 MB · MIT / CC-BY-4.0',
+        insert: {
+          adapterId: 'evodiff',
+          params: { taskMode: 'infill', precision: 'int8' },
+          label: 'EvoDiff (Infill)',
+        },
+        searchBlob: 'evodiff oadm 38m infill inpainting mask motif sequence scaffolding'.toLowerCase(),
+      },
+    ];
+    return {
+      subCountLabel: `${items.length} modes`,
+      subGroups: [{ title: 'Sampling Modes', items }],
     };
   }
 
@@ -548,6 +674,8 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
   (() => {
     const rfd4 = ADAPTER_REGISTRY['rfd4-proteina'];
     const g3 = ADAPTER_REGISTRY.genie3;
+    const rfd = ADAPTER_REGISTRY.rfdiffusion;
+    const bg = ADAPTER_REGISTRY.boltzgen;
     const pp = ADAPTER_REGISTRY.protpardelle;
     const items: CatalogSubItem[] = [
       {
@@ -567,6 +695,22 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         searchBlob: `${g3.id} ${g3.shortName} ${g3.displayName} ${CONCISE_BLOCK_ROLES.genie3} genie genie3 diffusion generate de novo backbone`.toLowerCase(),
       },
       {
+        key: 'rfdiffusion',
+        label: rfd.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.rfdiffusion,
+        meta: `~${rfd.approxWeightsMB} MB · BSD`,
+        insert: { adapterId: 'rfdiffusion', label: 'RFdiffusion' },
+        searchBlob: `${rfd.id} ${rfd.shortName} ${rfd.displayName} ${CONCISE_BLOCK_ROLES.rfdiffusion} rfdiffusion rfd base motif contig symmetry cyclic dihedral backbone diffusion bsd`.toLowerCase(),
+      },
+      {
+        key: 'boltzgen',
+        label: bg.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.boltzgen,
+        meta: `~${bg.approxWeightsMB} MB · MIT`,
+        insert: { adapterId: 'boltzgen', label: 'BoltzGen-1' },
+        searchBlob: `${bg.id} ${bg.shortName} ${bg.displayName} ${CONCISE_BLOCK_ROLES.boltzgen} boltzgen boltzgen1 all-atom binder motif diverse adherence diffusion mit`.toLowerCase(),
+      },
+      {
         key: 'protpardelle',
         label: pp.shortName,
         subtitle: CONCISE_BLOCK_ROLES.protpardelle,
@@ -582,7 +726,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
       id: 'generation',
       title: 'Structure Generation',
       stage: 'generate',
-      subtitle: 'RFD4-Proteina, Genie 3 & ProtPardelle-1c',
+      subtitle: 'RFD4-Proteina, Genie 3, RFdiffusion, BoltzGen-1 & ProtPardelle-1c',
       countLabel: `${items.length}`,
       subGroups,
       identityBlob,
@@ -594,6 +738,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
     const antifold = buildSubGroupsForAdapter('antifold-esmif1');
     const lig = ADAPTER_REGISTRY.ligandmpnn;
     const laser = ADAPTER_REGISTRY.lasermpnn;
+    const evo = ADAPTER_REGISTRY.evodiff;
     const allAtomItems: CatalogSubItem[] = [
       {
         key: 'ligandmpnn',
@@ -614,10 +759,22 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
           `${laser.id} ${laser.shortName} ${laser.displayName} ${CONCISE_BLOCK_ROLES.lasermpnn} ligand rotamer sidechain packing all-atom spice polizzi mpnn mit`.toLowerCase(),
       },
     ];
+    const seqDiffItems: CatalogSubItem[] = [
+      {
+        key: 'evodiff',
+        label: evo.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.evodiff,
+        meta: `~${evo.approxWeightsMB} MB · MIT`,
+        insert: { adapterId: 'evodiff', label: 'EvoDiff-38M' },
+        searchBlob:
+          `${evo.id} ${evo.shortName} ${evo.displayName} ${CONCISE_BLOCK_ROLES.evodiff} evodiff oadm 38m sequence diffusion infill inpainting msa-free mit`.toLowerCase(),
+      },
+    ];
     const subGroups: CatalogSubGroup[] = [
       { title: 'ProteinMPNN Family', items: mpnn.subGroups[0]?.items ?? [] },
       { title: 'Ligand & All-Atom Inverse Folding', items: allAtomItems },
       { title: 'Antibody & General GVP-Transformer', items: antifold.subGroups[0]?.items ?? [] },
+      { title: 'Sequence Diffusion (MSA-Free)', items: seqDiffItems },
     ];
     const total = subGroups.reduce((a, g) => a + g.items.length, 0);
     const identityBlob = 'sequence design inverse fold folding';
@@ -626,9 +783,9 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
       id: 'sequence-design',
       title: 'Sequence Design',
       stage: 'inverse-fold',
-      subtitle: 'ProteinMPNN, LigandMPNN, LASErMPNN, AntiFold & ESM-IF1',
+      subtitle: 'ProteinMPNN, LigandMPNN, LASErMPNN, AntiFold & EvoDiff-38M',
       countLabel: `${total}`,
-      footnote: 'Runs locally over WebGPU — ProteinMPNN, LigandMPNN, LASErMPNN, AntiFold & ESM-IF1',
+      footnote: 'Runs locally over WebGPU — ProteinMPNN, LigandMPNN, LASErMPNN, AntiFold, ESM-IF1 & EvoDiff',
       subGroups,
       identityBlob,
       searchBlob,

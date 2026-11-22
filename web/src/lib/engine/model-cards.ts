@@ -50,6 +50,9 @@ export const HOSTED_PORT_CARD_IDS = [
   'antifold-esmif1-webgpu',
   'esmc-webgpu',
   'protpardelle-webgpu',
+  'rfdiffusion-webgpu',
+  'boltzgen-webgpu',
+  'evodiff-webgpu',
   'dyna1-webgpu',
 ] as const;
 
@@ -824,6 +827,190 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
       'Outputs prior-corrected conformational exchange probabilities and classifier logits, not calibrated physical exchange rates (s⁻¹).',
       'FP16 mixed keeps classifier blocks 0–1 in FP32 (+62.9 MB) because pure FP16 exceeded the 5e-4 logit/probability relRMS gate.',
       'Parity and latency were measured on Trp-cage (20 aa) and ubiquitin (76 aa), not across every accepted sequence length; INT8 GPU weight buffers require ~844 MB.',
+    ],
+  },
+
+  'rfdiffusion-webgpu': {
+    id: 'rfdiffusion-webgpu',
+    adapterId: 'rfdiffusion',
+    displayName: 'RFdiffusion (Base)',
+    status: 'live',
+    activePrecisionId: 'int8',
+    precisions: [
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Symmetric per-output-row I8 linear matrices + colocated F32 scales; F32 embeddings, norms & SE(3) radial/fiber tensors (3 shards, 69.06 MB; 5,998 tensors, 59.81M params)',
+        approxSizeMB: 69,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU final xyz / N-CA-C-O relRMS vs matching-precision PyTorch/DGL',
+          value: '0.000e+00 (xyz) · ≤ 3.2e-8 (N/CA/C/O) across unconditional, motif & C3 symmetry',
+          scope: 'L=24 mode matrix + L=64 unconditional & 3-step trajectories (t=50,49,48)',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+        latencyHint: 'Hardware WebGPU packed I8 with F32 accumulation',
+      },
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'Packed F16 linear matrices decoded on the fly in WGSL with F32 accumulation (6 shards, 125.19 MB)',
+        approxSizeMB: 125,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU final xyz / N-CA-C-O relRMS vs matching-precision PyTorch/DGL',
+          value: '0.000e+00 (xyz) · 2.49e-8 (N/CA/C/O)',
+          scope: 'L=24 mode matrix + L=64 unconditional & 3-step trajectories',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Reference F32 tensors (10 shards, 240.01 MB; 5,998 tensors); exact PyTorch/DGL parity baseline',
+        approxSizeMB: 240,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU final xyz / N-CA-C-O relRMS vs PyTorch/DGL FP32',
+          value: '0.000e+00 (xyz) · 2.14e-8–3.14e-8 (N/CA/C/O) across unconditional, motif & C3 symmetry',
+          scope: 'L=24 mode matrix + L=64 unconditional & 3-step trajectories',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+    ],
+    upstreamRepo: 'https://github.com/RosettaCommons/RFdiffusion',
+    upstreamCommit: '86507b6538f51fce57b5a72477165f03999ed7ae',
+    weightsRepo: 'https://huggingface.co/ramithuh/rfdiffusion-webgpu',
+    weightsRevision: 'd98f06bf8256',
+    license: 'BSD (University of Washington / Institute for Protein Design)',
+    citation:
+      'Watson et al. (2023) De novo design of protein structure and function with RFdiffusion, Nature 620, 1089–1100.',
+    limitations: [
+      'Uses the Base_ckpt.pt backbone checkpoint; pair with ProteinMPNN / SolubleMPNN downstream for sequence design.',
+      'Symmetry modes require total residue length divisible by the point-group copy count (auto-rounded in the worker).',
+    ],
+  },
+
+  'boltzgen-webgpu': {
+    id: 'boltzgen-webgpu',
+    adapterId: 'boltzgen',
+    displayName: 'BoltzGen-1',
+    status: 'live',
+    activePrecisionId: 'int8',
+    precisions: [
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Packed 4×I8 matrices + per-output-row F32 scales; F32 norms & embeddings (diverse / adherence, 482 MB resident GPU weights, 64 Pairformer + 24 DiffusionTransformer blocks)',
+        approxSizeMB: 482,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU all-atom coordinate relRMS vs matching-precision PyTorch (no rigid alignment)',
+          value: '2.514e-5 (uncond L=8) · 7.424e-6 (uncond L=24) · 8.907e-6 (binder 1CRN)',
+          maxAbsDiff: '6.061e-4 Å (L=8) · 2.213e-4 Å (L=24) · 1.822e-4 Å (binder)',
+          scope: 'Dynamic lengths, steps & recycles; 1,806 WGSL variants verified via wgpu/Naga + Chromium Vulkan',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'Packed 2×F16 matrices decoded on the fly in WGSL with F32 accumulation (diverse / adherence, 950 MB resident GPU weights)',
+        approxSizeMB: 950,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU all-atom coordinate relRMS vs matching-precision PyTorch',
+          value: '2.503e-5 (uncond L=8) · 5.643e-6 (L=24) · 1.449e-5 (binder) · 7.502e-6 (motif L=16, r=1)',
+          maxAbsDiff: '6.299e-4 Å (L=8) · 2.022e-4 Å (L=24) · 1.221e-4 Å (motif)',
+          scope: 'Dynamic lengths, steps & recycles on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Reference F32 tensors (1,986 MB resident GPU weights); exact upstream BoltzGen-1 parity baseline',
+        approxSizeMB: 1986,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU all-atom coordinate relRMS vs PyTorch FP32 (no rigid alignment)',
+          value: '1.739e-5 / 2.748e-6 (diverse/adherence L=8) · 5.101e-6 / 6.034e-6 (L=24) · 2.395e-5 / 1.045e-5 (binder)',
+          maxAbsDiff: '5.386e-4 Å (diverse binder) · 1.395e-4 Å (adherence binder)',
+          scope: 'L=8, 24 dynamic lengths & multi-step trajectories on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+    ],
+    upstreamRepo: 'https://github.com/HannesStark/boltzgen',
+    upstreamCommit: '6472b44e8072187e6eaa51271ae6838245206013',
+    weightsRepo: 'https://huggingface.co/ramithuh/boltzgen-webgpu',
+    weightsRevision: '6193f31710d0',
+    license: 'MIT (Hannes Stärk / BoltzGen)',
+    citation:
+      'Stärk et al. (2025) BoltzGen: Toward Universal Binder Design (HannesStark/boltzgen).',
+    limitations: [
+      'Outputs backbone N/CA/C/O geometry for designed residues (plus full target sidechains); wire ProteinMPNN / LigandMPNN downstream for sequence assignment.',
+      'Pairformer triangle attention scales cubically with total token count; keep binder + target lengths moderate in browser VRAM.',
+    ],
+  },
+
+  'evodiff-webgpu': {
+    id: 'evodiff-webgpu',
+    adapterId: 'evodiff',
+    displayName: 'EvoDiff-Seq (38M)',
+    status: 'live',
+    activePrecisionId: 'int8',
+    precisions: [
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Packed 4×I8 Conv1D weights + per-channel F32 scales; F32 embeddings & LayerNorms (2 shards, 38.36 MB; 199 tensors, 37.89M params, 16 ByteNet blocks)',
+        approxSizeMB: 38,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU final logit relRMS vs matching-precision PyTorch',
+          value: '1.04e-6 (forward) · 5.05e-7–5.73e-7 (full 24-step & infill replay; exact sequence match)',
+          scope: 'Unconditional & motif-infill OA-DM replay; weight quantization logit relRMS 7.06e-3 vs FP32',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'Packed F16 Conv1D matrices decoded in WGSL with F32 accumulation (4 shards, 76.00 MB)',
+        approxSizeMB: 76,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU final logit relRMS vs matching-precision PyTorch',
+          value: '9.97e-7 (forward) · 5.41e-7–6.60e-7 (full sampling replay); quantization drift 1.90e-4 vs FP32',
+          scope: 'Unconditional & motif-infill OA-DM replay',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Reference F32 tensors (7 shards, 151.58 MB; 199 tensors, 37.89M params)',
+        approxSizeMB: 152,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU final logit relRMS vs PyTorch FP32',
+          value: '9.80e-7 (forward) · 3.90e-7–5.73e-7 (full 24-step & infill replay; exact sequence match)',
+          scope: 'Unconditional & motif-infill OA-DM replay on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+    ],
+    upstreamRepo: 'https://github.com/microsoft/evodiff',
+    upstreamCommit: '33206e99446f799ec11cf6e57d66ffaec837be91',
+    weightsRepo: 'https://huggingface.co/ramithuh/evodiff-webgpu',
+    weightsRevision: '682460d4262d',
+    license: 'MIT (Microsoft EvoDiff code) · CC-BY-4.0 (OA_DM_38M weights, Zenodo 8045076)',
+    citation:
+      'Alamdari et al. (2023) Protein generation with evolutionary diffusion: sequence is all you need, bioRxiv / Microsoft Research.',
+    limitations: [
+      'Pure sequence-space generator (OA-DM 38M); wire into LocalFold (AF2 / Boltz-2 / ESMFold2) downstream to inspect 3D foldability.',
+      'Automatically falls back to the pure-JS CPU backend when hardware WebGPU is unavailable.',
     ],
   },
 };

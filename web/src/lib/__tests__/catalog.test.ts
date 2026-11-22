@@ -56,12 +56,15 @@ describe('engine/catalog & biologist terminology', () => {
     }
   });
 
-  it('organizes all 16 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, AntiFold/ESM-IF1, ProtPardelle-1c, ESM-C 300M, Dyna-1, and 3D Superpose / Compare', () => {
+  it('organizes all 19 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, AntiFold/ESM-IF1, ProtPardelle-1c, RFdiffusion, BoltzGen-1, EvoDiff-38M, ESM-C 300M, Dyna-1, and 3D Superpose / Compare', () => {
     const groupedIds = CATALOG_STAGE_GROUPS.flatMap((g) => g.ids);
     expect(new Set(groupedIds)).toEqual(new Set(Object.keys(ADAPTER_REGISTRY)));
     expect(CATALOG_ITEMS).toHaveLength(Object.keys(ADAPTER_REGISTRY).length);
-    expect(CATALOG_ITEMS).toHaveLength(16);
+    expect(CATALOG_ITEMS).toHaveLength(19);
     expect(ADAPTER_REGISTRY['structure-compare']).toBeDefined();
+    expect(ADAPTER_REGISTRY.rfdiffusion).toBeDefined();
+    expect(ADAPTER_REGISTRY.boltzgen).toBeDefined();
+    expect(ADAPTER_REGISTRY.evodiff).toBeDefined();
     expect(ADAPTER_REGISTRY['top-k-filter']).toBeDefined();
     expect(ADAPTER_REGISTRY.thermompnn).toBeDefined();
     expect(ADAPTER_REGISTRY.ligandmpnn).toBeDefined();
@@ -116,10 +119,10 @@ describe('engine/catalog & biologist terminology', () => {
 
   it('filterCatalog matches parent fields and narrows multi-variant sub-items for boltz, soluble, motif, and af3', () => {
     const boltzRes = filterCatalog('boltz');
-    expect(boltzRes).toHaveLength(1);
-    expect(boltzRes[0].item.id).toBe('localfold-af2');
-    expect(boltzRes[0].hasNarrowedSubMatch).toBe(true);
-    expect(boltzRes[0].matchingSubItems.map((s) => s.key)).toEqual(['boltz2']);
+    expect(boltzRes.map((r) => r.item.id).sort()).toEqual(['boltzgen', 'localfold-af2']);
+    const lfBoltzMatch = boltzRes.find((r) => r.item.id === 'localfold-af2')!;
+    expect(lfBoltzMatch.hasNarrowedSubMatch).toBe(true);
+    expect(lfBoltzMatch.matchingSubItems.map((s) => s.key)).toEqual(['boltz2']);
 
     const solRes = filterCatalog('soluble');
     expect(solRes.some((r) => r.item.id === 'web-protein-mpnn')).toBe(true);
@@ -182,9 +185,9 @@ describe('engine/catalog & biologist terminology', () => {
     expect(pred.subGroups.flatMap((g) => g.items)).toHaveLength(20);
 
     const boltz = filterCatalogCategories('boltz');
-    expect(boltz).toHaveLength(1);
-    expect(boltz[0].category.id).toBe('prediction');
-    expect(boltz[0].matchingSubItems.map((s) => s.key)).toEqual(['boltz2']);
+    expect(boltz.map((b) => b.category.id).sort()).toEqual(['generation', 'prediction']);
+    const boltzPred = boltz.find((b) => b.category.id === 'prediction')!;
+    expect(boltzPred.matchingSubItems.map((s) => s.key)).toEqual(['boltz2']);
 
     const genie = filterCatalogCategories('genie');
     expect(genie).toHaveLength(1);
@@ -200,6 +203,7 @@ describe('engine/catalog & biologist terminology', () => {
       'lasermpnn',
       'antifold',
       'esmif1',
+      'evodiff',
     ]);
 
     const evalCat = CATALOG_CATEGORIES.find((c) => c.id === 'evaluation')!;
@@ -246,7 +250,7 @@ describe('engine/catalog & biologist terminology', () => {
     };
 
     // 1. Insert LocalFold pre-configured with Boltz-2
-    const lfSub = filterCatalog('boltz')[0].matchingSubItems[0];
+    const lfSub = filterCatalog('boltz').find((r) => r.item.id === 'localfold-af2')!.matchingSubItems[0];
     const rBoltz = insertBlockSmart(base, lfSub.insert.adapterId, 'seq_1', undefined, {
       autoCommit: true,
       params: lfSub.insert.params,

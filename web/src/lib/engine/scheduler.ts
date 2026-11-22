@@ -11,6 +11,9 @@ import LigandMpnnWorker from '$lib/workers/ligandmpnn.worker?worker';
 import LaserMpnnWorker from '$lib/workers/lasermpnn.worker?worker';
 import AntiFoldWorker from '$lib/workers/antifold.worker?worker';
 import ProtPardelleWorker from '$lib/workers/protpardelle.worker?worker';
+import RfdiffusionWorker from '$lib/workers/rfdiffusion.worker?worker';
+import BoltzGenWorker from '$lib/workers/boltzgen.worker?worker';
+import EvoDiffWorker from '$lib/workers/evodiff.worker?worker';
 import EsmcWorker from '$lib/workers/esmc.worker?worker';
 import Dyna1Worker from '$lib/workers/dyna1.worker?worker';
 import {
@@ -1289,6 +1292,12 @@ export class ExecutionScheduler {
         return new AntiFoldWorker();
       case 'protpardelle':
         return new ProtPardelleWorker();
+      case 'rfdiffusion':
+        return new RfdiffusionWorker();
+      case 'boltzgen':
+        return new BoltzGenWorker();
+      case 'evodiff':
+        return new EvoDiffWorker();
       case 'esmc':
         return new EsmcWorker();
       case 'dyna1':
