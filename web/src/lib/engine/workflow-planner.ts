@@ -1940,6 +1940,12 @@ function compileBlockGraphPlan(
           if (bm.category === 'binder' && !node.params.hotspots && cp.hotspots) {
             node.params.hotspots = cp.hotspots;
           }
+          if (!node.params.motifSpan && cp.motifSpan) {
+            node.params.motifSpan = cp.motifSpan;
+          }
+          if (cp.unindexedMotif && node.params.unindexedMotif !== true) {
+            node.params.unindexedMotif = true;
+          }
           if (!node.params.contig && cp.contig) {
             const reqLen = typeof node.params.length === 'number' ? node.params.length : null;
             node.params.contig = reqLen
@@ -1978,11 +1984,12 @@ function compileBlockGraphPlan(
     }
   }
 
-  // Ensure Genie 3 -> web-protein-mpnn uses family='ca' unless explicitly overridden
+  // Ensure Cα-only generators -> web-protein-mpnn use family='ca' unless explicitly overridden
+  const CA_ONLY_GENS = new Set(['genie3', 'genie2', 'proteina', 'sid-protein']);
   for (const e of edges) {
     const fn = nodeById.get(e.fromNode);
     const tn = nodeById.get(e.toNode);
-    if (fn?.adapterId === 'genie3' && tn?.adapterId === 'web-protein-mpnn' && !tn.params.family) {
+    if (fn && CA_ONLY_GENS.has(fn.adapterId) && tn?.adapterId === 'web-protein-mpnn' && !tn.params.family) {
       tn.params.family = 'ca';
     }
   }
