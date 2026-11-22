@@ -10,6 +10,7 @@
       "targetDir": "web/static/vendor/localfold",
       "sparsePaths": [
         "LICENSE",
+        "web/esmfold2-model.js",
         "webgpu",
         "shared",
         "cpu"

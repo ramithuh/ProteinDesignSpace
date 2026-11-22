@@ -199,8 +199,8 @@ describe('peek helpers', () => {
     expect(zeroRes.truncated).toBe(true);
   });
 
-  it('foldModelSlug and formatFoldModelName format all 18 worker foldModelId values and bare localfold-af2', () => {
-    expect(LOCALFOLD_MODEL_OPTIONS).toHaveLength(18);
+  it('formats all registered worker foldModelId values and bare localfold-af2', () => {
+    expect(LOCALFOLD_MODEL_OPTIONS.map((m) => m.id)).toEqual(expect.arrayContaining(['ef2-fast-300m', 'ef2-fast-600m']));
     for (const opt of LOCALFOLD_MODEL_OPTIONS) {
       const workerId =
         opt.family === 'af2' || opt.family === 'af2-multimer'

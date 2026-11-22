@@ -11,6 +11,7 @@ import {
   RFD4_BENCHMARK_OPTIONS,
 } from './registry';
 import { validateParamsWithSchema } from './param-schema';
+import { esmfold2ParamIssue } from './localfold-esmfold2';
 
 const VALID_PDB_INPUT_MODES = new Set(['demo-bundle', 'pdb-id', 'custom']);
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
@@ -120,7 +121,6 @@ const VALID_RFD4_PRESET_IDS = new Set([
 ]);
 const VALID_RFD4_RECYCLE_SCHEDULES = new Set(['none', 'low', 'medium', 'high']);
 const VALID_GENIE3_TASK_MODES = new Set(['unconditional', 'binder', 'motif']);
-const VALID_LOCALFOLD_MODELS = new Set(LOCALFOLD_MODEL_OPTIONS.map((m) => m.id));
 const VALID_MSA_MODES = new Set(['single', 'mmseqs2', 'target-only', 'a3m']);
 const VALID_TOPK_MODES = new Set(['per-backbone', 'global']);
 const VALID_TOPK_METRICS = new Set(['score', 'globalScore']);
@@ -598,11 +598,15 @@ export function validateNodeParams(node: WorkflowNode): string[] {
   const errs: string[] = [];
   const label = node.label || node.adapterId;
   const p = node.params ?? {};
+  const foldModel = node.adapterId === 'localfold-af2'
+    ? LOCALFOLD_MODEL_OPTIONS.find((model) => model.id === (p.model ?? 'monomer'))
+    : undefined;
 
   const numSpecs = NUMERIC_SPECS[node.adapterId];
   if (numSpecs) {
     for (const [key, spec] of Object.entries(numSpecs)) {
       if (p[key] === undefined) continue;
+      if (foldModel?.family === 'esmfold2' && ['recycles', 'tolerance', 'diffusionSteps'].includes(key)) continue;
       // Skip mode-irrelevant params
       if (node.adapterId === 'rfd4-proteina') {
         const mode = String(p.mode ?? 'unconditional');
@@ -718,11 +722,15 @@ export function validateNodeParams(node: WorkflowNode): string[] {
 
   if (node.adapterId === 'localfold-af2') {
     const modelId = p.model !== undefined ? String(p.model) : 'monomer';
-    if (p.model !== undefined && !VALID_LOCALFOLD_MODELS.has(modelId)) {
+    if (p.model !== undefined && !foldModel) {
       errs.push(`"${label}": Unknown LocalFold model "${modelId}".`);
     }
+    if (foldModel?.family === 'esmfold2') {
+      const issue = esmfold2ParamIssue(p);
+      if (issue) errs.push(`"${label}": ${issue}`);
+    }
     const maxRecycles = modelId === 'mol1' || modelId.startsWith('multimer') ? 20 : 10;
-    if (p.recycles !== undefined) {
+    if (p.recycles !== undefined && foldModel?.family !== 'esmfold2') {
       const rec = Number(p.recycles);
       if (Number.isFinite(rec) && Number.isInteger(rec) && rec > maxRecycles && rec <= 20) {
         errs.push(
@@ -730,7 +738,7 @@ export function validateNodeParams(node: WorkflowNode): string[] {
         );
       }
     }
-    if (p.msaMode !== undefined) {
+    if (p.msaMode !== undefined && foldModel?.family !== 'esmfold2') {
       const msaMode = String(p.msaMode);
       if (!VALID_MSA_MODES.has(msaMode)) {
         errs.push(

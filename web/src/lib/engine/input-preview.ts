@@ -36,6 +36,7 @@ import {
   resolveAf2Tolerance,
   validateAndParseA3mText,
 } from './localfold-msa';
+import { esmfold2Chains } from './localfold-esmfold2';
 import { compileMpnnInputSpec, parseFixedPositionsAndChains } from './mpnn-spec';
 import { validateParamsWithSchema } from './param-schema';
 import { extractSubgraphUpTo, findContextStructure } from './peek';
@@ -846,12 +847,14 @@ export function compileNodeInputPreview(
       for (const w of rt.warnings) {
         pushIssue({ severity: 'warning', source: 'runtime', message: w });
       }
+      return true;
     } catch (err) {
       pushIssue({
         severity: 'error',
         source: 'runtime',
         message: err instanceof Error ? err.message : String(err),
       });
+      return false;
     }
   };
 
@@ -2148,15 +2151,26 @@ export function compileNodeInputPreview(
     const seqSet = resolvedInputs.sequences as SequenceSet | undefined;
     const modelKey = String(node.params.model ?? 'monomer');
     const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelKey) ?? LOCALFOLD_MODEL_OPTIONS[0];
+    const isEsmFold = meta.family === 'esmfold2';
     const recycles = clampLocalFoldRecycles(modelKey, node.params.recycles, 1);
     const tolerance = resolveAf2Tolerance(modelKey, node.params.tolerance);
     const diffusionSteps = Math.max(10, Math.min(200, Math.round(Number(node.params.diffusionSteps ?? 25))));
-    const rawMsaMode = String(node.params.msaMode ?? 'single');
+    const rawMsaMode = isEsmFold ? 'single' : String(node.params.msaMode ?? 'single');
     const msaMode: MsaMode =
       rawMsaMode === 'mmseqs2' || rawMsaMode === 'target-only' || rawMsaMode === 'a3m'
         ? rawMsaMode
         : 'single';
     const msaA3mText = typeof node.params.msaA3mText === 'string' ? node.params.msaA3mText : '';
+    const foldSettings: CompiledModelPayloadView['compiledSummary'] = {
+      model: modelKey, family: meta.family, msaMode,
+    };
+    if (isEsmFold) {
+      foldSettings.esmfold2Steps = Number(node.params.esmfold2Steps ?? 15);
+    } else {
+      foldSettings.recycles = recycles;
+      foldSettings.tolerance = tolerance;
+      if (meta.family === 'af3') foldSettings.diffusionSteps = diffusionSteps;
+    }
 
     if (!seqSet) {
       const missingUp = missingUpstreamByPort.get('sequences');
@@ -2171,18 +2185,11 @@ export function compileNodeInputPreview(
         headline: missingUp
           ? `LocalFold (${meta.shortLabel}) · waiting for upstream sequences`
           : `LocalFold (${meta.shortLabel}) · connect a SequenceSet input`,
-        compiledSummary: {
-          model: modelKey,
-          family: meta.family,
-          msaMode,
-          recycles,
-          tolerance,
-          ...(meta.family === 'af3' ? { diffusionSteps } : {}),
-        },
+        compiledSummary: foldSettings,
         rawSpecText: JSON.stringify(node.params, null, 2),
       };
     } else {
-      runRuntimeValidation();
+      const validInputs = runRuntimeValidation();
       const work = selectFoldWorkItems(seqSet, node.params);
       const lockedChains: string[] | undefined = Array.isArray(seqSet.lockedChains)
         ? seqSet.lockedChains
@@ -2242,13 +2249,14 @@ export function compileNodeInputPreview(
       let a3mDistinctDepth: number | null = null;
       let chainLengths: number[] = [];
 
-      if (rep) {
+      if (rep && (!isEsmFold || validInputs)) {
         const cleanSeq = rep.sequence
           .toUpperCase()
           .replace(/[\s/:,]+/g, '')
           .replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, 'X');
-        chainLengths =
-          Array.isArray(rep.chainLengths) &&
+        chainLengths = isEsmFold
+          ? esmfold2Chains(rep).map((chain) => chain.length)
+          : Array.isArray(rep.chainLengths) &&
           rep.chainLengths.length > 0 &&
           rep.chainLengths.every((n) => Number.isInteger(n) && n > 0) &&
           rep.chainLengths.reduce((a, b) => a + b, 0) === cleanSeq.length
@@ -2402,20 +2410,15 @@ export function compileNodeInputPreview(
       }
 
       const af2Budgets =
-        meta.family !== 'af3'
+        meta.family === 'af2' || meta.family === 'af2-multimer'
           ? computeAf2MsaBudgets(a3mDepth ?? 1, Math.max(1, uniqueChains.length), a3mDistinctDepth ?? 1)
           : undefined;
 
       payload = {
         format: 'localfold-batch',
-        headline: `LocalFold (${meta.shortLabel}) · ${work.selected.length}/${work.totalCandidates} seqs · MSA: ${msaMode}`,
+        headline: `LocalFold (${meta.shortLabel}) · ${work.selected.length}/${work.totalCandidates} seqs · ${isEsmFold ? 'ESM-C language model' : `MSA: ${msaMode}`}`,
         compiledSummary: {
-          model: modelKey,
-          family: meta.family,
-          msaMode,
-          recycles,
-          tolerance,
-          ...(meta.family === 'af3' ? { diffusionSteps } : {}),
+          ...foldSettings,
           selectedCount: work.selected.length,
           excludedCount: work.excludedCandidates.length,
           totalCandidates: work.totalCandidates,
@@ -2429,13 +2432,9 @@ export function compileNodeInputPreview(
         },
         rawSpecText: JSON.stringify(
           {
-            model: modelKey,
-            family: meta.family,
-            msaMode,
-            recycles,
-            tolerance,
+            ...foldSettings,
             ...(meta.family === 'af3'
-              ? { diffusionSteps, ligandCcdCodes, dnaSequences: dnaSeqs, rnaSequences: rnaSeqs }
+              ? { ligandCcdCodes, dnaSequences: dnaSeqs, rnaSequences: rnaSeqs }
               : { af2Budgets }),
             maxSequences: work.maxSequences,
             selectedCandidates: work.selected.map((c) => c.id),

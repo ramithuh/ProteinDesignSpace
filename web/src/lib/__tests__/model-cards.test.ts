@@ -167,6 +167,15 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
       expect(card!.weightsRevision).toMatch(/^[0-9a-f]{12}$/);
     }
 
+    for (const tower of ['300', '600']) {
+      const card = getModelCardForAdapter('localfold-af2', { model: `ef2-fast-${tower}m` })!;
+      expect(card.weightsRevision).toBe('7f265c212f30');
+      expect(card.precisions[0].label).toBe('INT5 trunk + INT3 ESM-C');
+      expect(card.precisions[0].quantizationDetail).toContain(`ESM-C ${tower}M`);
+      expect(card.limitations.join(' ')).toContain('Synthyra');
+      expect(card.precisions[0].parityVsPytorchFp32).toBeNull();
+    }
+
     for (const v of MPNN_VARIANT_OPTIONS) {
       const card = getModelCardForAdapter('web-protein-mpnn', { family: v.family });
       expect(card).not.toBeNull();

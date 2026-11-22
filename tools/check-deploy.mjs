@@ -21,6 +21,8 @@ if (!existsSync(resolve(buildDir, 'index.html'))) {
 for (const req of [
   '_headers',
   'vendor/localfold/webgpu/index.js',
+  'vendor/localfold/web/esmfold2-model.js',
+  'vendor/localfold/webgpu/esmfold2/fold.js',
   'vendor/rfd4-proteina/webgpu/index.js',
   'vendor/genie3/webgpu/index.js',
 ]) {

@@ -201,6 +201,16 @@ describe('parameter validation & numeric sanitization', () => {
     ).toMatch(/Unknown LocalFold model/);
   });
 
+  it.each(['ef2-fast-300m', 'ef2-fast-600m'])('validates the active inputs and schedule for %s', (model) => {
+    const validate = (params: Record<string, unknown>) =>
+      validateNodeParams({ id: 'fold', adapterId: 'localfold-af2', params: { model, ...params } });
+    expect(validate({})).toEqual([]);
+    expect(validate({ esmfold2Steps: '32', recycles: 19 })).toEqual([]);
+    expect(validate({ esmfold2Steps: 25 }).join(' ')).toContain('diffusion schedule');
+    expect(validate({ msaMode: 'mmseqs2' }).join(' ')).toContain('single-sequence');
+    expect(validate({ ligandCcdCodes: ['ZN'] }).join(' ')).toContain('protein chains only');
+  });
+
   it('mpnn.worker.ts supports whole-chain locking, designChains, inherited locks, omitAminoAcids, tiedPositions, and aligned bounds', () => {
     const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/mpnn.worker.ts'), 'utf8');
     expect(mpnnSrc).toContain('parseFixedPositionsAndChains');

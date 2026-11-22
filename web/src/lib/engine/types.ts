@@ -41,6 +41,10 @@ export type AtomGranularity = 'ca-only' | 'backbone4' | 'all-atom';
 
 export interface ArtifactProvenance {
   quantization?: 'fp32' | 'fp16' | 'int8' | 'int5';
+  languageModelQuantization?: 'int3';
+  confidenceHead?: string;
+  diffusionStepsScheduled?: number;
+  diffusionStepsRun?: number;
   recyclesRun?: number;
   earlyStopped?: boolean;
   msaMode?: MsaMode;

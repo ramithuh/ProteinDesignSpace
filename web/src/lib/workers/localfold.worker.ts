@@ -7,6 +7,8 @@
 import { atom37ToPdb, chainIdsFromLengths, parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { normalizeLocalFoldChainScores } from '$lib/engine/conditioning';
+import { esmfold2Chains, esmfold2ParamIssue } from '$lib/engine/localfold-esmfold2';
+import { loadEsmfold2 } from './localfold-esmfold2';
 import { selectFoldWorkItems } from '$lib/engine/bio-capabilities';
 import {
   clampLocalFoldRecycles,
@@ -41,6 +43,7 @@ const AF2_MULTIMER_MODELS = new Set([
   'multimer-4',
   'multimer-5',
 ]);
+const ESMFOLD2_MODELS = new Set(['ef2-fast-300m', 'ef2-fast-600m']);
 const AF3_MODELS = new Set([
   'rosettafold3',
   'boltz2',
@@ -123,6 +126,8 @@ let loadedModelKey: string | null = null;
 let loadedAf2: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let loadedAf3: any = null;
+let predictEsmfold2: Awaited<ReturnType<typeof loadEsmfold2>> | null = null;
+let esmfold2Abort: AbortController | null = null;
 
 async function importVendor(relPath: string) {
   const url = `${self.location.origin}/vendor/localfold/${relPath}`;
@@ -245,6 +250,9 @@ function releaseCurrentModel() {
   } catch {
     /* ignore */
   }
+  esmfold2Abort?.abort();
+  esmfold2Abort = null;
+  predictEsmfold2 = null;
   loadedAf2 = null;
   loadedAf3 = null;
   loadedModelKey = null;
@@ -284,7 +292,7 @@ async function ensureModelLoaded(id: number, modelKey: string) {
 
   await ensureDevice();
 
-  if (loadedModelKey === modelKey && (loadedAf2 || loadedAf3)) {
+  if (loadedModelKey === modelKey && (loadedAf2 || loadedAf3 || predictEsmfold2)) {
     return;
   }
 
@@ -383,6 +391,12 @@ async function ensureModelLoaded(id: number, modelKey: string) {
     return;
   }
 
+  if (ESMFOLD2_MODELS.has(modelKey)) {
+    predictEsmfold2 = await loadEsmfold2(modelKey, importVendor, makeWeightProgress(modelKey));
+    loadedModelKey = modelKey;
+    return;
+  }
+
   if (AF3_MODELS.has(modelKey)) {
     await ensureAf3Modules(id);
     const manifest = await lfCore.loadManifest(modelKey);
@@ -444,7 +458,8 @@ self.onmessage = async (ev: MessageEvent) => {
       const isAf2Mono = AF2_MODELS.has(modelKey);
       const isAf2Multi = AF2_MULTIMER_MODELS.has(modelKey);
       const isAf3 = AF3_MODELS.has(modelKey);
-      if (!isAf2Mono && !isAf2Multi && !isAf3) {
+      const isEsmfold2 = ESMFOLD2_MODELS.has(modelKey);
+      if (!isAf2Mono && !isAf2Multi && !isAf3 && !isEsmfold2) {
         throw new Error(`Unsupported LocalFold model "${modelKey}"`);
       }
       const recycles = clampLocalFoldRecycles(modelKey, p.recycles, 1);
@@ -492,7 +507,11 @@ self.onmessage = async (ev: MessageEvent) => {
             .map((s) => s.replace(/[^ACGU]/gi, '').toUpperCase())
             .filter(Boolean);
 
-      await ensureModelLoaded(msg.id, modelKey);
+      const esmfold2Steps = Number(p.esmfold2Steps ?? 15);
+      if (isEsmfold2) {
+        const issue = esmfold2ParamIssue(p);
+        if (issue) throw new Error(issue);
+      }
 
       interface ResolvedFoldTarget {
         cand: SequenceCandidate;
@@ -612,6 +631,8 @@ self.onmessage = async (ev: MessageEvent) => {
         });
       }
 
+      const ef2Chains = isEsmfold2 ? targets.map(({ cand }) => esmfold2Chains(cand)) : [];
+      await ensureModelLoaded(msg.id, modelKey);
       const folds: FoldedCandidate[] = [];
       const sourceStructureId = seqSet.sourceStructureId ?? seqSet.parentStructureId;
       const msaCache = createMsaSearchCache();
@@ -625,7 +646,32 @@ self.onmessage = async (ev: MessageEvent) => {
         graphFamily: lfCore.graphFamily,
       };
 
-      if (!isAf3) {
+      if (isEsmfold2) {
+        if (!gpuDevice || !predictEsmfold2) throw new Error('ESMFold2 was not initialized');
+        const controller = new AbortController();
+        esmfold2Abort = controller;
+        try {
+          for (const [i, target] of targets.entries()) {
+            const { cand } = target;
+            const start = performance.now();
+            const result = await predictEsmfold2(gpuDevice, ef2Chains[i], esmfold2Steps, target.seed,
+              controller.signal, (progress, stage) => self.postMessage({
+                id: msg.id, type: 'progress', phase: 'fold',
+                progress: (i + progress) / targets.length, detail: `${modelKey} ${cand.id}: ${stage}`,
+              }));
+            folds.push({
+              ...result, sequenceId: cand.id, key: target.sequenceKey ?? cand.key ?? cand.id,
+              designKey: target.designKey, designIndex: target.designIndex,
+              sequenceKey: target.sequenceKey, foldKey: target.foldKey, seed: target.seed,
+              sourceStructureId: cand.sourceStructureId ?? sourceStructureId,
+              sampleIndex: cand.sampleIndex, foldModelId: `localfold-${modelKey}-int5`,
+              elapsedMs: performance.now() - start,
+            });
+          }
+        } finally {
+          if (esmfold2Abort === controller) esmfold2Abort = null;
+        }
+      } else if (!isAf3) {
         const runner = isAf2Multi
           ? new lfCore.AlphaFoldUnifiedGpu(gpuDevice)
           : new lfCore.AlphaFoldMonomerGpu(gpuDevice);
@@ -1055,8 +1101,9 @@ self.onmessage = async (ev: MessageEvent) => {
         JSON.stringify({
           seqSetId: seqSet.id,
           modelKey,
-          recycles,
-          tolerance: isAf3 ? null : tolerance,
+          recycles: isEsmfold2 ? null : recycles,
+          ...(isEsmfold2 ? { esmfold2Steps } : {}),
+          tolerance: isAf3 || isEsmfold2 ? null : tolerance,
           diffusionSteps: isAf3 ? diffusionSteps : null,
           maxSequences: maxSeqs,
           ...(isMultiBackbone ? { maxTotalFolds } : {}),
@@ -1085,7 +1132,7 @@ self.onmessage = async (ev: MessageEvent) => {
 
       const out: FoldedStructure = {
         kind: 'FoldedStructure',
-        id: `folds-${modelKey}-${seqSet.id}-r${recycles}-${runHash}`,
+        id: `folds-${modelKey}-${seqSet.id}-${isEsmfold2 ? `d${esmfold2Steps}` : `r${recycles}`}-${runHash}`,
         parentStructureId: seqSet.parentStructureId,
         sourceStructureId,
         collectionKind,

@@ -18,7 +18,7 @@ import {
 import { fetchStructureByPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
 import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/protein-ops/kabsch';
 import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
-import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
+import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS, WORKFLOW_PRESETS } from './registry';
 import { validateGraph } from './graph-utils';
 import { normalizeWorkflowGraph } from './share';
 import {
@@ -805,6 +805,7 @@ function parseReferenceResidueMapping(
 
 interface ActiveGpuSlot {
   adapterId: string;
+  isolatedCheckpoint?: string;
   worker: Worker;
   abortActive?: (err: Error) => void;
 }
@@ -1296,8 +1297,12 @@ export class ExecutionScheduler {
     // Never spawn or reuse a GPU worker while a prior worker disposal is still completing
     await this.waitForPendingGpuDisposal();
 
-    // Enforce Single-Active-GPU-Worker Mutex (warm-1-LRU)
-    if (this.activeGpu && this.activeGpu.adapterId !== node.adapterId) {
+    // LocalFold's ESMFold2 loader retains both bundles for the lifetime of its worker.
+    const isolatedCheckpoint = node.adapterId === 'localfold-af2'
+      ? LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === node.params.model && m.family === 'esmfold2')?.id
+      : undefined;
+    if (this.activeGpu && (this.activeGpu.adapterId !== node.adapterId ||
+        this.activeGpu.isolatedCheckpoint !== isolatedCheckpoint)) {
       onProgress({
         nodeId: node.id,
         status: 'loading',
@@ -1322,7 +1327,7 @@ export class ExecutionScheduler {
 
     if (!this.activeGpu) {
       const worker = this.spawnWorker(node.adapterId);
-      this.activeGpu = { adapterId: node.adapterId, worker };
+      this.activeGpu = { adapterId: node.adapterId, isolatedCheckpoint, worker };
     }
 
     const slot = this.activeGpu;

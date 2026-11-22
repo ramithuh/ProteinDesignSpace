@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { LOCALFOLD_MODEL_OPTIONS } from '$lib/engine/registry';
+import { ESMFOLD2_STEPS, LOCALFOLD_MODEL_OPTIONS } from '$lib/engine/registry';
 import { normalizeLocalFoldChainScores } from '$lib/engine/conditioning';
 
 const VENDOR_ROOT = resolve(__dirname, '../../../static/vendor/localfold');
@@ -24,6 +24,18 @@ describe('upstream localfold multi-model integration', () => {
       expect(manifest, `Manifest failed to load for "${opt.id}"`).toBeDefined();
       expect(Object.keys(manifest.tensors ?? {}).length).toBeGreaterThan(0);
     }
+  });
+
+  it('pairs each ESMFold2 trunk with its own tower shim, confidence head and supported schedules', async () => {
+    const { MODEL_BUNDLES, loadManifest } = await importLocalFold('shared/bundles/manifests/index.js');
+    const { actualSteps } = await importLocalFold('web/esmfold2-model.js');
+    for (const size of [300, 600]) {
+      const id = `ef2-fast-${size}m`;
+      const [trunk, tower] = await Promise.all([loadManifest(id), loadManifest(MODEL_BUNDLES[id].companion)]);
+      expect(tower.languageModel.shim).toBe(trunk.trunk.source);
+      expect(trunk.confidence.source).toBe(`head_${size}.npz`);
+    }
+    expect(ESMFOLD2_STEPS.map((steps) => actualSteps(`diffusion-${steps}`))).toEqual([11, 23, 45, 138]);
   });
 
   it('every AF3-lineage model resolves a valid dialect and featurises single- & multi-chain proteins', async () => {

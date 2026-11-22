@@ -157,6 +157,20 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
     expect(parsed.diagnostics.nucleicAcidChains).toEqual(['D']);
   });
 
+  it('validates ESMFold2 protein residues and chain boundaries before loading weights', () => {
+    const node = { id: 'fold', adapterId: 'localfold-af2', params: { model: 'ef2-fast-300m' } };
+    const check = (sequence: string, chainLengths?: number[]) => validateRuntimeNodeInputs(node, {
+      sequences: {
+        kind: 'SequenceSet', id: 'seqs', parentStructureId: 'none', sourceModelId: 'sequence-input',
+        candidates: [{ id: 'example', sequence, chainLengths, sourceModelId: 'sequence-input', score: null, globalScore: null }],
+      },
+    });
+    expect(check('ACDE:FGHI', [4, 4]).warnings).toEqual([]);
+    expect(() => check('ACDXFGHI')).toThrow(/canonical protein/);
+    expect(() => check('ACDEFGHI', [4, 3])).toThrow(/chain boundaries/);
+    expect(() => check('A'.repeat(513))).toThrow(/512/);
+  });
+
   it('Layer 2 runtime guard rejects sequences over WebGPU token ceiling and warns on multimer into AF2 monomer', () => {
     const tooLong: SequenceSet = {
       kind: 'SequenceSet',

@@ -193,6 +193,9 @@
 
   function formatQuantChip(provenance?: ArtifactProvenance, foldModelId?: string): string | null {
     if (provenance?.quantization) {
+      if (provenance.languageModelQuantization) {
+        return `${provenance.quantization.toUpperCase()} fold · ${provenance.languageModelQuantization.toUpperCase()} ESM-C`;
+      }
       return provenance.quantization.toUpperCase();
     }
     if (foldModelId && foldModelId.toLowerCase().includes('-int5')) {
@@ -1519,6 +1522,12 @@
         {/if}
         {#if activeFold.provenance?.recyclesRun !== undefined}
           <span class="stat-chip">{activeFold.provenance.recyclesRun} recycles</span>
+        {/if}
+        {#if activeFold.provenance?.diffusionStepsRun !== undefined}
+          <span class="stat-chip" title={`${activeFold.provenance.diffusionStepsScheduled} steps in the diffusion schedule`}>{activeFold.provenance.diffusionStepsRun} diffusion updates</span>
+        {/if}
+        {#if activeFold.provenance?.confidenceHead}
+          <span class="stat-chip">{activeFold.provenance.confidenceHead} confidence</span>
         {/if}
         {#if activeFold.provenance?.degradedFallback}
           <span class="warn-chip">⚠ {activeFold.provenance.degradedFallback}</span>

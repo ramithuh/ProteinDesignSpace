@@ -318,7 +318,7 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
         id: 'int5',
         label: 'INT5',
         quantizationDetail:
-          '5-bit weight quantization (INT5) across 18 pinned checkpoints (97–612 MB; AF2/Multimer models 2–5 load as ~43–44 MB deltas on model 1; Mol-1 keeps trunk single transition2 in FP32)',
+          '5-bit weight quantization (INT5) for folding weights across 20 pinned checkpoints (74–612 MB; AF2/Multimer models 2–5 load as ~43–44 MB deltas on model 1; Mol-1 keeps trunk single transition2 in FP32)',
         approxSizeMB: 97,
         parityVsPytorchFp32: {
           metric: 'Upstream LocalFold INT5 port',
@@ -811,6 +811,24 @@ export function getModelCardForAdapter(
     if (opt) {
       resolved.displayName = `LocalFold · ${opt.shortLabel}`;
       resolved.license = `Beer-Ware (runtime) · ${opt.license} (${opt.shortLabel} weights)`;
+      if (opt.family === 'esmfold2') {
+        const tower = opt.id === 'ef2-fast-300m' ? '300M' : '600M';
+        const size = tower === '300M' ? '257.5' : '351.4';
+        resolved.weightsRevision = '7f265c212f30';
+        resolved.citation = 'Biohub ESMFold2 Experimental Fast, base' + tower + '-step1500k, with matching ESM-C tower and Synthyra confidence head.';
+        resolved.precisions = [{
+          id: 'int5',
+          label: 'INT5 trunk + INT3 ESM-C',
+          approxSizeMB: opt.approxMB,
+          quantizationDetail: `INT5 folding trunk with its matched INT3 ESM-C ${tower} tower (${size} MiB combined). Tower revision 71ece3571b80.`,
+          parityVsPytorchFp32: null,
+        }];
+        resolved.limitations = [
+          'Folds one or more protein chains from sequence alone. MSA, DNA, RNA, and ligand inputs are unsupported by this adapter.',
+          'The bundled Synthyra head estimates pLDDT, PAE, and pTM, with ipTM for multichain predictions.',
+        ];
+        return resolved;
+      }
       if (resolved.precisions[0]) {
         resolved.precisions[0].approxSizeMB = opt.approxMB;
         if (meta) {

@@ -84,11 +84,13 @@ export const MPNN_CHECKPOINTS_BY_FAMILY: Record<string, AdapterParamOption[]> = 
   ],
 };
 
+export const ESMFOLD2_STEPS = [15, 32, 64, 200] as const;
+
 export interface LocalFoldModelMeta {
   id: string;
   label: string;
   shortLabel: string;
-  family: 'af2' | 'af2-multimer' | 'af3';
+  family: 'af2' | 'af2-multimer' | 'af3' | 'esmfold2';
   approxMB: number;
   license: string;
   nonCommercial?: boolean;
@@ -113,6 +115,8 @@ export const LOCALFOLD_MODEL_OPTIONS: LocalFoldModelMeta[] = [
   { id: 'mol1', label: 'Mol-1', shortLabel: 'Mol-1', family: 'af3', approxMB: 510, license: 'Apache-2.0' },
   { id: 'intellifold2', label: 'IntelliFold-2', shortLabel: 'IntelliFold-2', family: 'af3', approxMB: 612, license: 'Apache-2.0' },
   { id: 'af3', label: 'AlphaFold 3 (Non-Commercial)', shortLabel: 'AlphaFold 3', family: 'af3', approxMB: 265, license: 'AF3 Non-Commercial', nonCommercial: true },
+  { id: 'ef2-fast-300m', label: 'ESMFold2 Experimental Fast · ESM-C 300M', shortLabel: 'EF2 Fast 300M', family: 'esmfold2', approxMB: 270, license: 'Biohub / Synthyra model terms' },
+  { id: 'ef2-fast-600m', label: 'ESMFold2 Experimental Fast · ESM-C 600M', shortLabel: 'EF2 Fast 600M', family: 'esmfold2', approxMB: 368, license: 'Biohub / Synthyra model terms' },
 ];
 
 export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
@@ -1206,7 +1210,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 97,
     licenseNote: 'Beerware engine (sokrypton/localfold); model weights fetched per-checkpoint from Hugging Face (AF2 & AF2-Multimer CC-BY-4.0, RF3 BSD-3, Boltz-2 MIT, OpenBind-0/Protenix-2/OpenDDE/Mol-1/IF2 Apache-2.0, AF3 Non-Commercial)',
     description:
-      'In-browser protein structure prediction supporting AlphaFold2 Monomer (models 1–5), AlphaFold2-Multimer v3 (models 1–5), RoseTTAFold3, Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, and AlphaFold 3.',
+      'In-browser protein structure prediction supporting AlphaFold2 Monomer (models 1–5), AlphaFold2-Multimer v3 (models 1–5), RoseTTAFold3, Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, AlphaFold 3, and ESMFold2 Experimental Fast (300M and 600M).',
     inputs: {
       sequences: { type: 'SequenceSet' },
     },
@@ -1289,6 +1293,15 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         step: 1,
         upstreamDefaultHint: 'AF2: 3 · AF3: 10 · Multimer: 20',
         description: 'Number of structure trunk recycling iterations.',
+      },
+      {
+        key: 'esmfold2Steps',
+        label: 'ESMFold2 diffusion schedule',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: ESMFOLD2_STEPS[0],
+        options: ESMFOLD2_STEPS.map((steps) => ({ value: String(steps), label: `${steps} scheduled steps` })),
+        description: 'Diffusion schedule for ESMFold2 Experimental Fast.',
       },
       {
         key: 'diffusionSteps',

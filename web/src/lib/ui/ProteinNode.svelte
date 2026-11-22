@@ -180,6 +180,9 @@
               : msaMode === 'a3m'
                 ? '.a3m'
                 : 'single-seq';
+        if (meta.family === 'esmfold2') {
+          return `${meta.shortLabel} · single-seq · ${Number(p.esmfold2Steps ?? 15)} scheduled steps`;
+        }
         if (meta.family === 'af3') {
           const steps = Number(p.diffusionSteps ?? 25);
           return `LocalFold · ${msaTag} · ${steps} steps · ${rec} rec`;

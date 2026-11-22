@@ -164,12 +164,23 @@ function buildSubGroupsForAdapter(adapterId: string): {
         .toLowerCase(),
     }));
 
+    const esmfold2Items: CatalogSubItem[] = LOCALFOLD_MODEL_OPTIONS.filter(
+      (m) => m.family === 'esmfold2',
+    ).map((opt) => ({
+      key: opt.id,
+      label: opt.label,
+      meta: `~${opt.approxMB} MB · Protein sequences`,
+      insert: { adapterId: 'localfold-af2', params: { model: opt.id, msaMode: 'single' }, label: opt.shortLabel },
+      searchBlob: `${opt.id} ${opt.label} ${opt.shortLabel} esmfold2 esm-c protein multimer single sequence`.toLowerCase(),
+    }));
+
     return {
       subCountLabel: `${LOCALFOLD_MODEL_OPTIONS.length} models`,
       subGroups: [
         { title: 'AF2-Class (Monomer)', items: af2Items },
         { title: 'AF2-Multimer v3 (Complexes)', items: af2MultimerItems },
         { title: 'AF3-Class (All-Atom)', items: af3Items },
+        { title: 'ESMFold2 Experimental Fast', items: esmfold2Items },
       ],
     };
   }

@@ -3,6 +3,7 @@
 //          pure-DNA sequence input, and token-ceiling risks before clicking Run).
 // Layer 2: Runtime pre-dispatch artifact validation (called in scheduler.ts before launching GPU workers).
 
+import { esmfold2Chains, esmfold2ParamIssue } from './localfold-esmfold2';
 import { LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { getBenchmarkById } from './benchmarks';
 import { planLocalFoldFanout } from './work-plan';
@@ -938,7 +939,7 @@ export function validateBioCapabilities(
       }
 
       const msaMode = String(node.params.msaMode ?? 'single');
-      if (msaMode === 'single') {
+      if (msaMode === 'single' && meta.family !== 'esmfold2') {
         if (up.stoichiometry === 'multimer' && up.hasLockedTarget) {
           issues.push({
             severity: 'warning',
@@ -966,7 +967,7 @@ export function validateBioCapabilities(
         }
       }
 
-      const tokenLimit = meta.family === 'af3' ? 384 : 512;
+      const tokenLimit = meta.family === 'af3' || meta.family === 'esmfold2' ? 384 : 512;
       if (up.estimatedTokens > tokenLimit) {
         issues.push({
           severity: 'warning',
@@ -1004,7 +1005,11 @@ export function validateRuntimeNodeInputs(
     }
     const modelId = String(node.params.model ?? 'monomer');
     const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
-    const hardLimit = meta.family === 'af3' ? 512 : 768;
+    const hardLimit = meta.family === 'af3' || meta.family === 'esmfold2' ? 512 : 768;
+    if (meta.family === 'esmfold2') {
+      const issue = esmfold2ParamIssue(node.params);
+      if (issue) throw new Error(issue);
+    }
 
     // Resolve the EXACT same candidate subset that localfold.worker.ts will execute.
     const work = selectFoldWorkItems(seqSet, node.params);
@@ -1026,6 +1031,7 @@ export function validateRuntimeNodeInputs(
           `Refusing to fold "${cand.id}" (${len} aa) with ${meta.shortLabel}: exceeds browser WebGPU memory ceiling (${hardLimit} residues). Crop the target domain or shorten the sequence before running.`,
         );
       }
+      if (meta.family === 'esmfold2') esmfold2Chains(cand);
       if (cand.chainLengths && cand.chainLengths.length > 1 && meta.family === 'af2') {
         warnings.push(
           `Folding ${cand.chainLengths.length}-chain complex (${cand.chainLengths.join(' + ')} aa) with AF2 monomer (using unpaired multi-chain A3M); consider AF2-Multimer v3 or Boltz-2 for accurate interface scoring.`,

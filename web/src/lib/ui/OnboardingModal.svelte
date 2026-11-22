@@ -587,7 +587,7 @@
       {:else if subStage === 'category'}
         <div class="coach-title">Hover <b>Structure Prediction ›</b></div>
         <p class="coach-body">
-          Hover the highlighted category to pick from all 18 LocalFold models (AF2, AF2-Multimer, RF3, Boltz-2, AF3 &amp; more).
+          Hover the highlighted category to pick from LocalFold models (AF2, AF2-Multimer, RF3, Boltz-2, AF3, ESMFold2 &amp; more).
         </p>
       {:else}
         <div class="coach-title">2. Add Structure Prediction</div>

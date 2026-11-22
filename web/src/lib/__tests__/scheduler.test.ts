@@ -504,6 +504,32 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     await scheduler.releaseActiveGpu();
   });
 
+  it('reuses an ESMFold2 worker for the same checkpoint and releases it when the weight pair changes', async () => {
+    const scheduler = new ExecutionScheduler();
+    const graph: WorkflowGraph = {
+      id: 'fold-switch', name: 'Switch folding models',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'ACDEFGHIKL' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: {} },
+      ],
+      edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+    };
+    const terminate = vi.spyOn(MockWorker.prototype, 'terminate');
+    try {
+      for (const [model, releases] of [
+        ['monomer', 0], ['ef2-fast-300m', 1], ['ef2-fast-300m', 1], ['ef2-fast-600m', 2], ['monomer', 3],
+      ] as const) {
+        graph.nodes[1].params.model = model;
+        await scheduler.run(graph, () => {}, { bypassCache: true });
+        expect(terminate).toHaveBeenCalledTimes(releases);
+      }
+      expect(mockMaxLiveWorkers).toBe(1);
+    } finally {
+      await scheduler.releaseActiveGpu();
+      terminate.mockRestore();
+    }
+  });
+
   it('memoizes node results on cache hit, re-runs on bypassCache / param change / clearMemo, and rejects cycles', async () => {
     mockFoldFactory = () => ({
       kind: 'FoldedStructure',

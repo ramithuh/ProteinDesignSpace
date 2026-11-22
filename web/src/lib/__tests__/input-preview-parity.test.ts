@@ -576,6 +576,28 @@ describe('compileNodeInputPreview across all 7 adapters', () => {
     expect(motifLayer.tokens).toEqual(['H100', 'H100A', 'H100B']);
   });
 
+  it.each(['ef2-fast-300m', 'ef2-fast-600m'])('previews ESMFold2 chains and its own schedule for %s', (model) => {
+    const graph: WorkflowGraph = {
+      id: 'ef2-preview', name: 'EF2 preview',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'ACD:EFG' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { model, esmfold2Steps: 32 } },
+      ],
+      edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+    };
+    const sequences: SequenceSet = {
+      kind: 'SequenceSet', id: 'seqs', parentStructureId: 'none', sourceModelId: 'sequence-input',
+      candidates: [{ id: 'c', sequence: 'ACD:EFG', sourceModelId: 'sequence-input', score: null, globalScore: null }],
+    };
+    const preview = compileNodeInputPreview(graph, 'fold', { seq: { sequences } });
+    expect(preview.availability).toBe('ready');
+    expect(preview.chains.map((c) => c.sequence)).toEqual(['ACD', 'EFG']);
+    expect(preview.payload.compiledSummary).toMatchObject({ model, esmfold2Steps: 32, chainLengths: ['3', '3'] });
+    for (const field of ['tolerance', 'recycles', 'diffusionSteps', 'maxMsaSequences']) {
+      expect(preview.payload.compiledSummary).not.toHaveProperty(field);
+    }
+  });
+
   it('localfold-af2: validates target-only MSA masking, custom .a3m parsing, maxSequences, and AF3 ligands', () => {
     const seqSet: SequenceSet = {
       kind: 'SequenceSet',

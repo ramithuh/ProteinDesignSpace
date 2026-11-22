@@ -3,6 +3,7 @@
   import {
     ADAPTER_REGISTRY,
     LOCALFOLD_MODEL_OPTIONS,
+    ESMFOLD2_STEPS,
     MPNN_CHECKPOINTS_BY_FAMILY,
     MPNN_VARIANT_OPTIONS,
     RFD4_BENCHMARK_OPTIONS,
@@ -482,7 +483,7 @@
     const p = node.params ?? {};
     switch (node.adapterId) {
       case 'localfold-af2':
-        return `${selectedLocalFoldMeta?.label ?? LOCALFOLD_MODEL_OPTIONS[0].label} · ${formatLocalFoldMsaBadge(p.msaMode)}`;
+        return `${selectedLocalFoldMeta?.label ?? LOCALFOLD_MODEL_OPTIONS[0].label} · ${formatLocalFoldMsaBadge(selectedLocalFoldMeta?.family === 'esmfold2' ? 'single' : p.msaMode)}`;
       case 'rfd4-proteina':
         return rfd4NeedsEncoder
           ? 'RFD4-Proteina · Conditioned + structure encoder'
@@ -1885,6 +1886,10 @@
             if (autoInfo.auto && nextMeta) {
               onUpdateLabel?.(node.id, `${nextMeta.shortLabel}${autoInfo.suffix}`);
             }
+            if (nextMeta?.family === 'esmfold2') {
+              setParam('model', nextModel);
+              return;
+            }
             const nextMaxRec = nextMeta ? localFoldMaxRecycles(nextModel, nextMeta.family) : 10;
             const curRec = Number(node.params.recycles ?? 1);
             if (Number.isFinite(curRec) && curRec > nextMaxRec) {
@@ -1909,76 +1914,102 @@
               <option value={opt.id}>{opt.label}</option>
             {/each}
           </optgroup>
+          <optgroup label="ESMFold2 Experimental Fast">
+            {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'esmfold2') as opt (opt.id)}
+              <option value={opt.id}>{opt.label}</option>
+            {/each}
+          </optgroup>
         </select>
-        <span class="field-hint">{formatLocalFoldMsaBadge(lfMsaMode)} · Weights: ~{lfMeta.approxMB} MB · License: {lfMeta.license}</span>
+        <span class="field-hint">{formatLocalFoldMsaBadge(lfMeta.family === 'esmfold2' ? 'single' : lfMsaMode)} · Weights: ~{lfMeta.approxMB} MB · License: {lfMeta.license}</span>
       </label>
 
-      <label class="full">
-        MSA Mode
-        <select
-          {disabled}
-          value={lfMsaMode}
-          onchange={(e) => {
-            flushPendingTextCommit();
-            setParam('msaMode', e.currentTarget.value);
-          }}
-        >
-          <option value="single">Single-sequence (100% local)</option>
-          <option value="mmseqs2">MMseqs2 MSA (ColabFold API)</option>
-          <option value="target-only">Target-only MSA (binders — skips de novo chain)</option>
-          <option value="a3m">Custom .a3m alignment (local)</option>
-        </select>
-        {#if lfMsaMode === 'mmseqs2' || lfMsaMode === 'target-only'}
-          <span class="field-hint">
-            Queries api.colabfold.com for evolutionary alignments; cached across candidates
-          </span>
-        {/if}
-      </label>
-
-      {#if lfMsaMode === 'a3m'}
-        <div class="a3m-box full">
-          <div class="a3m-head">
-            <label class="mu-upload-btn a3m-upload-btn" class:is-disabled={disabled}>
-              <span>↑ Upload .a3m file</span>
-              <input
-                type="file"
-                accept=".a3m,.fas,.fasta,.txt"
-                hidden
-                {disabled}
-                onchange={handleA3mFileUpload}
-              />
-            </label>
-            {#if lfA3mSummary && lfA3mSummary.seqCount > 0}
-              <span class="field-hint ok">
-                ✓ {lfA3mSummary.seqCount} sequence{lfA3mSummary.seqCount === 1 ? '' : 's'} parsed{lfA3mSummary.queryLength > 0 ? ` · ${lfA3mSummary.queryLength} aa query` : ''}
-              </span>
-            {:else}
-              <span class="field-hint warn">Paste or upload a .a3m alignment</span>
-            {/if}
+      {#if lfMeta.family === 'esmfold2'}
+        <label>
+          Diffusion schedule
+          <select {disabled} value={Number(node.params.esmfold2Steps ?? ESMFOLD2_STEPS[0])}
+            onchange={(e) => setParam('esmfold2Steps', Number(e.currentTarget.value))}>
+            {#each ESMFOLD2_STEPS as steps}
+              <option value={steps}>{steps} scheduled steps</option>
+            {/each}
+          </select>
+          <span class="field-hint">Uses protein sequences alone. The default 15-step schedule executes 11 diffusion updates.</span>
+        </label>
+        {#if lfMsaMode !== 'single' || lfHasHoloContext}
+          <div class="full">
+            <span class="field-hint warn">This checkpoint accepts protein sequences without an MSA or co-folding context.</span>
+            <button type="button" {disabled} onclick={() => onUpdate(node.id, {
+              ...node.params, msaMode: 'single', ligandCcdCodes: '', dnaSequences: '', rnaSequences: '',
+            })}>Use protein sequence only</button>
           </div>
-          <textarea
-            rows="4"
-            class:input-error={!lfA3mSummary || lfA3mSummary.seqCount === 0}
+        {/if}
+      {:else}
+        <label class="full">
+          MSA Mode
+          <select
             {disabled}
-            placeholder=">query&#10;MKTAYIAKQRQISFVK...&#10;>hit1&#10;MKTAYIAKQRQISFVK..."
-            value={msaA3mDraft}
-            oninput={(e) => scheduleTextParam('msaA3mText', e.currentTarget.value)}
-            onblur={flushPendingTextCommit}
-          ></textarea>
-        </div>
-      {/if}
+            value={lfMsaMode}
+            onchange={(e) => {
+              flushPendingTextCommit();
+              setParam('msaMode', e.currentTarget.value);
+            }}
+          >
+            <option value="single">Single-sequence (100% local)</option>
+            <option value="mmseqs2">MMseqs2 MSA (ColabFold API)</option>
+            <option value="target-only">Target-only MSA (binders — skips de novo chain)</option>
+            <option value="a3m">Custom .a3m alignment (local)</option>
+          </select>
+          {#if lfMsaMode === 'mmseqs2' || lfMsaMode === 'target-only'}
+            <span class="field-hint">
+              Queries api.colabfold.com for evolutionary alignments; cached across candidates
+            </span>
+          {/if}
+        </label>
 
-      <label>
-        Recycles
-        <NumericInput
-          {disabled}
-          ariaLabel="Recycles"
-          spec={lfRecyclesSpec}
-          value={Number(node.params.recycles ?? 1)}
-          onChange={(v) => setParam('recycles', v)}
-        />
-        <span class="field-hint">{localFoldDefaultRecyclesHint(lfModelId, lfMeta.family)}</span>
-      </label>
+        {#if lfMsaMode === 'a3m'}
+          <div class="a3m-box full">
+            <div class="a3m-head">
+              <label class="mu-upload-btn a3m-upload-btn" class:is-disabled={disabled}>
+                <span>↑ Upload .a3m file</span>
+                <input
+                  type="file"
+                  accept=".a3m,.fas,.fasta,.txt"
+                  hidden
+                  {disabled}
+                  onchange={handleA3mFileUpload}
+                />
+              </label>
+              {#if lfA3mSummary && lfA3mSummary.seqCount > 0}
+                <span class="field-hint ok">
+                  ✓ {lfA3mSummary.seqCount} sequence{lfA3mSummary.seqCount === 1 ? '' : 's'} parsed{lfA3mSummary.queryLength > 0 ? ` · ${lfA3mSummary.queryLength} aa query` : ''}
+                </span>
+              {:else}
+                <span class="field-hint warn">Paste or upload a .a3m alignment</span>
+              {/if}
+            </div>
+            <textarea
+              rows="4"
+              class:input-error={!lfA3mSummary || lfA3mSummary.seqCount === 0}
+              {disabled}
+              placeholder=">query&#10;MKTAYIAKQRQISFVK...&#10;>hit1&#10;MKTAYIAKQRQISFVK..."
+              value={msaA3mDraft}
+              oninput={(e) => scheduleTextParam('msaA3mText', e.currentTarget.value)}
+              onblur={flushPendingTextCommit}
+            ></textarea>
+          </div>
+        {/if}
+
+        <label>
+          Recycles
+          <NumericInput
+            {disabled}
+            ariaLabel="Recycles"
+            spec={lfRecyclesSpec}
+            value={Number(node.params.recycles ?? 1)}
+            onChange={(v) => setParam('recycles', v)}
+          />
+          <span class="field-hint">{localFoldDefaultRecyclesHint(lfModelId, lfMeta.family)}</span>
+        </label>
+      {/if}
       {#if lfMeta.family === 'af3'}
         <label>
           Diffusion steps
