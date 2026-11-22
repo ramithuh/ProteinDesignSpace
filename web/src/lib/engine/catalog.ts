@@ -63,7 +63,7 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
     ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1'],
   },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
-  { title: 'Evaluation', ids: ['thermompnn', 'esmc', 'top-k-filter', 'designability-scorer'] },
+  { title: 'Evaluation', ids: ['thermompnn', 'esmc', 'dyna1', 'top-k-filter', 'designability-scorer'] },
 ];
 
 export const CONCISE_BLOCK_ROLES: Record<string, string> = {
@@ -79,6 +79,7 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   'localfold-af2': 'Predict 3D structures (AlphaFold2, RF3, Boltz-2, AlphaFold 3 & more)',
   thermompnn: 'Full L×20 site-saturation ΔΔG stability scan & B-factor painting',
   esmc: 'ESM-C 300M zero-shot L×20 LLR fitness heatmap, naturalness & masked fill',
+  dyna1: 'Millisecond conformational exchange & flexibility prediction (ESM-3 + Dyna-1)',
   'top-k-filter': 'Rank and filter top-K sequences per backbone or globally before folding',
   'designability-scorer': 'Kabsch alignment, scRMSD, scTM & pLDDT pass rate',
 };
@@ -352,6 +353,39 @@ function buildSubGroupsForAdapter(adapterId: string): {
     return {
       subCountLabel: `${items.length} modes`,
       subGroups: [{ title: 'Inference Modes', items }],
+    };
+  }
+
+  if (adapterId === 'dyna1') {
+    const items: CatalogSubItem[] = [
+      {
+        key: 'dyna1-standard',
+        label: 'Dyna-1 · Standard (Recommended)',
+        subtitle: 'Millisecond conformational exchange probability (0..1 · fast local profile)',
+        meta: '~844 MB · MIT',
+        insert: {
+          adapterId: 'dyna1',
+          params: { precision: 'int8' },
+          label: 'Dyna-1 (Dynamics)',
+        },
+        searchBlob: 'dyna1 dyna-1 dynamics flexibility nmr exchange esm3 esm-3 conformational rigid flexible standard'.toLowerCase(),
+      },
+      {
+        key: 'dyna1-high-precision',
+        label: 'Dyna-1 · High Precision',
+        subtitle: 'Higher-precision exchange probability profile (for high-memory GPUs)',
+        meta: '~1.7 GB · MIT',
+        insert: {
+          adapterId: 'dyna1',
+          params: { precision: 'fp16' },
+          label: 'Dyna-1 (High Precision)',
+        },
+        searchBlob: 'dyna1 dyna-1 dynamics flexibility nmr exchange esm3 high precision'.toLowerCase(),
+      },
+    ];
+    return {
+      subCountLabel: `${items.length} presets`,
+      subGroups: [{ title: 'Presets', items }],
     };
   }
 

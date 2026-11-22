@@ -1717,6 +1717,53 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       },
     ],
   },
+  dyna1: {
+    id: 'dyna1',
+    displayName: 'Dyna-1 (Conformational Dynamics)',
+    shortName: 'Dyna-1',
+    stage: 'score',
+    runtime: 'wgsl-custom',
+    estimatedVramMB: 1150,
+    approxWeightsMB: 844,
+    licenseNote: 'MIT (Dyna-1 classifier & port) · ESM-3 small open v1 backbone',
+    description:
+      'Predicts per-residue millisecond conformational exchange probabilities (0 = rigid, 1 = flexible) from protein sequences using ESM-3 small + Dyna-1 in WebGPU, painting dynamics onto 3D B-factors when a structure is connected.',
+    inputs: {
+      sequences: { type: 'SequenceSet', required: false },
+      structure: { type: 'StructureArtifact', required: false },
+    },
+    outputs: {
+      track: { type: 'ResidueTrack' },
+      structure: { type: 'StructureArtifact' },
+      sequences: { type: 'SequenceSet' },
+    },
+    paramSchema: [
+      {
+        key: 'precision',
+        label: 'Weight Precision',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'int8',
+        options: [
+          { value: 'int8', label: 'INT8 (default · ~844 MB)' },
+          { value: 'fp16', label: 'FP16 mixed (high accuracy · ~1.7 GB)' },
+          { value: 'fp32', label: 'FP32 (reference · ~3.4 GB)' },
+        ],
+        description: 'Weight storage precision streamed into WebGPU (INT8 achieves r ≥ 0.9995 vs FP32).',
+      },
+      {
+        key: 'maxSequences',
+        label: 'Max sequences',
+        kind: 'integer',
+        tier: 'advanced',
+        defaultValue: 1,
+        min: 1,
+        max: 8,
+        step: 1,
+        description: 'Maximum candidate sequences scored from an incoming SequenceSet.',
+      },
+    ],
+  },
   'top-k-filter': {
     id: 'top-k-filter',
     displayName: 'Sequence Filter / Top-K Ranker',

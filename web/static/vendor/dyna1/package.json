@@ -1,0 +1,10 @@
+{
+  "name": "dyna1-webgpu-vendor",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./webgpu": "./webgpu/index.js",
+    "./cpu": "./cpu/dyna1/index.js",
+    "./shared": "./shared/dyna1/index.js"
+  }
+}

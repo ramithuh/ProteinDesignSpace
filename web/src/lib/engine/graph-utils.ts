@@ -167,6 +167,11 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         maskPositions: '',
         maxSequences: 1,
       };
+    case 'dyna1':
+      return {
+        precision: 'int8',
+        maxSequences: 1,
+      };
     case 'top-k-filter':
       return {
         mode: 'per-backbone',

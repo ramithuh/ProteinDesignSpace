@@ -584,6 +584,26 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
       continue;
     }
 
+    if (node.adapterId === 'dyna1') {
+      const precision = String(node.params.precision ?? 'int8');
+      const approxMB = precision === 'fp32' ? 3362 : precision === 'fp16' ? 1745 : 844;
+      const estimatedVramMB =
+        precision === 'fp32' ? 3900 : precision === 'fp16' ? 2200 : manifest.estimatedVramMB;
+      const key = `dyna1:${precision}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          key,
+          label: `Dyna-1 (${precision.toUpperCase()})`,
+          approxMB,
+          estimatedVramMB,
+          runtime: manifest.runtime,
+          plannedItems: 0,
+        });
+      }
+      addPlannedItems(key, nodeItems);
+      continue;
+    }
+
     if (!byKey.has(manifest.id)) {
       byKey.set(manifest.id, {
         key: manifest.id,

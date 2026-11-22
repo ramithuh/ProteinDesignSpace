@@ -170,6 +170,10 @@
         const tag = mode === 'masked' ? 'Masked LLR' : mode === 'fill' ? 'Fill' : 'WT LLR';
         return `${tag} · ${prec}`;
       }
+      case 'dyna1': {
+        const prec = String(p.precision ?? 'int8').toUpperCase();
+        return `Exchange prob · ${prec}`;
+      }
       case 'web-protein-mpnn': {
         const fam =
           p.family === 'proteinmpnn'

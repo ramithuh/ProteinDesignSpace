@@ -350,4 +350,43 @@ describe('WorkflowPlan deterministic compiler', () => {
     expect(graph.edges.some((e) => e.fromNode === rfd4.id && e.fromPort === 'sequences')).toBe(true);
     expect(graph.edges.some((e) => e.fromNode === mpnn.id && e.fromPort === 'sequences')).toBe(true);
   });
+
+  it('compiles ProtPardelle-1c de novo + ESM-C + Dyna-1 and PDB ESM-C / Dyna-1 evaluation graphs', () => {
+    const { graph: deNovoGraph } = compileWorkflowPlanToGraph({
+      kind: 'de_novo',
+      generators: ['protpardelle'],
+      length: 90,
+      numDesigns: 1,
+      numSequences: 2,
+      topK: null,
+      refold: true,
+      foldModels: ['monomer'],
+      score: true,
+      stabilityScan: false,
+      esmcScore: true,
+      dynamicsScan: true,
+      summary: '90aa ProtPardelle-1c → AF2, ESM-C 300M & Dyna-1',
+    });
+    expect(validateGraph(deNovoGraph)).toEqual([]);
+    expect(deNovoGraph.nodes.some((n) => n.adapterId === 'protpardelle')).toBe(true);
+    expect(deNovoGraph.nodes.some((n) => n.adapterId === 'esmc')).toBe(true);
+    expect(deNovoGraph.nodes.some((n) => n.adapterId === 'dyna1')).toBe(true);
+
+    const { graph: pdbGraph } = compileWorkflowPlanToGraph({
+      kind: 'pdb',
+      pdbId: '1UBQ',
+      crop: null,
+      tasks: ['esmc', 'dyna1'],
+      targetChain: null,
+      regions: null,
+      numSequences: null,
+      topK: null,
+      refold: false,
+      foldModels: [],
+      stabilityScan: false,
+      summary: '1UBQ → ESM-C 300M & Dyna-1 dynamics',
+    });
+    expect(validateGraph(pdbGraph)).toEqual([]);
+    expect(pdbGraph.nodes.map((n) => n.adapterId).sort()).toEqual(['dyna1', 'esmc', 'pdb-input']);
+  });
 });

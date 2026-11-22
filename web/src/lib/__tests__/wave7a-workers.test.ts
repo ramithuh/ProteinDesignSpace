@@ -119,6 +119,14 @@ const WAVE7A_SPECS = [
     hfBaseUrl: 'https://huggingface.co/ramithuh/esmc-webgpu/resolve/main/esmc-300m',
     expectedParamKeys: ['maskPositions', 'maxSequences', 'mode', 'precision'],
   },
+  {
+    name: 'Dyna-1',
+    vendorDir: 'static/vendor/dyna1',
+    workerFile: 'src/lib/workers/dyna1.worker.ts',
+    factoryExport: 'createDyna1Engine',
+    hfBaseUrl: 'https://huggingface.co/ramithuh/dyna1-webgpu/resolve/main',
+    expectedParamKeys: ['maxSequences', 'precision'],
+  },
 ] as const;
 
 describe('Wave-7A WebGPU vendored engines & workers', () => {

@@ -67,7 +67,7 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
 
   it('ensures every card in MODEL_CARDS has a valid activePrecisionId and complete provenance', () => {
     const cards = Object.values(MODEL_CARDS);
-    expect(cards.length).toBe(11); // 10 live GPU/ONNX adapters + 1 remaining hosted WebGPU port (Dyna-1)
+    expect(cards.length).toBe(11); // All 11 GPU/ONNX adapters are live!
 
     for (const card of cards) {
       expect(card.precisions.length).toBeGreaterThan(0);
@@ -94,6 +94,7 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
       'antifold-esmif1-webgpu': { adapterId: 'antifold-esmif1', defaultPrecision: 'fp16' },
       'esmc-webgpu': { adapterId: 'esmc', defaultPrecision: 'int8' },
       'protpardelle-webgpu': { adapterId: 'protpardelle', defaultPrecision: 'int8' },
+      'dyna1-webgpu': { adapterId: 'dyna1', defaultPrecision: 'int8' },
     };
 
     for (const id of HOSTED_PORT_CARD_IDS) {

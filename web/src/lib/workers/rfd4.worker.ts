@@ -106,14 +106,77 @@ async function ensureLoaded(id: number, needEncoder: boolean) {
   }
 
   if (!gpuDevice) {
-    const res = await rfd4Mod.requestWebGpuDevice();
-    if (!res?.device) {
-      throw new Error('No compatible WebGPU device found for RFD4-Proteina');
+    // Retry + fallback to default requestAdapter() (without powerPreference) because on Linux
+    // Chrome/Vulkan (especially right after a prior GPU worker disposes), the first
+    // `requestAdapter({ powerPreference: 'high-performance' })` inside a new worker can return null.
+    let dev: GPUDevice | null = null;
+    let lastErr: unknown = null;
+
+    for (let attempt = 0; attempt < 3 && !dev; attempt++) {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, attempt * 250));
+      }
+      try {
+        const res = await rfd4Mod.requestWebGpuDevice();
+        if (res?.device) {
+          dev = res.device;
+          break;
+        }
+      } catch (err) {
+        lastErr = err;
+        // Retry withholding experimental subgroup features if the driver rejected them
+        try {
+          const res = await rfd4Mod.requestWebGpuDevice({
+            exclude: ['chromium-experimental-subgroup-matrix', 'subgroup-size-control'],
+          });
+          if (res?.device) {
+            dev = res.device;
+            break;
+          }
+        } catch (err2) {
+          lastErr = err2;
+        }
+      }
+
+      // Direct adapter fallback (mirrors Genie 3: tries default requestAdapter() with no powerPreference)
+      if (!dev && typeof navigator !== 'undefined' && navigator.gpu) {
+        try {
+          const adapter =
+            (await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })) ??
+            (await navigator.gpu.requestAdapter());
+          if (adapter) {
+            const base = `${self.location.origin}/vendor/rfd4-proteina`;
+            const devMod = await import(
+              /* @vite-ignore */ `${base}/vendor/localfold-1edc50a7/webgpu/runtime/device.js`
+            );
+            try {
+              dev = await devMod.requestAlphaFoldDevice(adapter);
+            } catch {
+              dev = await devMod.requestAlphaFoldDevice(adapter, {
+                withholdFeatures: [
+                  'chromium-experimental-subgroup-matrix',
+                  'subgroup-size-control',
+                ],
+              });
+            }
+            if (dev && !(dev as unknown as { adapterInfo?: unknown }).adapterInfo && adapter.info) {
+              (dev as unknown as { adapterInfo?: unknown }).adapterInfo = adapter.info;
+            }
+          }
+        } catch (err) {
+          lastErr = err;
+        }
+      }
     }
-    const dev: GPUDevice = res.device;
-    gpuDevice = dev;
-    void dev.lost.then(() => {
-      if (gpuDevice === dev) {
+
+    if (!dev) {
+      const detail = lastErr instanceof Error ? ` (${lastErr.message})` : '';
+      throw new Error(`No compatible WebGPU device found for RFD4-Proteina${detail}`);
+    }
+    const activeDev = dev;
+    gpuDevice = activeDev;
+    void activeDev.lost.then(() => {
+      if (gpuDevice === activeDev) {
         gpuDevice = null;
         generator = null;
       }

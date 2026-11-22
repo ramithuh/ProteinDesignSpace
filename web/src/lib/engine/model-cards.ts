@@ -761,8 +761,9 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
 
   'dyna1-webgpu': {
     id: 'dyna1-webgpu',
+    adapterId: 'dyna1',
     displayName: 'Dyna-1',
-    status: 'weights-hosted',
+    status: 'live',
     activePrecisionId: 'int8',
     precisions: [
       {

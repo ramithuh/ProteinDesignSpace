@@ -258,6 +258,7 @@ describe('declarative ParamSchema & modes single source of truth', () => {
       { adapterId: 'antifold-esmif1', file: 'src/lib/workers/antifold.worker.ts' },
       { adapterId: 'protpardelle', file: 'src/lib/workers/protpardelle.worker.ts' },
       { adapterId: 'esmc', file: 'src/lib/workers/esmc.worker.ts' },
+      { adapterId: 'dyna1', file: 'src/lib/workers/dyna1.worker.ts' },
     ];
 
     for (const target of WORKER_TARGETS) {

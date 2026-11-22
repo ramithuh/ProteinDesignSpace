@@ -120,6 +120,15 @@
       url: 'https://github.com/Biohub/esm',
       linkLabel: 'Biohub/esm',
     },
+    {
+      name: 'Dyna-1',
+      role: 'Millisecond Conformational Dynamics Prediction',
+      detail:
+        'Sequence-only conformational exchange probability predictor (Wayment-Steele et al., Nature 2026) combining 23 ESM-3 small blocks with the 12-layer Dyna-1 classifier in native WebGPU.',
+      license: 'MIT (Dyna-1) · ESM-3 open backbone',
+      url: 'https://github.com/WaymentSteeleLab/Dyna-1',
+      linkLabel: 'WaymentSteeleLab/Dyna-1',
+    },
   ];
 
   const TOOL_CREDITS: CreditItem[] = [

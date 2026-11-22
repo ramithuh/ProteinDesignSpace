@@ -7,7 +7,7 @@ import { autoLayoutGraph, defaultParamsForAdapter, validateGraph } from './graph
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 
-export type GeneratorId = 'rfd4-proteina' | 'genie3';
+export type GeneratorId = 'rfd4-proteina' | 'genie3' | 'protpardelle';
 export type SequenceDesignerId = 'native' | 'web-protein-mpnn' | 'ligandmpnn' | 'lasermpnn';
 export type FoldOracleId =
   | 'monomer'
@@ -29,13 +29,17 @@ export type PdbTaskId =
   | 'lasermpnn'
   | 'antifold'
   | 'esmif1'
-  | 'proteinmpnn';
+  | 'proteinmpnn'
+  | 'esmc'
+  | 'dyna1';
 
 export type EditActionId =
   | 'add_stability_scan'
   | 'add_fold_oracles'
   | 'add_sequence_designer'
-  | 'insert_top_k';
+  | 'insert_top_k'
+  | 'add_esmc'
+  | 'add_dyna1';
 
 export interface GraphEditOperation {
   action: EditActionId;
@@ -62,6 +66,8 @@ export interface DeNovoWorkflowPlan {
   foldModels: FoldOracleId[];
   score: boolean;
   stabilityScan: boolean;
+  esmcScore?: boolean;
+  dynamicsScan?: boolean;
   unsupported?: string[];
   summary: string;
 }
@@ -83,6 +89,8 @@ export interface ConditionedDesignWorkflowPlan {
   foldModels: FoldOracleId[];
   score: boolean;
   stabilityScan: boolean;
+  esmcScore?: boolean;
+  dynamicsScan?: boolean;
   unsupported?: string[];
   summary: string;
 }
@@ -194,7 +202,7 @@ export const PLANNER_MIN_PROMPT_LENGTH = 4;
 export const PLANNER_TIMEOUT_MS = 15_000;
 
 const CROP_ALLOWLIST_RE = /^[A-Za-z0-9,:;+\s._-]{1,80}$/;
-const MAX_GENERATORS = 2;
+const MAX_GENERATORS = 3;
 const MAX_SEQUENCE_DESIGNERS = 4;
 const MAX_FOLD_MODELS = 4;
 const MAX_PDB_TASKS = 4;
@@ -378,6 +386,8 @@ function attachDownstreamEval(opts: {
   foldModels: FoldOracleId[];
   score: boolean;
   stabilityScan: boolean;
+  esmcScore?: boolean;
+  dynamicsScan?: boolean;
 }) {
   const {
     nextId,
@@ -390,6 +400,8 @@ function attachDownstreamEval(opts: {
     foldModels,
     score,
     stabilityScan,
+    esmcScore = false,
+    dynamicsScan = false,
   } = opts;
   let seqNodeId = opts.seqSourceNodeId;
 
@@ -476,6 +488,46 @@ function attachDownstreamEval(opts: {
       toPort: 'structure',
     });
   }
+
+  if (esmcScore) {
+    const esmcId = nextId('esmc');
+    nodes.push({
+      id: esmcId,
+      adapterId: 'esmc',
+      label: branchTag ? `ESM-C 300M (${branchTag})` : 'ESM-C 300M',
+      params: { ...defaultParamsForAdapter('esmc') },
+    });
+    edges.push({
+      fromNode: seqNodeId,
+      fromPort: 'sequences',
+      toNode: esmcId,
+      toPort: 'sequences',
+    });
+  }
+
+  if (dynamicsScan) {
+    const dynaId = nextId('dyna');
+    nodes.push({
+      id: dynaId,
+      adapterId: 'dyna1',
+      label: branchTag ? `Dyna-1 (${branchTag})` : 'Dyna-1',
+      params: { ...defaultParamsForAdapter('dyna1') },
+    });
+    edges.push({
+      fromNode: seqNodeId,
+      fromPort: 'sequences',
+      toNode: dynaId,
+      toPort: 'sequences',
+    });
+    if (primaryFoldId) {
+      edges.push({
+        fromNode: primaryFoldId,
+        fromPort: 'structure',
+        toNode: dynaId,
+        toPort: 'structure',
+      });
+    }
+  }
 }
 
 function attachGeneratorBranch(opts: {
@@ -493,6 +545,8 @@ function attachGeneratorBranch(opts: {
   foldModels: FoldOracleId[];
   score: boolean;
   stabilityScan: boolean;
+  esmcScore?: boolean;
+  dynamicsScan?: boolean;
 }) {
   const {
     nextId,
@@ -509,10 +563,19 @@ function attachGeneratorBranch(opts: {
     foldModels,
     score,
     stabilityScan,
+    esmcScore = false,
+    dynamicsScan = false,
   } = opts;
 
-  const nodeId = nextId(genId === 'genie3' ? 'genie' : 'rfd4');
-  const genLabel = genId === 'genie3' ? 'Genie 3' : 'RFD4-Proteina';
+  const nodeId = nextId(
+    genId === 'genie3' ? 'genie' : genId === 'protpardelle' ? 'pardelle' : 'rfd4',
+  );
+  const genLabel =
+    genId === 'genie3'
+      ? 'Genie 3'
+      : genId === 'protpardelle'
+        ? 'ProtPardelle-1c'
+        : 'RFD4-Proteina';
   nodes.push({
     id: nodeId,
     adapterId: genId,
@@ -534,8 +597,8 @@ function attachGeneratorBranch(opts: {
 
   // Decide sequence design branch(es):
   // - If user explicitly requested 1+ sequenceDesigners (e.g. compare RFD4 native seq vs ProteinMPNN, or ProteinMPNN vs LigandMPNN), fan out!
-  // - 'native' on RFD4 uses its built-in co-designed `sequences` port directly; on Genie 3 (Cα-only), falls back to Cα-ProteinMPNN.
-  // - Otherwise Genie 3 gets Cα-ProteinMPNN, and RFD4 uses its native `sequences` port directly.
+  // - 'native' on RFD4 / ProtPardelle uses its built-in co-designed `sequences` port directly; on Genie 3 (Cα-only), falls back to Cα-ProteinMPNN.
+  // - Otherwise Genie 3 gets Cα-ProteinMPNN, and RFD4 / ProtPardelle use their native `sequences` port directly.
   const mappedDesigners: Array<SequenceDesignerId | null> =
     sequenceDesigners.length > 0
       ? sequenceDesigners.map((d) =>
@@ -590,7 +653,8 @@ function attachGeneratorBranch(opts: {
         subTag = branchTag ? `${branchTag} · ${designerLabel}` : designerLabel;
       }
     } else if (multiDesigner) {
-      subTag = branchTag ? `${branchTag} · RFD4 seq` : 'RFD4 seq';
+      const nativeTag = genId === 'protpardelle' ? 'ProtPardelle seq' : 'RFD4 seq';
+      subTag = branchTag ? `${branchTag} · ${nativeTag}` : nativeTag;
     }
 
     attachDownstreamEval({
@@ -605,6 +669,8 @@ function attachGeneratorBranch(opts: {
       foldModels,
       score,
       stabilityScan,
+      esmcScore,
+      dynamicsScan,
     });
   }
 }
@@ -867,6 +933,83 @@ function applyEditCurrentPlan(
           toPort: 'sequences',
         });
       }
+    } else if (op.action === 'add_esmc' || op.action === 'add_dyna1') {
+      const isDyna = op.action === 'add_dyna1';
+      const adapterId = isDyna ? 'dyna1' : 'esmc';
+      const label = isDyna ? 'Dyna-1' : 'ESM-C 300M';
+      let target = resolveNode(op.attachToNodeId);
+      if (!target || (!hasOutputPort(target, 'sequences') && !hasOutputPort(target, 'structure'))) {
+        const priority = isDyna
+          ? [
+              'localfold-af2',
+              'pdb-input',
+              'rfd4-proteina',
+              'protpardelle',
+              'top-k-filter',
+              'web-protein-mpnn',
+              'ligandmpnn',
+              'lasermpnn',
+              'sequence-input',
+              'genie3',
+            ]
+          : [
+              'top-k-filter',
+              'web-protein-mpnn',
+              'ligandmpnn',
+              'lasermpnn',
+              'antifold-esmif1',
+              'rfd4-proteina',
+              'protpardelle',
+              'sequence-input',
+              'pdb-input',
+              'localfold-af2',
+              'genie3',
+            ];
+        for (const aid of priority) {
+          const matches = nodes.filter(
+            (n) =>
+              n.adapterId === aid &&
+              (hasOutputPort(n, 'sequences') || hasOutputPort(n, 'structure')),
+          );
+          if (matches.length > 0) {
+            target = matches[matches.length - 1];
+            break;
+          }
+        }
+      }
+      if (!target) {
+        notes.push(`Skipped ${label}: no sequence or structure block exists on the canvas yet.`);
+        continue;
+      }
+      const newId = nextId(isDyna ? 'dyna' : 'esmc');
+      nodes.push({
+        id: newId,
+        adapterId,
+        label,
+        params: { ...defaultParamsForAdapter(adapterId) },
+      });
+      if (isDyna && hasOutputPort(target, 'structure')) {
+        edges.push({
+          fromNode: target.id,
+          fromPort: 'structure',
+          toNode: newId,
+          toPort: 'structure',
+        });
+      } else if (hasOutputPort(target, 'sequences')) {
+        edges.push({
+          fromNode: target.id,
+          fromPort: 'sequences',
+          toNode: newId,
+          toPort: 'sequences',
+        });
+      } else {
+        edges.push({
+          fromNode: target.id,
+          fromPort: 'structure',
+          toNode: newId,
+          toPort: 'structure',
+        });
+      }
     }
   }
 
@@ -947,7 +1090,13 @@ export function compileWorkflowPlanToGraph(
     const boundedFoldModels = (plan.foldModels ?? []).slice(0, MAX_FOLD_MODELS);
 
     for (const genId of gens) {
-      const branchTag = multiBranch ? (genId === 'genie3' ? 'Genie 3' : 'RFD4') : '';
+      const branchTag = multiBranch
+        ? genId === 'genie3'
+          ? 'Genie 3'
+          : genId === 'protpardelle'
+            ? 'ProtPardelle'
+            : 'RFD4'
+        : '';
       const paramsOverride: Record<string, unknown> =
         genId === 'genie3'
           ? {
@@ -955,11 +1104,17 @@ export function compileWorkflowPlanToGraph(
               length: plan.length,
               numDesigns: plan.numDesigns,
             }
-          : {
-              mode: 'unconditional',
-              length: plan.length,
-              numDesigns: plan.numDesigns,
-            };
+          : genId === 'protpardelle'
+            ? {
+                taskMode: 'unconditional',
+                length: plan.length,
+                numDesigns: plan.numDesigns,
+              }
+            : {
+                mode: 'unconditional',
+                length: plan.length,
+                numDesigns: plan.numDesigns,
+              };
 
       attachGeneratorBranch({
         nextId,
@@ -981,6 +1136,8 @@ export function compileWorkflowPlanToGraph(
         foldModels: boundedFoldModels,
         score: plan.score,
         stabilityScan: plan.stabilityScan,
+        esmcScore: Boolean(plan.esmcScore),
+        dynamicsScan: Boolean(plan.dynamicsScan),
       });
     }
   } else if (plan.kind === 'conditioned_design') {
@@ -1013,6 +1170,16 @@ export function compileWorkflowPlanToGraph(
         `${bench.shortLabel} requires all-atom ligand/DNA conditioning, so Genie 3 (Cα-only) was skipped in favor of RFD4-Proteina.`,
       );
     }
+    if (
+      (plan.designTask === 'enzyme-ligand' || (bench && !bench.supportsGenie3)) &&
+      gens.includes('protpardelle')
+    ) {
+      gens = gens.filter((g) => g !== 'protpardelle');
+      if (gens.length === 0) gens = ['rfd4-proteina'];
+      notes.push(
+        'ProtPardelle-1c released denoisers are protein-only, so RFD4-Proteina is used for ligand/DNA conditioning.',
+      );
+    }
 
     const explicitDesigners: SequenceDesignerId[] = (
       plan.sequenceDesigners && plan.sequenceDesigners.length > 0
@@ -1026,7 +1193,13 @@ export function compileWorkflowPlanToGraph(
     const cp = bench?.conditionParams;
 
     for (const genId of gens) {
-      const branchTag = multiBranch ? (genId === 'genie3' ? 'Genie 3' : 'RFD4') : '';
+      const branchTag = multiBranch
+        ? genId === 'genie3'
+          ? 'Genie 3'
+          : genId === 'protpardelle'
+            ? 'ProtPardelle'
+            : 'RFD4'
+        : '';
       let paramsOverride: Record<string, unknown>;
 
       if (genId === 'genie3') {
@@ -1041,6 +1214,13 @@ export function compileWorkflowPlanToGraph(
           ...(cp?.lockChain ? { lockChain: cp.lockChain } : {}),
           ...(cp?.hotspots ? { hotspots: cp.hotspots } : {}),
           ...(bench ? { autoSeededBenchmarkId: bench.id } : {}),
+        };
+      } else if (genId === 'protpardelle') {
+        paramsOverride = {
+          taskMode: 'motif',
+          numDesigns: plan.numDesigns,
+          ...(plan.length ? { length: plan.length } : {}),
+          ...(cp?.motifSpan ? { motifSelection: cp.motifSpan } : {}),
         };
       } else {
         const mode =
@@ -1075,6 +1255,8 @@ export function compileWorkflowPlanToGraph(
         foldModels: boundedFoldModels,
         score: plan.score,
         stabilityScan: plan.stabilityScan,
+        esmcScore: Boolean(plan.esmcScore),
+        dynamicsScan: Boolean(plan.dynamicsScan),
       });
     }
   } else if (plan.kind === 'pdb') {
@@ -1125,6 +1307,34 @@ export function compileWorkflowPlanToGraph(
           fromNode: pdbNodeId,
           fromPort: 'structure',
           toNode: thermoId,
+          toPort: 'structure',
+        });
+      } else if (task === 'esmc') {
+        const esmcId = nextId('esmc');
+        nodes.push({
+          id: esmcId,
+          adapterId: 'esmc',
+          label: 'ESM-C 300M',
+          params: { ...defaultParamsForAdapter('esmc') },
+        });
+        edges.push({
+          fromNode: pdbNodeId,
+          fromPort: 'structure',
+          toNode: esmcId,
+          toPort: 'structure',
+        });
+      } else if (task === 'dyna1') {
+        const dynaId = nextId('dyna');
+        nodes.push({
+          id: dynaId,
+          adapterId: 'dyna1',
+          label: 'Dyna-1',
+          params: { ...defaultParamsForAdapter('dyna1') },
+        });
+        edges.push({
+          fromNode: pdbNodeId,
+          fromPort: 'structure',
+          toNode: dynaId,
           toPort: 'structure',
         });
       } else if (task === 'antifold' || task === 'esmif1') {

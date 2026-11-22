@@ -56,11 +56,11 @@ describe('engine/catalog & biologist terminology', () => {
     }
   });
 
-  it('organizes all 14 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, AntiFold/ESM-IF1, ProtPardelle-1c, and ESM-C 300M', () => {
+  it('organizes all 15 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, AntiFold/ESM-IF1, ProtPardelle-1c, ESM-C 300M, and Dyna-1', () => {
     const groupedIds = CATALOG_STAGE_GROUPS.flatMap((g) => g.ids);
     expect(new Set(groupedIds)).toEqual(new Set(Object.keys(ADAPTER_REGISTRY)));
     expect(CATALOG_ITEMS).toHaveLength(Object.keys(ADAPTER_REGISTRY).length);
-    expect(CATALOG_ITEMS).toHaveLength(14);
+    expect(CATALOG_ITEMS).toHaveLength(15);
     expect(ADAPTER_REGISTRY['top-k-filter']).toBeDefined();
     expect(ADAPTER_REGISTRY.thermompnn).toBeDefined();
     expect(ADAPTER_REGISTRY.ligandmpnn).toBeDefined();
@@ -68,6 +68,7 @@ describe('engine/catalog & biologist terminology', () => {
     expect(ADAPTER_REGISTRY['antifold-esmif1']).toBeDefined();
     expect(ADAPTER_REGISTRY.protpardelle).toBeDefined();
     expect(ADAPTER_REGISTRY.esmc).toBeDefined();
+    expect(ADAPTER_REGISTRY.dyna1).toBeDefined();
     expect(ADAPTER_REGISTRY['rfd4-conditioner']).toBeUndefined();
 
     const lf = CATALOG_ITEMS.find((i) => i.id === 'localfold-af2')!;

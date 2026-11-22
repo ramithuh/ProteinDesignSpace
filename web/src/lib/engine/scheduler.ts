@@ -12,6 +12,7 @@ import LaserMpnnWorker from '$lib/workers/lasermpnn.worker?worker';
 import AntiFoldWorker from '$lib/workers/antifold.worker?worker';
 import ProtPardelleWorker from '$lib/workers/protpardelle.worker?worker';
 import EsmcWorker from '$lib/workers/esmc.worker?worker';
+import Dyna1Worker from '$lib/workers/dyna1.worker?worker';
 import {
   cropRawAllAtomStructure,
   generateSampleHelixBundlePdb,
@@ -1285,6 +1286,8 @@ export class ExecutionScheduler {
         return new ProtPardelleWorker();
       case 'esmc':
         return new EsmcWorker();
+      case 'dyna1':
+        return new Dyna1Worker();
       default:
         throw new Error(`No GPU worker registered for adapter "${adapterId}"`);
     }
