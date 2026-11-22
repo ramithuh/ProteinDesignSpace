@@ -51,9 +51,24 @@ export default defineConfig({
     format: 'es',
     plugins: () => [stripUnusedOrtWasm()],
   },
-  // Allow serving static assets + Tailscale HTTPS preview.
+  // Keep Vite's strict filesystem boundary enabled; allow optional explicit preview hosts via VITE_ALLOWED_HOSTS.
   server: {
-    fs: { strict: false },
-    allowedHosts: ['.ts.net', 'localhost'],
+    fs: {
+      strict: true,
+      allow: [
+        resolve(__dirname),
+        resolve(__dirname, 'static'),
+        resolve(__dirname, 'node_modules'),
+      ],
+    },
+    allowedHosts: [
+      'localhost',
+      '127.0.0.1',
+      ...(process.env.VITE_ALLOWED_HOSTS
+        ? process.env.VITE_ALLOWED_HOSTS.split(',')
+            .map((h) => h.trim())
+            .filter(Boolean)
+        : []),
+    ],
   },
 });

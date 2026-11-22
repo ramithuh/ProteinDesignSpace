@@ -18,12 +18,21 @@ export interface PreflightModelItem {
   plannedItems?: number;
 }
 
+export interface RemoteMsaTransferNotice {
+  nodeId: string;
+  nodeLabel: string;
+  mode: 'mmseqs2' | 'target-only';
+  destination: string;
+}
+
 export interface RunPreflightSummary {
   models: PreflightModelItem[];
   totalDownloadMB: number;
   peakVramMB: number;
   usesWebGpu: boolean;
   hasNonCommercialModel: boolean;
+  /** External sequence transfers required by remote ColabFold MMseqs2 MSA nodes in this run. */
+  remoteMsaTransfers?: RemoteMsaTransferNotice[];
   /** Total planned backbones across generators. */
   plannedBackbones?: number;
   /** Total planned sequences across inverse-folding / native generator outputs. */
@@ -630,12 +639,28 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
       ? Number((workload.totalGpuWorkItems / baselineWorkload.totalGpuWorkItems).toFixed(2))
       : 1;
 
+  const remoteMsaTransfers: RemoteMsaTransferNotice[] = [];
+  for (const node of graph.nodes) {
+    if (node.adapterId === 'localfold-af2') {
+      const msaMode = String(node.params?.msaMode ?? 'single').trim().toLowerCase();
+      if (msaMode === 'mmseqs2' || msaMode === 'target-only') {
+        remoteMsaTransfers.push({
+          nodeId: node.id,
+          nodeLabel: node.label || 'LocalFold',
+          mode: msaMode,
+          destination: 'api.colabfold.com',
+        });
+      }
+    }
+  }
+
   return {
     models,
     totalDownloadMB,
     peakVramMB,
     usesWebGpu,
     hasNonCommercialModel,
+    ...(remoteMsaTransfers.length > 0 ? { remoteMsaTransfers } : {}),
     plannedBackbones: workload.plannedBackbones,
     plannedSequences: workload.plannedSequences,
     plannedFolds: workload.plannedFolds,

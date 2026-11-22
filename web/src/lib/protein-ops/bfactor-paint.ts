@@ -521,10 +521,12 @@ export function rankTopMutations(
 }
 
 function escapeCsvCell(raw: string): string {
-  if (raw.includes(',') || raw.includes('"') || raw.includes('\n') || raw.includes('\r')) {
-    return `"${raw.replace(/"/g, '""')}"`;
+  const isNumeric = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(raw);
+  const safe = !isNumeric && /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  if (safe.includes(',') || safe.includes('"') || safe.includes('\n') || safe.includes('\r')) {
+    return `"${safe.replace(/"/g, '""')}"`;
   }
-  return raw;
+  return safe;
 }
 
 /** Format a `MutationMatrixArtifact` as RFC-4180 CSV (`position,residue_id,wild_type,A,C,...,Y`). */

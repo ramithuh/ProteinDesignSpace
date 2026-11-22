@@ -174,10 +174,11 @@ describe('localfold-msa: target-only chain-off masking', () => {
     ).toEqual([false, false, true]);
   });
 
-  it('falls back to searching all chains when no locks or roles are present', () => {
-    expect(computeTargetOnlyOffMask(['A', 'B'], undefined, undefined)).toEqual([false, false]);
-    expect(computeTargetOnlyOffMask(['A', 'B'], [], {})).toEqual([false, false]);
-    expect(computeTargetOnlyOffMask(['A'], undefined, undefined)).toEqual([false]);
+  it('fails closed (keeps all chains local) when no positively identified target/locked chain is present', () => {
+    expect(computeTargetOnlyOffMask(['A', 'B'], undefined, undefined)).toEqual([true, true]);
+    expect(computeTargetOnlyOffMask(['A', 'B'], [], {})).toEqual([true, true]);
+    expect(computeTargetOnlyOffMask(['A'], undefined, undefined)).toEqual([true]);
+    expect(computeTargetOnlyOffMask(['A', 'B'], ['H'], { H: 'target' })).toEqual([true, true]);
   });
 
   it('skips explicit single-chain de novo scaffold in target-only mode', () => {

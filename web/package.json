@@ -7,14 +7,14 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "vite dev",
-    "prebuild": "node ../tools/sync-upstream.mjs",
+    "dev": "node ../tools/sync-ort-wasm.mjs && vite dev",
+    "prebuild": "node ../tools/sync-upstream.mjs && node ../tools/sync-ort-wasm.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "test": "svelte-kit sync && vitest run",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:deploy": "node ../tools/check-deploy.mjs",
-    "sync:upstream": "node ../tools/sync-upstream.mjs"
+    "sync:upstream": "node ../tools/sync-upstream.mjs && node ../tools/sync-ort-wasm.mjs"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.0",
@@ -25,13 +25,13 @@
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
     "typescript": "^5.5.0",
-    "vite": "^6.0.0",
+    "vite": "^6.4.6",
     "vitest": "^3.2.7"
   },
   "dependencies": {
     "@xyflow/svelte": "^2.0.2",
     "molstar": "^5.13.1",
-    "onnxruntime-web": "^1.23.0",
+    "onnxruntime-web": "1.24.3",
     "proteinmpnn-web": "github:MurrellGroup/webProteinMPNN#10849c13a9"
   }
 }

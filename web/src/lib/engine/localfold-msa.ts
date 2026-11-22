@@ -552,8 +552,7 @@ export function validateAndParseA3mText(
  * - Chains explicitly marked `'target'` in `chainRoles` OR listed in `lockedChains` get `off = false` (searched via MMseqs2).
  * - De novo `'binder'` / `'scaffold'` chains get `off = true` (query-only, skipped from MMseqs2).
  * - If at least one chain has a target/locked signal, any remaining unmarked chains are treated as de novo (`off = true`).
- * - If no chain has a target/locked signal, but some chains are explicitly `'binder'` / `'scaffold'`, those get `off = true` and unmarked chains get `off = false`.
- * - If no locks or roles match any chain (e.g. an unannotated complex or monomer), falls back to searching all chains (`off = false` for every chain).
+ * - Security fail-closed rule: if NO chain has a positively identified `'target'` role or lock (e.g. an unannotated complex or mismatched chain IDs), skip ALL chains (`off = true` for every chain) so private de novo sequences are NEVER silently transmitted to ColabFold.
  *
  * @param chainIds Physical protein chain IDs in fold order (e.g. `['A', 'B']`).
  */
@@ -570,23 +569,15 @@ export function computeTargetOnlyOffMask(
   const roles = chainRoles ?? {};
 
   const isTarget = chainIds.map((id) => roles[id] === 'target' || lockedSet.has(id));
-  const isDeNovo = chainIds.map((id) => roles[id] === 'binder' || roles[id] === 'scaffold');
-
   const hasTargetSignal = isTarget.some(Boolean);
-  const hasDeNovoSignal = isDeNovo.some(Boolean);
 
-  if (!hasTargetSignal && !hasDeNovoSignal) {
-    // No locks or roles apply to these chains — search all chains.
-    return chainIds.map(() => false);
+  if (!hasTargetSignal) {
+    // Fail closed: without an explicit target/locked chain annotation, keep all chains local.
+    return chainIds.map(() => true);
   }
 
-  if (hasTargetSignal) {
-    // Search target/locked chains only; skip binders, scaffolds, and unmarked de novo chains.
-    return chainIds.map((_, idx) => !isTarget[idx]);
-  }
-
-  // Only explicit binder/scaffold roles exist (no locked/target chain): skip explicit de novo chains.
-  return isDeNovo;
+  // Search positively identified target/locked chains only; skip binders, scaffolds, and unmarked chains.
+  return chainIds.map((_, idx) => !isTarget[idx]);
 }
 
 export function createMsaSearchCache(): MsaSearchCache {

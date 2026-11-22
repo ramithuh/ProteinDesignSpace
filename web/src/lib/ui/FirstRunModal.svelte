@@ -22,6 +22,8 @@
 
   let rememberChoice = $state(true);
   let confirmBtn = $state<HTMLButtonElement | null>(null);
+  let remoteMsaList = $derived(preflight.remoteMsaTransfers ?? []);
+  let hasRemoteMsa = $derived(remoteMsaList.length > 0);
 
   onMount(() => {
     confirmBtn?.focus();
@@ -51,14 +53,29 @@
     aria-labelledby="first-run-title"
   >
     <div class="modal-hdr">
-      <div class="hdr-badge">LOCAL BROWSER RUN</div>
-      <h2 id="first-run-title">Before your first run</h2>
+      <div class="hdr-badge">{hasRemoteMsa ? 'EXTERNAL MSA + LOCAL GPU RUN' : 'LOCAL BROWSER RUN'}</div>
+      <h2 id="first-run-title">{hasRemoteMsa ? 'Confirm external MSA & run' : 'Before your first run'}</h2>
       <p class="hdr-sub">
-        {isPartialRun
-          ? 'This partial run will download the required model weights and run protein design & folding locally on your device\'s GPU.'
-          : 'This workflow downloads model weights once into your browser and runs protein design & folding locally on your device\'s GPU.'}
+        {hasRemoteMsa
+          ? 'This workflow has remote ColabFold MMseqs2 MSA enabled. Selected chain sequences will be sent to api.colabfold.com before local GPU folding.'
+          : isPartialRun
+            ? "This partial run will download the required model weights and run protein design & folding locally on your device's GPU."
+            : "This workflow downloads model weights once into your browser and runs protein design & folding locally on your device's GPU."}
       </p>
     </div>
+
+    {#if hasRemoteMsa}
+      <div class="gpu-warn" role="alert">
+        <strong>External sequence transfer (api.colabfold.com):</strong>
+        <span>
+          {#each remoteMsaList as item, idx (item.nodeId)}
+            {idx > 0 ? '; ' : ''}{item.nodeLabel} ({item.mode === 'target-only'
+              ? 'target/locked chains only — unannotated chains stay local'
+              : 'all chains sent to ColabFold MMseqs2'})
+          {/each}. Switch MSA mode to <code>Single-sequence</code> in the block inspector to keep 100% of sequences offline.
+        </span>
+      </div>
+    {/if}
 
     {#if !webgpuSupported}
       <div class="gpu-warn" role="alert">
@@ -100,9 +117,11 @@
     {/if}
 
     <ul class="notes">
-      <li>
-        <strong>100% local &amp; private:</strong> Nothing is uploaded — sequences and structures stay in your browser.
-      </li>
+      {#if !hasRemoteMsa}
+        <li>
+          <strong>100% local &amp; private:</strong> Nothing is uploaded — sequences and structures stay in your browser.
+        </li>
+      {/if}
       <li>
         <strong>Cached locally in your browser:</strong> Weights download once and are reused automatically on future runs.
       </li>
@@ -111,10 +130,12 @@
       </li>
     </ul>
 
-    <label class="remember-row">
-      <input type="checkbox" bind:checked={rememberChoice} />
-      <span>Don't show this again on this browser</span>
-    </label>
+    {#if !hasRemoteMsa}
+      <label class="remember-row">
+        <input type="checkbox" bind:checked={rememberChoice} />
+        <span>Don't show this again on this browser</span>
+      </label>
+    {/if}
 
     <div class="modal-actions">
       <button type="button" class="btn-cancel" onclick={onCancel}>
@@ -124,9 +145,11 @@
         type="button"
         class="btn-confirm"
         bind:this={confirmBtn}
-        onclick={() => onConfirm(rememberChoice)}
+        onclick={() => onConfirm(hasRemoteMsa ? false : rememberChoice)}
       >
-        ▶ Download &amp; Run ({formatApproxSize(preflight.totalDownloadMB)})
+        {hasRemoteMsa
+          ? `▶ Send MSA & Run (${formatApproxSize(preflight.totalDownloadMB)})`
+          : `▶ Download & Run (${formatApproxSize(preflight.totalDownloadMB)})`}
       </button>
     </div>
   </div>

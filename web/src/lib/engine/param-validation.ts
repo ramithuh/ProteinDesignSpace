@@ -678,7 +678,9 @@ export function validateNodeParams(node: WorkflowNode): string[] {
     ? LOCALFOLD_MODEL_OPTIONS.find((model) => model.id === (p.model ?? 'monomer'))
     : undefined;
 
-  const numSpecs = NUMERIC_SPECS[node.adapterId];
+  const numSpecs = Object.hasOwn(NUMERIC_SPECS, node.adapterId)
+    ? NUMERIC_SPECS[node.adapterId]
+    : undefined;
   if (numSpecs) {
     for (const [key, spec] of Object.entries(numSpecs)) {
       if (p[key] === undefined) continue;
@@ -739,7 +741,9 @@ export function validateNodeParams(node: WorkflowNode): string[] {
 
   if (node.adapterId === 'web-protein-mpnn') {
     const family = p.family !== undefined ? String(p.family) : 'solublempnn';
-    const allowedModels = VALID_MPNN_CATALOG[family];
+    const allowedModels = Object.hasOwn(VALID_MPNN_CATALOG, family)
+      ? VALID_MPNN_CATALOG[family]
+      : undefined;
     if (!allowedModels) {
       errs.push(`"${label}": Unknown ProteinMPNN family "${family}" (expected solublempnn, proteinmpnn, or ca).`);
     } else if (p.modelName !== undefined) {

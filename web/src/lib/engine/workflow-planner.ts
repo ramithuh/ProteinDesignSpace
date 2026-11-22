@@ -1641,14 +1641,50 @@ function resolveBlockEdgePorts(
   return null;
 }
 
+const BLOCK_FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const MAX_BLOCK_GRAPH_NODES = 20;
+const MAX_BLOCK_GRAPH_EDGES = 36;
+const MAX_BLOCK_GRAPH_EDIT_OPS = 12;
+
 function sanitizeBlockNodeParams(
   adapterId: string,
   rawParams: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
   const defaults = defaultParamsForAdapter(adapterId);
   const merged: Record<string, unknown> = { ...defaults };
+  const allowedKeys = new Set<string>([
+    ...Object.keys(defaults),
+    'benchmarkId',
+    'cropSegments',
+    'hotspots',
+    'motifSpan',
+    'contig',
+    'omitAminoAcids',
+    'fixedPositions',
+    'targetChain',
+    'regions',
+    'variant',
+    'family',
+    'model',
+    'msaMode',
+    'maxSequences',
+    'topK',
+    'length',
+    'numDesigns',
+    'numSequences',
+    'temperature',
+    'partialFraction',
+    'useLigandContext',
+    'sequence',
+    'label',
+    'mode',
+    'taskMode',
+    'pdbId',
+  ]);
   if (rawParams && typeof rawParams === 'object') {
     for (const [k, v] of Object.entries(rawParams)) {
+      if (BLOCK_FORBIDDEN_KEYS.has(k) || !allowedKeys.has(k)) continue;
+      if (k === 'fetchedPdbId' || k === 'pdbText' || k === 'customSpecYaml') continue;
       if (v === null || v === undefined) continue;
       if (k === 'cropSegments') {
         const cleanCrop = validateOptionalCrop(String(v));
@@ -1659,10 +1695,19 @@ function sanitizeBlockNodeParams(
         merged.variant = String(v).toLowerCase().includes('anti') ? 'antifold' : 'esmif1';
         continue;
       }
+      if (k === 'pdbId' && typeof v === 'string') {
+        const up = v.trim().toUpperCase();
+        if (/^[0-9][A-Z0-9]{3}$/.test(up) || up === 'DEMO') {
+          merged.pdbId = up === 'DEMO' ? 'demo' : up;
+        }
+        continue;
+      }
       merged[k] = v;
     }
   }
   if (adapterId === 'pdb-input') {
+    delete merged.fetchedPdbId;
+    delete merged.pdbText;
     const bmId = typeof merged.benchmarkId === 'string' ? merged.benchmarkId : '';
     const bm = bmId ? getBenchmarkById(bmId) : undefined;
     if (bm) {
@@ -1716,15 +1761,19 @@ function compileBlockGraphPlan(
     const idRemap = new Map<string, string>();
     const addedNodeIds: string[] = [];
 
-    for (const op of plan.editOps ?? []) {
+    for (const op of (plan.editOps ?? []).slice(0, MAX_BLOCK_GRAPH_EDIT_OPS)) {
       if (op.action === 'add_node') {
         const adapterId = op.adapter ?? '';
-        if (!ADAPTER_REGISTRY[adapterId]) continue;
+        if (!Object.hasOwn(ADAPTER_REGISTRY, adapterId)) continue;
         const requestedId = op.nodeId?.trim();
+        const safeRequestedId =
+          requestedId && !BLOCK_FORBIDDEN_KEYS.has(requestedId) ? requestedId : '';
         const finalId =
-          requestedId && !existingIds.has(requestedId) ? requestedId : nextId(adapterId.split('-')[0]);
+          safeRequestedId && !existingIds.has(safeRequestedId)
+            ? safeRequestedId
+            : nextId(adapterId.split('-')[0]);
         existingIds.add(finalId);
-        if (requestedId) idRemap.set(requestedId, finalId);
+        if (safeRequestedId) idRemap.set(safeRequestedId, finalId);
         nodes.push({
           id: finalId,
           adapterId,
@@ -1823,14 +1872,18 @@ function compileBlockGraphPlan(
   }
 
   // mode === 'new'
-  const rawNodes = plan.nodes ?? [];
+  const rawNodes = (plan.nodes ?? []).slice(0, MAX_BLOCK_GRAPH_NODES);
   const nodes: WorkflowNode[] = [];
   const seenIds = new Set<string>();
   for (const spec of rawNodes) {
-    if (!ADAPTER_REGISTRY[spec.adapter]) continue;
-    let id = spec.id.trim() || `${spec.adapter.split('-')[0]}_${nodes.length + 1}`;
+    if (!Object.hasOwn(ADAPTER_REGISTRY, spec.adapter)) continue;
+    const rawId = spec.id.trim();
+    let id =
+      rawId && !BLOCK_FORBIDDEN_KEYS.has(rawId)
+        ? rawId
+        : `${spec.adapter.split('-')[0]}_${nodes.length + 1}`;
     let n = 2;
-    while (seenIds.has(id)) id = `${spec.id}_${n++}`;
+    while (seenIds.has(id)) id = `${id}_${n++}`;
     seenIds.add(id);
     nodes.push({
       id,
@@ -1883,7 +1936,7 @@ function compileBlockGraphPlan(
 
   const edges: WorkflowEdge[] = [];
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
-  for (const [fromId, toId] of plan.edges ?? []) {
+  for (const [fromId, toId] of (plan.edges ?? []).slice(0, MAX_BLOCK_GRAPH_EDGES)) {
     const fn = nodeById.get(fromId);
     const tn = nodeById.get(toId);
     if (!fn || !tn || fromId === toId) continue;

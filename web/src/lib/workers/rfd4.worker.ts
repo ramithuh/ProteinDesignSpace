@@ -248,9 +248,18 @@ async function ensureLoaded(id: number, needEncoder: boolean) {
   }
 }
 
+const SAFE_EXAMPLE_CIF_RE = /^[a-zA-Z0-9/_-]+\.cif(?:\.zst)?$/;
+
 async function fetchExampleCifBytes(id: number, relUrl: string): Promise<Uint8Array> {
-  const cleanRel = relUrl.replace(/^\.\//, '');
-  const fullUrl = relUrl.startsWith('http') ? relUrl : `${RFD4_ORIGIN}/${cleanRel}`;
+  const cleanRel = relUrl.replace(/^\.\//, '').replace(/^\/+/, '');
+  if (
+    /^https?:\/\//i.test(relUrl) ||
+    cleanRel.includes('..') ||
+    !SAFE_EXAMPLE_CIF_RE.test(cleanRel)
+  ) {
+    throw new Error(`Rejected unsafe RFD4 example CIF path: "${relUrl}"`);
+  }
+  const fullUrl = `${RFD4_ORIGIN}/${cleanRel}`;
   self.postMessage({
     id,
     type: 'progress',

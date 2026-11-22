@@ -920,8 +920,12 @@ export function joinBranchArtifacts(
 export function exportJoinedCollectionCsv<T = unknown>(
   joined: KeyedCollectionJoinResult<T>,
 ): string {
-  const esc = (v: string): string =>
-    /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  const esc = (v: string): string => {
+    // Neutralize spreadsheet formula injection on non-numeric text cells while preserving negative numbers.
+    const isNumeric = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(v);
+    const safe = !isNumeric && /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+    return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+  };
   const includeIpsae = joined.rows.some((r) =>
     joined.branchIds.some((bid) => {
       const val = r.byBranch[bid]?.ipsae;

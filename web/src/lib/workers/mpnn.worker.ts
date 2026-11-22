@@ -22,7 +22,9 @@ import type { SequenceCandidate, SequenceSet, StructureArtifact } from '$lib/eng
 
 declare const self: DedicatedWorkerGlobalScope;
 
-const WASM_PATHS = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/';
+// First-party same-origin ONNX Runtime 1.24.3 WASM/MJS binaries synced from npm-locked node_modules
+// (zero third-party CDN code execution; all files < 25 MiB Cloudflare Pages limit).
+const WASM_PATHS = new URL('/vendor/ort/', self.location.origin).href;
 
 let model: ProteinMPNN | null = null;
 let loadedKey: string | null = null;
@@ -104,12 +106,13 @@ async function ensureModel(
       const errMsg = err instanceof Error ? err.message : String(err);
       if (
         !retried &&
-        anyFromCache &&
         fetchedUrls.length > 0 &&
         /SHA-256|integrity|manifest|embedding size/i.test(errMsg)
       ) {
         await evictCachedUrls(fetchedUrls);
-        return await loadOnce(true);
+        if (anyFromCache) {
+          return await loadOnce(true);
+        }
       }
       throw err;
     }

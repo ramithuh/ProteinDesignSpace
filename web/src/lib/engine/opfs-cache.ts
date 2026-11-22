@@ -407,9 +407,11 @@ export async function clearAllModelCaches(options?: { preserveCheckpoints?: bool
   }
 
   const preserveCheckpoints = Boolean(options?.preserveCheckpoints);
-  const idbPromises: Promise<void>[] = [clearArtifactDatabase(ARTIFACT_DB_NAME)];
-  const handledDbNames = new Set<string>([ARTIFACT_DB_NAME]);
+  const idbPromises: Promise<void>[] = [];
+  const handledDbNames = new Set<string>();
   if (!preserveCheckpoints) {
+    idbPromises.push(clearArtifactDatabase(ARTIFACT_DB_NAME));
+    handledDbNames.add(ARTIFACT_DB_NAME);
     idbPromises.push(deleteIndexedDbSafe(CHECKPOINT_DB_NAME));
     handledDbNames.add(CHECKPOINT_DB_NAME);
   }
@@ -422,7 +424,7 @@ export async function clearAllModelCaches(options?: { preserveCheckpoints?: bool
           name &&
           name.startsWith('denovo-run') &&
           !handledDbNames.has(name) &&
-          !(preserveCheckpoints && name === CHECKPOINT_DB_NAME)
+          !(preserveCheckpoints && (name === CHECKPOINT_DB_NAME || name === ARTIFACT_DB_NAME))
         ) {
           handledDbNames.add(name);
           idbPromises.push(deleteIndexedDbSafe(name));

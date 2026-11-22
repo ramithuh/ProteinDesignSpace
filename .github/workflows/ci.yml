@@ -9,6 +9,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     name: Test, Typecheck, Build & CF Pages Check
@@ -20,6 +23,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -29,6 +34,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install dependencies
+        env:
+          SCARF_ANALYTICS: 'false'
         run: npm ci
 
       - name: Sync pinned upstream WebGPU engines

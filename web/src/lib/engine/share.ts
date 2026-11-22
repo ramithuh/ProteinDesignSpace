@@ -40,13 +40,19 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 }
 
-function sanitizeParams(obj: Record<string, unknown>): Record<string, unknown> {
+function sanitizeValue(val: unknown, depth = 0): unknown {
+  if (depth > 8 || val === null || typeof val !== 'object') return val;
+  if (Array.isArray(val)) return val.map((item) => sanitizeValue(item, depth + 1));
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
+  for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
     if (FORBIDDEN_KEYS.has(k)) continue;
-    out[k] = v;
+    out[k] = sanitizeValue(v, depth + 1);
   }
   return out;
+}
+
+function sanitizeParams(obj: Record<string, unknown>): Record<string, unknown> {
+  return sanitizeValue(obj, 0) as Record<string, unknown>;
 }
 
 async function deflateRaw(text: string): Promise<Uint8Array> {
@@ -65,22 +71,54 @@ async function deflateRaw(text: string): Promise<Uint8Array> {
   return new Uint8Array(buf);
 }
 
+const MAX_HASH_CHARS = 65_536;
+const MAX_INFLATED_BYTES = 512 * 1024;
+const MAX_IMPORT_NODES = 64;
+const MAX_IMPORT_EDGES = 128;
+
 async function inflateRaw(bytes: Uint8Array): Promise<string> {
+  if (bytes.byteLength > MAX_INFLATED_BYTES) {
+    throw new Error('Shared workflow payload exceeds maximum allowed size.');
+  }
   if (typeof DecompressionStream === 'undefined') {
     return new TextDecoder().decode(bytes);
   }
   const ds = new DecompressionStream('deflate-raw');
-  const bufPromise = new Response(ds.readable).arrayBuffer();
-  // Prevent unhandled promise rejection if writer.write/close rejects on invalid deflate bytes
-  bufPromise.catch(() => {});
   const writer = ds.writable.getWriter();
   const writePromise = (async () => {
     await writer.write(bytes.slice());
     await writer.close();
   })();
   writePromise.catch(() => {});
-  const [buf] = await Promise.all([bufPromise, writePromise]);
-  return new TextDecoder().decode(buf);
+
+  const reader = ds.readable.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        totalBytes += value.byteLength;
+        if (totalBytes > MAX_INFLATED_BYTES) {
+          await reader.cancel('Shared workflow exceeds maximum decompressed size').catch(() => {});
+          throw new Error('Shared workflow exceeds maximum decompressed size.');
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  await writePromise;
+
+  const out = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(out);
 }
 
 const UPLOAD_META_KEYS = new Set(['missingUpload', 'expectedPdbSha256', 'expectedFilename']);
@@ -382,6 +420,12 @@ export function normalizeWorkflowGraph(
   if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
     throw new Error('Workflow must contain nodes[] and edges[]');
   }
+  if (parsed.nodes.length > MAX_IMPORT_NODES) {
+    throw new Error(`Workflow exceeds maximum allowed block count (${MAX_IMPORT_NODES}).`);
+  }
+  if (parsed.edges.length > MAX_IMPORT_EDGES) {
+    throw new Error(`Workflow exceeds maximum allowed wire count (${MAX_IMPORT_EDGES}).`);
+  }
 
   const seenIds = new Set<string>();
   const validatedNodes: WorkflowNode[] = parsed.nodes.map((n, idx) => {
@@ -398,6 +442,18 @@ export function normalizeWorkflowGraph(
       throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
     }
     const rawParams = isPlainObject(n.params) ? sanitizeParams(n.params) : {};
+    const mergedParams = fillDefaults ? { ...defaultParamsForAdapter(adapterId), ...rawParams } : { ...rawParams };
+    // Security: discard externally supplied fetch provenance / cached coordinates for accession-based
+    // PDB inputs so an imported recipe cannot spoof an RCSB accession with arbitrary coordinates.
+    if (adapterId === 'pdb-input') {
+      delete mergedParams.fetchedPdbId;
+      const mode = String(mergedParams.mode ?? 'demo-bundle');
+      if (mode === 'pdb-id' || mode === 'demo-bundle') {
+        if ('pdbText' in mergedParams) {
+          mergedParams.pdbText = '';
+        }
+      }
+    }
     const posObj = isPlainObject(n.position) ? n.position : null;
     const pos =
       posObj &&
@@ -412,7 +468,7 @@ export function normalizeWorkflowGraph(
       id,
       adapterId,
       label: typeof n.label === 'string' && n.label.trim() ? n.label : ADAPTER_REGISTRY[adapterId].shortName,
-      params: fillDefaults ? { ...defaultParamsForAdapter(adapterId), ...rawParams } : rawParams,
+      params: mergedParams,
       ...(pos ? { position: pos } : {}),
     };
   });
@@ -460,6 +516,9 @@ export function serializeWorkflowJson(graph: WorkflowGraph): string {
 export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | null> {
   const clean = hash.replace(/^#/, '').trim();
   if (!clean) return null;
+  if (clean.length > MAX_HASH_CHARS) {
+    throw new Error(`Shared workflow link is too large (max ${MAX_HASH_CHARS} chars).`);
+  }
 
   if (clean.startsWith('p=')) {
     const qs = new URLSearchParams(clean);
@@ -530,7 +589,13 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
     let jsonText: string;
     try {
       jsonText = await inflateRaw(rawBytes);
-    } catch {
+    } catch (inflateErr) {
+      if (inflateErr instanceof Error && /maximum (decompressed|allowed) size/i.test(inflateErr.message)) {
+        throw inflateErr;
+      }
+      if (rawBytes.byteLength > MAX_INFLATED_BYTES) {
+        throw new Error('Shared workflow payload exceeds maximum allowed size.');
+      }
       jsonText = new TextDecoder().decode(rawBytes);
     }
     let obj: unknown;
@@ -540,6 +605,11 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
       return null;
     }
     if (!isPlainObject(obj) || !Array.isArray(obj.n) || !Array.isArray(obj.e)) return null;
+    if (obj.n.length > MAX_IMPORT_NODES || obj.e.length > MAX_IMPORT_EDGES) {
+      throw new Error(
+        `Shared workflow exceeds size limits (max ${MAX_IMPORT_NODES} blocks, ${MAX_IMPORT_EDGES} wires).`,
+      );
+    }
 
     const rawPositions = Array.isArray(obj.p) ? obj.p : null;
     const nodes: WorkflowNode[] = [];

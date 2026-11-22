@@ -1617,9 +1617,10 @@
       runError = errs.join('\n');
       return;
     }
-    if (!confirmed && !firstRunAck) {
+    if (!confirmed) {
       const preflight = estimateRunRequirements(targetGraph);
-      if (preflight.usesWebGpu || preflight.totalDownloadMB > 0) {
+      const hasRemoteMsa = (preflight.remoteMsaTransfers?.length ?? 0) > 0;
+      if (hasRemoteMsa || (!firstRunAck && (preflight.usesWebGpu || preflight.totalDownloadMB > 0))) {
         pendingRun = { bypassCache, upToNodeId, preflight };
         return;
       }
@@ -1765,7 +1766,7 @@
     await scheduler.releaseActiveGpu();
     scheduler.clearMemo();
     clearRcsbCache();
-    await clearAllModelCaches();
+    await clearAllModelCaches({ preserveCheckpoints: true });
     await refreshCacheStats();
     activeGpuWorker = null;
   }
