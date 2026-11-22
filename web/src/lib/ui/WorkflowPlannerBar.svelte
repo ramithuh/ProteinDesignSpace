@@ -36,7 +36,7 @@
 
   const ALL_EXAMPLES: ExampleChip[] = [
     {
-      label: '+ ThermoMPNN & RF3 branch',
+      label: '+ ThermoMPNN & RF3',
       prompt: 'Add ThermoMPNN and a RoseTTAFold 3 refolding branch to my current graph',
       requiresExisting: true,
     },
@@ -57,7 +57,7 @@
 
   let examples = $derived.by(() => {
     const hasNodes = graph.nodes.length > 0;
-    return ALL_EXAMPLES.filter((ex) => !ex.requiresExisting || hasNodes);
+    return ALL_EXAMPLES.filter((ex) => !ex.requiresExisting || hasNodes).slice(0, 3);
   });
 
   let prompt = $state('');
@@ -316,8 +316,8 @@
         rows="1"
         maxlength="320"
         placeholder={graph.nodes.length > 0
-          ? 'Describe a workflow or edit this graph… (e.g. add ThermoMPNN, refold with Protenix)'
-          : 'Describe your protein design workflow… (e.g. Genie 3 & RFD4 on di-iron motif)'}
+          ? 'Describe a workflow or edit this graph…'
+          : 'Describe your protein design workflow…'}
         disabled={disabled || loading}
         oninput={resizeTextarea}
         onkeydown={onTextareaKeydown}
@@ -374,10 +374,10 @@
       </span>
     {:else}
       <span class="micro-text desktop-disclosure">
-        Prompt → Cloudflare Workers AI (<code>gemma-4-26b-a4b-it</code>, free) · All models run 100% locally on WebGPU
+        Prompt → Cloudflare Workers AI (gemma-4) · Design models run locally
       </span>
       <span class="micro-text mobile-disclosure">
-        Prompt → Cloudflare AI (<code>gemma-4</code>) · 100% local WebGPU
+        Cloudflare AI (gemma-4) · Design models run locally
       </span>
       <button
         type="button"
@@ -423,7 +423,7 @@
     left: 50%;
     bottom: calc(100% + 10px);
     transform: translateX(-50%);
-    max-width: min(640px, calc(100vw - 24px));
+    max-width: min(720px, calc(100vw - 24px));
     z-index: 3;
   }
 
@@ -433,7 +433,8 @@
     gap: 6px;
     overflow-x: auto;
     scrollbar-width: none;
-    padding: 2px 2px;
+    padding: 4px 4px;
+    margin: -4px 0;
     white-space: nowrap;
   }
   .chip-row::-webkit-scrollbar {
@@ -447,15 +448,13 @@
     padding: 4px 10px;
     border-radius: 999px;
     border: 1px solid var(--border-strong);
-    background: color-mix(in srgb, var(--bg-surface) 92%, transparent);
-    -webkit-backdrop-filter: blur(10px);
-    backdrop-filter: blur(10px);
+    background: var(--bg-surface);
     color: var(--text-secondary);
     font-family: inherit;
     font-size: 11px;
     font-weight: 500;
     cursor: pointer;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
     flex-shrink: 0;
     transition:
       background 0.14s ease,
@@ -779,11 +778,9 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 2px 9px;
+    padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-canvas) 84%, transparent);
-    -webkit-backdrop-filter: blur(6px);
-    backdrop-filter: blur(6px);
+    background: transparent;
     white-space: nowrap;
     max-width: calc(100vw - 20px);
     pointer-events: auto;
@@ -792,11 +789,6 @@
     font-size: 10.5px;
     color: var(--text-dim);
     line-height: 1.3;
-  }
-  .micro-text code {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 9.5px;
-    color: var(--text-muted);
   }
   .micro-text kbd {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
