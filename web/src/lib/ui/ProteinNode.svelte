@@ -22,6 +22,7 @@
     compareBadge?: string;
     activePeekSlotId?: string;
     autoModeHint?: string;
+    isDraft?: boolean;
     onDelete?: (nodeId: string) => void;
     onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
     onOpenStudio?: (nodeId: string) => void;
@@ -279,9 +280,16 @@
   class:loading={st?.status === 'loading'}
   class:done={isNodeDone}
   class:err={st?.status === 'error'}
+  class:draft={Boolean(data.isDraft)}
   style="--stage-color: {stageColor}{data.compareColor ? `; --compare-color: ${data.compareColor}` : ''}"
 >
   <div class="stripe-clip" aria-hidden="true"><div class="stripe"></div></div>
+
+  {#if data.isDraft}
+    <span class="draft-badge" title="Draft preview — press Enter or Apply to add to canvas">
+      ✦ NEW
+    </span>
+  {/if}
 
   {#if data.compareBadge && data.compareColor}
     <span
@@ -554,6 +562,31 @@
     --node-border-w: 1.5px;
     --node-border-color: #ef4444;
     box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.22), var(--node-shadow);
+  }
+  .p-node.draft {
+    opacity: 0.92;
+    --node-border-w: 1.5px;
+    --node-border-style: dashed;
+    --node-border-color: var(--accent);
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent),
+      var(--node-shadow);
+  }
+  .draft-badge {
+    position: absolute;
+    top: -9px;
+    right: 10px;
+    z-index: 5;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 8.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
+    pointer-events: none;
   }
   /* Selected / peeking focus ring stays bold & unmistakable in both light and dark themes */
   .p-node.selected {

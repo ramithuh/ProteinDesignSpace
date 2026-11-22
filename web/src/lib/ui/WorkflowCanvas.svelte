@@ -34,7 +34,8 @@
   import ProteinNode, { type ProteinNodeData } from './ProteinNode.svelte';
   import SmartEdge from './SmartEdge.svelte';
   import BlockCatalogPopover from './BlockCatalogPopover.svelte';
-  import WorkflowPlannerPopover from './WorkflowPlannerPopover.svelte';
+  import WorkflowPlannerBar from './WorkflowPlannerBar.svelte';
+  import type { PlannedWorkflowResult } from '$lib/engine/workflow-planner';
 
   interface Props {
     graph: WorkflowGraph;
@@ -104,11 +105,19 @@
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let canvasEl: HTMLDivElement | null = $state(null);
   let addBtnEl: HTMLButtonElement | null = $state(null);
-  let plannerBtnEl: HTMLButtonElement | null = $state(null);
   let wireBtnEl: HTMLButtonElement | null = $state(null);
   let wirePopoverEl: HTMLDivElement | null = $state(null);
+  let plannerBarRef: {
+    focusInput: () => void;
+    abortPending: () => void;
+    handleEscape: () => boolean;
+    handleConfirmShortcut: () => boolean;
+  } | null = $state(null);
   let catalogOpen = $state(false);
   let plannerOpen = $state(false);
+  let plannerHasText = $state(false);
+  let plannerLoading = $state(false);
+  let draftPreview = $state<PlannedWorkflowResult | null>(null);
   let wireLegendOpen = $state(false);
   let clearConfirmPending = $state(false);
   let clearConfirmTimer: ReturnType<typeof setTimeout> | null = null;
@@ -330,9 +339,39 @@
     lastFitViewTrigger = fvt;
     if (graphChanged) {
       clearProposals();
+      draftPreview = null;
     }
     scheduleFitView(triggerChanged ? 260 : 220);
   });
+
+  function setDraftPreview(next: PlannedWorkflowResult | null) {
+    const hadDraft = draftPreview !== null;
+    draftPreview = next;
+    if (next || hadDraft) {
+      scheduleFitView(next ? 260 : 220);
+    }
+  }
+
+  function openInlinePlanner() {
+    if (disabled) return;
+    clearProposals();
+    cancelClearConfirm();
+    wireLegendOpen = false;
+    catalogOpen = false;
+    plannerOpen = true;
+    void tick().then(() => plannerBarRef?.focusInput());
+  }
+
+  function closeInlinePlanner() {
+    plannerBarRef?.abortPending();
+    if (draftPreview) {
+      draftPreview = null;
+      scheduleFitView(220);
+    }
+    plannerOpen = false;
+    plannerHasText = false;
+    plannerLoading = false;
+  }
 
   // Close wire legend on click-outside
   $effect(() => {
@@ -364,15 +403,37 @@
     );
   }
 
-  // Clear stale ghost proposals when starting a run
+  // Clear stale ghost proposals & planner preview when starting a run
   $effect(() => {
-    if (isRunning) clearProposals();
+    if (isRunning) {
+      clearProposals();
+      if (draftPreview || plannerOpen) {
+        closeInlinePlanner();
+      }
+    }
   });
 
   function handleWindowKeydown(ev: KeyboardEvent) {
     if (isModalOrOverlayOpen()) return;
+
+    // ⌘K / Ctrl+K opens & focuses the canvas-native inline workflow bar
+    if (!disabled && (ev.metaKey || ev.ctrlKey) && !ev.altKey && ev.key.toLowerCase() === 'k') {
+      ev.preventDefault();
+      if (plannerOpen) {
+        plannerBarRef?.focusInput();
+      } else {
+        openInlinePlanner();
+      }
+      return;
+    }
+
     if (ev.key === 'Escape') {
       if (ev.defaultPrevented) return;
+      if (plannerOpen && plannerBarRef) {
+        ev.preventDefault();
+        plannerBarRef.handleEscape();
+        return;
+      }
       if (clearConfirmPending) {
         cancelClearConfirm();
         return;
@@ -395,9 +456,17 @@
     if (disabled || ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (isEditableElement(ev.target) || isEditableElement(document.activeElement)) return;
 
+    // Enter or Tab while reviewing a live canvas draft applies it immediately
+    if (draftPreview && plannerBarRef && (ev.key === 'Enter' || ev.key === 'Tab')) {
+      ev.preventDefault();
+      plannerBarRef.handleConfirmShortcut();
+      return;
+    }
+
     if (
       proposedEdges.length > 0 &&
       !catalogOpen &&
+      !plannerOpen &&
       (ev.key === 'Tab' || ev.key === 'Enter') &&
       performance.now() >= blockAcceptUntil
     ) {
@@ -410,6 +479,7 @@
       ev.preventDefault();
       clearProposals();
       wireLegendOpen = false;
+      if (plannerOpen) closeInlinePlanner();
       catalogOpen = true;
     }
   }
@@ -422,47 +492,61 @@
     }, 3000);
   }
 
-  function edgeColor(fromNodeId: string, fromPort: string): string {
-    const n = graph.nodes.find((x) => x.id === fromNodeId);
+  function edgeColor(fromNodeId: string, fromPort: string, sourceGraph: WorkflowGraph = graph): string {
+    const n = sourceGraph.nodes.find((x) => x.id === fromNodeId);
     const portType = n ? ADAPTER_REGISTRY[n.adapterId]?.outputs[fromPort]?.type : undefined;
     return portType ? PORT_COLORS[portType]?.bg ?? '#64748b' : '#64748b';
   }
 
-  // Convert canonical WorkflowGraph -> SvelteFlow Node[] / Edge[]
+  // Convert canonical WorkflowGraph (or active draft preview) -> SvelteFlow Node[] / Edge[]
   let flowNodes = $state.raw<Node<ProteinNodeData>[]>([]);
   let flowEdges = $state.raw<Edge[]>([]);
 
   $effect(() => {
-    const laid = graph.nodes.some((n) => !n.position) ? autoLayoutGraph(graph) : graph;
+    const activePreview = draftPreview;
+    const activeGraph = activePreview ? activePreview.graph : graph;
+    const laid = activeGraph.nodes.some((n) => !n.position) ? autoLayoutGraph(activeGraph) : activeGraph;
+    const existingNodeIds = activePreview ? new Set(graph.nodes.map((n) => n.id)) : null;
+    const existingEdgeIds = activePreview
+      ? new Set(graph.edges.map((e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)))
+      : null;
     const activeSelectedEdgeId =
+      !activePreview &&
       selectedEdgeId &&
       laid.edges.some(
         (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === selectedEdgeId,
       )
         ? selectedEdgeId
         : null;
-    const selSet = new Set(selectedNodeIds.length > 0 ? selectedNodeIds : selectedNodeId ? [selectedNodeId] : []);
+    const selSet = activePreview
+      ? new Set<string>()
+      : new Set(selectedNodeIds.length > 0 ? selectedNodeIds : selectedNodeId ? [selectedNodeId] : []);
     // Preserve SvelteFlow's measured dimensions on existing nodes so rebuilding flowNodes
     // never resets NodeWrapper `hasDimensions` to false (which hides already-mounted nodes/handles
     // because ResizeObserver does not re-fire when DOM box size is unchanged).
     const prevFlowNodesById = untrack(() => new Map(flowNodes.map((fn) => [fn.id, fn])));
     flowNodes = laid.nodes.map((n) => {
       const prevFlow = prevFlowNodesById.get(n.id);
+      const isDraftNode = Boolean(
+        activePreview && (!activePreview.isIncrementalEdit || !existingNodeIds?.has(n.id)),
+      );
       const inputPortsConnected: Record<string, boolean> = {};
       const inputPortsReady: Record<string, boolean> = {};
       for (const e of laid.edges) {
         if (e.toNode === n.id) {
           inputPortsConnected[e.toPort] = true;
-          if (outputsByNode[e.fromNode]?.[e.fromPort]) {
+          if (!isDraftNode && outputsByNode[e.fromNode]?.[e.fromPort]) {
             inputPortsReady[e.toPort] = true;
           }
         }
       }
       const outputPortsReady: Record<string, boolean> = {};
-      for (const port of Object.keys(outputsByNode[n.id] ?? {})) {
-        outputPortsReady[port] = true;
+      if (!isDraftNode) {
+        for (const port of Object.keys(outputsByNode[n.id] ?? {})) {
+          outputPortsReady[port] = true;
+        }
       }
-      const cmp = compareColors[n.id];
+      const cmp = activePreview ? undefined : compareColors[n.id];
       let autoModeHint: string | undefined;
       if (n.adapterId === 'genie3') {
         const tm = String(n.params?.taskMode ?? 'unconditional');
@@ -496,19 +580,21 @@
           adapterId: n.adapterId,
           label: n.label ?? ADAPTER_REGISTRY[n.adapterId]?.shortName ?? n.adapterId,
           params: n.params,
-          state: nodeStates[n.id],
-          outputs: outputsByNode[n.id],
+          state: isDraftNode ? undefined : nodeStates[n.id],
+          outputs: isDraftNode ? undefined : outputsByNode[n.id],
           isPipelineRunning: isRunning,
           inputPortsConnected,
           inputPortsReady,
           outputPortsReady,
           compareColor: cmp?.css,
           compareBadge: cmp?.badge,
-          activePeekSlotId: activePeekPort?.nodeId === n.id ? activePeekPort.slotId : undefined,
+          activePeekSlotId:
+            !activePreview && activePeekPort?.nodeId === n.id ? activePeekPort.slotId : undefined,
           autoModeHint,
-          onDelete: disabled ? undefined : removeNode,
-          onPeekPort,
-          onOpenStudio: onOpenStudio ?? onNodeDoubleClick,
+          isDraft: isDraftNode,
+          onDelete: disabled || activePreview ? undefined : removeNode,
+          onPeekPort: activePreview ? undefined : onPeekPort,
+          onOpenStudio: activePreview ? undefined : (onOpenStudio ?? onNodeDoubleClick),
         },
       };
     });
@@ -519,21 +605,26 @@
 
     const nextFlowEdges: Edge[] = laid.edges.map((e) => {
       const eid = makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort);
-      const col = edgeColor(e.fromNode, e.fromPort);
+      const col = edgeColor(e.fromNode, e.fromPort, laid);
+      const isDraftEdge = Boolean(
+        activePreview && (!activePreview.isIncrementalEdit || !existingEdgeIds?.has(eid)),
+      );
       const srcState = nodeStates[e.fromNode]?.status;
       const dstState = nodeStates[e.toNode]?.status;
       const srcDone = srcState === 'done' || srcState === 'cached';
       const dstRunning = dstState === 'running' || dstState === 'loading';
       const dstDone = dstState === 'done' || dstState === 'cached';
-      const isSel = eid === selectedEdgeId;
+      const isSel = !activePreview && eid === selectedEdgeId;
 
-      // Only animate incoming edges actively feeding the currently running block
+      // Only animate incoming edges actively feeding the currently running block (or new draft preview wires)
       const activeFeed = isRunning && srcDone && dstRunning;
       const completedEdge = isRunning && srcDone && dstDone;
       const unreachedEdge = isRunning && !activeFeed && !completedEdge;
 
       let style: string;
-      if (isSel) {
+      if (isDraftEdge) {
+        style = `stroke: ${col}; stroke-width: 2.2px; stroke-dasharray: 6 4; opacity: 0.9;`;
+      } else if (isSel) {
         style = `stroke: ${col}; stroke-width: 3.5px; opacity: 1; cursor: pointer;`;
       } else if (activeFeed) {
         style = `stroke: ${col}; stroke-width: 2.5px; opacity: 1; cursor: pointer;`;
@@ -559,7 +650,7 @@
         target: e.toNode,
         targetHandle: e.toPort,
         selected: isSel,
-        animated: activeFeed,
+        animated: activeFeed || isDraftEdge,
         markerEnd: {
           type: MarkerType.ArrowClosed,
           width: 16,
@@ -572,7 +663,7 @@
     });
 
     // Append ephemeral ghost proposals (never stored in graph.edges until accepted)
-    if (proposedEdges.length > 0 && !isRunning) {
+    if (proposedEdges.length > 0 && !isRunning && !activePreview) {
       const nodeIdSet = new Set(laid.nodes.map((n) => n.id));
       const validGhosts = proposedEdges.filter(
         (pe) => nodeIdSet.has(pe.fromNode) && nodeIdSet.has(pe.toNode),
@@ -884,22 +975,16 @@
     />
   {/if}
 
-  {#if plannerOpen}
-    <WorkflowPlannerPopover
-      {graph}
-      {disabled}
-      triggerEl={plannerBtnEl}
-      onApply={(nextGraph, summary) => {
-        clearProposals();
-        if (onApplyPlannedGraph) {
-          onApplyPlannedGraph(nextGraph, summary);
-        } else {
-          onGraphChange(nextGraph);
-        }
-        scheduleFitView(260);
-      }}
-      onClose={() => (plannerOpen = false)}
-    />
+  {#if draftPreview && !draftPreview.isIncrementalEdit}
+    <div class="draft-preview-banner canvas-overlay" role="status">
+      <span class="dpb-spark" aria-hidden="true">✦</span>
+      <span>
+        Preview: <strong>New graph</strong> · {draftPreview.graph.nodes.length} blocks
+        {#if graph.nodes.length > 0}
+          — current graph kept until applied
+        {/if}
+      </span>
+    </div>
   {/if}
 
   <!-- Floating Top-Right: Utility controls (Wire legend & Clear) -->
@@ -911,7 +996,7 @@
       class:active={wireLegendOpen}
       onclick={() => {
         catalogOpen = false;
-        plannerOpen = false;
+        if (plannerOpen) closeInlinePlanner();
         wireLegendOpen = !wireLegendOpen;
       }}
       title="Typed wire colors"
@@ -959,53 +1044,79 @@
     </div>
   {/if}
 
-  <!-- Floating Bottom-Center Action Dock: Primary + Add Block, Describe Workflow & Auto Layout -->
-  <div class="canvas-action-dock canvas-overlay" role="toolbar" aria-label="Canvas authoring actions">
-    <button
-      bind:this={addBtnEl}
-      type="button"
-      class="add-block-btn"
-      class:open={catalogOpen}
-      data-tour="add-block-btn"
-      {disabled}
-      onclick={() => {
-        wireLegendOpen = false;
-        plannerOpen = false;
-        catalogOpen = !catalogOpen;
-      }}
-      title="Add a workflow block (shortcut: / or Shift+A, or double-click canvas)"
-    >
-      <span class="plus">+</span> Add Block
-      <kbd class="kbd-hint">/</kbd>
-    </button>
-    <span class="dock-divider" aria-hidden="true"></span>
-    <button
-      bind:this={plannerBtnEl}
-      type="button"
-      class="dock-ai-btn"
-      class:open={plannerOpen}
-      {disabled}
-      onclick={() => {
-        wireLegendOpen = false;
-        catalogOpen = false;
-        plannerOpen = !plannerOpen;
-      }}
-      title="Type your workflow in high level (uses Cloudflare Workers AI)"
-    >
-      <span class="ai-sparkle" aria-hidden="true">✦</span>
-      <span class="ai-label-full">Describe Workflow</span>
-      <span class="ai-label-short">Describe</span>
-    </button>
-    <span class="dock-divider" aria-hidden="true"></span>
-    <button
-      type="button"
-      class="dock-tool-btn"
-      {disabled}
-      onclick={handleAutoLayout}
-      title="Re-arrange DAG cleanly and fit view"
-    >
-      Auto Layout
-    </button>
+  <!-- Floating Bottom-Center Action Dock: morphs seamlessly into the inline workflow prompt bar -->
+  <div
+    class="canvas-action-dock canvas-overlay"
+    class:planner-active={plannerOpen}
+    class:planner-review={Boolean(draftPreview)}
+    role="toolbar"
+    aria-label="Canvas authoring actions"
+  >
+    {#if plannerOpen}
+      <WorkflowPlannerBar
+        bind:this={plannerBarRef}
+        {graph}
+        {disabled}
+        {modKeyLabel}
+        {draftPreview}
+        onDraftChange={setDraftPreview}
+        onPromptStateChange={(hasText, isLoading) => {
+          plannerHasText = hasText;
+          plannerLoading = isLoading;
+        }}
+        onApply={(nextGraph, summary) => {
+          clearProposals();
+          draftPreview = null;
+          if (onApplyPlannedGraph) {
+            onApplyPlannedGraph(nextGraph, summary);
+          } else {
+            onGraphChange(nextGraph);
+          }
+          scheduleFitView(260);
+        }}
+        onClose={closeInlinePlanner}
+      />
+    {:else}
+      <button
+        bind:this={addBtnEl}
+        type="button"
+        class="add-block-btn"
+        class:open={catalogOpen}
+        data-tour="add-block-btn"
+        {disabled}
+        onclick={() => {
+          wireLegendOpen = false;
+          catalogOpen = !catalogOpen;
+        }}
+        title="Add a workflow block (shortcut: / or Shift+A, or double-click canvas)"
+      >
+        <span class="plus">+</span> Add Block
+        <kbd class="kbd-hint">/</kbd>
+      </button>
+      <span class="dock-divider" aria-hidden="true"></span>
+      <button
+        type="button"
+        class="dock-ai-btn"
+        {disabled}
+        onclick={openInlinePlanner}
+        title={`Type your workflow right on the canvas (${modKeyLabel}K · uses Cloudflare Workers AI)`}
+      >
+        <span class="ai-sparkle" aria-hidden="true">✦</span>
+        <span class="ai-label-full">Describe</span>
+        <span class="ai-label-short">Describe</span>
+        <kbd class="kbd-hint ai-kbd">{modKeyLabel}K</kbd>
+      </button>
+      <span class="dock-divider" aria-hidden="true"></span>
+      <button
+        type="button"
+        class="dock-tool-btn"
+        {disabled}
+        onclick={handleAutoLayout}
+        title="Re-arrange DAG cleanly and fit view"
+      >
+        Auto Layout
+      </button>
+    {/if}
   </div>
 
   <div class="flow-inner">
@@ -1015,11 +1126,11 @@
       {nodeTypes}
       {edgeTypes}
       forceColorMode={theme}
-      nodesDraggable={!disabled}
-      nodesConnectable={!disabled}
+      nodesDraggable={!disabled && !draftPreview}
+      nodesConnectable={!disabled && !draftPreview}
       zoomOnDoubleClick={false}
       multiSelectionKey={['Meta', 'Control', 'Shift']}
-      deleteKey={disabled ? null : ['Backspace', 'Delete']}
+      deleteKey={disabled || draftPreview ? null : ['Backspace', 'Delete']}
       minZoom={0.2}
       fitView
       fitViewOptions={{ padding: { top: 0.12, left: 0.1, right: 0.1, bottom: 0.28 }, maxZoom: 1 }}
@@ -1031,14 +1142,19 @@
         clearProposals();
         cancelClearConfirm();
         catalogOpen = false;
-        plannerOpen = false;
+        if (plannerOpen && !draftPreview && !plannerHasText && !plannerLoading) {
+          closeInlinePlanner();
+        }
         wireLegendOpen = false;
-        onSelectNode('');
+        if (!draftPreview) onSelectNode('');
       }}
       onnodeclick={({ node, event }) => {
+        if (draftPreview) return;
         cancelClearConfirm();
         catalogOpen = false;
-        plannerOpen = false;
+        if (plannerOpen && !plannerHasText && !plannerLoading) {
+          closeInlinePlanner();
+        }
         wireLegendOpen = false;
         if (proposedForNodeId && node.id !== proposedForNodeId) {
           clearProposals();
@@ -1213,6 +1329,37 @@
       min-height: 260px;
     }
   }
+  .draft-preview-banner {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 26;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    max-width: calc(100% - 28px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .draft-preview-banner strong {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  .dpb-spark {
+    color: var(--accent-bright);
+    flex-shrink: 0;
+  }
   .canvas-action-dock {
     position: absolute;
     bottom: calc(28px + env(safe-area-inset-bottom, 0px));
@@ -1224,12 +1371,32 @@
     gap: 4px;
     padding: 4px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-surface) 92%, transparent);
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
+    background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
     border: 1px solid var(--border-strong);
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24), var(--node-shadow);
     white-space: nowrap;
+    transition:
+      width 200ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      border-radius 180ms ease,
+      border-color 160ms ease,
+      box-shadow 160ms ease;
+  }
+  .canvas-action-dock.planner-active {
+    z-index: 32;
+    width: min(580px, calc(100% - 24px));
+    border-radius: 22px;
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
+    box-shadow:
+      0 0 0 1.5px color-mix(in srgb, var(--accent) 28%, transparent),
+      0 14px 36px rgba(0, 0, 0, 0.26),
+      var(--node-shadow);
+    white-space: normal;
+  }
+  .canvas-action-dock.planner-review {
+    width: min(630px, calc(100% - 24px));
+    border-radius: 999px;
   }
   .dock-divider {
     width: 1px;
@@ -1281,11 +1448,6 @@
     border-color: var(--border-strong);
     color: var(--text-primary);
   }
-  .dock-ai-btn.open {
-    background: var(--bg-surface-selected);
-    border-color: color-mix(in srgb, var(--accent) 50%, var(--border-strong));
-    color: var(--accent-bright);
-  }
   .dock-ai-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
@@ -1323,7 +1485,13 @@
     .canvas-action-dock {
       bottom: calc(18px + env(safe-area-inset-bottom, 0px));
     }
-    .add-block-btn .kbd-hint {
+    .canvas-action-dock.planner-active {
+      bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+      width: calc(100% - 16px);
+      border-radius: 18px;
+    }
+    .add-block-btn .kbd-hint,
+    .dock-ai-btn .ai-kbd {
       display: none;
     }
     .add-block-btn {
