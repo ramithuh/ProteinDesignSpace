@@ -9,9 +9,6 @@ export function esmfold2ParamIssue(params: Record<string, unknown>): string | un
   if ((params.msaMode ?? 'single') !== 'single') {
     return 'ESMFold2 requires single-sequence mode.';
   }
-  if (['ligandCcdCodes', 'dnaSequences', 'rnaSequences'].some((key) => String(params[key] ?? '').trim())) {
-    return 'ESMFold2 accepts protein chains only. Clear the ligand and nucleic acid inputs to run this checkpoint.';
-  }
 }
 
 /** Preserve both explicit chain lengths and inline chain boundaries at the worker boundary. */

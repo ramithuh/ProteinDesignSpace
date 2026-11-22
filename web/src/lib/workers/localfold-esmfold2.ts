@@ -34,11 +34,32 @@ export async function loadEsmfold2(
   return async function predict(
     device: GPUDevice, chains: string[], steps: number, seed: number, signal: AbortSignal,
     onProgress: (progress: number, stage: string) => void,
+    holo?: { dnaSeqs?: string[]; rnaSeqs?: string[]; parsedLigands?: unknown[] },
   ) {
     let stage = 'Language model';
     const sequence = chains.join('');
+    const dnaSeqs = holo?.dnaSeqs ?? [];
+    const rnaSeqs = holo?.rnaSeqs ?? [];
+    const parsedLigands = holo?.parsedLigands ?? [];
+    const hasExtraContext = dnaSeqs.length > 0 || rnaSeqs.length > 0 || parsedLigands.length > 0;
+    const allPolymerSeqs = [...chains, ...dnaSeqs, ...rnaSeqs];
+    const chainKinds: Array<'protein' | 'dna' | 'rna'> = [
+      ...chains.map(() => 'protein' as const),
+      ...dnaSeqs.map(() => 'dna' as const),
+      ...rnaSeqs.map(() => 'rna' as const),
+    ];
     const result = await fold.foldEsmfold2(device, {
       sequence: chains.join(':'),
+      ...(hasExtraContext
+        ? {
+            entities: {
+              sequence: allPolymerSeqs.join(':'),
+              chainKinds,
+              ...(parsedLigands.length > 0 ? { ligands: parsedLigands } : {}),
+              conformerSeed: seed,
+            },
+          }
+        : {}),
       shape: loaded.shape,
       weights: loaded.weights,
       confidenceWeights: loaded.confidenceWeights,
@@ -51,13 +72,14 @@ export async function loadEsmfold2(
       onProgress: (fraction: number) => onProgress(fraction, stage),
     });
     const { features, coordinates, confidence } = result;
-    if (features.tokens !== sequence.length || coordinates.length !== features.atoms * 3 ||
-        !confidence || confidence.plddt?.length !== sequence.length ||
-        confidence.plddtPerAtom?.length !== features.atoms || confidence.pae?.length !== sequence.length ** 2) {
+    const totalEntities = chains.length + dnaSeqs.length + rnaSeqs.length + parsedLigands.length;
+    if (features.tokens < sequence.length || coordinates.length !== features.atoms * 3 ||
+        !confidence || confidence.plddt?.length !== features.tokens ||
+        confidence.plddtPerAtom?.length !== features.atoms || confidence.pae?.length !== features.tokens ** 2) {
       throw new Error(`Invalid structure or confidence dimensions from ${family}.`);
     }
-    // The learned Synthyra head emits atom and token pLDDT on [0,1].
-    const plddt = Float32Array.from(confidence.plddt as Float32Array, (v) => v * 100);
+    // The learned Synthyra head emits atom and token pLDDT on [0,1]; keep per-residue pLDDT on protein tokens.
+    const plddt = Float32Array.from((confidence.plddt as Float32Array).subarray(0, sequence.length), (v) => v * 100);
     const denseConfidence = new Float32Array(features.tokens * features.dense);
     for (let i = 0; i < features.atoms; i++) {
       const slot = features.denseSlot[i];
@@ -66,7 +88,7 @@ export async function loadEsmfold2(
     const densePositions = featuresApi.toDensePositions(features, coordinates) as Float32Array;
     if (!densePositions.every(Number.isFinite) || !denseConfidence.every(Number.isFinite) ||
         !plddt.every(Number.isFinite) || !confidence.pae.every(Number.isFinite) ||
-        !Number.isFinite(confidence.ptm) || (chains.length > 1 && !Number.isFinite(confidence.iptm))) {
+        !Number.isFinite(confidence.ptm) || (totalEntities > 1 && !Number.isFinite(confidence.iptm))) {
       throw new Error(`Nonfinite structure or confidence from ${family}.`);
     }
     const pdbText = pdb.toPdb(features.batch, densePositions, denseConfidence) as string;
@@ -75,11 +97,18 @@ export async function loadEsmfold2(
       throw new Error(`ESMFold2 exported residues or chains inconsistent with the input.`);
     }
     const ptm: number = confidence.ptm;
-    const iptm: number | null = chains.length > 1 ? confidence.iptm : null;
+    const iptm: number | null = totalEntities > 1 ? confidence.iptm : null;
     const meanPlddt = plddt.reduce((sum, v) => sum + v, 0) / plddt.length;
     const chainLengths = chains.map((chain) => chain.length);
     const pae = confidence.pae as Float32Array;
-    const ipsaeRes = computeCandidateIpsae(pae, chainLengths, parsed.chainIds);
+    let ipsaeChainLengths = chainLengths;
+    let ipsaeChainIds = parsed.chainIds;
+    if (pae.length > sequence.length * sequence.length && features.tokens > sequence.length) {
+      const extraTokens = features.tokens - sequence.length;
+      ipsaeChainLengths = [...chainLengths, extraTokens];
+      ipsaeChainIds = [...parsed.chainIds, ...Array<string>(extraTokens).fill('LIG')];
+    }
+    const ipsaeRes = computeCandidateIpsae(pae, ipsaeChainLengths, ipsaeChainIds);
     return {
       sequence, pdbText, caCoords: parsed.caCoords, plddt, meanPlddt, confidence: meanPlddt,
       confidenceAvailable: true, ptm, iptm, pae,

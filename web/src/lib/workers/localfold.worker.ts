@@ -648,17 +648,45 @@ self.onmessage = async (ev: MessageEvent) => {
 
       if (isEsmfold2) {
         if (!gpuDevice || !predictEsmfold2) throw new Error('ESMFold2 was not initialized');
+        const parsedLigands: unknown[] = [];
+        if (ligandCcdCodes.length > 0) {
+          const ccdMod = await importVendor('shared/af3/featurise/ccd-component.js');
+          if (!ccdMod?.ccdUrl || !ccdMod?.parseCcdComponent) {
+            throw new Error(
+              `Cannot co-fold requested CCD ligand(s) [${ligandCcdCodes.join(', ')}]: LocalFold CCD component parser is unavailable.`,
+            );
+          }
+          const textDec = new TextDecoder();
+          for (const code of ligandCcdCodes) {
+            try {
+              const url = ccdMod.ccdUrl(code);
+              const bytes = await fetchCachedBytes(`lf-ccd-${code}`, url);
+              parsedLigands.push(ccdMod.parseCcdComponent(textDec.decode(bytes)));
+            } catch (err) {
+              throw new Error(
+                `Failed to fetch/parse requested CCD ligand "${code}" for ESMFold2 holo co-folding (${err instanceof Error ? err.message : String(err)}). Verify the CCD code or remove it to fold apo.`,
+              );
+            }
+          }
+        }
         const controller = new AbortController();
         esmfold2Abort = controller;
         try {
           for (const [i, target] of targets.entries()) {
             const { cand } = target;
             const start = performance.now();
-            const result = await predictEsmfold2(gpuDevice, ef2Chains[i], esmfold2Steps, target.seed,
-              controller.signal, (progress, stage) => self.postMessage({
+            const result = await predictEsmfold2(
+              gpuDevice,
+              ef2Chains[i],
+              esmfold2Steps,
+              target.seed,
+              controller.signal,
+              (progress, stage) => self.postMessage({
                 id: msg.id, type: 'progress', phase: 'fold',
                 progress: (i + progress) / targets.length, detail: `${modelKey} ${cand.id}: ${stage}`,
-              }));
+              }),
+              { dnaSeqs, rnaSeqs, parsedLigands },
+            );
             folds.push({
               ...result, sequenceId: cand.id, key: target.sequenceKey ?? cand.key ?? cand.id,
               designKey: target.designKey, designIndex: target.designIndex,
@@ -1129,9 +1157,9 @@ self.onmessage = async (ev: MessageEvent) => {
           seed,
           msaMode,
           msaA3mHash: msaMode === 'a3m' ? fnv1a(msaA3mText) : null,
-          ligandCcdCodes: isAf3 ? ligandCcdCodes : [],
-          dnaSeqs: isAf3 ? dnaSeqs : [],
-          rnaSeqs: isAf3 ? rnaSeqs : [],
+          ligandCcdCodes: isAf3 || isEsmfold2 ? ligandCcdCodes : [],
+          dnaSeqs: isAf3 || isEsmfold2 ? dnaSeqs : [],
+          rnaSeqs: isAf3 || isEsmfold2 ? rnaSeqs : [],
         }),
       );
 

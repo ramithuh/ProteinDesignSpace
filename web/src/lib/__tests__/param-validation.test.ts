@@ -210,7 +210,7 @@ describe('parameter validation & numeric sanitization', () => {
     expect(validate({ esmfold2Steps: '32', recycles: 19 })).toEqual([]);
     expect(validate({ esmfold2Steps: 25 }).join(' ')).toContain('diffusion schedule');
     expect(validate({ msaMode: 'mmseqs2' }).join(' ')).toContain('single-sequence');
-    expect(validate({ ligandCcdCodes: ['ZN'] }).join(' ')).toContain('protein chains only');
+    expect(validate({ ligandCcdCodes: 'ZN, DHZ' })).toEqual([]);
   });
 
   it('mpnn.worker.ts supports whole-chain locking, designChains, inherited locks, omitAminoAcids, tiedPositions, and aligned bounds', () => {

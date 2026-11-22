@@ -2025,14 +2025,14 @@
               <option value={steps}>{steps} scheduled steps</option>
             {/each}
           </select>
-          <span class="field-hint">Uses protein sequences alone. The default 15-step schedule executes 11 diffusion updates.</span>
+          <span class="field-hint">Single-sequence ESM-C + all-atom diffusion. The default 15-step schedule executes 11 diffusion updates.</span>
         </label>
-        {#if lfMsaMode !== 'single' || lfHasHoloContext}
+        {#if lfMsaMode !== 'single'}
           <div class="full">
-            <span class="field-hint warn">This checkpoint accepts protein sequences without an MSA or co-folding context.</span>
+            <span class="field-hint warn">This checkpoint runs in single-sequence mode without an external MSA.</span>
             <button type="button" {disabled} onclick={() => onUpdate(node.id, {
-              ...node.params, msaMode: 'single', ligandCcdCodes: '', dnaSequences: '', rnaSequences: '',
-            })}>Use protein sequence only</button>
+              ...node.params, msaMode: 'single',
+            })}>Switch to single-sequence</button>
           </div>
         {/if}
       {:else}
@@ -2166,7 +2166,7 @@
         </div>
       {/if}
 
-      {#if lfMeta.family === 'af3'}
+      {#if lfMeta.family === 'af3' || lfMeta.family === 'esmfold2'}
         <details class="adv-details full" open={lfHasHoloContext}>
           <summary>
             Holo co-folding (ligands / DNA / RNA)

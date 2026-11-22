@@ -1097,8 +1097,9 @@ export function validateBioCapabilities(
       const modelDisplay = nodeName.toLowerCase().includes(meta.shortLabel.toLowerCase())
         ? nodeName
         : `${nodeName} (${meta.shortLabel})`;
+      const supportsHolo = meta.family === 'af3' || meta.family === 'esmfold2';
       const hasExplicitAf3NonProt =
-        meta.family === 'af3' &&
+        supportsHolo &&
         (String(node.params.ligandCcdCodes ?? '').trim().length > 0 ||
           String(node.params.dnaSequences ?? '').trim().length > 0 ||
           String(node.params.rnaSequences ?? '').trim().length > 0);
@@ -1123,7 +1124,7 @@ export function validateBioCapabilities(
         ].filter(Boolean);
         const holoSummary = holoParts.join(' + ');
 
-        if (meta.family !== 'af3') {
+        if (!supportsHolo) {
           issues.push({
             severity: 'warning',
             code: 'af2-non-protein-entity',

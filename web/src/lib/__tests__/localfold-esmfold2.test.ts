@@ -25,14 +25,13 @@ describe('ESMFold2 worker contract', () => {
     }
   });
 
-  it('rejects non-protein context or MSA requests before loading weights', async () => {
+  it('rejects unsupported MSA or diffusion schedules before loading weights', async () => {
     const postMessage = vi.fn();
     const scope = { postMessage, onmessage: async (_event: { data: unknown }) => {} };
     vi.stubGlobal('self', scope);
     try {
       await import('$lib/workers/localfold.worker');
       for (const params of [
-        { ligandCcdCodes: ['ATP'] }, { dnaSequences: 'ATGC' }, { rnaSequences: 'AUGC' },
         { msaMode: 'mmseqs2' }, { esmfold2Steps: 25 },
       ]) {
         postMessage.mockClear();
@@ -108,5 +107,47 @@ describe('ESMFold2 worker contract', () => {
 
     missingConfidence = true;
     await expect(fold(['ACDEFG'])).rejects.toThrow(/confidence dimensions/);
+  });
+
+  it('supports all-atom holo entities (DNA/ligands) through featuriseForEsmfold2 and computes iptm/ipsae', async () => {
+    const featuresApi = await vendor('shared/esmfold2/featurise.js');
+    const model = {
+      loadEsmfold2Weights: vi.fn(async () => ({
+        shape: { loops: 4, pairChannels: 256 }, language: { megabytes: 130 },
+      })),
+      languageModelRunner: () => () => {},
+    };
+    const holoPredict = await loadEsmfold2('ef2-fast-300m', async (path) => {
+      if (path === 'web/esmfold2-model.js') return model;
+      if (path !== 'webgpu/esmfold2/fold.js') return vendor(path);
+      return {
+        foldEsmfold2: (_device: unknown, args: { entities?: Record<string, unknown>; sequence: string }) => {
+          expect(args.entities).toBeDefined();
+          const f = featuresApi.featuriseForEsmfold2(args.entities ?? args.sequence);
+          const confidence = {
+            plddt: new Float32Array(f.tokens).fill(0.8),
+            plddtPerAtom: new Float32Array(f.atoms).fill(0.82),
+            pae: new Float32Array(f.tokens ** 2).fill(2.5),
+            ptm: 0.72,
+            iptm: 0.68,
+          };
+          return { features: f, coordinates: f.refPos, steps: 11, confidence };
+        },
+      };
+    }, () => {});
+    const holoRes = await holoPredict(
+      {} as GPUDevice,
+      ['ACDEFG'],
+      15,
+      42,
+      new AbortController().signal,
+      () => {},
+      { dnaSeqs: ['ACGT'] },
+    );
+    expect(holoRes.sequence).toBe('ACDEFG');
+    expect(holoRes.plddt).toHaveLength(6);
+    expect(holoRes.meanPlddt).toBeCloseTo(80, 4);
+    expect(holoRes.iptm).toBeCloseTo(0.68, 4);
+    expect(holoRes.ipsae).toBeGreaterThan(0);
   });
 });
