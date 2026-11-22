@@ -4,8 +4,12 @@
   import {
     analyzeSequence,
     foldModelSlug,
+    formatCandidateSequence,
     formatFoldModelName,
+    inferPdbChainLengths,
     previewTextLines,
+    resolveActiveRowChainLengths,
+    resolveFoldIpsae,
     type PeekSlot,
   } from '$lib/engine/peek';
   import {
@@ -232,28 +236,6 @@
       }
     }
     return count > 0 ? sum / count : null;
-  }
-
-  function inferPdbChainLengths(pdbText?: string): number[] | undefined {
-    if (!pdbText) return undefined;
-    const counts: number[] = [];
-    const seen = new Set<string>();
-    let lastChain = '';
-    for (const line of pdbText.split('\n')) {
-      if (!line.startsWith('ATOM  ') || line.length < 27) continue;
-      if (line.slice(12, 16).trim() !== 'CA') continue;
-      const chain = line[21] || 'A';
-      const resKey = `${chain}:${line.slice(22, 27)}`;
-      if (seen.has(resKey)) continue;
-      seen.add(resKey);
-      if (counts.length === 0 || chain !== lastChain) {
-        counts.push(1);
-        lastChain = chain;
-      } else {
-        counts[counts.length - 1] += 1;
-      }
-    }
-    return counts.length > 1 ? counts : undefined;
   }
 
   let effectiveIpsaePass = $derived(ipsaeThreshold > 0 ? ipsaeThreshold : 0.6);
@@ -660,6 +642,7 @@
           globalScore: null,
           sourceModelId: 'scorer',
           ...(row.sourceStructureId ? { sourceStructureId: row.sourceStructureId } : {}),
+          ...(row.chainLengths ? { chainLengths: row.chainLengths } : {}),
         },
         summary: {
           label: row.sequenceId,
@@ -824,20 +807,18 @@
       ),
     ),
   );
-  let activeRowChainLengths = $derived.by((): number[] | undefined => {
-    if (!activeRow) return undefined;
-    const fromPdb = inferPdbChainLengths(activeRow.alignedFoldPdb);
-    if (fromPdb && fromPdb.length > 1) return fromPdb;
-    const ctxLens = contextStructure?.chainLengths ?? contextStructure?.diagnostics?.chainLengths;
-    return ctxLens && ctxLens.length > 1 ? ctxLens : undefined;
-  });
+  let activeRowChainLengths = $derived(
+    resolveActiveRowChainLengths(activeRow, contextStructure),
+  );
   let hasFoldMultiChainMetrics = $derived(
     Boolean(
       foldArt?.folds.some(
         (f) =>
           isFiniteNum(f.iptm) ||
           isFiniteNum(f.ipsae) ||
-          (f.chainLengths && f.chainLengths.length > 1),
+          (f.chainLengths && f.chainLengths.length > 1) ||
+          Boolean(f.chainIds && new Set(f.chainIds).size > 1) ||
+          resolveFoldIpsae(f) !== null,
       ),
     ),
   );
@@ -858,19 +839,6 @@
 
   function formatConditionKey(key: string): string {
     return CONDITION_KEY_LABELS[key] ?? key;
-  }
-
-  function formatCandidateSequence(sequence: string, chainLengths?: number[]): string {
-    if (!chainLengths || chainLengths.length <= 1) return sequence;
-    const sum = chainLengths.reduce((acc, n) => acc + n, 0);
-    if (sum !== sequence.length) return sequence;
-    const parts: string[] = [];
-    let offset = 0;
-    for (const len of chainLengths) {
-      parts.push(sequence.slice(offset, offset + len));
-      offset += len;
-    }
-    return parts.join(':');
   }
 
   function formatFasta(seqSet: SequenceSet): string {
@@ -1059,6 +1027,23 @@
           {/each}
         </div>
       {/if}
+    </div>
+  {/if}
+
+  {#if activeSlot?.direction === 'in' && outSlots.length > 0 && outSlots.every((s) => s.artifact === null) && node && onRunUpToNode}
+    {@const nodeTitle = node.label || ADAPTER_REGISTRY[node.adapterId]?.shortName || node.adapterId}
+    <div class="input-preview-banner" role="status">
+      <span>
+        Showing upstream input (<b>{activeSlot.portName}</b>) — <b>{nodeTitle}</b> has not run yet.
+      </span>
+      <button
+        type="button"
+        class="run-to-btn compact"
+        disabled={isRunning}
+        onclick={() => onRunUpToNode(node.id)}
+      >
+        ▶ Run up to {nodeTitle}
+      </button>
     </div>
   {/if}
 
@@ -1256,6 +1241,7 @@
       {@const designedIsCif = activeRow.designedPdb.trimStart().startsWith('data_')}
       {@const activeFailedGates = activeRow.failedGates ?? []}
       {@const activeMsaBadge = formatMsaBadge(activeRow.msaMode, activeRow.msaDepth)}
+      {@const formattedRowSeq = formatCandidateSequence(activeRow.sequence, activeRowChainLengths)}
       {#if !activeRow.designable && activeFailedGates.length > 0}
         <div class="failed-gates-box" role="status">
           <span class="failed-gates-lbl">Failed gates:</span>
@@ -1284,7 +1270,7 @@
         <div class="seq-head">
           <span>Selected Sequence ({activeRow.sequence.length} aa · {activeRowSeqStats.uniqueAaCount} unique AAs)</span>
           <div class="dl-links">
-            <button class="link-btn" onclick={() => copyText(activeRow.sequence, 'metric-seq')}>
+            <button class="link-btn" onclick={() => copyText(formattedRowSeq, 'metric-seq')}>
               {copyBtnLabel('metric-seq', 'Copy seq')}
             </button>
             {#if activeRow.designedPdb.trim().length > 0}
@@ -1318,7 +1304,7 @@
             {/each}
           </div>
         {/if}
-        <div class="seq-text">{activeRow.sequence}</div>
+        <div class="seq-text">{formattedRowSeq}</div>
       </div>
 
       <div class="pae-row">
@@ -1479,6 +1465,7 @@
           {@const i = entry.origIdx}
           {@const confAvail = f.confidenceAvailable !== false && isFiniteNum(f.meanPlddt)}
           {@const fIpae = hasFoldMultiChainMetrics ? computeIpaeFromPae(f.pae, f.chainLengths) : null}
+          {@const fIpsae = hasFoldMultiChainMetrics ? resolveFoldIpsae(f) : null}
           <tr class:selected={i === selectedFoldIdx} onclick={() => onSelectFold(i)}>
             {#if foldMultiDesign}
               <td><span class="design-tag">{entry.designLabel || '—'}</span></td>
@@ -1494,8 +1481,8 @@
               <td class:good-val={isFiniteNum(fIpae) && fIpae < ipaeThreshold}>
                 {fmtNum(fIpae, 1, ' Å')}
               </td>
-              <td class:good-val={isFiniteNum(f.ipsae) && f.ipsae >= effectiveIpsaePass}>
-                {fmtNum(f.ipsae, 2)}
+              <td class:good-val={fIpsae !== null && fIpsae.ipsae >= effectiveIpsaePass}>
+                {fmtNum(fIpsae?.ipsae, 2)}
               </td>
             {/if}
             <td>{isFiniteNum(f.elapsedMs) ? `${(f.elapsedMs / 1000).toFixed(1)}s` : '—'}</td>
@@ -1513,6 +1500,12 @@
       )}
       {@const activeFoldQuant = formatQuantChip(activeFold.provenance, activeFold.foldModelId)}
       {@const activeFoldIpae = computeIpaeFromPae(activeFold.pae, activeFold.chainLengths)}
+      {@const activeFoldIpsae = resolveFoldIpsae(activeFold)}
+      {@const activeFoldChainLengths =
+        activeFold.chainLengths && activeFold.chainLengths.length > 1
+          ? activeFold.chainLengths
+          : inferPdbChainLengths(activeFold.pdbText)}
+      {@const formattedFoldSeq = formatCandidateSequence(activeFold.sequence, activeFoldChainLengths)}
       <div class="stat-chips">
         <span class="stat-chip cond-key" title="Multiple sequence alignment mode & depth">
           MSA: {activeFoldMsa}
@@ -1542,7 +1535,7 @@
         <div class="seq-head">
           <span>{activeFold.sequenceId} · {formatFoldModelName(activeFold.foldModelId)}</span>
           <div class="dl-links">
-            <button class="link-btn" onclick={() => copyText(activeFold.sequence, 'fold-seq')}>
+            <button class="link-btn" onclick={() => copyText(formattedFoldSeq, 'fold-seq')}>
               {copyBtnLabel('fold-seq', 'Copy seq')}
             </button>
             <button
@@ -1557,7 +1550,7 @@
             </button>
           </div>
         </div>
-        <div class="seq-text">{activeFold.sequence}</div>
+        <div class="seq-text">{formattedFoldSeq}</div>
       </div>
 
       <div class="pae-row">
@@ -1582,14 +1575,14 @@
               <span class:good-val={activeFoldIpae < ipaeThreshold}>{activeFoldIpae.toFixed(2)} Å</span>
             </div>
           {/if}
-          {#if isFiniteNum(activeFold.ipsae)}
+          {#if activeFoldIpsae !== null}
             <div>
               <b>ipSAE:</b>
-              <span class:good-val={activeFold.ipsae >= effectiveIpsaePass}>
-                {activeFold.ipsae.toFixed(2)}
+              <span class:good-val={activeFoldIpsae.ipsae >= effectiveIpsaePass}>
+                {activeFoldIpsae.ipsae.toFixed(2)}
               </span>
-              {#if isFiniteNum(activeFold.ipsaeMin)}
-                <span class="sub-note">(min {activeFold.ipsaeMin.toFixed(2)})</span>
+              {#if isFiniteNum(activeFoldIpsae.ipsaeMin)}
+                <span class="sub-note">(min {activeFoldIpsae.ipsaeMin.toFixed(2)})</span>
               {/if}
             </div>
           {/if}
@@ -2655,6 +2648,25 @@
   .run-to-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  .run-to-btn.compact {
+    padding: 4px 10px;
+    font-size: 11px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .input-preview-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 7px 10px;
+    background: var(--info-bg, rgba(56, 189, 248, 0.08));
+    border: 1px solid var(--info-border, rgba(56, 189, 248, 0.35));
+    border-radius: 6px;
+    font-size: 11px;
+    color: var(--text-secondary);
   }
   .hint-foot {
     font-size: 11px;

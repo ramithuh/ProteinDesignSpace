@@ -467,10 +467,61 @@ export class MemoryArtifactBackend implements BlobStorageBackend {
 // Browser IndexedDB v2 Backend (RFC §4.4)
 // ============================================================================
 
+const openArtifactDbs = new Set<IDBDatabase>();
+
+export function closeAllOpenArtifactDbs(): void {
+  for (const db of openArtifactDbs) {
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
+  }
+  openArtifactDbs.clear();
+}
+
+export async function clearArtifactDatabase(dbName = ARTIFACT_DB_NAME): Promise<void> {
+  closeAllOpenArtifactDbs();
+  if (typeof indexedDB === 'undefined' || typeof indexedDB.deleteDatabase !== 'function') {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, 2000);
+    try {
+      const req = indexedDB.deleteDatabase(dbName);
+      if (!req || typeof req !== 'object') {
+        finish();
+        return;
+      }
+      req.onsuccess = finish;
+      req.onerror = finish;
+      // Do not settle immediately onblocked; wait for onversionchange -> db.close() or timeout
+    } catch {
+      finish();
+    }
+  });
+}
+
 class IndexedDbArtifactBackend implements BlobStorageBackend {
   readonly isDurable = true;
 
   constructor(private readonly dbName = ARTIFACT_DB_NAME) {}
+
+  private closeDb(db: IDBDatabase): void {
+    openArtifactDbs.delete(db);
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
+  }
 
   private openDb(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
@@ -491,7 +542,22 @@ class IndexedDbArtifactBackend implements BlobStorageBackend {
             db.createObjectStore(STORE_RUNS);
           }
         };
-        req.onsuccess = () => resolve(req.result);
+        req.onsuccess = () => {
+          const db = req.result;
+          openArtifactDbs.add(db);
+          db.onversionchange = () => {
+            openArtifactDbs.delete(db);
+            try {
+              db.close();
+            } catch {
+              /* ignore */
+            }
+          };
+          db.onclose = () => {
+            openArtifactDbs.delete(db);
+          };
+          resolve(db);
+        };
         req.onerror = () => reject(req.error ?? new Error('Failed to open artifact IndexedDB'));
       } catch (err) {
         reject(err);
@@ -521,7 +587,7 @@ class IndexedDbArtifactBackend implements BlobStorageBackend {
         tx.onabort = () => reject(this.wrapError(tx.error, bytes.byteLength));
       });
     } finally {
-      db.close();
+      this.closeDb(db);
     }
   }
 
@@ -542,7 +608,7 @@ class IndexedDbArtifactBackend implements BlobStorageBackend {
         req.onerror = () => reject(this.wrapError(req.error));
       });
     } finally {
-      db.close();
+      this.closeDb(db);
     }
   }
 
@@ -556,7 +622,7 @@ class IndexedDbArtifactBackend implements BlobStorageBackend {
         req.onerror = () => reject(this.wrapError(req.error));
       });
     } finally {
-      db.close();
+      this.closeDb(db);
     }
   }
 
@@ -570,7 +636,7 @@ class IndexedDbArtifactBackend implements BlobStorageBackend {
         tx.onerror = () => reject(this.wrapError(tx.error));
       });
     } finally {
-      db.close();
+      this.closeDb(db);
     }
   }
 
@@ -584,7 +650,7 @@ class IndexedDbArtifactBackend implements BlobStorageBackend {
         req.onerror = () => reject(this.wrapError(req.error));
       });
     } finally {
-      db.close();
+      this.closeDb(db);
     }
   }
 
@@ -599,7 +665,7 @@ class IndexedDbArtifactBackend implements BlobStorageBackend {
         tx.onabort = () => reject(this.wrapError(tx.error));
       });
     } finally {
-      db.close();
+      this.closeDb(db);
     }
   }
 
@@ -616,7 +682,7 @@ class IndexedDbArtifactBackend implements BlobStorageBackend {
         req.onerror = () => reject(this.wrapError(req.error));
       });
     } finally {
-      db.close();
+      this.closeDb(db);
     }
   }
 
@@ -630,7 +696,7 @@ class IndexedDbArtifactBackend implements BlobStorageBackend {
         tx.onerror = () => reject(this.wrapError(tx.error));
       });
     } finally {
-      db.close();
+      this.closeDb(db);
     }
   }
 
@@ -644,7 +710,7 @@ class IndexedDbArtifactBackend implements BlobStorageBackend {
         req.onerror = () => reject(this.wrapError(req.error));
       });
     } finally {
-      db.close();
+      this.closeDb(db);
     }
   }
 
@@ -672,7 +738,7 @@ class IndexedDbArtifactBackend implements BlobStorageBackend {
         tx.onabort = () => reject(this.wrapError(tx.error, commit.bytes.byteLength));
       });
     } finally {
-      db.close();
+      this.closeDb(db);
     }
   }
 }

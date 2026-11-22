@@ -9,6 +9,7 @@ import {
 import { ExecutionScheduler } from '$lib/engine/scheduler';
 import { validateConnection } from '$lib/engine/graph-utils';
 import { atom37ToPdb, chainIdsFromLengths, parsePdbBackbone } from '$lib/protein-ops/pdb';
+import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import type {
   FoldedCandidate,
   SequenceSet,
@@ -661,5 +662,212 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
       ],
     };
     expect(validateBioCapabilities(genie3MonomerGraph)).toEqual([]);
+  });
+
+  it('R4: warns when AntiFold is wired to non-antibody structures and offers 1-click Switch to ESM-IF1 fix without false positives on antibodies', () => {
+    // 1. Demo bundle / RFD4 / 1UBQ -> AntiFold triggers antifold-non-antibody warning
+    const demoAntiGraph: WorkflowGraph = {
+      id: 'demo-anti',
+      name: 'Demo AntiFold',
+      nodes: [
+        { id: 'pdb', adapterId: 'pdb-input', params: { mode: 'demo-bundle', filename: 'demo_3helix_53aa.pdb' } },
+        {
+          id: 'af',
+          adapterId: 'antifold-esmif1',
+          label: 'AntiFold',
+          params: { variant: 'antifold', regions: 'CDR1 CDR2 CDR3' },
+        },
+      ],
+      edges: [{ fromNode: 'pdb', fromPort: 'structure', toNode: 'af', toPort: 'structure' }],
+    };
+    const demoIssues = validateBioCapabilities(demoAntiGraph);
+    const antiWarn = demoIssues.find((i) => i.code === 'antifold-non-antibody');
+    expect(antiWarn).toBeDefined();
+    expect(antiWarn!.severity).toBe('warning');
+    expect(antiWarn!.message).toMatch(/ESM-IF1|SolubleMPNN/i);
+    expect(antiWarn!.fix).toEqual({
+      label: 'Switch to ESM-IF1',
+      nodeId: 'af',
+      paramsPatch: { variant: 'esmif1' },
+      nodeLabel: 'ESM-IF1',
+    });
+
+    // Applying the +page.svelte fix merge resolves the warning
+    const fixedGraph: WorkflowGraph = {
+      ...demoAntiGraph,
+      nodes: demoAntiGraph.nodes.map((n) =>
+        n.id === antiWarn!.fix!.nodeId
+          ? {
+              ...n,
+              params: { ...n.params, ...antiWarn!.fix!.paramsPatch },
+              ...(antiWarn!.fix!.nodeLabel ? { label: antiWarn!.fix!.nodeLabel } : {}),
+            }
+          : n,
+      ),
+    };
+    expect(validateBioCapabilities(fixedGraph).find((i) => i.code === 'antifold-non-antibody')).toBeUndefined();
+
+    // 2. RFD4 de novo backbone -> AntiFold triggers warning
+    const rfdAntiGraph: WorkflowGraph = {
+      id: 'rfd-anti',
+      name: 'RFD4 AntiFold',
+      nodes: [
+        { id: 'rfd', adapterId: 'rfd4-proteina', params: { mode: 'unconditional', length: 80 } },
+        { id: 'af', adapterId: 'antifold-esmif1', label: 'AntiFold', params: { variant: 'antifold' } },
+      ],
+      edges: [{ fromNode: 'rfd', fromPort: 'structure', toNode: 'af', toPort: 'structure' }],
+    };
+    expect(validateBioCapabilities(rfdAntiGraph).some((i) => i.code === 'antifold-non-antibody')).toBe(true);
+
+    // 3. Negative control: antibody H/L chain / molecularContext antibody-H does NOT emit warning
+    const abGraph: WorkflowGraph = {
+      id: 'ab-anti',
+      name: 'Antibody AntiFold',
+      nodes: [
+        { id: 'pdb', adapterId: 'pdb-input', params: { mode: 'pdb-id', pdbId: '1IGT' } },
+        { id: 'af', adapterId: 'antifold-esmif1', label: 'AntiFold', params: { variant: 'antifold', targetChain: 'H', regions: 'CDR1 CDR3' } },
+      ],
+      edges: [{ fromNode: 'pdb', fromPort: 'structure', toNode: 'af', toPort: 'structure' }],
+    };
+    expect(validateBioCapabilities(abGraph).find((i) => i.code === 'antifold-non-antibody')).toBeUndefined();
+
+    const abStructOut = {
+      pdb: {
+        structure: {
+          kind: 'StructureArtifact',
+          id: 'ab-1igt',
+          label: '1IGT',
+          sourceModelId: 'pdb-input',
+          length: 115,
+          sequence: 'A'.repeat(115),
+          caCoords: new Float32Array(115 * 3),
+          backbone4Coords: new Float32Array(115 * 4 * 3),
+          pdbText: '',
+          geometry: computeGeometryStats(new Float32Array(115 * 3)),
+          molecularContext: { chainTypes: { A: 'antibody-H' } },
+        } satisfies StructureArtifact,
+      },
+    };
+    const abCtxGraph: WorkflowGraph = {
+      id: 'ab-ctx',
+      name: 'Antibody Context AntiFold',
+      nodes: [
+        { id: 'pdb', adapterId: 'pdb-input', params: { mode: 'pdb-id', pdbId: '1IGT' } },
+        { id: 'af', adapterId: 'antifold-esmif1', label: 'AntiFold', params: { variant: 'antifold', regions: 'CDR3' } },
+      ],
+      edges: [{ fromNode: 'pdb', fromPort: 'structure', toNode: 'af', toPort: 'structure' }],
+    };
+    expect(validateBioCapabilities(abCtxGraph, abStructOut).find((i) => i.code === 'antifold-non-antibody')).toBeUndefined();
+  });
+
+  it('Iteration 2 Bug 5: does NOT suppress antifold-non-antibody warning via resNum >= 105 on >=105aa RFD4 or non-antibody PDBs (1CTT, 5O45)', () => {
+    const makeSequentialPdb = (nRes: number, chain = 'A', startNum = 1) => {
+      const lines: string[] = [];
+      let serial = 1;
+      for (let i = 0; i < nRes; i++) {
+        const rn = String(startNum + i).padStart(4);
+        const x = (i * 3.8).toFixed(3).padStart(8);
+        lines.push(`ATOM  ${String(serial++).padStart(5)}  N   ALA ${chain}${rn}    ${x}   0.000   0.000  1.00 20.00           N  `);
+        lines.push(`ATOM  ${String(serial++).padStart(5)}  CA  ALA ${chain}${rn}    ${x}   1.000   0.000  1.00 20.00           C  `);
+        lines.push(`ATOM  ${String(serial++).padStart(5)}  C   ALA ${chain}${rn}    ${x}   2.000   0.000  1.00 20.00           C  `);
+        lines.push(`ATOM  ${String(serial++).padStart(5)}  O   ALA ${chain}${rn}    ${x}   2.000   1.000  1.00 20.00           O  `);
+      }
+      lines.push('END');
+      return lines.join('\n');
+    };
+
+    // Case A: RFD4 120aa with materialized liveStruct (sourceResidues 1..120 on chain A)
+    const rfd4LiveStruct: StructureArtifact = {
+      kind: 'StructureArtifact',
+      id: 'rfd4-120',
+      label: 'RFD4 120aa',
+      sourceModelId: 'rfd4-proteina',
+      length: 120,
+      sequence: 'A'.repeat(120),
+      caCoords: new Float32Array(120 * 3),
+      backbone4Coords: new Float32Array(120 * 4 * 3),
+      pdbText: makeSequentialPdb(120),
+      chainIds: Array(120).fill('A'),
+      sourceResidues: Array.from({ length: 120 }, (_, i) => ({
+        index: i,
+        authChainId: 'A',
+        resNum: i + 1,
+        insCode: '',
+        resName: 'ALA',
+        projectedChainId: 'A',
+      })),
+      geometry: computeGeometryStats(new Float32Array(120 * 3)),
+    };
+    const rfd4Graph: WorkflowGraph = {
+      id: 'rfd4-120-antifold',
+      name: 'RFD4 120aa AntiFold',
+      nodes: [
+        { id: 'rfd4_1', adapterId: 'rfd4-proteina', params: { mode: 'unconditional', length: 120 } },
+        { id: 'af_1', adapterId: 'antifold-esmif1', label: 'AntiFold', params: { variant: 'antifold' } },
+      ],
+      edges: [{ fromNode: 'rfd4_1', fromPort: 'structure', toNode: 'af_1', toPort: 'structure' }],
+    };
+    expect(
+      validateBioCapabilities(rfd4Graph, { rfd4_1: { structure: rfd4LiveStruct } }).some(
+        (i) => i.code === 'antifold-non-antibody',
+      ),
+    ).toBe(true);
+
+    // Case B: 1CTT (294aa enzyme) with pdbText loaded
+    const cttGraph: WorkflowGraph = {
+      id: '1ctt-antifold',
+      name: '1CTT AntiFold',
+      nodes: [
+        {
+          id: 'pdb_1',
+          adapterId: 'pdb-input',
+          params: { mode: 'pdb-id', pdbId: '1CTT', pdbText: makeSequentialPdb(294) },
+        },
+        { id: 'af_1', adapterId: 'antifold-esmif1', label: 'AntiFold', params: { variant: 'antifold' } },
+      ],
+      edges: [{ fromNode: 'pdb_1', fromPort: 'structure', toNode: 'af_1', toPort: 'structure' }],
+    };
+    expect(
+      validateBioCapabilities(cttGraph, {}).some((i) => i.code === 'antifold-non-antibody'),
+    ).toBe(true);
+
+    // Case C: 5O45 benchmark target with pdbText >= 105aa
+    const pdl1Graph: WorkflowGraph = {
+      id: '5o45-antifold',
+      name: '5O45 AntiFold',
+      nodes: [
+        {
+          id: 'pdb_1',
+          adapterId: 'pdb-input',
+          params: { mode: 'pdb-id', pdbId: '5O45', pdbText: makeSequentialPdb(116, 'A', 17) },
+        },
+        { id: 'af_1', adapterId: 'antifold-esmif1', label: 'AntiFold', params: { variant: 'antifold' } },
+      ],
+      edges: [{ fromNode: 'pdb_1', fromPort: 'structure', toNode: 'af_1', toPort: 'structure' }],
+    };
+    expect(
+      validateBioCapabilities(pdl1Graph, {}).some((i) => i.code === 'antifold-non-antibody'),
+    ).toBe(true);
+
+    // Case D: Custom antibody PDB on chain A identified via PDB header keyword does NOT warn
+    const customNanobodyGraph: WorkflowGraph = {
+      id: 'nb-header-antifold',
+      name: 'Nanobody Header AntiFold',
+      nodes: [
+        {
+          id: 'pdb_1',
+          adapterId: 'pdb-input',
+          params: {
+            mode: 'custom',
+            pdbText: `HEADER    NANOBODY VHH\n${makeSequentialPdb(120, 'A', 1)}`,
+          },
+        },
+        { id: 'af_1', adapterId: 'antifold-esmif1', label: 'AntiFold', params: { variant: 'antifold' } },
+      ],
+      edges: [{ fromNode: 'pdb_1', fromPort: 'structure', toNode: 'af_1', toPort: 'structure' }],
+    };
+    expect(
+      validateBioCapabilities(customNanobodyGraph, {}).some((i) => i.code === 'antifold-non-antibody'),
+    ).toBe(false);
   });
 });

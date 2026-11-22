@@ -62,6 +62,7 @@
     onOpenStudio?: (nodeId: string) => void;
     onOpenTour?: () => void;
     onApplyPlannedGraph?: (next: WorkflowGraph, summary: string) => void;
+    onDraftPreviewChange?: (draft: PlannedWorkflowResult | null) => void;
   }
 
   let {
@@ -89,6 +90,7 @@
     onOpenStudio = undefined,
     onOpenTour = undefined,
     onApplyPlannedGraph = undefined,
+    onDraftPreviewChange = undefined,
   }: Props = $props();
 
   let canvasHintDismissed = $state(false);
@@ -120,6 +122,12 @@
   let plannerHasText = $state(false);
   let plannerLoading = $state(false);
   let draftPreview = $state<PlannedWorkflowResult | null>(null);
+  let lastNotifiedDraft: PlannedWorkflowResult | null = null;
+  function notifyDraftPreview(next: PlannedWorkflowResult | null) {
+    if (lastNotifiedDraft === next) return;
+    lastNotifiedDraft = next;
+    onDraftPreviewChange?.(next);
+  }
   let wireLegendOpen = $state(false);
   let dockCentered = $derived(graph.nodes.length === 0 && !draftPreview && !catalogOpen);
   let clearConfirmPending = $state(false);
@@ -322,6 +330,7 @@
       if (clearConfirmTimer) clearTimeout(clearConfirmTimer);
       if (dockMorphTimer) clearTimeout(dockMorphTimer);
       cancelPendingFit();
+      notifyDraftPreview(null);
     };
   });
 
@@ -345,6 +354,7 @@
     if (graphChanged) {
       clearProposals();
       draftPreview = null;
+      notifyDraftPreview(null);
     }
     scheduleFitView(triggerChanged ? 260 : 220);
   });
@@ -391,6 +401,7 @@
     const hadDraft = draftPreview !== null;
     morphDock(() => {
       draftPreview = next;
+      notifyDraftPreview(next);
     });
     if (next || hadDraft) {
       scheduleFitView(next ? 260 : 220);
@@ -414,6 +425,7 @@
     const hadDraft = draftPreview !== null;
     morphDock(() => {
       draftPreview = null;
+      notifyDraftPreview(null);
       plannerOpen = false;
       plannerHasText = false;
       plannerLoading = false;
@@ -1150,6 +1162,7 @@
         onApply={(nextGraph, summary) => {
           clearProposals();
           draftPreview = null;
+          notifyDraftPreview(null);
           if (onApplyPlannedGraph) {
             onApplyPlannedGraph(nextGraph, summary);
           } else {

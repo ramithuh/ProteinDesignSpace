@@ -4,13 +4,23 @@ import {
   extractSubgraphUpTo,
   findContextStructure,
   foldModelSlug,
+  formatCandidateSequence,
   formatFoldModelName,
   getNodePeekSlots,
   pickDefaultPeekSlot,
   previewTextLines,
+  resolveActiveRowChainLengths,
+  resolveFoldIpsae,
+  selectPrimaryOutputPort,
 } from '$lib/engine/peek';
 import { LOCALFOLD_MODEL_OPTIONS, WORKFLOW_PRESETS } from '$lib/engine/registry';
-import type { CanonicalArtifact, SequenceSet, StructureArtifact } from '$lib/engine/types';
+import type {
+  CanonicalArtifact,
+  MutationMatrixArtifact,
+  ResidueTrackArtifact,
+  SequenceSet,
+  StructureArtifact,
+} from '$lib/engine/types';
 
 function makeDummyStructure(id: string, sequence = 'MKTAYIAKQRQISFVKSHFSRQ'): StructureArtifact {
   return {
@@ -213,5 +223,102 @@ describe('peek helpers', () => {
     expect(formatFoldModelName('localfold-af2')).toBe('AlphaFold2');
     expect(foldModelSlug('')).toBe('folded');
     expect(formatFoldModelName('')).toBe('folded');
+  });
+
+  it('Compare/Peek #5: prioritizes MutationMatrix/ResidueTrack over StructureArtifact and keeps StructureArtifact above SequenceSet', () => {
+    const struct = makeDummyStructure('s1');
+    const seqs = makeDummySeqSet('q1');
+    const mut: MutationMatrixArtifact = {
+      kind: 'MutationMatrix',
+      id: 'mut-1',
+      sourceModelId: 'thermompnn',
+      metric: 'ddg-kcal-mol',
+      direction: 'lower-is-better',
+      residues: 'MK',
+      residueIds: ['A1', 'A2'],
+      alphabet: 'ACDEFGHIKLMNPQRSTVWY',
+      values: new Float32Array(40).fill(-0.5),
+    };
+    const track: ResidueTrackArtifact = {
+      kind: 'ResidueTrack',
+      id: 'trk-1',
+      sourceModelId: 'dyna1',
+      quantity: 'exchange-prob',
+      residues: 'MK',
+      residueIds: ['A1', 'A2'],
+      values: new Float32Array([0.1, 0.2]),
+      summary: { min: 0.1, max: 0.2, mean: 0.15 },
+    };
+
+    // Order-independent pickDefaultPeekSlot for ThermoMPNN (mutations vs structure)
+    const thermoSlotsOrderA = [
+      { id: 'in:structure', direction: 'in' as const, portName: 'structure', portType: 'StructureArtifact' as const, required: true, wired: true, artifact: struct },
+      { id: 'out:mutations', direction: 'out' as const, portName: 'mutations', portType: 'MutationMatrix' as const, required: true, wired: true, artifact: mut },
+      { id: 'out:structure', direction: 'out' as const, portName: 'structure', portType: 'StructureArtifact' as const, required: true, wired: true, artifact: struct },
+    ];
+    const thermoSlotsOrderB = [thermoSlotsOrderA[0], thermoSlotsOrderA[2], thermoSlotsOrderA[1]];
+    expect(pickDefaultPeekSlot(thermoSlotsOrderA)).toBe('out:mutations');
+    expect(pickDefaultPeekSlot(thermoSlotsOrderB)).toBe('out:mutations');
+
+    // Dyna-1 prefers ResidueTrack over StructureArtifact and SequenceSet
+    const dynaSlots = [
+      { id: 'out:structure', direction: 'out' as const, portName: 'structure', portType: 'StructureArtifact' as const, required: true, wired: true, artifact: struct },
+      { id: 'out:sequences', direction: 'out' as const, portName: 'sequences', portType: 'SequenceSet' as const, required: true, wired: true, artifact: seqs },
+      { id: 'out:track', direction: 'out' as const, portName: 'track', portType: 'ResidueTrack' as const, required: true, wired: true, artifact: track },
+    ];
+    expect(pickDefaultPeekSlot(dynaSlots)).toBe('out:track');
+
+    // De novo generators (RFD4 / Genie 3) preserve 3D StructureArtifact above SequenceSet
+    const genSlots = [
+      { id: 'out:sequences', direction: 'out' as const, portName: 'sequences', portType: 'SequenceSet' as const, required: true, wired: true, artifact: seqs },
+      { id: 'out:structure', direction: 'out' as const, portName: 'structure', portType: 'StructureArtifact' as const, required: true, wired: true, artifact: struct },
+    ];
+    expect(pickDefaultPeekSlot(genSlots)).toBe('out:structure');
+
+    // selectPrimaryOutputPort matches pickDefaultPeekSlot priority
+    expect(selectPrimaryOutputPort({ structure: struct, mutations: mut })).toMatchObject({
+      portName: 'mutations',
+      is3D: false,
+    });
+    expect(selectPrimaryOutputPort({ structure: struct, track, sequences: seqs })).toMatchObject({
+      portName: 'track',
+      is3D: false,
+    });
+    expect(selectPrimaryOutputPort({ sequences: seqs, structure: struct })).toMatchObject({
+      portName: 'structure',
+      is3D: true,
+    });
+  });
+
+  it('QA #7 & #8: resolveFoldIpsae falls back to PAE matrix and formatCandidateSequence inserts ":" chain delimiters', () => {
+    // Explicit ipsae takes precedence
+    expect(resolveFoldIpsae({ ipsae: 0.72, ipsaeMin: 0.68 })).toEqual({ ipsae: 0.72, ipsaeMin: 0.68 });
+
+    // Monomer returns null
+    const monoPae = new Float32Array(40 * 40).fill(15);
+    expect(resolveFoldIpsae({ pae: monoPae, chainLengths: [40] })).toBeNull();
+
+    // Multimer 20+20 with high interface PAE falls back to 0.00
+    const highPae = new Float32Array(40 * 40).fill(17.5);
+    expect(resolveFoldIpsae({ pae: highPae, chainLengths: [20, 20] })).toEqual({
+      ipsae: 0,
+      ipsaeMin: 0,
+    });
+
+    // Multimer 40+40 with low interface PAE (including AF3-style padded 85x85 PAE) computes > 0.6
+    const dim = 85;
+    const lowInterPae = new Float32Array(dim * dim).fill(1.0);
+    const res = resolveFoldIpsae({ pae: lowInterPae, chainLengths: [40, 40] });
+    expect(res).not.toBeNull();
+    expect(res!.ipsae).toBeGreaterThan(0.6);
+
+    // QA #8: resolveActiveRowChainLengths prioritizes row.chainLengths even without alignedFoldPdb
+    const rowLens = resolveActiveRowChainLengths({ chainLengths: [20, 20], alignedFoldPdb: '' }, null);
+    expect(rowLens).toEqual([20, 20]);
+    const seq40 = 'NLYIQWLKDGGPSSGRPPPSNLYIQWLKDGGPSSGRPPPS';
+    expect(seq40).toHaveLength(40);
+    expect(formatCandidateSequence(seq40, rowLens)).toBe(
+      'NLYIQWLKDGGPSSGRPPPS:NLYIQWLKDGGPSSGRPPPS',
+    );
   });
 });

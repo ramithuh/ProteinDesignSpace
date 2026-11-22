@@ -5,6 +5,7 @@ import {
   createMemoryCheckpointStore,
   evictCachedUrls,
   fetchCachedBytes,
+  getCacheStats,
   makeCachedFetch,
   type FetchProgress,
 } from '$lib/engine/opfs-cache';
@@ -220,5 +221,107 @@ describe('engine/opfs-cache', () => {
     expect(await memStore.listKeys?.()).toEqual(['run-1']);
     await memStore.delete?.('run-1');
     expect(await memStore.load('run-1')).toBeNull();
+  });
+
+  it('QA #9: clearAllModelCaches clears all 7 vendor CacheStorage buckets, all 6 OPFS dirs, and IndexedDB databases while preserving unrelated caches', async () => {
+    const deletedCaches: string[] = [];
+    vi.stubGlobal('caches', {
+      keys: vi.fn(async () => [
+        'denovo-run-weights-v1',
+        'localfold-shards-v1',
+        'rfd4p-weights-v1',
+        'rfd4p-ccd-v1',
+        'genie3-weights-fp16-1',
+        'ligandmpnn-v1',
+        'esmc-v1',
+        'lasermpnn-v1',
+        'thermompnn-v1',
+        'protpardelle-v1',
+        'dyna1-v1',
+        'gvp-transformer-v1',
+        'unrelated-cache',
+      ]),
+      delete: vi.fn(async (k: string) => {
+        deletedCaches.push(k);
+        return true;
+      }),
+    });
+
+    const removedOpfsDirs: string[] = [];
+    const mockDirEntries = new Map<string, Array<[string, { kind: string; getFile: () => Promise<{ size: number }> }]>>([
+      ['denovo-weights', [['af2.bin', { kind: 'file', getFile: async () => ({ size: 1200 }) }]]],
+      ['esmc-v1', [['esmc.bin', { kind: 'file', getFile: async () => ({ size: 3400 }) }]]],
+    ]);
+    vi.stubGlobal('navigator', {
+      storage: {
+        estimate: vi.fn(async () => ({ usage: 4600, quota: 100_000 })),
+        getDirectory: vi.fn(async () => ({
+          getDirectoryHandle: vi.fn(async (dirName: string) => {
+            const entries = mockDirEntries.get(dirName);
+            if (!entries) throw new Error('NotFoundError');
+            return {
+              entries: async function* () {
+                for (const item of entries) yield item;
+              },
+            };
+          }),
+          removeEntry: vi.fn(async (dirName: string) => {
+            removedOpfsDirs.push(dirName);
+          }),
+        })),
+      },
+    });
+
+    const deletedDbs: string[] = [];
+    vi.stubGlobal('indexedDB', {
+      databases: vi.fn(async () => [
+        { name: 'denovo-run-artifacts-v2' },
+        { name: 'denovo-run-checkpoints-v1' },
+        { name: 'other-app-db' },
+      ]),
+      deleteDatabase: vi.fn((name: string) => {
+        deletedDbs.push(name);
+        const req: { onsuccess?: () => void; onerror?: () => void } = {};
+        queueMicrotask(() => req.onsuccess?.());
+        return req;
+      }),
+    });
+
+    const statsBefore = await getCacheStats();
+    expect(statsBefore.opfsFiles).toEqual([
+      { name: 'af2.bin', bytes: 1200 },
+      { name: 'esmc-v1/esmc.bin', bytes: 3400 },
+    ]);
+
+    await clearAllModelCaches();
+
+    expect(deletedCaches).toEqual([
+      'denovo-run-weights-v1',
+      'localfold-shards-v1',
+      'rfd4p-weights-v1',
+      'rfd4p-ccd-v1',
+      'genie3-weights-fp16-1',
+      'ligandmpnn-v1',
+      'esmc-v1',
+      'lasermpnn-v1',
+      'thermompnn-v1',
+      'protpardelle-v1',
+      'dyna1-v1',
+      'gvp-transformer-v1',
+    ]);
+    expect(deletedCaches).not.toContain('unrelated-cache');
+
+    expect(removedOpfsDirs).toEqual([
+      'denovo-weights',
+      'esmc-v1',
+      'thermompnn-v1',
+      'protpardelle-v1',
+      'dyna1-v1',
+      'gvp-transformer-v1',
+    ]);
+
+    expect(deletedDbs).toContain('denovo-run-artifacts-v2');
+    expect(deletedDbs).toContain('denovo-run-checkpoints-v1');
+    expect(deletedDbs).not.toContain('other-app-db');
   });
 });

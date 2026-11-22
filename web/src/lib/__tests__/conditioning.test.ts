@@ -16,7 +16,7 @@ import {
   resolveGenie3PolyAlaSequence,
   resolveMotifSourceResidues,
 } from '$lib/engine/conditioning';
-import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
+import { BENCHMARK_TARGETS, adaptBenchmarkContigForLength, getBenchmarkById } from '$lib/engine/benchmarks';
 import { isValidPdbId } from '$lib/protein-ops/rcsb';
 import {
   cropParsedStructure,
@@ -856,5 +856,99 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
     );
     expect(explicitCropCompiled.contig).toContain('C402');
     expect(explicitCropCompiled.contig).not.toContain('B401');
+  });
+
+  it('R3: adaptBenchmarkContigForLength adapts 5O45 binder (65aa) and 1YCR motif (80aa) contigs consistently for Genie 3 and RFD4', () => {
+    // 1. Binder 5O45 at 65 aa
+    const adapted5o45 = adaptBenchmarkContigForLength('A17-132,/0,70-70', 65, 'binder');
+    expect(adapted5o45).toBe('A17-132,/0,65-65');
+
+    // Feed into Genie 3 binder compiler with a 116-aa chain A template (A17..A132)
+    const n5o45 = 116;
+    const pdb5o45 =
+      Array.from({ length: n5o45 }, (_, i) =>
+        `ATOM  ${String(i + 1).padStart(5)}  CA  ALA A${String(17 + i).padStart(4)}       0.000   0.000   0.000  1.00 10.00           C  `,
+      ).join('\n') + '\nEND\n';
+    const parsed5o45 = parseStructureText(pdb5o45);
+    const tpl5o45: StructureArtifact = {
+      kind: 'StructureArtifact',
+      id: 'tpl-5o45',
+      label: '5O45',
+      sourceModelId: 'pdb-input',
+      length: parsed5o45.nResidues,
+      sequence: parsed5o45.sequence,
+      caCoords: parsed5o45.caCoords,
+      backbone4Coords: parsed5o45.backbone4Coords,
+      pdbText: parsed5o45.pdbText,
+      chainIds: parsed5o45.chainIds,
+      sourceResidues: parsed5o45.sourceResidues,
+      geometry: computeGeometryStats(parsed5o45.caCoords, parsed5o45.chainIds, parsed5o45.resNums),
+    };
+    const cond5o45: ConditionSpecArtifact = {
+      kind: 'ConditionSpec',
+      id: 'cond-5o45',
+      label: '5O45',
+      contig: adapted5o45,
+      conditions: {},
+      summary: '5O45 65aa binder',
+      intent: buildCanonicalConditionIntent({ contig: adapted5o45, lockChain: 'A' }),
+    };
+    const g3Binder = compileConditionToGenie3Spec(cond5o45, tpl5o45, 65);
+    expect(g3Binder.chainLengths[0]).toBe(65);
+    expect(g3Binder.chainLengths[1]).toBe(116);
+
+    const rfd4Binder = compileConditionToRfd4(
+      buildCanonicalConditionIntent({ contig: adapted5o45, lockChain: 'A', length: 65 }),
+      extractRfd4TemplateContext(pdb5o45),
+    );
+    expect(rfd4Binder.contig).toBe('A1-116,/0,65-65');
+
+    // 2. Motif 1YCR B19-27 at 80 aa (35 + 9 + 36 = 80)
+    const adapted1ycr = adaptBenchmarkContigForLength('28-28,B19-27,28-28', 80, 'motif');
+    expect(adapted1ycr).toBe('35-35,B19-27,36-36');
+
+    const n1ycr = 9;
+    const pdb1ycr =
+      Array.from({ length: n1ycr }, (_, i) =>
+        `ATOM  ${String(i + 1).padStart(5)}  CA  ALA B${String(19 + i).padStart(4)}       0.000   0.000   0.000  1.00 10.00           C  `,
+      ).join('\n') + '\nEND\n';
+    const parsed1ycr = parseStructureText(pdb1ycr);
+    const tpl1ycr: StructureArtifact = {
+      kind: 'StructureArtifact',
+      id: 'tpl-1ycr',
+      label: '1YCR',
+      sourceModelId: 'pdb-input',
+      length: parsed1ycr.nResidues,
+      sequence: parsed1ycr.sequence,
+      caCoords: parsed1ycr.caCoords,
+      backbone4Coords: parsed1ycr.backbone4Coords,
+      pdbText: parsed1ycr.pdbText,
+      chainIds: parsed1ycr.chainIds,
+      sourceResidues: parsed1ycr.sourceResidues,
+      geometry: computeGeometryStats(parsed1ycr.caCoords, parsed1ycr.chainIds, parsed1ycr.resNums),
+    };
+    const cond1ycr: ConditionSpecArtifact = {
+      kind: 'ConditionSpec',
+      id: 'cond-1ycr',
+      label: '1YCR',
+      contig: adapted1ycr,
+      conditions: {},
+      summary: '1YCR 80aa motif',
+      intent: buildCanonicalConditionIntent({ contig: adapted1ycr, motifSpan: 'B19-27' }),
+    };
+    const g3Motif = compileConditionToGenie3Spec(cond1ycr, tpl1ycr, 80);
+    expect(g3Motif.length).toBe(80);
+    expect(g3Motif.chainLengths).toEqual([80]);
+
+    const rfd4Motif = compileConditionToRfd4(
+      buildCanonicalConditionIntent({ contig: adapted1ycr, motifSpan: 'B19-27', length: 80 }),
+      extractRfd4TemplateContext(pdb1ycr),
+    );
+    expect(rfd4Motif.contig).toBe('35-35,B1-9,36-36');
+
+    // 3. Multi-island motif & enzyme-ligand & invalid targetLength guard
+    expect(adaptBenchmarkContigForLength('10-10,A16-35,16-16,A52-71,10-10', 100, 'motif')).toMatch(/A16-35.*A52-71/);
+    expect(adaptBenchmarkContigForLength('150-150', 120, 'enzyme-ligand')).toBe('120-120');
+    expect(adaptBenchmarkContigForLength('28-28,B19-27,28-28', 0, 'motif')).toBe('28-28,B19-27,28-28');
   });
 });

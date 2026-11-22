@@ -204,10 +204,9 @@
     notesExpanded = false;
 
     try {
-      const planned = compileLocalStarterPlan(
-        example.plan,
-        graph.nodes.length > 0 ? graph : undefined,
-      );
+      const snapshotGraph =
+        graph.nodes.length > 0 ? ($state.snapshot(graph) as WorkflowGraph) : undefined;
+      const planned = compileLocalStarterPlan(example.plan, snapshotGraph);
       onDraftChange(planned);
     } catch (err) {
       errorMsg = err instanceof Error ? err.message : 'Failed to compile starter workflow.';
@@ -241,8 +240,10 @@
     onDraftChange(null);
 
     try {
+      const snapshotGraph =
+        graph.nodes.length > 0 ? ($state.snapshot(graph) as WorkflowGraph) : undefined;
       const planned = await requestWorkflowPlan(text, {
-        currentGraph: graph.nodes.length > 0 ? graph : undefined,
+        currentGraph: snapshotGraph,
         signal: abortCtrl.signal,
       });
       onDraftChange(planned);
@@ -280,9 +281,10 @@
 
   function applyDraft() {
     if (!draftPreview || disabled) return;
-    const { graph: nextGraph, plan } = draftPreview;
+    const nextGraph = $state.snapshot(draftPreview.graph) as WorkflowGraph;
+    const summary = draftPreview.plan.summary;
     onDraftChange(null);
-    onApply(nextGraph, plan.summary);
+    onApply(nextGraph, summary);
     onClose();
   }
 

@@ -1,5 +1,8 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
+  import type { Camera } from 'molstar/lib/mol-canvas3d/camera';
+  import type { Scene } from 'molstar/lib/mol-gl/scene';
+  import { Vec3 } from 'molstar/lib/mol-math/linear-algebra/3d/vec3';
   import type { ViewerModelSpec } from '$lib/engine/compare';
   import { expandResidueTokenList } from '$lib/engine/residue-tokens';
   import type { ResidueHighlightLayer } from '$lib/engine/studio-types';
@@ -20,6 +23,8 @@
     spin?: boolean;
     /** Rotations per second when `spin` is enabled (Mol* default is 0.1; 0.02 ≈ 1 turn / 50s). */
     spinSpeed?: number;
+    /** Lock camera reset to canonical front view (+Z -> -Z, up +Y) and pause spin (side-by-side / grid layouts). */
+    canonicalCamera?: boolean;
     /** When true (full-view expanded mode), shows the floating Representation & View menu. */
     expanded?: boolean;
     theme?: 'dark' | 'light';
@@ -62,6 +67,7 @@
     illustrative = false,
     spin = true,
     spinSpeed = 0.02,
+    canonicalCamera = false,
     expanded = false,
     theme = 'dark',
     height = 420,
@@ -246,6 +252,38 @@
     return renderChain;
   }
 
+  function hashStructureSample(text: string): string {
+    let h = 2166136261;
+    const n = text.length;
+    const step = 1;
+    for (let i = 0; i < n; i += step) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(36);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function resetViewerCamera(ctx: any, canonical: boolean) {
+    if (!ctx?.canvas3d) return;
+    if (canonical) {
+      ctx.canvas3d.requestCameraReset({
+        durationMs: 0,
+        snapshot: (scene: Scene, camera: Camera) => {
+          const { center, radius } = scene.boundingSphereVisible;
+          return camera.getInvariantFocus(
+            center,
+            radius,
+            Vec3.create(0, 1, 0),
+            Vec3.create(0, 0, -1),
+          );
+        },
+      });
+    } else {
+      ctx.canvas3d.requestCameraReset();
+    }
+  }
+
   function handleResetCamera() {
     const liveStructs = plugin?.managers?.structure?.hierarchy?.current?.structures?.length ?? 0;
     const expectsStructure = Boolean(
@@ -259,7 +297,7 @@
       forceRenderTick += 1;
       return;
     }
-    plugin?.canvas3d?.requestCameraReset();
+    resetViewerCamera(plugin, canonicalCamera);
   }
 
   async function handleSavePng() {
@@ -369,9 +407,9 @@
           renderer: { backgroundColor: (theme === 'light' ? 0xf8fafc : 0x0d0e11) as unknown as never },
           cameraFog: { name: 'off', params: {} },
           cameraClipping: { far: false, radius: 0, minNear: 0.1 },
-          postprocessing: buildPostprocessingProps(illustrative, spin && hasAnyStructure),
+          postprocessing: buildPostprocessingProps(illustrative, effectiveSpin),
           trackball: {
-            animate: spin && hasAnyStructure
+            animate: effectiveSpin
               ? { name: 'spin', params: { speed: effectiveSpinSpeed, axis: [0, -1, 0] as unknown as never } }
               : { name: 'off', params: {} },
           },
@@ -946,6 +984,7 @@
   let hasAnyStructure = $derived(
     Boolean((models && models.length > 0) || designedPdb || refoldPdb),
   );
+  let effectiveSpin = $derived(spin && hasAnyStructure && !canonicalCamera);
   let showSemanticBfactorLegend = $derived(
     hasAnyStructure &&
       isSemanticBfactor &&
@@ -974,6 +1013,7 @@
       ligands: boolean;
       plddtAllowed: boolean;
       bfactorSemantics?: BfactorSemantics;
+      canonicalCamera: boolean;
       preserveCamera: boolean;
       structureKey: string;
       fullKey: string;
@@ -1073,11 +1113,11 @@
         if (destroyed || mySeq !== loadSeq) return;
         const liveStructs = ctx.managers?.structure?.hierarchy?.current?.structures?.length ?? 0;
         modelRefs = nextRefs;
-        applyPostprocessing(illustrative, spin && hasAnyStructure);
+        applyPostprocessing(illustrative, spin && hasAnyStructure && !styleOpts.canonicalCamera);
         if (savedCam && liveStructs > 0) {
           ctx.canvas3d?.camera?.setState(savedCam, 0);
         } else {
-          ctx.canvas3d?.requestCameraReset();
+          resetViewerCamera(ctx, styleOpts.canonicalCamera);
         }
         if (liveStructs > 0) {
           lastStructureKey = styleOpts.structureKey;
@@ -1384,7 +1424,7 @@
     return models
       .map(
         (m) =>
-          `${m.id}|${m.colorHex}|${m.alpha}|${m.colorByPlddt ? 1 : 0}|${m.pdbText.length}|${m.pdbText.slice(0, 64)}|${m.pdbText.slice(-64)}`,
+          `${m.id}|${m.colorHex}|${m.alpha}|${m.colorByPlddt ? 1 : 0}|${m.pdbText.length}|${hashStructureSample(m.pdbText)}`,
       )
       .join('||');
   });
@@ -1392,6 +1432,7 @@
   // Re-render full scene ONLY when (structureKey + styleKey) actually changes
   $effect(() => {
     void forceRenderTick;
+    const canonical = canonicalCamera;
     const styleOpts = {
       rep: repType,
       color: colorScheme,
@@ -1403,13 +1444,14 @@
     };
     const styleKey = `${styleOpts.rep}|${styleOpts.color}|${styleOpts.sidechains ? 1 : 0}|${styleOpts.surfaceOverlay ? 1 : 0}|${styleOpts.ligands ? 1 : 0}|${styleOpts.plddtAllowed ? 1 : 0}|${styleOpts.bfactorSemantics ?? ''}`;
     if (multiRenderKey !== null) {
-      const mKey = `multi:${multiRenderKey}`;
+      const mKey = `multi:${canonical ? 1 : 0}:${multiRenderKey}`;
       const fullKey = `${mKey}##${styleKey}`;
       if (fullKey === lastRenderedKey && !initError) return;
       const sameStructure = lastStructureKey === mKey;
       const snapshot = untrack(() => models ?? []);
       void renderMultiModels(snapshot, {
         ...styleOpts,
+        canonicalCamera: canonical,
         preserveCamera: sameStructure,
         structureKey: mKey,
         fullKey,
@@ -1451,12 +1493,12 @@
 
   $effect(() => {
     const on = illustrative;
-    const spinning = spin && hasAnyStructure;
+    const spinning = effectiveSpin;
     if (plugin) applyPostprocessing(on, spinning);
   });
 
   $effect(() => {
-    const on = spin && hasAnyStructure;
+    const on = effectiveSpin;
     const speed = effectiveSpinSpeed;
     if (plugin) applySpin(on, speed);
   });
@@ -1644,7 +1686,7 @@
               </button>
             </div>
           </div>
-          {#if spin}
+          {#if effectiveSpin}
             <label class="sp-field">
               <span>Spin speed ({effectiveSpinSpeed.toFixed(3)} rot/s)</span>
               <input

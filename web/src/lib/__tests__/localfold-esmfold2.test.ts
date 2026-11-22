@@ -2,7 +2,8 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { esmfold2Chains } from '$lib/engine/localfold-esmfold2';
-import { loadEsmfold2 } from '$lib/workers/localfold-esmfold2';
+import { computeCandidateIpsae, loadEsmfold2 } from '$lib/workers/localfold-esmfold2';
+import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 
 const vendor = (path: string) =>
   import(pathToFileURL(resolve(__dirname, '../../../static/vendor/localfold', path)).href);
@@ -84,9 +85,27 @@ describe('ESMFold2 worker contract', () => {
     expect(result.caCoords).toHaveLength(18);
     expect(result.pae).toHaveLength(36);
     expect(result.pae[1]).toBe(3.25);
+    // QA #7: multimer ESMFold2 populates ipsae & ipsaeMin directly on candidate
+    const expectedIpsae = computeIpsae(result.pae, result.chainIds, 10)!;
+    expect(result.ipsae).toBeCloseTo(expectedIpsae.ipsae, 6);
+    expect(result.ipsaeMin).toBeCloseTo(expectedIpsae.ipsaeMin, 6);
+    expect(result.ipsae!).toBeGreaterThan(0);
+
     const bFactors = result.pdbText.split('\n').filter(line => line.startsWith('ATOM')).map(line => +line.slice(60, 66));
     expect(new Set(bFactors)).toEqual(new Set([87.5]));
-    expect((await fold(['ACDEFG'])).iptm).toBeNull();
+    const mono = await fold(['ACDEFG']);
+    expect(mono.iptm).toBeNull();
+    expect(mono.ipsae).toBeUndefined();
+    expect(mono.ipsaeMin).toBeUndefined();
+
+    // QA #7: AF3 co-fold PAE with trailing ligand tokens slices protein submatrix cleanly
+    const af3Dim = 8; // 6 protein residues + 2 ligand tokens
+    const af3Pae = new Float32Array(af3Dim * af3Dim).fill(2.0);
+    const af3Ipsae = computeCandidateIpsae(af3Pae, [3, 3], ['A', 'A', 'A', 'B', 'B', 'B']);
+    const expectedSliced = computeIpsae(sliceProteinPae(af3Pae, 6)!, ['A', 'A', 'A', 'B', 'B', 'B'], 10)!;
+    expect(af3Ipsae).toEqual({ ipsae: expectedSliced.ipsae, ipsaeMin: expectedSliced.ipsaeMin });
+    expect(computeCandidateIpsae(af3Pae, [6], ['A', 'A', 'A', 'A', 'A', 'A'])).toBeNull();
+
     missingConfidence = true;
     await expect(fold(['ACDEFG'])).rejects.toThrow(/confidence dimensions/);
   });

@@ -354,3 +354,149 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
 export function getBenchmarkById(id: string): BenchmarkTargetMeta | undefined {
   return BENCHMARK_TARGETS.find((b) => b.id === id);
 }
+
+/**
+ * Adapt a curated benchmark contig to a user-requested length without breaking fixed motif spans
+ * or chain-break (`/0`) binder syntax:
+ * - Binder (`category === 'binder'` or contains `/0`): updates designed binder length token (after `/0`) to `L-L`.
+ * - Enzyme/Ligand (`category === 'enzyme-ligand'`): updates bare length token to `L-L`.
+ * - Motif (`category === 'motif'`): preserves fixed motif spans (e.g. `B19-27`) and scales scaffold flanks
+ *   proportionally so total scaffold + motif residues equal `L` (remainder allocated from last flank backward).
+ */
+export function adaptBenchmarkContigForLength(
+  contig: string,
+  targetLength: number,
+  category: BenchmarkCategory,
+): string {
+  if (!contig || !Number.isFinite(targetLength) || targetLength <= 0) {
+    return contig;
+  }
+  const L = Math.max(10, Math.min(512, Math.round(targetLength)));
+  const tokens = contig
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean);
+  if (tokens.length === 0) return contig;
+
+  interface ParsedBare {
+    idx: number;
+    origLen: number;
+    suffix: string;
+  }
+
+  const bareTokens: ParsedBare[] = [];
+  let motifTotal = 0;
+  const chainBreakIdx = tokens.indexOf('/0');
+
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (tok === '/0') continue;
+    const bareMatch = /^(\d+)(?:-(\d+))?([PRDN])?$/i.exec(tok);
+    if (bareMatch) {
+      const min = Number(bareMatch[1]);
+      const max = bareMatch[2] !== undefined ? Number(bareMatch[2]) : min;
+      const suffix = bareMatch[3] ? bareMatch[3].toUpperCase() : '';
+      bareTokens.push({ idx: i, origLen: Math.max(1, Math.round((min + max) / 2)), suffix });
+      continue;
+    }
+    const spanMatch = /^([A-Za-z_])(-?\d+)(?:-(-?\d+))?$/.exec(tok);
+    if (spanMatch) {
+      const start = Number(spanMatch[2]);
+      const end = spanMatch[3] !== undefined ? Number(spanMatch[3]) : start;
+      motifTotal += Math.max(1, end - start + 1);
+    }
+  }
+
+  if (bareTokens.length === 0) {
+    return contig;
+  }
+
+  const out = [...tokens];
+
+  if (category === 'binder' || chainBreakIdx >= 0) {
+    const afterBreak =
+      chainBreakIdx >= 0 ? bareTokens.filter((b) => b.idx > chainBreakIdx) : bareTokens;
+    const targets = afterBreak.length > 0 ? afterBreak : bareTokens;
+    if (targets.length === 1) {
+      const b = targets[0];
+      out[b.idx] = `${L}-${L}${b.suffix}`;
+      return out.join(',');
+    }
+    const origSum = Math.max(1, targets.reduce((s, b) => s + b.origLen, 0));
+    const alloc = targets.map((b) => Math.max(4, Math.floor((L * b.origLen) / origSum)));
+    let diff = L - alloc.reduce((s, v) => s + v, 0);
+    for (let k = alloc.length - 1; diff > 0; k = k === 0 ? alloc.length - 1 : k - 1) {
+      alloc[k] += 1;
+      diff--;
+    }
+    while (diff < 0) {
+      let trimmed = false;
+      for (let k = alloc.length - 1; k >= 0 && diff < 0; k--) {
+        if (alloc[k] > 4) {
+          alloc[k] -= 1;
+          diff++;
+          trimmed = true;
+        }
+      }
+      if (!trimmed) break;
+    }
+    for (let k = 0; k < targets.length; k++) {
+      out[targets[k].idx] = `${alloc[k]}-${alloc[k]}${targets[k].suffix}`;
+    }
+    return out.join(',');
+  }
+
+  if (category === 'enzyme-ligand') {
+    if (bareTokens.length === 1) {
+      const b = bareTokens[0];
+      out[b.idx] = `${L}-${L}${b.suffix}`;
+      return out.join(',');
+    }
+    const origSum = Math.max(1, bareTokens.reduce((s, b) => s + b.origLen, 0));
+    const alloc = bareTokens.map((b) => Math.max(4, Math.floor((L * b.origLen) / origSum)));
+    let diff = L - alloc.reduce((s, v) => s + v, 0);
+    for (let k = alloc.length - 1; diff > 0; k = k === 0 ? alloc.length - 1 : k - 1) {
+      alloc[k] += 1;
+      diff--;
+    }
+    for (let k = 0; k < bareTokens.length; k++) {
+      out[bareTokens[k].idx] = `${alloc[k]}-${alloc[k]}${bareTokens[k].suffix}`;
+    }
+    return out.join(',');
+  }
+
+  // category === 'motif'
+  const minFlank = 4;
+  if (bareTokens.length === 1) {
+    const b = bareTokens[0];
+    const flank = Math.max(minFlank, L - motifTotal);
+    out[b.idx] = `${flank}-${flank}${b.suffix}`;
+    return out.join(',');
+  }
+
+  const desiredScaffoldTotal = Math.max(bareTokens.length * minFlank, L - motifTotal);
+  const origScaffoldTotal = Math.max(1, bareTokens.reduce((s, b) => s + b.origLen, 0));
+  const alloc = bareTokens.map((b) =>
+    Math.max(minFlank, Math.floor((desiredScaffoldTotal * b.origLen) / origScaffoldTotal)),
+  );
+  let diff = desiredScaffoldTotal - alloc.reduce((s, v) => s + v, 0);
+  for (let k = alloc.length - 1; diff > 0; k = k === 0 ? alloc.length - 1 : k - 1) {
+    alloc[k] += 1;
+    diff--;
+  }
+  while (diff < 0) {
+    let trimmed = false;
+    for (let k = alloc.length - 1; k >= 0 && diff < 0; k--) {
+      if (alloc[k] > minFlank) {
+        alloc[k] -= 1;
+        diff++;
+        trimmed = true;
+      }
+    }
+    if (!trimmed) break;
+  }
+  for (let k = 0; k < bareTokens.length; k++) {
+    out[bareTokens[k].idx] = `${alloc[k]}-${alloc[k]}${bareTokens[k].suffix}`;
+  }
+  return out.join(',');
+}

@@ -1,7 +1,11 @@
 <script lang="ts">
   import NumericInput from './NumericInput.svelte';
   import { fieldToNumericSpec } from '$lib/engine/param-schema';
-  import { isValidResidueToken, type NumericFieldSpec } from '$lib/engine/param-validation';
+  import {
+    isValidResidueToken,
+    validateTiedPositions,
+    type NumericFieldSpec,
+  } from '$lib/engine/param-validation';
   import type { AdapterParamField, AdapterParamOption } from '$lib/engine/types';
 
   interface Props {
@@ -278,6 +282,8 @@
       {/if}
     </div>
   {:else}
+    {@const rawVal = String(params[field.key] ?? field.defaultValue ?? '')}
+    {@const fieldErr = field.key === 'tiedPositions' ? validateTiedPositions(rawVal) : null}
     <label class="schema-field wide">
       <span class="label-row">
         <span>{field.label}</span>
@@ -289,12 +295,16 @@
         type="text"
         id={`param-${field.key}`}
         name={field.key}
+        class:input-error={Boolean(fieldErr)}
+        aria-invalid={fieldErr ? 'true' : undefined}
         disabled={fieldDisabled}
         placeholder={field.placeholder ?? ''}
-        value={String(params[field.key] ?? field.defaultValue ?? '')}
+        value={rawVal}
         oninput={(e) => onChange(field.key, e.currentTarget.value)}
       />
-      {#if field.description}
+      {#if fieldErr}
+        <span class="field-hint err" role="alert">{fieldErr}</span>
+      {:else if field.description}
         <span class="field-hint">{field.description}</span>
       {/if}
     </label>

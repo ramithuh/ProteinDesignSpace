@@ -7,6 +7,7 @@
   } from '$lib/engine/registry';
   import { PORT_COLORS, STAGE_COLORS, STAGE_LABELS } from '$lib/engine/graph-utils';
   import { validateSequenceText } from '$lib/engine/param-validation';
+  import { selectPrimaryOutputPort } from '$lib/engine/peek';
   import type { CanonicalArtifact, NodeProgressEvent } from '$lib/engine/types';
 
   export interface ProteinNodeData {
@@ -81,7 +82,12 @@
           return id ? `RCSB ${id}${cropTag}` : 'Fetch by PDB ID';
         }
         if (p.mode === 'custom') {
-          const fname = String(p.filename ?? '').trim();
+          const rawFn = String(p.filename ?? '').trim();
+          const fname = rawFn && rawFn !== 'demo_3helix_53aa.pdb' ? rawFn : '';
+          const hasText = String(p.pdbText ?? '').trim().length > 0;
+          if (!hasText) {
+            return fname ? `${fname} (empty)` : 'No PDB loaded';
+          }
           return `${fname || 'custom PDB'}${cropTag}`;
         }
         return `53 aa 3-helix demo${cropTag}`;
@@ -216,24 +222,49 @@
     }
   });
 
-  let primaryOutputInfo = $derived.by((): { portName: string; is3D: boolean } | null => {
-    const outs = data.outputs;
-    if (!outs) return null;
-    for (const [portName, art] of Object.entries(outs)) {
-      if (art.kind === 'DesignabilityMetrics' || art.kind === 'FoldedStructure' || art.kind === 'StructureArtifact') {
-        return { portName, is3D: true };
-      }
-    }
-    const firstKey = Object.keys(outs)[0];
-    return firstKey ? { portName: firstKey, is3D: false } : null;
-  });
+  let primaryOutput = $derived(selectPrimaryOutputPort(data.outputs));
+  let primaryOutputInfo = $derived(
+    primaryOutput ? { portName: primaryOutput.portName, is3D: primaryOutput.is3D } : null,
+  );
 
   let outputBadge = $derived.by((): string | null => {
     const outs = data.outputs;
     if (!outs) return null;
-    for (const art of Object.values(outs)) {
+    const ordered = primaryOutput
+      ? [primaryOutput.artifact, ...Object.values(outs).filter((a) => a !== primaryOutput.artifact)]
+      : Object.values(outs);
+    for (const art of ordered) {
       if (art.kind === 'DesignabilityMetrics' && art.best) {
         return `scRMSD ${art.best.scRmsd.toFixed(2)} Å · pLDDT ${art.best.meanPlddt.toFixed(1)}`;
+      }
+      if (art.kind === 'MutationMatrix') {
+        const nPos = art.residueIds?.length ?? art.residues.length;
+        let bestVal: number | null = null;
+        for (let i = 0; i < art.values.length; i++) {
+          const v = art.values[i];
+          if (!Number.isFinite(v)) continue;
+          if (
+            bestVal === null ||
+            (art.direction === 'lower-is-better' ? v < bestVal : v > bestVal)
+          ) {
+            bestVal = v;
+          }
+        }
+        if (art.metric === 'ddg-kcal-mol') {
+          return bestVal !== null
+            ? `${nPos} pos · min ΔΔG ${bestVal.toFixed(2)}`
+            : `${nPos}×20 ΔΔG`;
+        }
+        return bestVal !== null
+          ? `${nPos} pos · max LLR ${bestVal.toFixed(2)}`
+          : `${nPos}×20 LLR`;
+      }
+      if (art.kind === 'ResidueTrack') {
+        const nPos = art.residueIds?.length ?? art.residues.length;
+        const mean = art.summary?.mean;
+        return Number.isFinite(mean)
+          ? `${nPos} pos · μ=${(mean as number).toFixed(2)}`
+          : `${nPos} pos · ${art.quantity}`;
       }
       if (art.kind === 'FoldedStructure' && art.folds.length > 0) {
         const bestP = Math.max(...art.folds.map((f) => f.meanPlddt));
@@ -241,6 +272,9 @@
       }
       if (art.kind === 'SequenceSet') {
         return `${art.candidates.length} seq${art.candidates.length > 1 ? 's' : ''} (${art.candidates[0]?.sequence.length ?? 0} aa)`;
+      }
+      if (art.kind === 'SequenceEmbedding') {
+        return `${art.sequence.length} aa · ${art.dim}d`;
       }
       if (art.kind === 'StructureArtifact') {
         const ligNames = art.diagnostics?.ligandNames ?? [];

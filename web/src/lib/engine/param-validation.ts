@@ -503,6 +503,45 @@ export function isValidResidueToken(token: string): boolean {
   return true;
 }
 
+/**
+ * Validate tiedPositions syntax (e.g. "A10=B10; A11=B11" or "A10=B10, A11=B11").
+ * Returns null if valid or empty, or a human-readable error message.
+ */
+export function validateTiedPositions(raw: string): string | null {
+  const text = (raw ?? '').trim();
+  if (!text) return null;
+  const rawGroups = text.split(/[;,]+/);
+  let groupCount = 0;
+  const seenResidues = new Set<string>();
+  for (const rawGroup of rawGroups) {
+    const groupText = rawGroup.trim();
+    if (!groupText) continue;
+    groupCount++;
+    if (groupText.includes('=') && groupText.split('=').some((part) => !part.trim())) {
+      return `Invalid tiedPositions group "${groupText}" (empty side around "="; expected e.g. "A10=B10").`;
+    }
+    const tokens = groupText.split(/[=\s]+/).filter(Boolean);
+    if (tokens.length < 2) {
+      return `Invalid tiedPositions group "${groupText}" (expected at least 2 residues, e.g. "A10=B10").`;
+    }
+    for (const tok of tokens) {
+      const m = /^([A-Za-z_]):?(-?\d+)([A-Za-z])?$/.exec(tok);
+      if (!m) {
+        return `Invalid tiedPositions token "${tok}" in "${groupText}" (expected chain ID + residue number, e.g. "A10=B10" or "A100A=B100A").`;
+      }
+      const key = `${m[1].toUpperCase()}:${Number(m[2])}${m[3] ?? ''}`;
+      if (seenResidues.has(key)) {
+        return `Duplicate or overlapping tiedPositions residue "${tok}" in "${groupText}" (each residue may appear in at most one tie group).`;
+      }
+      seenResidues.add(key);
+    }
+  }
+  if (groupCount === 0) {
+    return `Invalid tiedPositions "${text}" (expected at least 2 residues, e.g. "A10=B10").`;
+  }
+  return null;
+}
+
 /** Validate RFD4 raw JSON override text (blank is valid). */
 export function validateJsonOverride(raw: string): ValidationFeedback {
   const trimmed = raw.trim();
@@ -722,25 +761,9 @@ export function validateNodeParams(node: WorkflowNode): string[] {
       }
     }
     if (typeof p.tiedPositions === 'string' && p.tiedPositions.trim()) {
-      const text = p.tiedPositions.trim();
-      const rawGroups = text.includes(';') ? text.split(';') : text.split(',');
-      for (const rawGroup of rawGroups) {
-        const groupText = rawGroup.trim();
-        if (!groupText) continue;
-        const tokens = groupText.split(/[=\s]+/).filter(Boolean);
-        if (tokens.length < 2) {
-          errs.push(
-            `"${label}": Invalid tiedPositions group "${groupText}" (expected at least 2 residues, e.g. "A10=B10").`,
-          );
-          continue;
-        }
-        for (const tok of tokens) {
-          if (!/^([A-Za-z_])?:?(-?\d+)([A-Z])?$/.test(tok)) {
-            errs.push(
-              `"${label}": Invalid tiedPositions token "${tok}" in "${groupText}" (expected e.g. "A10=B10" or "A100A=B100A").`,
-            );
-          }
-        }
+      const tiedErr = validateTiedPositions(p.tiedPositions);
+      if (tiedErr) {
+        errs.push(`"${label}": ${tiedErr}`);
       }
     }
     if (typeof p.omitAminoAcids === 'string' && p.omitAminoAcids.trim()) {
@@ -764,6 +787,12 @@ export function validateNodeParams(node: WorkflowNode): string[] {
   }
 
   if (node.adapterId === 'ligandmpnn' || node.adapterId === 'lasermpnn') {
+    if (typeof p.tiedPositions === 'string' && p.tiedPositions.trim()) {
+      const tiedErr = validateTiedPositions(p.tiedPositions);
+      if (tiedErr) {
+        errs.push(`"${label}": ${tiedErr}`);
+      }
+    }
     if (typeof p.omitAminoAcids === 'string' && p.omitAminoAcids.trim()) {
       const compact = p.omitAminoAcids.trim().toUpperCase().replace(/[\s,;]+/g, '');
       const badChars = new Set<string>();

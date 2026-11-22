@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { insertBlockSmart, proposeConnectionsForNode } from '$lib/engine/graph-utils';
 import {
   buildComparisonState,
+  computePairwiseSequenceDiff,
   exportJoinedCollectionCsv,
   joinBranchArtifacts,
   joinKeyedCollections,
@@ -12,6 +13,7 @@ import type {
   CanonicalArtifact,
   DesignabilityMetrics,
   FoldedStructure,
+  SequenceSet,
   StructureArtifact,
   TrajectoryFramesArtifact,
   WorkflowGraph,
@@ -806,8 +808,7 @@ describe('multi-select 3D comparison state', () => {
       layout: 'overlay',
       colorMode: 'by-model',
       pairingMode: 'branch-best',
-      // Even if stale per-branch indices point to non-winners, explicit 'branch-best' MUST display the true winner!
-      branchCandidateIdx: { f1: 0, f2: 1 },
+      branchCandidateIdx: {},
     });
     expect(cmp.pairingMode).toBe('branch-best');
     expect(cmp.branches[0].sequenceId).toBe('af2-high');
@@ -815,6 +816,20 @@ describe('multi-select 3D comparison state', () => {
     expect(cmp.branches[0].rankingPolicy).toBe('highest-mean-plddt');
     expect(cmp.branches[1].sequenceId).toBe('rf3-low');
     expect(cmp.branches[1].meanPlddt).toBeCloseTo(91, 3);
+
+    // Explicit per-branch candidate selection in 'branch-best' mode updates selectedIndex & metrics
+    const cmpPicked = buildComparisonState(g, ['f1', 'f2'], outs, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      pairingMode: 'branch-best',
+      branchCandidateIdx: { f1: 0, f2: 1 },
+    });
+    expect(cmpPicked.branches[0].selectedIndex).toBe(0);
+    expect(cmpPicked.branches[0].sequenceId).toBe('af2-low');
+    expect(cmpPicked.branches[0].meanPlddt).toBeCloseTo(50, 3);
+    expect(cmpPicked.branches[1].selectedIndex).toBe(1);
+    expect(cmpPicked.branches[1].sequenceId).toBe('rf3-high');
+    expect(cmpPicked.branches[1].meanPlddt).toBeCloseTo(60, 3);
 
     // Defect #7 regression: multi-sample FoldedStructure members omitting `key` but carrying distinct `sampleIndex`
     // (or duplicate sequenceId) must NOT collapse into one row during keyed join!
@@ -1067,5 +1082,343 @@ describe('multi-select 3D comparison state', () => {
     expect(csv).toContain('sc_ipsae');
     expect(csv).toContain('lf_ipsae');
     expect(csv).toContain('0.625');
+  });
+
+  it('Compare/Peek #1: places branch A at x=0 (left) and branch B at +X (right) in side-by-side layout', () => {
+    const pdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(pdb);
+    const geom = computeGeometryStats(parsed.caCoords);
+
+    const makeStruct = (id: string, shiftX: number): StructureArtifact => {
+      const shiftedPdb = applyTransformToPdb(
+        pdb,
+        new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
+        new Float64Array([shiftX, 0, 0]),
+      );
+      const sp = parsePdbBackbone(shiftedPdb);
+      return {
+        kind: 'StructureArtifact',
+        id,
+        label: id,
+        sourceModelId: 'localfold-af2',
+        length: sp.nResidues,
+        sequence: sp.sequence,
+        caCoords: sp.caCoords,
+        backbone4Coords: sp.backbone4Coords,
+        pdbText: shiftedPdb,
+        geometry: geom,
+      };
+    };
+
+    const g: WorkflowGraph = {
+      id: 'side-by-side-order',
+      name: 'Side-by-Side Order',
+      nodes: [
+        { id: 'af_a', adapterId: 'localfold-af2', label: 'AF2 A', params: {} },
+        { id: 'af_b', adapterId: 'localfold-af2', label: 'AF2 B', params: {} },
+      ],
+      edges: [],
+    };
+    const cmp = buildComparisonState(
+      g,
+      ['af_a', 'af_b'],
+      {
+        af_a: { structure: makeStruct('struct-a', 0) },
+        af_b: { structure: makeStruct('struct-b', 25) },
+      },
+      { layout: 'side-by-side', colorMode: 'by-model' },
+    );
+    expect(cmp.effectiveLayout).toBe('side-by-side');
+    expect(cmp.models).toHaveLength(2);
+    expect(cmp.models[0].badge).toBe('A');
+    expect(cmp.models[1].badge).toBe('B');
+
+    const meanX = (pdbText: string): number => {
+      const p = parsePdbBackbone(pdbText);
+      let sum = 0;
+      for (let i = 0; i < p.nResidues; i++) sum += p.caCoords[i * 3];
+      return sum / p.nResidues;
+    };
+    const xA = meanX(cmp.models[0].pdbText);
+    const xB = meanX(cmp.models[1].pdbText);
+    expect(xA).toBeCloseTo(0, 1);
+    expect(xB).toBeGreaterThan(xA + 10);
+  });
+
+  it('Compare/Peek #2: compares SequenceSet branches (MPNN scores, recovery, AA composition, candidate selection, pairwise diff, and skips self-recovery on generators)', () => {
+    const pdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(pdb);
+    const refSeq = parsed.sequence;
+    const seqA = 'A' + refSeq.slice(1);
+    const seqB = 'GG' + refSeq.slice(2);
+    const seqAlt = 'L'.repeat(refSeq.length);
+
+    const makeSeqSet = (
+      id: string,
+      modelId: string,
+      cands: Array<{ id: string; key: string; seq: string; score: number; globalScore: number }>,
+    ): SequenceSet => ({
+      kind: 'SequenceSet',
+      id,
+      parentStructureId: 'src-struct',
+      sourceModelId: modelId,
+      candidates: cands.map((c) => ({
+        id: c.id,
+        key: c.key,
+        sequence: c.seq,
+        score: c.score,
+        globalScore: c.globalScore,
+        sourceModelId: modelId,
+        sourceStructureId: 'src-struct',
+      })),
+    });
+
+    const g: WorkflowGraph = {
+      id: 'mpnn-compare',
+      name: 'MPNN Compare',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', label: 'Backbone', params: {} },
+        { id: 'mpnn_std', adapterId: 'web-protein-mpnn', label: 'ProteinMPNN', params: { family: 'proteinmpnn' } },
+        { id: 'mpnn_sol', adapterId: 'web-protein-mpnn', label: 'SolubleMPNN', params: { family: 'solublempnn' } },
+      ],
+      edges: [
+        { fromNode: 'src', fromPort: 'structure', toNode: 'mpnn_std', toPort: 'structure' },
+        { fromNode: 'src', fromPort: 'structure', toNode: 'mpnn_sol', toPort: 'structure' },
+      ],
+    };
+
+    const outs: Record<string, Record<string, CanonicalArtifact>> = {
+      src: {
+        structure: {
+          kind: 'StructureArtifact',
+          id: 'src-struct',
+          label: 'Demo',
+          sourceModelId: 'pdb-input',
+          length: parsed.nResidues,
+          sequence: refSeq,
+          caCoords: parsed.caCoords,
+          backbone4Coords: parsed.backbone4Coords,
+          pdbText: pdb,
+          geometry: computeGeometryStats(parsed.caCoords),
+        },
+      },
+      mpnn_std: {
+        sequences: makeSeqSet('seq-std', 'web-protein-mpnn', [
+          { id: 's1', key: 'design-1', seq: seqA, score: 1.12, globalScore: 1.25 },
+          { id: 's2', key: 'design-2', seq: seqAlt, score: 1.45, globalScore: 1.6 },
+        ]),
+      },
+      mpnn_sol: {
+        sequences: makeSeqSet('seq-sol', 'web-protein-mpnn', [
+          { id: 's1', key: 'design-1', seq: seqB, score: 1.05, globalScore: 1.18 },
+        ]),
+      },
+    };
+
+    const cmp = buildComparisonState(g, ['mpnn_std', 'mpnn_sol'], outs, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      pairingMode: 'by-candidate',
+    });
+    expect(cmp.models).toEqual([]);
+    expect(cmp.branches[0].kind).toBe('sequence');
+    expect(cmp.branches[0].hasOutputs).toBe(true);
+    expect(cmp.branches[0].has3D).toBe(false);
+    expect(cmp.branches[0].mpnnScore).toBeCloseTo(1.12, 4);
+    expect(cmp.branches[0].globalScore).toBeCloseTo(1.25, 4);
+    expect(cmp.branches[0].seqRecoveryPct).not.toBeNull();
+    expect(cmp.branches[0].seqAnalysis?.hydrophobicPct).toBeGreaterThanOrEqual(0);
+    expect(cmp.branches[1].mpnnScore).toBeCloseTo(1.05, 4);
+
+    // Pairwise sequence diff between A and B
+    const diffs = computePairwiseSequenceDiff(cmp.branches);
+    expect(diffs).toHaveLength(1);
+    expect(diffs[0].comparableLength).toBe(refSeq.length);
+    expect(diffs[0].identicalCount).toBeLessThan(refSeq.length);
+    expect(diffs[0].identityPct).toBeCloseTo(
+      (diffs[0].identicalCount / diffs[0].comparableLength) * 100,
+      4,
+    );
+
+    // Missing member in by-candidate mode when selecting design-2 (absent in mpnn_sol)
+    const cmpMissing = buildComparisonState(g, ['mpnn_std', 'mpnn_sol'], outs, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      pairingMode: 'by-candidate',
+      selectedCandidateKey: 'design-2',
+    });
+    expect(cmpMissing.branches[0].sequence).toBe(seqAlt);
+    expect(cmpMissing.branches[1].missingSelectedCandidate).toBe(true);
+
+    // Non-overlapping candidates default to branch-best while honoring branchCandidateIdx
+    const cmpIdx = buildComparisonState(
+      g,
+      ['mpnn_std', 'mpnn_sol'],
+      {
+        mpnn_std: outs.mpnn_std,
+        mpnn_sol: {
+          sequences: makeSeqSet('seq-sol-alt', 'web-protein-mpnn', [
+            { id: 's9', key: 'other-design', seq: 'V'.repeat(refSeq.length), score: 1.05, globalScore: 1.18 },
+          ]),
+        },
+      },
+      {
+        layout: 'overlay',
+        colorMode: 'by-model',
+        branchCandidateIdx: { mpnn_std: 1, mpnn_sol: 0 },
+      },
+    );
+    expect(cmpIdx.pairingMode).toBe('branch-best');
+    expect(cmpIdx.branches[0].selectedIndex).toBe(1);
+    expect(cmpIdx.branches[0].sequence).toBe(seqAlt);
+
+    // Explicit pairingMode: 'branch-best' with cleared branchCandidateIdx defaults to #1;
+    // selecting #2 via branchCandidateIdx updates selectedIndex and sequence in 'branch-best' mode
+    const cmpExplicitBestDefault = buildComparisonState(g, ['mpnn_std', 'mpnn_sol'], outs, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      pairingMode: 'branch-best',
+      branchCandidateIdx: {},
+    });
+    expect(cmpExplicitBestDefault.branches[0].selectedIndex).toBe(0);
+
+    const cmpExplicitBestSwitched = buildComparisonState(g, ['mpnn_std', 'mpnn_sol'], outs, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      pairingMode: 'branch-best',
+      branchCandidateIdx: { mpnn_std: 1, mpnn_sol: 0 },
+    });
+    expect(cmpExplicitBestSwitched.branches[0].selectedIndex).toBe(1);
+    expect(cmpExplicitBestSwitched.branches[0].sequence).toBe(seqAlt);
+
+    // 3-branch SequenceSet comparison (ProteinMPNN + SolubleMPNN + ESM-IF1) with real worker-shaped keys:
+    // switching from 'by-candidate' (where ESM-IF1 is missing) to 'branch-best' and selecting #2 updates selectedIndex & sequence
+    const seqEsm1 = 'E' + refSeq.slice(1);
+    const seqEsm2 = 'W' + refSeq.slice(1);
+    const g3Seq: WorkflowGraph = {
+      id: 'mpnn-sol-esmif-compare',
+      name: '3-branch Seq Compare',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', label: 'Backbone', params: {} },
+        { id: 'p_mpnn', adapterId: 'web-protein-mpnn', label: 'ProteinMPNN', params: { family: 'proteinmpnn' } },
+        { id: 's_mpnn', adapterId: 'web-protein-mpnn', label: 'SolubleMPNN', params: { family: 'solublempnn' } },
+        { id: 'esmif', adapterId: 'antifold-esmif1', label: 'ESM-IF1', params: { variant: 'esmif1' } },
+      ],
+      edges: [
+        { fromNode: 'src', fromPort: 'structure', toNode: 'p_mpnn', toPort: 'structure' },
+        { fromNode: 'src', fromPort: 'structure', toNode: 's_mpnn', toPort: 'structure' },
+        { fromNode: 'src', fromPort: 'structure', toNode: 'esmif', toPort: 'structure' },
+      ],
+    };
+    const outs3Seq: Record<string, Record<string, CanonicalArtifact>> = {
+      src: outs.src,
+      p_mpnn: {
+        sequences: {
+          kind: 'SequenceSet',
+          id: 'p-set',
+          parentStructureId: 'src-struct',
+          sourceModelId: 'web-protein-mpnn',
+          candidates: [
+            { id: 'mpnn-1', sequence: seqA, score: 1.11, globalScore: 1.2, sourceModelId: 'web-protein-mpnn', sourceStructureId: 'src-struct' },
+            { id: 'mpnn-2', sequence: seqAlt, score: 1.45, globalScore: 1.5, sourceModelId: 'web-protein-mpnn', sourceStructureId: 'src-struct' },
+          ],
+        },
+      },
+      s_mpnn: {
+        sequences: {
+          kind: 'SequenceSet',
+          id: 's-set',
+          parentStructureId: 'src-struct',
+          sourceModelId: 'web-protein-mpnn',
+          candidates: [
+            { id: 'mpnn-1', sequence: seqB, score: 1.05, globalScore: 1.15, sourceModelId: 'web-protein-mpnn', sourceStructureId: 'src-struct' },
+            { id: 'mpnn-2', sequence: refSeq, score: 1.35, globalScore: 1.4, sourceModelId: 'web-protein-mpnn', sourceStructureId: 'src-struct' },
+          ],
+        },
+      },
+      esmif: {
+        sequences: {
+          kind: 'SequenceSet',
+          id: 'e-set',
+          parentStructureId: 'src-struct',
+          sourceModelId: 'esmif1',
+          candidates: [
+            { id: 'esmif1-1', sampleIndex: 0, sequence: seqEsm1, score: 0.92, globalScore: 0.92, sourceModelId: 'esmif1', sourceStructureId: 'src-struct' },
+            { id: 'esmif1-2', sampleIndex: 1, sequence: seqEsm2, score: 1.28, globalScore: 1.28, sourceModelId: 'esmif1', sourceStructureId: 'src-struct' },
+          ],
+        },
+      },
+    };
+    const cmp3Default = buildComparisonState(g3Seq, ['p_mpnn', 's_mpnn', 'esmif'], outs3Seq, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+    });
+    expect(cmp3Default.pairingMode).toBe('by-candidate');
+    expect(cmp3Default.branches[2].missingSelectedCandidate).toBe(true);
+
+    const cmp3BranchBest = buildComparisonState(g3Seq, ['p_mpnn', 's_mpnn', 'esmif'], outs3Seq, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      pairingMode: 'branch-best',
+      branchCandidateIdx: { p_mpnn: 1, esmif: 1 },
+    });
+    expect(cmp3BranchBest.pairingMode).toBe('branch-best');
+    expect(cmp3BranchBest.branches[0].selectedIndex).toBe(1);
+    expect(cmp3BranchBest.branches[0].sequence).toBe(seqAlt);
+    expect(cmp3BranchBest.branches[0].mpnnScore).toBeCloseTo(1.45, 3);
+    expect(cmp3BranchBest.branches[1].selectedIndex).toBe(0);
+    expect(cmp3BranchBest.branches[1].sequence).toBe(seqB);
+    expect(cmp3BranchBest.branches[2].missingSelectedCandidate).toBe(false);
+    expect(cmp3BranchBest.branches[2].selectedIndex).toBe(1);
+    expect(cmp3BranchBest.branches[2].sequence).toBe(seqEsm2);
+    expect(cmp3BranchBest.branches[2].mpnnScore).toBeCloseTo(1.28, 3);
+
+    // Whitespace-padded & lowercase candidate sequence computes seqRecoveryPct cleanly
+    const cmpPadded = buildComparisonState(
+      g,
+      ['mpnn_std', 'mpnn_sol'],
+      {
+        src: outs.src,
+        mpnn_std: {
+          sequences: makeSeqSet('seq-pad', 'web-protein-mpnn', [
+            { id: 's-pad', key: 'k-pad', seq: `  ${refSeq.toLowerCase()} \n`, score: 1.0, globalScore: 1.1 },
+          ]),
+        },
+        mpnn_sol: outs.mpnn_sol,
+      },
+      { layout: 'overlay', colorMode: 'by-model', pairingMode: 'branch-best' },
+    );
+    expect(cmpPadded.branches[0].length).toBe(refSeq.length);
+    expect(cmpPadded.branches[0].seqRecoveryPct).toBeCloseTo(100, 3);
+
+    // Self-recovery is skipped on rfd4-proteina / genie3 sequence outputs
+    const genGraph: WorkflowGraph = {
+      id: 'gen-seq-cmp',
+      name: 'Gen Seq',
+      nodes: [
+        { id: 'rfd', adapterId: 'rfd4-proteina', label: 'RFD4', params: {} },
+        { id: 'g3', adapterId: 'genie3', label: 'Genie3', params: {} },
+      ],
+      edges: [],
+    };
+    const genCmp = buildComparisonState(
+      genGraph,
+      ['rfd', 'g3'],
+      {
+        rfd: {
+          sequences: makeSeqSet('rfd-s', 'rfd4-proteina', [
+            { id: 'r1', key: 'r1', seq: refSeq, score: 0.9, globalScore: 0.9 },
+          ]),
+        },
+        g3: {
+          sequences: makeSeqSet('g3-s', 'genie3', [
+            { id: 'g1', key: 'g1', seq: refSeq, score: 0.8, globalScore: 0.8 },
+          ]),
+        },
+      },
+      { layout: 'overlay', colorMode: 'by-model' },
+    );
+    expect(genCmp.branches[0].seqRecoveryPct).toBeNull();
+    expect(genCmp.branches[1].seqRecoveryPct).toBeNull();
   });
 });

@@ -299,18 +299,40 @@
     baseParams: Record<string, unknown>;
   } | null = null;
 
+  function buildTextParamUpdate(
+    baseParams: Record<string, unknown>,
+    key: 'pdbText' | 'sequence' | 'msaA3mText',
+    value: string,
+  ): Record<string, unknown> {
+    const next: Record<string, unknown> = { ...baseParams, [key]: value };
+    if (key === 'pdbText') {
+      const curFn = String(baseParams.filename ?? '').trim();
+      if (!value.trim() && !baseParams.missingUpload) {
+        next.filename = '';
+      } else if (curFn === 'demo_3helix_53aa.pdb') {
+        next.filename = '';
+      }
+    }
+    return next;
+  }
+
   function flushPendingTextCommit() {
     if (!pendingTextCommit) return;
     const pending = pendingTextCommit;
     clearTimeout(pending.timer);
     pendingTextCommit = null;
-    onUpdate(pending.nodeId, { ...pending.baseParams, [pending.key]: pending.value });
+    onUpdate(pending.nodeId, buildTextParamUpdate(pending.baseParams, pending.key, pending.value));
   }
 
   function scheduleTextParam(key: 'pdbText' | 'sequence' | 'msaA3mText', value: string) {
-    if (key === 'pdbText') pdbTextDraft = value;
-    else if (key === 'sequence') sequenceDraft = value;
-    else msaA3mDraft = value;
+    if (key === 'pdbText') {
+      pdbTextDraft = value;
+      patchPdbStatus(node.id, { error: null, summary: null });
+    } else if (key === 'sequence') {
+      sequenceDraft = value;
+    } else {
+      msaA3mDraft = value;
+    }
     const targetNodeId = node.id;
     const baseParams = { ...node.params };
     if (pendingTextCommit) {
@@ -326,11 +348,22 @@
       onUpdate(targetNodeId, { ...baseParams, [key]: value });
       return;
     }
+    if (key === 'pdbText' && value.length <= 8000) {
+      if (
+        !value.trim() &&
+        !baseParams.missingUpload &&
+        isAutoPdbLabel(node.label, String(baseParams.filename ?? ''))
+      ) {
+        onUpdateLabel?.(targetNodeId, 'PDB Input');
+      }
+      onUpdate(targetNodeId, buildTextParamUpdate(baseParams, key, value));
+      return;
+    }
     const timer = setTimeout(() => {
       if (pendingTextCommit?.timer === timer) {
         pendingTextCommit = null;
       }
-      onUpdate(targetNodeId, { ...baseParams, [key]: value });
+      onUpdate(targetNodeId, buildTextParamUpdate(baseParams, key, value));
     }, 200);
     pendingTextCommit = { timer, nodeId: targetNodeId, key, value, baseParams };
   }
@@ -526,11 +559,15 @@
 
   function setParam(key: string, value: unknown) {
     const next: Record<string, unknown> = { ...node.params, [key]: value };
-    if (
-      (node.adapterId === 'rfd4-proteina' || node.adapterId === 'genie3') &&
-      ['mode', 'taskMode', 'contig', 'lockChain', 'hotspots', 'motifSpan', 'unindexedMotif', 'hbondMode', 'hbondSelection', 'cathCode', 'presetId'].includes(key)
-    ) {
-      next.userEditedTask = true;
+    if (node.adapterId === 'rfd4-proteina' || node.adapterId === 'genie3') {
+      if (key === 'length') {
+        next.userEditedLength = true;
+      }
+      if (
+        ['mode', 'taskMode', 'contig', 'lockChain', 'hotspots', 'motifSpan', 'unindexedMotif', 'hbondMode', 'hbondSelection', 'cathCode', 'presetId'].includes(key)
+      ) {
+        next.userEditedTask = true;
+      }
     }
     onUpdate(node.id, next);
   }
@@ -818,9 +855,12 @@
           value={String(node.params.mode ?? 'demo-bundle')}
           onchange={(e) => {
             flushPendingTextCommit();
+            const prevMode = String(node.params.mode ?? 'demo-bundle');
             const nextMode = e.currentTarget.value;
             patchPdbStatus(node.id, { error: null, summary: null });
-            if (isAutoPdbLabel(node.label, String(node.params.filename ?? ''))) {
+            const rawFn = String(node.params.filename ?? '').trim();
+            const customFn = rawFn && rawFn !== 'demo_3helix_53aa.pdb' ? rawFn : '';
+            if (isAutoPdbLabel(node.label, rawFn)) {
               if (nextMode === 'demo-bundle') {
                 onUpdateLabel?.(node.id, 'PDB Input');
               } else if (nextMode === 'pdb-id') {
@@ -830,15 +870,47 @@
                   validatePdbId(norm).status === 'ok' ? `RCSB ${norm}` : 'PDB Input',
                 );
               } else if (nextMode === 'custom') {
-                const fn = String(node.params.filename ?? '').trim();
-                onUpdateLabel?.(node.id, fn && fn !== 'demo_3helix_53aa.pdb' ? `PDB: ${fn}` : 'PDB Input');
+                const keepFn = prevMode === 'custom' && Boolean(customFn);
+                onUpdateLabel?.(node.id, keepFn ? `PDB: ${customFn}` : 'PDB Input');
               }
             }
-            onUpdate(node.id, {
+            const nextParams: Record<string, unknown> = {
               ...node.params,
               mode: nextMode,
-              ...(nextMode === 'demo-bundle' ? { cropSegments: '', benchmarkId: '' } : {}),
-            });
+            };
+            if (nextMode === 'demo-bundle') {
+              nextParams.filename = 'demo_3helix_53aa.pdb';
+              nextParams.pdbText = '';
+              nextParams.fetchedPdbId = '';
+              nextParams.benchmarkId = '';
+              nextParams.cropSegments = '';
+              nextParams.missingUpload = false;
+              pdbTextDraft = '';
+            } else if (nextMode === 'pdb-id') {
+              if (prevMode !== 'pdb-id') {
+                nextParams.filename = '';
+                nextParams.pdbText = '';
+                nextParams.fetchedPdbId = '';
+                nextParams.benchmarkId = '';
+                nextParams.cropSegments = '';
+                nextParams.missingUpload = false;
+                pdbTextDraft = '';
+              }
+            } else if (nextMode === 'custom') {
+              if (prevMode !== 'custom') {
+                nextParams.filename = '';
+                nextParams.fetchedPdbId = '';
+                nextParams.benchmarkId = '';
+                nextParams.cropSegments = '';
+                if (prevMode === 'pdb-id') {
+                  nextParams.pdbText = '';
+                  pdbTextDraft = '';
+                }
+              } else if (rawFn === 'demo_3helix_53aa.pdb') {
+                nextParams.filename = '';
+              }
+            }
+            onUpdate(node.id, nextParams);
           }}
         >
           <option value="demo-bundle">Built-in 53 aa 3-helix bundle demo</option>
@@ -877,11 +949,13 @@
                     validatePdbId(norm).status === 'ok' ? `RCSB ${norm}` : 'PDB Input',
                   );
                 }
+                const fetchedNorm = normalizePdbId(String(node.params.fetchedPdbId ?? ''));
                 onUpdate(node.id, {
                   ...node.params,
                   pdbId: nextPdbId,
                   benchmarkId: '',
                   cropSegments: '',
+                  ...(norm !== fetchedNorm ? { filename: '' } : {}),
                 });
               }}
               onkeydown={(e) => {
@@ -1031,8 +1105,12 @@
           <span>Upload .pdb / .cif</span>
           <input type="file" accept=".pdb,.cif,.mmcif,.ent,.txt" {disabled} onchange={handleFileUpload} />
         </label>
+        {@const rawFn = String(node.params.filename ?? '').trim()}
+        {@const customFilename = rawFn && rawFn !== 'demo_3helix_53aa.pdb' ? rawFn : ''}
         <label class="full">
-          <span class="filename-wrap">PDB / mmCIF text ({String(node.params.filename || 'custom.pdb')})</span>
+          <span class="filename-wrap">
+            PDB / mmCIF text{customFilename ? ` (${customFilename})` : ''}
+          </span>
           <textarea
             rows="4"
             class:input-error={pdbCheck.status === 'error'}
@@ -1044,7 +1122,7 @@
           ></textarea>
           {#if curPdbStatus.error}
             <span class="field-hint err">{curPdbStatus.error}</span>
-          {:else if nodeState?.status === 'error' && nodeState.error}
+          {:else if nodeState?.status === 'error' && nodeState.error && nodeState.error !== pdbCheck.message}
             <span class="field-hint err">{nodeState.error}</span>
           {:else if curPdbStatus.summary}
             <span class="field-hint ok">✓ {curPdbStatus.summary}</span>
@@ -1297,6 +1375,7 @@
                 ...node.params,
                 length: v,
                 contig: nextContig,
+                userEditedLength: true,
                 userEditedTask: true,
               });
             }}
@@ -1591,6 +1670,7 @@
                 ...node.params,
                 length: v,
                 contig: nextContig,
+                userEditedLength: true,
                 userEditedTask: true,
               });
             }}

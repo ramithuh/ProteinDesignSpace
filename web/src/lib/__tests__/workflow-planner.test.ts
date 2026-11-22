@@ -1,18 +1,25 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   compileLocalStarterPlan,
   compileWorkflowPlanToGraph,
   DEFAULT_PLANNER_ENDPOINT,
   LOCAL_EXAMPLE_PLANS,
+  parseDeterministicEditOperations,
   parseRetryAfterSec,
+  PlannerHttpError,
+  reconcilePlannedWorkflow,
+  requestWorkflowPlan,
+  UnsupportedWorkflowError,
   type ConditionedDesignWorkflowPlan,
   type DeNovoWorkflowPlan,
   type EditCurrentWorkflowPlan,
   type PdbWorkflowPlan,
+  type SequenceWorkflowPlan,
   type WorkflowPlan,
 } from '$lib/engine/workflow-planner';
 import { validateGraph } from '$lib/engine/graph-utils';
 import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
+import type { WorkflowGraph } from '$lib/engine/types';
 
 describe('WorkflowPlan deterministic compiler', () => {
   it('compiles Di-Iron 4-Helix Bundle motif + Genie 3 & RFD4 + AF2/RF3/Protenix-v2 into a valid 16-block multi-oracle graph', () => {
@@ -388,5 +395,752 @@ describe('WorkflowPlan deterministic compiler', () => {
     });
     expect(validateGraph(pdbGraph)).toEqual([]);
     expect(pdbGraph.nodes.map((n) => n.adapterId).sort()).toEqual(['dyna1', 'esmc', 'pdb-input']);
+  });
+});
+
+function makeReactiveProxy<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  const target = Array.isArray(value)
+    ? value.map((item) => makeReactiveProxy(item))
+    : Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, makeReactiveProxy(v)]),
+      );
+  return new Proxy(target as object, {
+    get(t, prop, receiver) {
+      return Reflect.get(t, prop, receiver);
+    },
+  }) as T;
+}
+
+describe('WorkflowPlan R1–R4 regressions & Q1–Q10 reconciliation', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('R1: clones Proxy-wrapped Svelte $state graphs safely without DataCloneError and applies remove_nodes & update_params', () => {
+    const base = compileWorkflowPlanToGraph({
+      kind: 'pdb',
+      pdbId: '1IGT',
+      crop: null,
+      tasks: ['antifold', 'esmc'],
+      targetChain: 'H',
+      regions: 'CDR1 CDR3',
+      numSequences: 2,
+      topK: 2,
+      refold: true,
+      foldModels: ['monomer'],
+      stabilityScan: false,
+      summary: '1IGT base',
+    }).graph;
+
+    // Confirm structuredClone throws on our Proxy wrapper (proving we test the exact Svelte $state failure mode)
+    const proxied = makeReactiveProxy(base);
+    expect(() => structuredClone(proxied)).toThrow();
+
+    // 1. Starter plan compiles cleanly against Proxy-wrapped currentGraph
+    const starterRes = compileLocalStarterPlan(LOCAL_EXAMPLE_PLANS[0].plan, proxied);
+    expect(validateGraph(starterRes.graph)).toEqual([]);
+    expect(starterRes.graph.nodes.some((n) => n.adapterId === 'thermompnn')).toBe(true);
+    expect(starterRes.graph.nodes.some((n) => n.params.model === 'rosettafold3')).toBe(true);
+
+    // 2. remove_nodes splices pass-through Top-K cleanly without breaking AF2 -> scRMSD
+    const spliceRes = compileWorkflowPlanToGraph(
+      {
+        kind: 'edit_current',
+        operations: [
+          {
+            action: 'remove_nodes',
+            attachToNodeId: null,
+            model: null,
+            foldModels: [],
+            topK: null,
+            numSequences: null,
+            targetChain: null,
+            regions: null,
+            score: false,
+            targetAdapterIds: ['top-k-filter'],
+          },
+        ],
+        summary: 'Remove Top-K',
+      },
+      proxied,
+    );
+    expect(validateGraph(spliceRes.graph)).toEqual([]);
+    expect(spliceRes.graph.nodes.some((n) => n.adapterId === 'top-k-filter')).toBe(false);
+    expect(spliceRes.graph.nodes.some((n) => n.adapterId === 'localfold-af2')).toBe(true);
+    expect(
+      spliceRes.graph.edges.some(
+        (e) =>
+          spliceRes.graph.nodes.find((n) => n.id === e.fromNode)?.adapterId === 'antifold-esmif1' &&
+          spliceRes.graph.nodes.find((n) => n.id === e.toNode)?.adapterId === 'localfold-af2',
+      ),
+    ).toBe(true);
+
+    // 3. remove_nodes cascades orphaned downstream AF2 & scRMSD when AntiFold is removed alongside ESM-C
+    const removeRes = compileWorkflowPlanToGraph(
+      parseDeterministicEditOperations('Remove AntiFold and ESM-C', proxied)!,
+      proxied,
+    );
+    expect(validateGraph(removeRes.graph)).toEqual([]);
+    expect(removeRes.graph.nodes.map((n) => n.adapterId)).toEqual(['pdb-input']);
+
+    // 4. Combined add_stability_scan + update_params (temperature, omitAminoAcids, mpnnFamily)
+    const mpnnBase = makeReactiveProxy(
+      compileWorkflowPlanToGraph({
+        kind: 'de_novo',
+        generators: ['rfd4-proteina'],
+        length: 80,
+        numDesigns: 1,
+        sequenceDesigners: ['web-protein-mpnn'],
+        numSequences: 2,
+        topK: null,
+        refold: true,
+        foldModels: ['monomer'],
+        score: true,
+        stabilityScan: false,
+        summary: 'RFD4 base',
+      }).graph,
+    );
+    const editOps = parseDeterministicEditOperations(
+      'Add ThermoMPNN after AlphaFold2 and change MPNN temperature to 0.2',
+      mpnnBase,
+    )!;
+    const edited = compileWorkflowPlanToGraph(editOps, mpnnBase);
+    expect(validateGraph(edited.graph)).toEqual([]);
+    const mpnnNode = edited.graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn')!;
+    expect(mpnnNode.params.temperature).toBe(0.2);
+    const af2Node = edited.graph.nodes.find((n) => n.adapterId === 'localfold-af2')!;
+    const thermoNode = edited.graph.nodes.find((n) => n.adapterId === 'thermompnn')!;
+    expect(
+      edited.graph.edges.some(
+        (e) => e.fromNode === af2Node.id && e.toNode === thermoNode.id,
+      ),
+    ).toBe(true);
+
+    // 5. update_params clamps temperature & updates omitAminoAcids & mpnnFamily -> SolubleMPNN
+    const paramUpdated = compileWorkflowPlanToGraph(
+      {
+        kind: 'edit_current',
+        operations: [
+          {
+            action: 'update_params',
+            attachToNodeId: null,
+            model: null,
+            foldModels: [],
+            topK: null,
+            numSequences: 4,
+            targetChain: null,
+            regions: null,
+            score: false,
+            temperature: 9.0,
+            omitAminoAcids: 'c, c',
+            mpnnFamily: 'solublempnn',
+          },
+        ],
+        summary: 'Update MPNN params',
+      },
+      mpnnBase,
+    );
+    expect(validateGraph(paramUpdated.graph)).toEqual([]);
+    const updatedMpnn = paramUpdated.graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn')!;
+    expect(updatedMpnn.params.temperature).toBe(1.5);
+    expect(updatedMpnn.params.omitAminoAcids).toBe('C');
+    expect(updatedMpnn.params.numSequences).toBe(4);
+    expect(updatedMpnn.params.family).toBe('solublempnn');
+    expect(updatedMpnn.label).toBe('SolubleMPNN');
+  });
+
+  it('R1 & R2: requestWorkflowPlan recovers from 502/empty-ops edit responses, uses v2 session cache, and preserves 429/502 non-edit errors', async () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('sessionStorage', {
+      getItem: vi.fn((k: string) => store.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => {
+        store.set(k, v);
+      }),
+    });
+
+    const baseGraph = makeReactiveProxy(
+      compileWorkflowPlanToGraph({
+        kind: 'pdb',
+        pdbId: '1IGT',
+        crop: null,
+        tasks: ['antifold', 'esmc'],
+        targetChain: 'H',
+        regions: 'CDR3',
+        numSequences: 2,
+        topK: null,
+        refold: false,
+        foldModels: [],
+        stabilityScan: false,
+        summary: '1IGT',
+      }).graph,
+    );
+
+    // 1. HTTP 502 fallback on deterministic edit instruction
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ok: false, code: 'ai_error' }), { status: 502 })),
+    );
+    const recovered = await requestWorkflowPlan('Remove AntiFold and ESM-C', {
+      currentGraph: baseGraph,
+      skipSessionCache: true,
+    });
+    expect(recovered.model).toBe('client-edit-fallback');
+    expect(recovered.graph.nodes.map((n) => n.adapterId)).toEqual(['pdb-input']);
+    expect(store.has('denovo:planner-cache:v2')).toBe(true);
+    expect(store.has('denovo:planner-cache:v1')).toBe(false);
+
+    // 2. Empty edit_current ops repaired cleanly
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ok: true,
+              plan: { kind: 'edit_current', operations: [], summary: 'Empty ops' },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const repaired = await requestWorkflowPlan('Remove AntiFold and ESM-C', {
+      currentGraph: baseGraph,
+      skipSessionCache: true,
+    });
+    expect(repaired.graph.nodes.map((n) => n.adapterId)).toEqual(['pdb-input']);
+
+    // 3. HTTP 429 is NOT masked even with currentGraph
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ok: false, error: 'Rate limited' }), { status: 429 })),
+    );
+    await expect(
+      requestWorkflowPlan('Remove AntiFold and ESM-C', {
+        currentGraph: baseGraph,
+        skipSessionCache: true,
+      }),
+    ).rejects.toBeInstanceOf(PlannerHttpError);
+
+    // 4. HTTP 502 on non-edit prompt without currentGraph still throws PlannerHttpError
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ok: false }), { status: 502 })),
+    );
+    await expect(
+      requestWorkflowPlan('Design a 100aa helical bundle', { skipSessionCache: true }),
+    ).rejects.toBeInstanceOf(PlannerHttpError);
+  });
+
+  it('R2, R3, R4: compiles sequence, partial diffusion, solublempnn/esmif1/antifold, and pdb ThermoMPNN+foldModels graphs', () => {
+    // 1. kind: 'sequence' (Q7 heterodimer)
+    const seqPlan: SequenceWorkflowPlan = {
+      kind: 'sequence',
+      sequences: ['MKTEEELIKK', 'GGGGSVVVVV'],
+      label: 'Heterodimer Sequence',
+      foldModels: ['multimer'],
+      stabilityScan: true,
+      esmcScore: true,
+      dynamicsScan: true,
+      summary: 'Fold heterodimer + ThermoMPNN',
+    };
+    const seqCompiled = compileWorkflowPlanToGraph(seqPlan);
+    expect(validateGraph(seqCompiled.graph)).toEqual([]);
+    const seqIn = seqCompiled.graph.nodes.find((n) => n.adapterId === 'sequence-input')!;
+    expect(seqIn.params.sequence).toBe('MKTEEELIKK:GGGGSVVVVV');
+    expect(seqCompiled.graph.nodes.find((n) => n.adapterId === 'localfold-af2')?.params.model).toBe(
+      'multimer',
+    );
+    expect(seqCompiled.graph.nodes.some((n) => n.adapterId === 'thermompnn')).toBe(true);
+    expect(seqCompiled.graph.nodes.some((n) => n.adapterId === 'esmc')).toBe(true);
+    expect(seqCompiled.graph.nodes.some((n) => n.adapterId === 'dyna1')).toBe(true);
+
+    // 2. designTask: 'partial' (Q8 1UBQ) filters Genie 3, clamps partialFraction, wires ESM-IF1
+    const partialCompiled = compileWorkflowPlanToGraph({
+      kind: 'conditioned_design',
+      designTask: 'partial',
+      partialFraction: 0.99,
+      benchmarkId: null,
+      pdbId: '1UBQ',
+      crop: null,
+      generators: ['genie3', 'rfd4-proteina'],
+      length: null,
+      numDesigns: 2,
+      sequenceDesigners: ['esmif1'],
+      numSequences: 3,
+      temperature: 0.25,
+      topK: null,
+      refold: true,
+      foldModels: ['monomer'],
+      score: true,
+      stabilityScan: false,
+      summary: 'Partial diffusion 1UBQ + ESM-IF1',
+    });
+    expect(validateGraph(partialCompiled.graph)).toEqual([]);
+    expect(partialCompiled.graph.nodes.some((n) => n.adapterId === 'genie3')).toBe(false);
+    const rfd4 = partialCompiled.graph.nodes.find((n) => n.adapterId === 'rfd4-proteina')!;
+    expect(rfd4.params.mode).toBe('partial');
+    expect(rfd4.params.partialFraction).toBe(0.95);
+    expect(rfd4.params.numDesigns).toBe(2);
+    const esmIf1 = partialCompiled.graph.nodes.find((n) => n.adapterId === 'antifold-esmif1')!;
+    expect(esmIf1.label).toBe('ESM-IF1');
+    expect(esmIf1.params.variant).toBe('esmif1');
+    expect(esmIf1.params.temperature).toBe(0.25);
+
+    // 3. pdb downstream eval with foldModels + refold: false & non-refold stabilityScan (Q2, Q3)
+    const pdbEvalCompiled = compileWorkflowPlanToGraph({
+      kind: 'pdb',
+      pdbId: '1CTT',
+      crop: null,
+      tasks: ['ligandmpnn'],
+      targetChain: null,
+      regions: null,
+      numSequences: 2,
+      omitAminoAcids: 'C',
+      temperature: 0.2,
+      topK: null,
+      refold: false,
+      foldModels: [],
+      stabilityScan: true,
+      esmcScore: true,
+      dynamicsScan: true,
+      summary: '1CTT LigandMPNN + ThermoMPNN',
+    });
+    expect(validateGraph(pdbEvalCompiled.graph)).toEqual([]);
+    const lig = pdbEvalCompiled.graph.nodes.find((n) => n.adapterId === 'ligandmpnn')!;
+    expect(lig.params.omitAminoAcids).toBe('C');
+    expect(lig.params.temperature).toBe(0.2);
+    expect(pdbEvalCompiled.graph.nodes.some((n) => n.adapterId === 'thermompnn')).toBe(true);
+    expect(pdbEvalCompiled.graph.nodes.some((n) => n.adapterId === 'esmc')).toBe(true);
+    expect(pdbEvalCompiled.graph.nodes.some((n) => n.adapterId === 'dyna1')).toBe(true);
+
+    // 4. pdb thermompnn task with foldModels: ['monomer'] still wires downstream refold/score cleanly
+    const thermoRefoldCompiled = compileWorkflowPlanToGraph({
+      kind: 'pdb',
+      pdbId: '1UBQ',
+      crop: null,
+      tasks: ['thermompnn'],
+      targetChain: null,
+      regions: null,
+      numSequences: 2,
+      topK: null,
+      refold: false,
+      foldModels: ['monomer'],
+      stabilityScan: true,
+      summary: '1UBQ ThermoMPNN + AF2',
+    });
+    expect(validateGraph(thermoRefoldCompiled.graph)).toEqual([]);
+    expect(thermoRefoldCompiled.graph.nodes.some((n) => n.adapterId === 'thermompnn')).toBe(true);
+    expect(thermoRefoldCompiled.graph.nodes.some((n) => n.adapterId === 'localfold-af2')).toBe(true);
+    expect(thermoRefoldCompiled.graph.nodes.some((n) => n.adapterId === 'designability-scorer')).toBe(true);
+
+    // 5. SolubleMPNN labeling on solublempnn / mpnnFamily: 'solublempnn'
+    const solubleCompiled = compileWorkflowPlanToGraph({
+      kind: 'de_novo',
+      generators: ['rfd4-proteina'],
+      length: 70,
+      numDesigns: 1,
+      sequenceDesigners: ['solublempnn'],
+      numSequences: 2,
+      omitAminoAcids: 'C, M',
+      temperature: 0.15,
+      topK: null,
+      refold: true,
+      foldModels: ['monomer'],
+      score: true,
+      stabilityScan: false,
+      summary: 'SolubleMPNN de novo',
+    });
+    expect(validateGraph(solubleCompiled.graph)).toEqual([]);
+    const solNode = solubleCompiled.graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn')!;
+    expect(solNode.label).toBe('SolubleMPNN');
+    expect(solNode.params.family).toBe('solublempnn');
+    expect(solNode.params.omitAminoAcids).toBe('CM');
+    expect(solNode.params.temperature).toBe(0.15);
+  });
+
+  it('R2–R4: reconcilePlannedWorkflow repairs Q1–Q9 v7 desyncs and leaves Q10 unsupported untouched', () => {
+    // Q1: 5O45 65aa binder with SolubleMPNN omit C & AF2-Multimer
+    const q1 = reconcilePlannedWorkflow(
+      {
+        kind: 'conditioned_design',
+        designTask: 'binder',
+        benchmarkId: 'pdl1_5o45',
+        pdbId: '5O45',
+        crop: null,
+        generators: ['rfd4-proteina'],
+        length: 65,
+        numDesigns: 1,
+        sequenceDesigners: ['antifold'],
+        numSequences: 2,
+        topK: null,
+        refold: true,
+        foldModels: ['multimer'],
+        score: true,
+        stabilityScan: false,
+        summary: 'Q1',
+      },
+      'Design a 65aa binder to 5O45 with RFD4, SolubleMPNN omitting C, and AF2-Multimer',
+    ) as ConditionedDesignWorkflowPlan;
+    expect(q1.mpnnFamily).toBe('solublempnn');
+    expect(q1.omitAminoAcids).toBe('C');
+    expect(q1.sequenceDesigners).toEqual(['solublempnn']);
+    const q1Graph = compileWorkflowPlanToGraph(q1).graph;
+    expect(q1Graph.nodes.find((n) => n.adapterId === 'rfd4-proteina')?.params.contig).toBe(
+      'A17-132,/0,65-65',
+    );
+    expect(q1Graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn')?.params.omitAminoAcids).toBe('C');
+
+    // Q2: 1IGT CDR1+CDR3 AntiFold + Top-K (3) + RF3
+    const q2 = reconcilePlannedWorkflow(
+      {
+        kind: 'pdb',
+        pdbId: '1IGT',
+        crop: null,
+        tasks: ['antifold'],
+        targetChain: 'H',
+        regions: 'CDR3',
+        numSequences: 4,
+        topK: null,
+        refold: false,
+        foldModels: [],
+        stabilityScan: false,
+        summary: 'Q2',
+      },
+      'Redesign 1IGT CDR1 and CDR3 with AntiFold, Top-K (3), and RoseTTAFold 3',
+    ) as PdbWorkflowPlan;
+    expect(q2.topK).toBe(3);
+    expect(q2.foldModels).toEqual(['rosettafold3']);
+    expect(q2.refold).toBe(true);
+    expect(q2.regions).toBe('CDR1 CDR3');
+    const q2Graph = compileWorkflowPlanToGraph(q2).graph;
+    expect(q2Graph.nodes.some((n) => n.adapterId === 'top-k-filter' && n.params.topK === 3)).toBe(true);
+    expect(q2Graph.nodes.some((n) => n.adapterId === 'localfold-af2' && n.params.model === 'rosettafold3')).toBe(true);
+
+    // Q3: 1CTT LigandMPNN + ThermoMPNN misrouted to conditioned_design -> pdb
+    const q3 = reconcilePlannedWorkflow(
+      {
+        kind: 'conditioned_design',
+        designTask: 'enzyme-ligand',
+        benchmarkId: 'ame_1ctt_cda',
+        pdbId: '1CTT',
+        crop: null,
+        generators: ['rfd4-proteina'],
+        length: null,
+        numDesigns: 1,
+        numSequences: 2,
+        topK: null,
+        refold: true,
+        foldModels: ['monomer'],
+        score: true,
+        stabilityScan: false,
+        summary: 'Q3',
+      },
+      'Run LigandMPNN and ThermoMPNN on 1CTT',
+    ) as PdbWorkflowPlan;
+    expect(q3.kind).toBe('pdb');
+    expect(q3.pdbId).toBe('1CTT');
+    expect(q3.tasks).toEqual(['ligandmpnn', 'thermompnn']);
+    const q3Graph = compileWorkflowPlanToGraph(q3).graph;
+    expect(q3Graph.nodes.some((n) => n.adapterId === 'ligandmpnn')).toBe(true);
+    expect(q3Graph.nodes.some((n) => n.adapterId === 'thermompnn')).toBe(true);
+    expect(q3Graph.nodes.some((n) => n.adapterId === 'rfd4-proteina')).toBe(false);
+
+    // Q4: 1YCR B19-27 80aa motif scaffold -> contig 35-35,B19-27,36-36
+    const q4 = reconcilePlannedWorkflow(
+      {
+        kind: 'conditioned_design',
+        designTask: 'motif',
+        benchmarkId: 'rfd_1ycr_p53',
+        pdbId: '1YCR',
+        crop: null,
+        generators: ['genie3'],
+        length: null,
+        numDesigns: 1,
+        numSequences: 2,
+        topK: null,
+        refold: true,
+        foldModels: ['monomer'],
+        score: true,
+        stabilityScan: false,
+        summary: 'Q4',
+      },
+      'Scaffold 1YCR B19-27 into an 80aa protein with Genie 3, AF2, and motif RMSD',
+    ) as ConditionedDesignWorkflowPlan;
+    expect(q4.length).toBe(80);
+    const q4Graph = compileWorkflowPlanToGraph(q4).graph;
+    expect(q4Graph.nodes.find((n) => n.adapterId === 'genie3')?.params.contig).toBe('35-35,B19-27,36-36');
+
+    // Q6: 2×90aa 3-way cross-folder fork
+    const q6 = reconcilePlannedWorkflow(
+      {
+        kind: 'de_novo',
+        generators: ['rfd4-proteina'],
+        length: 90,
+        numDesigns: 1,
+        sequenceDesigners: ['web-protein-mpnn'],
+        numSequences: 2,
+        topK: null,
+        refold: true,
+        foldModels: ['monomer'],
+        score: true,
+        stabilityScan: false,
+        summary: 'Q6',
+      },
+      'Generate 2×90aa de novo proteins with RFD4, ProteinMPNN, and compare AF2 vs Boltz-2 vs RF3',
+    ) as DeNovoWorkflowPlan;
+    expect(q6.numDesigns).toBe(2);
+    expect(q6.length).toBe(90);
+    expect(q6.foldModels).toEqual(['monomer', 'boltz2', 'rosettafold3']);
+    const q6Graph = compileWorkflowPlanToGraph(q6).graph;
+    expect(q6Graph.nodes.find((n) => n.adapterId === 'rfd4-proteina')?.params.numDesigns).toBe(2);
+    expect(q6Graph.nodes.filter((n) => n.adapterId === 'localfold-af2')).toHaveLength(3);
+
+    // Q7: Heterodimer sequence folding promoted from stale pdb demo fallback
+    const q7 = reconcilePlannedWorkflow(
+      {
+        kind: 'pdb',
+        pdbId: 'demo',
+        crop: null,
+        tasks: ['thermompnn'],
+        targetChain: null,
+        regions: null,
+        numSequences: null,
+        topK: null,
+        refold: false,
+        foldModels: [],
+        stabilityScan: false,
+        summary: 'Q7',
+      },
+      'Fold heterodimer sequence MKTEEELIKK + GGGGSVVVVV with AF2-Multimer and ThermoMPNN',
+    ) as SequenceWorkflowPlan;
+    expect(q7.kind).toBe('sequence');
+    expect(q7.sequences).toEqual(['MKTEEELIKK', 'GGGGSVVVVV']);
+    expect(q7.foldModels).toEqual(['multimer']);
+    expect(q7.stabilityScan).toBe(true);
+
+    // Q8: Partial diffusion + ESM-IF1 on 1UBQ strips unrequested AntiFold
+    const q8 = reconcilePlannedWorkflow(
+      {
+        kind: 'pdb',
+        pdbId: '1UBQ',
+        crop: null,
+        tasks: ['antifold'],
+        targetChain: null,
+        regions: null,
+        numSequences: 2,
+        topK: null,
+        refold: false,
+        foldModels: [],
+        stabilityScan: false,
+        summary: 'Q8',
+      },
+      'Run partial diffusion on 1UBQ with RFD4-Proteina, ESM-IF1, and check designability',
+    ) as ConditionedDesignWorkflowPlan;
+    expect(q8.kind).toBe('conditioned_design');
+    expect(q8.designTask).toBe('partial');
+    expect(q8.pdbId).toBe('1UBQ');
+    expect(q8.sequenceDesigners).toEqual(['esmif1']);
+    expect(q8.score).toBe(true);
+
+    // Q9: Vague stabilization/anti-aggregation routes antifold -> SolubleMPNN + stabilityScan
+    const q9 = reconcilePlannedWorkflow(
+      {
+        kind: 'pdb',
+        pdbId: 'demo',
+        crop: null,
+        tasks: ['antifold'],
+        targetChain: null,
+        regions: null,
+        numSequences: 2,
+        topK: null,
+        refold: false,
+        foldModels: [],
+        stabilityScan: false,
+        summary: 'Q9',
+      },
+      'Stabilize a small protein and avoid aggregation',
+    ) as PdbWorkflowPlan;
+    expect(q9.tasks).toContain('solublempnn');
+    expect(q9.tasks).not.toContain('antifold');
+    expect(q9.stabilityScan).toBe(true);
+
+    // Q10: Unsupported plan stays completely unaltered and never mutates active currentGraph
+    const activeSnapshot: WorkflowGraph = {
+      id: 'active-g',
+      name: 'Active',
+      nodes: [{ id: 'pdb_1', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } }],
+      edges: [],
+    };
+    const q10Input: WorkflowPlan = {
+      kind: 'unsupported',
+      unsupported: ['RDKit', 'AutoDock Vina'],
+      reason: 'Small-molecule docking is not supported.',
+      suggestions: ['Use LigandMPNN'],
+      summary: 'Unsupported',
+    };
+    const q10Out = reconcilePlannedWorkflow(
+      q10Input,
+      'Run RDKit and AutoDock Vina docking on 3PTB',
+      activeSnapshot,
+    );
+    expect(q10Out).toBe(q10Input);
+    expect(() => compileWorkflowPlanToGraph(q10Out, activeSnapshot)).toThrow(UnsupportedWorkflowError);
+    expect(activeSnapshot.nodes).toHaveLength(1);
+  });
+
+  it('Iteration 2 regressions: scoped remove/param edit parsing, de_novo singular sequenceDesigner, pdb AntiFold restore, pdb topK+stabilityScan, and ALL-CAPS English prompt guard', () => {
+    // 1. Bug 1: Remove AntiFold and change MPNN temperature to 0.2 removes ONLY af_1 and updates mpnn_1 temp to 0.2
+    const canvasBug1: WorkflowGraph = {
+      id: 'canvas-bug1',
+      name: 'Bug 1 Canvas',
+      nodes: [
+        { id: 'pdb_1', adapterId: 'pdb-input', label: 'PDB', params: { mode: 'demo-bundle' } },
+        {
+          id: 'mpnn_1',
+          adapterId: 'web-protein-mpnn',
+          label: 'ProteinMPNN',
+          params: { family: 'proteinmpnn', temperature: 0.1, numSequences: 2 },
+        },
+        {
+          id: 'af_1',
+          adapterId: 'antifold-esmif1',
+          label: 'AntiFold',
+          params: { variant: 'antifold', temperature: 0.5, numSequences: 2 },
+        },
+      ],
+      edges: [
+        { fromNode: 'pdb_1', fromPort: 'structure', toNode: 'mpnn_1', toPort: 'structure' },
+        { fromNode: 'pdb_1', fromPort: 'structure', toNode: 'af_1', toPort: 'structure' },
+      ],
+    };
+    const bug1Plan = parseDeterministicEditOperations(
+      'Remove AntiFold and change MPNN temperature to 0.2',
+      canvasBug1,
+    )!;
+    expect(bug1Plan).not.toBeNull();
+    const bug1Compiled = compileWorkflowPlanToGraph(bug1Plan, canvasBug1).graph;
+    expect(validateGraph(bug1Compiled)).toEqual([]);
+    expect(bug1Compiled.nodes.find((n) => n.id === 'af_1')).toBeUndefined();
+    const keptMpnn = bug1Compiled.nodes.find((n) => n.id === 'mpnn_1');
+    expect(keptMpnn).toBeDefined();
+    expect(keptMpnn!.params.temperature).toBe(0.2);
+
+    // 2. Bug 2: Add ThermoMPNN after AntiFold and change MPNN temperature to 0.2 does NOT overwrite af_1 temperature
+    const bug2Plan = parseDeterministicEditOperations(
+      'Add ThermoMPNN after AntiFold and change MPNN temperature to 0.2',
+      canvasBug1,
+    )!;
+    expect(bug2Plan).not.toBeNull();
+    const bug2UpdateOp = bug2Plan.operations.find((o) => o.action === 'update_params')!;
+    expect(bug2UpdateOp.targetNodeIds).toEqual(['mpnn_1']);
+    const bug2Compiled = compileWorkflowPlanToGraph(bug2Plan, canvasBug1).graph;
+    expect(validateGraph(bug2Compiled)).toEqual([]);
+    expect(bug2Compiled.nodes.find((n) => n.id === 'mpnn_1')!.params.temperature).toBe(0.2);
+    expect(bug2Compiled.nodes.find((n) => n.id === 'af_1')!.params.temperature).toBe(0.5);
+    const thermoBug2 = bug2Compiled.nodes.find((n) => n.adapterId === 'thermompnn')!;
+    expect(thermoBug2).toBeDefined();
+    expect(
+      bug2Compiled.edges.some((e) => e.fromNode === 'pdb_1' && e.toNode === thermoBug2.id),
+    ).toBe(true);
+
+    // 3. Bug 3: de_novo legacy singular sequenceDesigner: 'antifold' on Q9 stabilization replaces antifold -> solublempnn
+    const q9DeNovo = reconcilePlannedWorkflow(
+      {
+        kind: 'de_novo',
+        generators: ['rfd4-proteina'],
+        length: 70,
+        numDesigns: 1,
+        sequenceDesigner: 'antifold',
+        numSequences: 2,
+        topK: null,
+        refold: true,
+        foldModels: ['monomer'],
+        score: true,
+        stabilityScan: false,
+        summary: 'Stabilize small protein',
+      },
+      'Stabilize small protein and avoid aggregation',
+    ) as DeNovoWorkflowPlan;
+    expect(q9DeNovo.mpnnFamily).toBe('solublempnn');
+    expect(q9DeNovo.sequenceDesigners).toEqual(['solublempnn']);
+    expect(q9DeNovo.stabilityScan).toBe(true);
+    const q9DeNovoGraph = compileWorkflowPlanToGraph(q9DeNovo).graph;
+    expect(q9DeNovoGraph.nodes.some((n) => n.adapterId === 'antifold-esmif1')).toBe(false);
+    expect(
+      q9DeNovoGraph.nodes.some(
+        (n) => n.adapterId === 'web-protein-mpnn' && n.label === 'SolubleMPNN',
+      ),
+    ).toBe(true);
+
+    // 4. Bug 4: pdb AntiFold restoration when degraded v7 returns proteinmpnn for antibody AntiFold prompt
+    const q2Restored = reconcilePlannedWorkflow(
+      {
+        kind: 'pdb',
+        pdbId: '1IGT',
+        crop: null,
+        tasks: ['proteinmpnn'],
+        targetChain: null,
+        regions: null,
+        numSequences: 2,
+        topK: null,
+        refold: false,
+        foldModels: [],
+        stabilityScan: false,
+        summary: 'Q2 degraded',
+      },
+      'Design CDR1 and CDR3 of antibody 1IGT using AntiFold, take Top-3, and refold with RF3',
+    ) as PdbWorkflowPlan;
+    expect(q2Restored.tasks).toContain('antifold');
+    expect(q2Restored.tasks).not.toContain('proteinmpnn');
+    expect(q2Restored.regions).toBe('CDR1 CDR3');
+    expect(q2Restored.topK).toBe(3);
+    expect(q2Restored.foldModels).toEqual(['rosettafold3']);
+    const q2RestoredGraph = compileWorkflowPlanToGraph(q2Restored).graph;
+    expect(validateGraph(q2RestoredGraph)).toEqual([]);
+    expect(
+      q2RestoredGraph.nodes.some(
+        (n) => n.adapterId === 'antifold-esmif1' && n.params.variant === 'antifold',
+      ),
+    ).toBe(true);
+    expect(q2RestoredGraph.nodes.some((n) => n.adapterId === 'web-protein-mpnn')).toBe(false);
+
+    // 5. Reviewer caveat 7a: pdb with topK + stabilityScan + refold: false still attaches ThermoMPNN
+    const pdbTopKThermo = compileWorkflowPlanToGraph({
+      kind: 'pdb',
+      pdbId: '1UBQ',
+      crop: null,
+      tasks: ['proteinmpnn'],
+      targetChain: null,
+      regions: null,
+      numSequences: 4,
+      topK: 2,
+      refold: false,
+      foldModels: [],
+      stabilityScan: true,
+      summary: '1UBQ MPNN Top-2 + ThermoMPNN',
+    }).graph;
+    expect(validateGraph(pdbTopKThermo)).toEqual([]);
+    expect(pdbTopKThermo.nodes.some((n) => n.adapterId === 'top-k-filter')).toBe(true);
+    expect(pdbTopKThermo.nodes.some((n) => n.adapterId === 'thermompnn')).toBe(true);
+
+    // 6. Reviewer caveat 7b: ALL-CAPS English prompts do not falsely trigger kind: 'sequence'
+    const allCapsReconciled = reconcilePlannedWorkflow(
+      {
+        kind: 'de_novo',
+        generators: ['rfd4-proteina'],
+        length: 80,
+        numDesigns: 1,
+        numSequences: 2,
+        topK: null,
+        refold: true,
+        foldModels: ['monomer'],
+        score: true,
+        stabilityScan: false,
+        summary: 'All caps de novo',
+      },
+      'DESIGN A STABLE PEPTIDE BINDER FOR TARGET STRAND WITH FILTER PLEASE CREATE NATIVE CHAINS',
+    );
+    expect(allCapsReconciled.kind).toBe('de_novo');
   });
 });

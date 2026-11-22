@@ -2632,6 +2632,7 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     const tight = byId.get('tight-interface')!;
     expect(tight.designable).toBe(true);
     expect(tight.failedGates).toEqual([]);
+    expect(tight.chainLengths).toEqual([nTarget, nBinder]);
     expect(tight.ipsae!).toBeGreaterThan(0.7);
     expect(tight.ipsaeMin!).toBeCloseTo(tight.ipsae!, 5);
     expect(tight.msaMode).toBe('target-only');
@@ -2639,6 +2640,7 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
 
     const weak = byId.get('weak-interface')!;
     expect(weak.designable).toBe(false);
+    expect(weak.chainLengths).toEqual([nTarget, nBinder]);
     expect(weak.ipsae!).toBeLessThan(0.6);
     expect(weak.msaMode).toBe('single');
     expect(weak.msaDepth).toBe(1);

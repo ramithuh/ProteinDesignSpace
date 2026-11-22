@@ -138,32 +138,49 @@ export function parseFixedPositionsAndChains(
  * Parse tied-position groups like "A10=B10, A11=B11" (or semicolon-separated groups "A10 B10; A11 B11")
  * into `ResidueRef[][]` for ProteinMPNN homomer / symmetry tying.
  */
-export function parseTiedPositions(spec: unknown, defaultChain = 'A'): ResidueRef[][] {
+export function parseTiedPositions(spec: unknown, _defaultChain = 'A'): ResidueRef[][] {
   if (Array.isArray(spec)) {
     return spec as ResidueRef[][];
   }
   const text = String(spec ?? '').trim();
   if (!text) return [];
   const groups: ResidueRef[][] = [];
-  const rawGroups = text.includes(';') ? text.split(';') : text.split(',');
+  const rawGroups = text.split(/[;,]+/);
+  const seenResidues = new Set<string>();
   for (const rawGroup of rawGroups) {
-    const tokens = rawGroup
-      .trim()
-      .split(/[=\s]+/)
-      .filter(Boolean);
-    if (tokens.length < 2) continue;
+    const groupText = rawGroup.trim();
+    if (!groupText) continue;
+    if (groupText.includes('=') && groupText.split('=').some((part) => !part.trim())) {
+      throw new Error(`Invalid tied position group "${groupText}" (empty side around "="; expected e.g. "A10=B10").`);
+    }
+    const tokens = groupText.split(/[=\s]+/).filter(Boolean);
+    if (tokens.length < 2) {
+      throw new Error(`Invalid tied position group "${groupText}" (expected at least 2 residues, e.g. "A10=B10").`);
+    }
     const refs: ResidueRef[] = [];
     for (const tok of tokens) {
-      const m = /^([A-Za-z_])?:?(-?\d+)([A-Za-z])?$/.exec(tok);
+      const m = /^([A-Za-z_]):?(-?\d+)([A-Za-z])?$/.exec(tok);
       if (!m) {
-        throw new Error(`Invalid tied position token "${tok}" in "${rawGroup.trim()}".`);
+        throw new Error(
+          `Invalid tied position token "${tok}" in "${groupText}" (expected chain ID + residue number, e.g. "A10=B10" or "A100A=B100A").`,
+        );
       }
-      const chain = m[1] ? m[1].toUpperCase() : defaultChain;
+      const chain = m[1].toUpperCase();
       const number = Number(m[2]);
       const insertionCode = m[3];
+      const key = `${chain}:${number}${insertionCode ?? ''}`;
+      if (seenResidues.has(key)) {
+        throw new Error(
+          `Duplicate or overlapping tied position residue "${tok}" in "${groupText}" (each residue may appear in at most one tie group).`,
+        );
+      }
+      seenResidues.add(key);
       refs.push(insertionCode ? { chain, number, insertionCode } : { chain, number });
     }
-    if (refs.length >= 2) groups.push(refs);
+    groups.push(refs);
+  }
+  if (groups.length === 0) {
+    throw new Error(`Invalid tied position group "${text}" (expected at least 2 residues, e.g. "A10=B10").`);
   }
   return groups;
 }

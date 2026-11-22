@@ -16,6 +16,7 @@ import { parseStructureText } from '$lib/protein-ops/pdb';
 import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 import { ADAPTER_REGISTRY } from './registry';
 import { resolveFoldConfidence, selectFoldRepresentative } from './bio-capabilities';
+import { analyzeSequence, type SequenceAnalysis } from './peek';
 import type {
   CanonicalArtifact,
   CollectionKind,
@@ -77,7 +78,7 @@ export interface KeyedCollectionJoinResult<T = unknown> {
 
 export interface BranchCandidateRef {
   nodeId: string;
-  kind: 'metrics' | 'fold' | 'structure' | 'trajectory';
+  kind: 'metrics' | 'fold' | 'structure' | 'trajectory' | 'sequence';
   index: number;
   key: string;
   sequenceId: string;
@@ -126,7 +127,7 @@ export interface CompareBranchSummary {
   colorHex: number;
   hasOutputs: boolean;
   has3D: boolean;
-  kind: 'metrics' | 'fold' | 'structure' | 'none';
+  kind: 'metrics' | 'fold' | 'structure' | 'sequence' | 'none';
   structureId: string | null;
   designedPdb: string | null;
   pdbText: string | null;
@@ -168,6 +169,10 @@ export interface CompareBranchSummary {
   foldElapsedMs: number | null;
   geometry: GeometryStats | null;
   pae: Float32Array | null;
+  mpnnScore: number | null;
+  globalScore: number | null;
+  seqRecoveryPct: number | null;
+  seqAnalysis: SequenceAnalysis | null;
 }
 
 export type CompareBranchMetrics = CompareBranchSummary;
@@ -802,7 +807,7 @@ function extractBranchCandidateItems(
           confidenceAvailable: false,
           value: {
             nodeId,
-            kind: 'structure' as const,
+            kind: 'sequence' as const,
             index: idx,
             key,
             sequenceId: c.id,
@@ -1065,6 +1070,10 @@ function extractBranch(
     foldElapsedMs: null,
     geometry: null,
     pae: null,
+    mpnnScore: null,
+    globalScore: null,
+    seqRecoveryPct: null,
+    seqAnalysis: null,
   };
 
   const outs = outputsByNode[nodeId];
@@ -1371,6 +1380,79 @@ function extractBranch(
       candidateCount: 1,
       selectedIndex: 0,
       geometry: struct.geometry,
+    };
+  }
+
+  const seqSet = values.find((a): a is SequenceSet => a.kind === 'SequenceSet');
+  if (seqSet && seqSet.candidates.length > 0) {
+    if (overrideSelection?.missing) {
+      return {
+        ...empty,
+        hasOutputs: true,
+        kind: 'sequence',
+        candidateCount: seqSet.candidates.length,
+        selectedIndex: -1,
+        candidateKey: overrideSelection.candidateKey,
+        missingSelectedCandidate: true,
+        rankingPolicy: 'sequence-score',
+        collectionKind: seqSet.collectionKind ?? 'independent-candidates',
+      };
+    }
+    const rawIdx =
+      overrideSelection?.index !== undefined && overrideSelection.index !== null
+        ? overrideSelection.index
+        : (branchCandidateIdx[nodeId] ?? 0);
+    const idx = Math.max(0, Math.min(seqSet.candidates.length - 1, rawIdx));
+    const cand = seqSet.candidates[idx] ?? seqSet.candidates[0];
+    const upstreamStruct =
+      findStructureArtifactById(outputsByNode, cand.sourceStructureId ?? seqSet.parentStructureId) ??
+      findUpstreamStructureArtifact(graph, nodeId, outputsByNode);
+    const isSelfGen =
+      adapterId.startsWith('rfd4-proteina') ||
+      adapterId.startsWith('genie3') ||
+      cand.sourceModelId.startsWith('rfd4-proteina') ||
+      cand.sourceModelId.startsWith('genie3');
+    const trimmedCandSeq = cand.sequence.trim();
+    const trimmedRefSeq = upstreamStruct?.sequence?.trim() ?? '';
+    const refSeq =
+      !isSelfGen && trimmedRefSeq && trimmedRefSeq.length === trimmedCandSeq.length
+        ? trimmedRefSeq
+        : undefined;
+    const seqAnalysis = analyzeSequence(trimmedCandSeq, refSeq);
+    const candKey =
+      cand.key ??
+      (cand.sampleIndex !== undefined && cand.sampleIndex !== null
+        ? `${cand.id}#sample-${cand.sampleIndex}`
+        : cand.id);
+    const mpnnScore =
+      typeof cand.score === 'number' && Number.isFinite(cand.score) ? cand.score : null;
+    const globalScore =
+      typeof cand.globalScore === 'number' && Number.isFinite(cand.globalScore)
+        ? cand.globalScore
+        : null;
+    return {
+      ...empty,
+      hasOutputs: true,
+      has3D: false,
+      kind: 'sequence',
+      structureId: cand.sourceStructureId ?? seqSet.parentStructureId ?? null,
+      chainLengths: cand.chainLengths ?? upstreamStruct?.chainLengths ?? null,
+      chainRoles: upstreamStruct?.chainRoles ?? null,
+      sequence: trimmedCandSeq,
+      length: trimmedCandSeq.length,
+      sequenceId: cand.id,
+      candidateKey: candKey,
+      missingSelectedCandidate: false,
+      rankingPolicy: 'sequence-score',
+      branchRank: idx + 1,
+      confidenceAvailable: false,
+      collectionKind: seqSet.collectionKind ?? 'independent-candidates',
+      candidateCount: seqSet.candidates.length,
+      selectedIndex: idx,
+      mpnnScore,
+      globalScore,
+      seqRecoveryPct: seqAnalysis.recoveryPct,
+      seqAnalysis,
     };
   }
 
@@ -1906,10 +1988,7 @@ export function buildComparisonState(
         missing: true,
       });
     }
-    // In explicit `'branch-best'` mode, always select each branch's top-ranked winner
-    // rather than letting a stale per-branch `branchCandidateIdx` override the winner.
-    const effectiveBranchIdx = opts.pairingMode === 'branch-best' ? {} : candIdx;
-    return extractBranch(graph, id, idx, outputsByNode, effectiveBranchIdx);
+    return extractBranch(graph, id, idx, outputsByNode, candIdx);
   });
 
   // All branches with renderable 3D (protein >= 3 aa OR pure ligand/DNA mmCIF/PDB)
@@ -2135,4 +2214,55 @@ export function buildComparisonState(
     candidateKeys: joined.keys,
     pairedCandidates: joined.rows,
   };
+}
+
+export interface SequencePairDiff {
+  badgeA: string;
+  badgeB: string;
+  labelA: string;
+  labelB: string;
+  seqA: string;
+  seqB: string;
+  comparableLength: number;
+  identicalCount: number;
+  identityPct: number;
+  mismatchIndices: number[];
+  lengthDiffers: boolean;
+}
+
+export function computePairwiseSequenceDiff(
+  branches: readonly CompareBranchSummary[],
+): SequencePairDiff[] {
+  const withSeq = branches.filter((b) => Boolean(b.sequence && b.sequence.trim().length > 0));
+  const diffs: SequencePairDiff[] = [];
+  for (let i = 0; i < withSeq.length; i++) {
+    for (let j = i + 1; j < withSeq.length; j++) {
+      const a = withSeq[i];
+      const b = withSeq[j];
+      const seqA = a.sequence!.trim().toUpperCase();
+      const seqB = b.sequence!.trim().toUpperCase();
+      const comparableLength = Math.min(seqA.length, seqB.length);
+      if (comparableLength === 0) continue;
+      const mismatchIndices: number[] = [];
+      let identicalCount = 0;
+      for (let k = 0; k < comparableLength; k++) {
+        if (seqA[k] === seqB[k]) identicalCount++;
+        else mismatchIndices.push(k);
+      }
+      diffs.push({
+        badgeA: a.badge,
+        badgeB: b.badge,
+        labelA: a.label,
+        labelB: b.label,
+        seqA,
+        seqB,
+        comparableLength,
+        identicalCount,
+        identityPct: (identicalCount / comparableLength) * 100,
+        mismatchIndices,
+        lengthDiffers: seqA.length !== seqB.length,
+      });
+    }
+  }
+  return diffs;
 }

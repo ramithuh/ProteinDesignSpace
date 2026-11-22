@@ -8,6 +8,7 @@
 
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { shouldSyncNumericDraft } from './page-state-helpers';
   import {
     clampNumeric,
     commitNumericDraft,
@@ -46,11 +47,21 @@
 
   let draft = $state(untrack(() => formatNumericValue(value, spec)));
   let focused = $state(false);
+  let lastCommittedBySelf: number | null = null;
 
-  // Sync draft from external value changes (preset switches, node switches, stepper clicks)
+  function emitChange(next: number) {
+    if (!Object.is(next, value)) {
+      lastCommittedBySelf = next;
+    }
+    onChange(next);
+  }
+
+  // Sync draft from external value changes (preset switches, node switches, stepper clicks, undo/redo)
   $effect(() => {
     const formatted = formatNumericValue(value, spec);
-    if (!focused) {
+    const isSelfEcho = lastCommittedBySelf !== null && Object.is(value, lastCommittedBySelf);
+    lastCommittedBySelf = null;
+    if (shouldSyncNumericDraft(focused, isSelfEcho)) {
       draft = formatted;
     }
   });
@@ -80,7 +91,7 @@
 
     const check = validateNumericDraft(cleaned, spec);
     if ((check.status === 'ok' || check.status === 'warn') && check.value !== undefined) {
-      onChange(spec.integer ? Math.round(check.value) : check.value);
+      emitChange(spec.integer ? Math.round(check.value) : check.value);
     }
   }
 
@@ -88,12 +99,13 @@
     const committed = commitNumericDraft(draft, spec, value);
     draft = formatNumericValue(committed, spec);
     if (committed !== value) {
-      onChange(committed);
+      emitChange(committed);
     }
   }
 
   function handleBlur() {
     focused = false;
+    lastCommittedBySelf = null;
     commit();
   }
 
@@ -103,10 +115,20 @@
     const step = spec.step ?? 1;
     const next = clampNumeric(base + delta * step, spec);
     draft = formatNumericValue(next, spec);
-    onChange(next);
+    emitChange(next);
   }
 
   function handleKeydown(ev: KeyboardEvent) {
+    if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && ev.key.toLowerCase() === 'z' && !ev.shiftKey) {
+      const formattedCurrent = formatNumericValue(value, spec);
+      if (draft !== formattedCurrent && (isInvalid || Number(draft) !== value)) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        draft = formattedCurrent;
+        lastCommittedBySelf = null;
+      }
+      return;
+    }
     if (ev.key === 'ArrowUp') {
       ev.preventDefault();
       stepBy(1);
@@ -142,7 +164,10 @@
       aria-invalid={isInvalid}
       {disabled}
       value={draft}
-      onfocus={() => (focused = true)}
+      onfocus={() => {
+        focused = true;
+        lastCommittedBySelf = null;
+      }}
       oninput={handleInput}
       onblur={handleBlur}
       onkeydown={handleKeydown}

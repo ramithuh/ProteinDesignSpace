@@ -1,6 +1,7 @@
 <script lang="ts">
   import PaePlot from '$lib/viewer/PaePlot.svelte';
   import {
+    computePairwiseSequenceDiff,
     exportJoinedCollectionCsv,
     type ComparisonPairingMode,
     type ComparisonState,
@@ -244,6 +245,24 @@
   let hasAnyRefoldMotifRmsd = $derived(branches.some((b) => isFiniteNum(b.refoldMotifRmsd)));
   let hasAnyGenMotifRmsd = $derived(branches.some((b) => isFiniteNum(b.genMotifRmsd)));
   let hasAnyTime = $derived(branches.some((b) => isFiniteNum(b.foldElapsedMs)));
+  let bestMpnnScore = $derived.by((): number | null => {
+    const vals = branches.map((b) => b.mpnnScore).filter(isFiniteNum);
+    return vals.length >= 2 ? Math.min(...vals) : null;
+  });
+  let bestGlobalScore = $derived.by((): number | null => {
+    const vals = branches.map((b) => b.globalScore).filter(isFiniteNum);
+    return vals.length >= 2 ? Math.min(...vals) : null;
+  });
+  let hasAnyMpnnScore = $derived(branches.some((b) => isFiniteNum(b.mpnnScore)));
+  let hasAnyGlobalScore = $derived(branches.some((b) => isFiniteNum(b.globalScore)));
+  let hasAnySeqRecovery = $derived(branches.some((b) => isFiniteNum(b.seqRecoveryPct)));
+  let hasAnySeqAnalysis = $derived(
+    branches.some((b) => b.seqAnalysis !== null && b.seqAnalysis.length > 0),
+  );
+  let hasSequenceBranch = $derived(branches.some((b) => b.kind === 'sequence'));
+  let pairwiseSeqDiffs = $derived(
+    hasSequenceBranch ? computePairwiseSequenceDiff(branches) : [],
+  );
   let hasAnyRefMeta = $derived(
     branches.some((b) => Boolean(formatRefBadge(branchMetaByNodeId?.[b.nodeId]))),
   );
@@ -375,7 +394,11 @@
   {/if}
 
   <div class="table-scroll">
-    <table class="cmp-table">
+    <table
+      class="cmp-table"
+      class:compact-cols={branches.length >= 3}
+      class:compact-cols-4={branches.length >= 4}
+    >
       <thead>
         <tr>
           <th class="metric-col">Metric</th>
@@ -416,8 +439,6 @@
                 <span class="missing-badge" title={`Candidate ${b.candidateKey ?? ''} is not present in this branch`}>
                   MISSING
                 </span>
-              {:else if !b.has3D}
-                <span class="dim">No 3D</span>
               {:else if comparison.pairingMode !== 'by-candidate' && b.candidateCount > 1}
                 <select
                   class="cand-sel"
@@ -428,8 +449,12 @@
                     <option value={idx}>#{idx + 1}</option>
                   {/each}
                 </select>
+              {:else if !b.has3D && b.kind !== 'sequence'}
+                <span class="dim">No 3D</span>
               {:else}
-                <code class="mono-sm">{b.candidateKey ?? b.sequenceId ?? (b.length ? `${b.length} aa` : '—')}</code>
+                <code class="mono-sm" title={b.candidateKey ?? b.sequenceId ?? ''}>
+                  {b.candidateKey ?? b.sequenceId ?? (b.length ? `${b.length} aa` : '—')}
+                </code>
               {/if}
             </td>
           {/each}
@@ -647,6 +672,64 @@
           </tr>
         {/if}
 
+        {#if hasAnyMpnnScore}
+          <tr>
+            <td class="m-k" title="Negative log-likelihood (NLL; lower = better)">Seq score (NLL)</td>
+            {#each branches as b (b.nodeId)}
+              <td class:win={bestMpnnScore !== null && isFiniteNum(b.mpnnScore) && b.mpnnScore === bestMpnnScore}>
+                {fmtNum(b.mpnnScore, 3)}
+              </td>
+            {/each}
+          </tr>
+        {/if}
+
+        {#if hasAnyGlobalScore}
+          <tr>
+            <td class="m-k" title="Global NLL score (lower = better)">Global NLL</td>
+            {#each branches as b (b.nodeId)}
+              <td class:win={bestGlobalScore !== null && isFiniteNum(b.globalScore) && b.globalScore === bestGlobalScore}>
+                {fmtNum(b.globalScore, 3)}
+              </td>
+            {/each}
+          </tr>
+        {/if}
+
+        {#if hasAnySeqRecovery}
+          <tr>
+            <td class="m-k">Seq recovery</td>
+            {#each branches as b (b.nodeId)}
+              <td>{fmtNum(b.seqRecoveryPct, 1, '%')}</td>
+            {/each}
+          </tr>
+        {/if}
+
+        {#if hasAnySeqAnalysis}
+          <tr>
+            <td class="m-k" title="Hydrophobic / Polar / Charged %">AA comp (H/P/C)</td>
+            {#each branches as b (b.nodeId)}
+              <td>
+                {#if b.seqAnalysis && b.seqAnalysis.length > 0}
+                  {Math.round(b.seqAnalysis.hydrophobicPct)}/{Math.round(b.seqAnalysis.polarPct)}/{Math.round(b.seqAnalysis.chargedPct)}%
+                {:else}
+                  —
+                {/if}
+              </td>
+            {/each}
+          </tr>
+          <tr>
+            <td class="m-k">Top AA</td>
+            {#each branches as b (b.nodeId)}
+              <td title={b.seqAnalysis ? `${b.seqAnalysis.uniqueAaCount} unique amino acids` : ''}>
+                {#if b.seqAnalysis?.topAa}
+                  {b.seqAnalysis.topAa.aa} ({Math.round(b.seqAnalysis.topAa.pct)}%)
+                {:else}
+                  —
+                {/if}
+              </td>
+            {/each}
+          </tr>
+        {/if}
+
         {#if hasAnyRmsd}
           <tr>
             <td class="m-k">Pass</td>
@@ -754,6 +837,43 @@
     </table>
   </div>
 
+  {#if pairwiseSeqDiffs.length > 0}
+    {@const primaryDiff = pairwiseSeqDiffs[0]}
+    {@const mismatchSet = new Set(primaryDiff.mismatchIndices)}
+    <div class="seq-diff-box">
+      <div class="seq-diff-head">
+        <span>
+          Seq identity ({primaryDiff.badgeA} ↔ {primaryDiff.badgeB}):
+          <b>{primaryDiff.identityPct.toFixed(1)}%</b>
+          ({primaryDiff.identicalCount}/{primaryDiff.comparableLength} · {primaryDiff.mismatchIndices.length} diffs{primaryDiff.lengthDiffers ? ' · len differs' : ''})
+        </span>
+      </div>
+      {#if pairwiseSeqDiffs.length > 1}
+        <div class="extra-pairs">
+          {#each pairwiseSeqDiffs.slice(1) as p (`${p.badgeA}-${p.badgeB}`)}
+            <span class="pair-chip">
+              {p.badgeA}↔{p.badgeB}: {p.identityPct.toFixed(1)}% ({p.mismatchIndices.length} diffs)
+            </span>
+          {/each}
+        </div>
+      {/if}
+      <div class="seq-diff-scroll">
+        <div class="seq-diff-row">
+          <span class="seq-diff-badge">{primaryDiff.badgeA}</span>
+          <span class="seq-diff-chars">
+            {#each primaryDiff.seqA.split('') as ch, idx (idx)}<span class:aa-diff={idx < primaryDiff.comparableLength ? mismatchSet.has(idx) : true} class:aa-same={idx < primaryDiff.comparableLength && !mismatchSet.has(idx)}>{ch}</span>{/each}
+          </span>
+        </div>
+        <div class="seq-diff-row">
+          <span class="seq-diff-badge">{primaryDiff.badgeB}</span>
+          <span class="seq-diff-chars">
+            {#each primaryDiff.seqB.split('') as ch, idx (idx)}<span class:aa-diff={idx < primaryDiff.comparableLength ? mismatchSet.has(idx) : true} class:aa-same={idx < primaryDiff.comparableLength && !mismatchSet.has(idx)}>{ch}</span>{/each}
+          </span>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if paeBranches.length > 0}
     <div class="pae-grid">
       {#each paeBranches as b (b.nodeId)}
@@ -783,6 +903,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+    width: 100%;
     min-width: 0;
     max-width: 100%;
     box-sizing: border-box;
@@ -978,13 +1099,43 @@
     border-radius: 6px;
   }
   .table-scroll {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
     overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
   .cmp-table {
     width: 100%;
     border-collapse: collapse;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
+  }
+  .cmp-table.compact-cols {
+    font-size: 10px;
+  }
+  .cmp-table.compact-cols th,
+  .cmp-table.compact-cols td {
+    padding: 4px 5px;
+  }
+  .cmp-table.compact-cols .col-hdr-btn {
+    font-size: 10px;
+    gap: 4px;
+  }
+  .cmp-table.compact-cols .col-name {
+    max-width: 64px;
+  }
+  .cmp-table.compact-cols-4 .col-name {
+    max-width: 48px;
+  }
+  .cmp-table.compact-cols .m-k {
+    white-space: normal;
+    min-width: 72px;
+    max-width: 92px;
+    line-height: 1.25;
+  }
+  .cmp-table.compact-cols .mono-sm {
+    max-width: 72px;
   }
   .cmp-table th,
   .cmp-table td {
@@ -1053,6 +1204,60 @@
   .mono-sm {
     font-size: 10px;
     color: var(--text-secondary);
+    display: inline-block;
+    max-width: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: bottom;
+  }
+  .seq-diff-box {
+    border: 1px solid var(--border);
+    background: var(--bg-surface-2);
+    border-radius: 6px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+  }
+  .seq-diff-head {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    color: var(--text-secondary);
+  }
+  .seq-diff-scroll {
+    overflow-x: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    line-height: 1.45;
+  }
+  .seq-diff-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .seq-diff-badge {
+    font-size: 9.5px;
+    font-weight: 700;
+    color: var(--text-muted);
+    min-width: 14px;
+    flex-shrink: 0;
+  }
+  .seq-diff-chars {
+    letter-spacing: 0.4px;
+  }
+  .aa-same {
+    color: var(--text-dim);
+  }
+  .aa-diff {
+    color: var(--warn-text);
+    background: var(--warn-bg);
+    font-weight: 700;
+    border-radius: 2px;
   }
   .cand-sel {
     background: var(--bg-input);

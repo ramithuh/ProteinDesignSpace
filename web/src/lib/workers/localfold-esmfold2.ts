@@ -1,5 +1,20 @@
 import { normalizeLocalFoldChainScores } from '$lib/engine/conditioning';
+import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 import { parsePdbBackbone } from '$lib/protein-ops/pdb';
+
+export function computeCandidateIpsae(
+  paeRaw: Float32Array | undefined,
+  chainLengths: readonly number[],
+  chainIds: readonly string[],
+): { ipsae: number; ipsaeMin: number } | null {
+  if (!paeRaw || chainLengths.length <= 1) return null;
+  const proteinLen = chainIds.length;
+  if (proteinLen <= 0 || paeRaw.length < proteinLen * proteinLen) return null;
+  const proteinPae = sliceProteinPae(paeRaw, proteinLen);
+  if (!proteinPae) return null;
+  const res = computeIpsae(proteinPae, chainIds, 10);
+  return res ? { ipsae: res.ipsae, ipsaeMin: res.ipsaeMin } : null;
+}
 
 type ImportVendor = (path: string) => Promise<Record<string, any>>;
 
@@ -62,10 +77,14 @@ export async function loadEsmfold2(
     const ptm: number = confidence.ptm;
     const iptm: number | null = chains.length > 1 ? confidence.iptm : null;
     const meanPlddt = plddt.reduce((sum, v) => sum + v, 0) / plddt.length;
+    const chainLengths = chains.map((chain) => chain.length);
+    const pae = confidence.pae as Float32Array;
+    const ipsaeRes = computeCandidateIpsae(pae, chainLengths, parsed.chainIds);
     return {
       sequence, pdbText, caCoords: parsed.caCoords, plddt, meanPlddt, confidence: meanPlddt,
-      confidenceAvailable: true, ptm, iptm, pae: confidence.pae as Float32Array,
-      chainIds: parsed.chainIds, chainLengths: chains.map((chain) => chain.length), resNums: parsed.resNums,
+      confidenceAvailable: true, ptm, iptm, pae,
+      chainIds: parsed.chainIds, chainLengths, resNums: parsed.resNums,
+      ...(ipsaeRes ? { ipsae: ipsaeRes.ipsae, ipsaeMin: ipsaeRes.ipsaeMin } : {}),
       ...normalizeLocalFoldChainScores({ ...confidence, ptm, iptm }, [...new Set(parsed.chainIds)], 1),
       provenance: {
         quantization: 'int5' as const, languageModelQuantization: 'int3' as const,

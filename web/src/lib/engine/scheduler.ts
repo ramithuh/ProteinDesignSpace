@@ -1954,6 +1954,12 @@ export class ExecutionScheduler {
 
         const designKey = ref.designKey ?? f.designKey;
         const designIndex = ref.designIndex ?? f.designIndex;
+        const rowChainLengths =
+          f.chainLengths && f.chainLengths.length > 0
+            ? f.chainLengths
+            : ipsaeChainRanges.length > 1
+              ? ipsaeChainRanges.map((r) => r.length)
+              : undefined;
 
         return {
           structureId: ref.id,
@@ -1965,6 +1971,7 @@ export class ExecutionScheduler {
           ...(f.foldKey ? { foldKey: f.foldKey } : {}),
           ...(rowLineage ? { sourceStructureId: rowLineage } : {}),
           sequence: f.sequence,
+          ...(rowChainLengths ? { chainLengths: rowChainLengths } : {}),
           scRmsd: align.rmsd,
           scTm: align.tmScore,
           meanPlddt: effectiveMeanPlddt,
@@ -2086,12 +2093,15 @@ export class ExecutionScheduler {
               ...(f.foldKey ? { foldKey: f.foldKey } : {}),
               ...(foldSourceId ? { sourceStructureId: foldSourceId } : {}),
               sequence: f.sequence,
+              ...(f.chainLengths && f.chainLengths.length > 0 ? { chainLengths: f.chainLengths } : {}),
               scRmsd: Number.NaN,
               scTm: Number.NaN,
               meanPlddt: effectiveMeanPlddt,
               confidenceAvailable,
               ptm: f.ptm,
               iptm: f.iptm ?? null,
+              ...(typeof f.ipsae === 'number' && Number.isFinite(f.ipsae) ? { ipsae: f.ipsae } : {}),
+              ...(typeof f.ipsaeMin === 'number' && Number.isFinite(f.ipsaeMin) ? { ipsaeMin: f.ipsaeMin } : {}),
               referenceMode: 'lineage-mismatch',
               referenceRelation: foldSourceId || foldDesignKey ? 'external-mismatch' : 'external-unlinked',
               referenceLabel: `Invalid parent reference · ${errMsg}`,

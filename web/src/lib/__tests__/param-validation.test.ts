@@ -14,7 +14,9 @@ import {
   validateNumericDraft,
   validateSequenceText,
   validateStructureText,
+  validateTiedPositions,
 } from '../engine/param-validation';
+import { parseTiedPositions } from '../engine/mpnn-spec';
 import { generateSampleHelixBundlePdb } from '../protein-ops/pdb';
 import { defaultParamsForAdapter } from '../engine/graph-utils';
 
@@ -645,5 +647,79 @@ describe('parameter validation & numeric sanitization', () => {
     const recipeSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/RecipeDrawer.svelte'), 'utf8');
     expect(recipeSrc).toContain('pendingSwitchFormat');
     expect(recipeSrc).toContain('confirmDiscardAndSwitch');
+  });
+
+  it('QA #6: validateTiedPositions & parseTiedPositions reject malformed, single-residue, missing-chain, and overlapping tie specs', () => {
+    // Valid cases
+    for (const valid of [
+      '',
+      '   ',
+      'A10=B10',
+      'A10=B10; A11=B11',
+      'A10=B10, A11=B11',
+      'A10=B10; A11=B11, A12=B12',
+      'A10 B10; A11 B11',
+      'A100A=H100a',
+      'A-2=B-2',
+      'A0=B0',
+      'A10=B10=C10',
+      'A:10=B:10',
+    ]) {
+      expect(validateTiedPositions(valid), `Expected valid for "${valid}"`).toBeNull();
+    }
+
+    // Invalid cases
+    for (const bad of [
+      'INVALID_TIED',
+      'A10',
+      'A10=B10; A11',
+      'A10=B10, A11',
+      '10=20',
+      'A10=',
+      '=B10',
+      'A10==B10',
+      'A10=A10',
+      'A10=B10; A10=C10',
+      'A10=B10X1',
+      ';;;',
+    ]) {
+      expect(validateTiedPositions(bad), `Expected error for "${bad}"`).not.toBeNull();
+    }
+
+    // Mixed ; and , splits cleanly in parseTiedPositions and throws on malformed/single-token groups
+    const parsedMixed = parseTiedPositions('A10=B10; A11=B11, A12=B12');
+    expect(parsedMixed).toHaveLength(3);
+    expect(() => parseTiedPositions('INVALID_TIED')).toThrow(/Invalid tied position group/i);
+    expect(() => parseTiedPositions('A10=B10, A11')).toThrow(/Invalid tied position group/i);
+
+    // Iteration 2 Challenger 2 QA #6 parity: parseTiedPositions rejects separator-only, missing-chain, self-tie, and overlapping groups
+    expect(() => parseTiedPositions(';;;')).toThrow(/Invalid tied position group/i);
+    expect(() => parseTiedPositions('10=20')).toThrow(/Invalid tied position token/i);
+    expect(() => parseTiedPositions('A10=A10')).toThrow(/Duplicate or overlapping/i);
+    expect(() => parseTiedPositions('A010=A10')).toThrow(/Duplicate or overlapping/i);
+    expect(() => parseTiedPositions('A10=B10; A10=C10')).toThrow(/Duplicate or overlapping/i);
+
+    // validateNodeParams checks tiedPositions on web-protein-mpnn and ligandmpnn
+    expect(
+      validateNodeParams({
+        id: 'mpnn-invalid-tied',
+        adapterId: 'web-protein-mpnn',
+        params: { tiedPositions: 'INVALID_TIED' },
+      }).join(' '),
+    ).toMatch(/tiedPositions/i);
+    expect(
+      validateNodeParams({
+        id: 'mpnn-dup-tied',
+        adapterId: 'web-protein-mpnn',
+        params: { tiedPositions: 'A10=B10; A10=C10' },
+      }).join(' '),
+    ).toMatch(/Duplicate or overlapping/i);
+    expect(
+      validateNodeParams({
+        id: 'lig-invalid-tied',
+        adapterId: 'ligandmpnn',
+        params: { tiedPositions: 'A10' },
+      }).join(' '),
+    ).toMatch(/tiedPositions/i);
   });
 });

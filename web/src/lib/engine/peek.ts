@@ -1,9 +1,11 @@
 // Pure-TS helpers for inspecting ("peeking") intermediate node inputs/outputs,
 // extracting ancestor subgraphs for partial runs, and analyzing intermediate modalities.
 
+import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import type {
   CanonicalArtifact,
+  DesignabilityRow,
   PortType,
   StructureArtifact,
   WorkflowEdge,
@@ -99,20 +101,64 @@ export function getNodePeekSlots(
   return slots;
 }
 
+const PORT_TYPE_PRIORITY: Record<PortType, number> = {
+  DesignabilityMetrics: 80,
+  MutationMatrix: 70,
+  ResidueTrack: 65,
+  FoldedStructure: 60,
+  StructureArtifact: 50,
+  SequenceSet: 40,
+  SequenceEmbedding: 30,
+  TrajectoryFrames: 20,
+  ConditionSpec: 10,
+};
+
+export function getPortTypePriority(portType: PortType): number {
+  return PORT_TYPE_PRIORITY[portType] ?? 0;
+}
+
 /**
- * Choose the most informative default peek slot for a node:
- * 1) First outgoing slot with live data
- * 2) Otherwise first incoming slot with live data (useful while this node is still running!)
- * 3) Otherwise first outgoing slot, or first incoming slot.
+ * Choose the most informative default peek slot for a node using explicit output modality priority:
+ * 1) Outgoing slot with live data, sorted by PORT_TYPE_PRIORITY (DesignabilityMetrics > MutationMatrix > ResidueTrack > FoldedStructure > StructureArtifact > SequenceSet > ...)
+ * 2) Otherwise incoming slot with live data (useful while this node is still running)
+ * 3) Otherwise highest-priority outgoing slot, or first incoming slot.
  */
 export function pickDefaultPeekSlot(slots: PeekSlot[]): string | null {
-  const outWithData = slots.find((s) => s.direction === 'out' && s.artifact !== null);
-  if (outWithData) return outWithData.id;
-  const inWithData = slots.find((s) => s.direction === 'in' && s.artifact !== null);
-  if (inWithData) return inWithData.id;
-  const firstOut = slots.find((s) => s.direction === 'out');
-  if (firstOut) return firstOut.id;
+  const outWithData = slots.filter((s) => s.direction === 'out' && s.artifact !== null);
+  if (outWithData.length > 0) {
+    outWithData.sort((a, b) => getPortTypePriority(b.portType) - getPortTypePriority(a.portType));
+    return outWithData[0].id;
+  }
+  const inWithData = slots.filter((s) => s.direction === 'in' && s.artifact !== null);
+  if (inWithData.length > 0) {
+    inWithData.sort((a, b) => getPortTypePriority(b.portType) - getPortTypePriority(a.portType));
+    return inWithData[0].id;
+  }
+  const outs = slots.filter((s) => s.direction === 'out');
+  if (outs.length > 0) {
+    outs.sort((a, b) => getPortTypePriority(b.portType) - getPortTypePriority(a.portType));
+    return outs[0].id;
+  }
   return slots[0]?.id ?? null;
+}
+
+export function selectPrimaryOutputPort(
+  outs: Record<string, CanonicalArtifact> | undefined,
+): { portName: string; artifact: CanonicalArtifact; is3D: boolean } | null {
+  if (!outs) return null;
+  let best: { portName: string; artifact: CanonicalArtifact; priority: number } | null = null;
+  for (const [portName, art] of Object.entries(outs)) {
+    const priority = getPortTypePriority(art.kind as PortType);
+    if (!best || priority > best.priority) {
+      best = { portName, artifact: art, priority };
+    }
+  }
+  if (!best) return null;
+  const is3D =
+    best.artifact.kind === 'DesignabilityMetrics' ||
+    best.artifact.kind === 'FoldedStructure' ||
+    best.artifact.kind === 'StructureArtifact';
+  return { portName: best.portName, artifact: best.artifact, is3D };
 }
 
 /**
@@ -319,4 +365,105 @@ export function formatFoldModelName(foldModelId: string): string {
   if (slug.toLowerCase() === 'af2') return 'AlphaFold2';
   const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === slug);
   return meta ? meta.label : slug;
+}
+
+/** Infer per-chain residue counts from a PDB string's CA records when more than one chain is present. */
+export function inferPdbChainLengths(pdbText?: string): number[] | undefined {
+  if (!pdbText) return undefined;
+  const counts: number[] = [];
+  const seen = new Set<string>();
+  let lastChain = '';
+  for (const line of pdbText.split('\n')) {
+    if (!line.startsWith('ATOM  ') || line.length < 27) continue;
+    if (line.slice(12, 16).trim() !== 'CA') continue;
+    const chain = line[21] || 'A';
+    const resKey = `${chain}:${line.slice(22, 27)}`;
+    if (seen.has(resKey)) continue;
+    seen.add(resKey);
+    if (counts.length === 0 || chain !== lastChain) {
+      counts.push(1);
+      lastChain = chain;
+    } else {
+      counts[counts.length - 1] += 1;
+    }
+  }
+  return counts.length > 1 ? counts : undefined;
+}
+
+/** Insert `:` chain delimiters into a concatenated multimer amino-acid sequence when chainLengths sum matches. */
+export function formatCandidateSequence(sequence: string, chainLengths?: readonly number[]): string {
+  if (!chainLengths || chainLengths.length <= 1) return sequence;
+  const sum = chainLengths.reduce((acc, n) => acc + n, 0);
+  if (sum !== sequence.length) return sequence;
+  const parts: string[] = [];
+  let offset = 0;
+  for (const len of chainLengths) {
+    parts.push(sequence.slice(offset, offset + len));
+    offset += len;
+  }
+  return parts.join(':');
+}
+
+/** Resolve chain lengths for a DesignabilityRow, prioritizing row.chainLengths before PDB/context fallback. */
+export function resolveActiveRowChainLengths(
+  row: Pick<DesignabilityRow, 'chainLengths' | 'alignedFoldPdb'> | null | undefined,
+  contextStructure?: Pick<StructureArtifact, 'chainLengths' | 'diagnostics'> | null,
+): number[] | undefined {
+  if (!row) return undefined;
+  if (row.chainLengths && row.chainLengths.length > 1) {
+    return [...row.chainLengths];
+  }
+  const fromPdb = inferPdbChainLengths(row.alignedFoldPdb);
+  if (fromPdb && fromPdb.length > 1) return fromPdb;
+  const ctxLens = contextStructure?.chainLengths ?? contextStructure?.diagnostics?.chainLengths;
+  return ctxLens && ctxLens.length > 1 ? [...ctxLens] : undefined;
+}
+
+/** Resolve ipSAE / ipSAE_min from explicit values or fallback computation on the candidate PAE matrix. */
+export function resolveFoldIpsae(fold: {
+  ipsae?: number;
+  ipsaeMin?: number;
+  pae?: Float32Array;
+  chainLengths?: readonly number[];
+  chainIds?: readonly string[];
+}): { ipsae: number; ipsaeMin?: number } | null {
+  if (typeof fold.ipsae === 'number' && Number.isFinite(fold.ipsae)) {
+    return {
+      ipsae: fold.ipsae,
+      ...(typeof fold.ipsaeMin === 'number' && Number.isFinite(fold.ipsaeMin)
+        ? { ipsaeMin: fold.ipsaeMin }
+        : {}),
+    };
+  }
+  if (!fold.pae || fold.pae.length === 0) return null;
+  const chainIds = fold.chainIds;
+  const chainLengths = fold.chainLengths;
+  const L =
+    chainIds && chainIds.length > 0
+      ? chainIds.length
+      : chainLengths && chainLengths.length > 0
+        ? chainLengths.reduce((a, b) => a + b, 0)
+        : 0;
+  if (L <= 0) return null;
+  let perResChains: string[];
+  if (chainIds && chainIds.length === L && new Set(chainIds).size >= 2) {
+    perResChains = [...chainIds];
+  } else if (
+    chainLengths &&
+    chainLengths.length > 1 &&
+    chainLengths.reduce((a, b) => a + b, 0) === L
+  ) {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    perResChains = [];
+    for (let c = 0; c < chainLengths.length; c++) {
+      const cid = c < alphabet.length ? alphabet[c] : `C${c}`;
+      for (let k = 0; k < chainLengths[c]; k++) perResChains.push(cid);
+    }
+  } else {
+    return null;
+  }
+  const sliced = sliceProteinPae(fold.pae, L);
+  if (!sliced) return null;
+  const res = computeIpsae(sliced, perResChains, 10);
+  return res ? { ipsae: res.ipsae, ipsaeMin: res.ipsaeMin } : null;
 }

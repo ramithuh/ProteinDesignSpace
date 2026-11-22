@@ -8,7 +8,7 @@ import { atom37ToPdb, chainIdsFromLengths, parsePdbBackbone } from '$lib/protein
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { normalizeLocalFoldChainScores } from '$lib/engine/conditioning';
 import { esmfold2Chains, esmfold2ParamIssue } from '$lib/engine/localfold-esmfold2';
-import { loadEsmfold2 } from './localfold-esmfold2';
+import { computeCandidateIpsae, loadEsmfold2 } from './localfold-esmfold2';
 import { selectFoldWorkItems } from '$lib/engine/bio-capabilities';
 import {
   clampLocalFoldRecycles,
@@ -821,6 +821,7 @@ self.onmessage = async (ev: MessageEvent) => {
             0,
           );
           const iptmIsMonomerApprox = isAf2Mono && chainLengths.length > 1 && iptmVal !== null;
+          const ipsaeRes = computeCandidateIpsae(paeRaw, chainLengths, chainIds);
 
           folds.push({
             sequenceId: cand.id,
@@ -848,6 +849,7 @@ self.onmessage = async (ev: MessageEvent) => {
             chainIds,
             resNums: sequentialResNumsFromChainLengths(chainLengths),
             pae: paeRaw ? new Float32Array(paeRaw) : undefined,
+            ...(ipsaeRes ? { ipsae: ipsaeRes.ipsae, ipsaeMin: ipsaeRes.ipsaeMin } : {}),
             msaMode,
             msaDepth: msa.msaDepth,
             provenance: {
@@ -1055,6 +1057,8 @@ self.onmessage = async (ev: MessageEvent) => {
             1,
           );
 
+          const ipsaeRes = computeCandidateIpsae(paeRaw, chainLengths, chainIds);
+
           folds.push({
             sequenceId: cand.id,
             key: target.sequenceKey ?? cand.key ?? cand.id,
@@ -1083,6 +1087,7 @@ self.onmessage = async (ev: MessageEvent) => {
                 ? parsed.resNums
                 : sequentialResNumsFromChainLengths(chainLengths),
             pae: paeRaw ? new Float32Array(paeRaw) : undefined,
+            ...(ipsaeRes ? { ipsae: ipsaeRes.ipsae, ipsaeMin: ipsaeRes.ipsaeMin } : {}),
             msaMode,
             msaDepth: msa.msaDepth,
             provenance: {

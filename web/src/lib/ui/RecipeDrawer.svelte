@@ -28,6 +28,14 @@
   let statusTimer: ReturnType<typeof setTimeout> | null = null;
   let lastGraphId = '';
 
+  function clearStatus() {
+    shareStatus = null;
+    if (statusTimer) {
+      clearTimeout(statusTimer);
+      statusTimer = null;
+    }
+  }
+
   function flashStatus(msg: string, ms = 3000) {
     shareStatus = msg;
     if (statusTimer) clearTimeout(statusTimer);
@@ -38,7 +46,7 @@
   }
 
   onDestroy(() => {
-    if (statusTimer) clearTimeout(statusTimer);
+    clearStatus();
   });
 
   $effect(() => {
@@ -56,6 +64,7 @@
 
   function switchFormat(next: 'yaml' | 'json') {
     if (next === format) return;
+    clearStatus();
     pendingSwitchFormat = null;
     if (!dirty) {
       format = next;
@@ -78,6 +87,7 @@
   function confirmDiscardAndSwitch() {
     if (!pendingSwitchFormat) return;
     const next = pendingSwitchFormat;
+    clearStatus();
     pendingSwitchFormat = null;
     dirty = false;
     parseErr = null;
@@ -115,6 +125,7 @@
 
   function applyEdits() {
     parseErr = null;
+    clearStatus();
     try {
       const next = parseRecipeToGraph(editorText);
       // When applying a YAML recipe that omitted an oversized inline pdbText (>1500 chars),
@@ -173,12 +184,14 @@
       onApplyGraph({ ...next, nodes: mergedNodes });
       flashStatus('Applied recipe to canvas', 2000);
     } catch (err) {
+      clearStatus();
       parseErr = err instanceof Error ? err.message : String(err);
     }
   }
 
   async function copyShareUrl() {
     parseErr = null;
+    clearStatus();
     try {
       const plain = $state.snapshot(graph) as WorkflowGraph;
       const { hash, length, mode, strippedPdb } = await encodeGraphToHash(plain);
@@ -205,12 +218,14 @@
         );
       }
     } catch (err) {
+      clearStatus();
       parseErr = err instanceof Error ? err.message : String(err);
     }
   }
 
   async function copyText() {
     parseErr = null;
+    clearStatus();
     try {
       if (!navigator.clipboard?.writeText) {
         throw new Error('Clipboard API unavailable');
@@ -261,6 +276,7 @@
       dirty = true;
       parseErr = null;
       pendingSwitchFormat = null;
+      clearStatus();
     }}
   ></textarea>
 
@@ -282,7 +298,7 @@
   {/if}
 
   {#if parseErr}
-    <div class="d-err">{parseErr}</div>
+    <div class="d-err" role="alert">{parseErr}</div>
   {/if}
 </div>
 

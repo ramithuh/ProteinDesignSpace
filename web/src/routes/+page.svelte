@@ -11,7 +11,6 @@
   } from '$lib/engine/scheduler';
   import { clearRcsbCache, isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
   import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from '$lib/engine/registry';
-  import { getBenchmarkById } from '$lib/engine/benchmarks';
   import { autoLayoutGraph, defaultParamsForAdapter, insertBlockSmart, validateGraph } from '$lib/engine/graph-utils';
   import {
     extractSubgraphUpTo,
@@ -38,7 +37,7 @@
     type ComparisonPairingMode,
   } from '$lib/engine/compare';
   import { estimateRunRequirements, type RunPreflightSummary } from '$lib/engine/run-preflight';
-  import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
+  import type { PlannedWorkflowResult } from '$lib/engine/workflow-planner';
   import type {
     AtomGranularity,
     BfactorSemantics,
@@ -65,6 +64,18 @@
   import { hasInvalidNumericInputs } from '$lib/ui/NumericInput.svelte';
   import WorkflowCanvas from '$lib/ui/WorkflowCanvas.svelte';
   import RecipeDrawer from '$lib/ui/RecipeDrawer.svelte';
+  import {
+    classifyParamUndoAction,
+    computeBenchmarkAutoSeedPatches,
+    computeChangedParamKeys,
+    computePreviewChecks,
+    isSharedWorkflowHash,
+    parseLengthFromContig,
+    shouldAllowNativeTextUndo,
+    shouldSuppressOnboardingForHash,
+    type LabelUndoMarker,
+    type ParamUndoMarker,
+  } from '$lib/ui/page-state-helpers';
   import { compileNodeInputPreview } from '$lib/engine/input-preview';
 
   const scheduler = new ExecutionScheduler({
@@ -101,6 +112,7 @@
   let moreMenuOpen = $state(false);
   let sysWrapEl: HTMLDivElement | null = $state(null);
   let moreWrapEl: HTMLDivElement | null = $state(null);
+  let importFileInput: HTMLInputElement | null = $state(null);
   let firstRunAck = $state(false);
   let showOnboarding = $state(false);
   let onboardingInteractive = $state(false);
@@ -115,9 +127,16 @@
   // Active workflow state
   let selectedPresetId = $state(WORKFLOW_PRESETS[0].id);
   let graph = $state<WorkflowGraph>(autoLayoutGraph(structuredClone(WORKFLOW_PRESETS[0].graph)));
+  let activeDraftPreview = $state<PlannedWorkflowResult | null>(null);
+  interface GraphHistoryEntry {
+    graph: WorkflowGraph;
+    selectedPresetId: string;
+  }
   const MAX_GRAPH_HISTORY = 40;
-  let graphUndoStack: WorkflowGraph[] = [];
-  let graphRedoStack: WorkflowGraph[] = [];
+  let graphUndoStack: GraphHistoryEntry[] = [];
+  let graphRedoStack: GraphHistoryEntry[] = [];
+  let lastParamUndo: ParamUndoMarker | null = null;
+  let lastLabelUndo: LabelUndoMarker | null = null;
   let selectedNodeIds = $state<string[]>([WORKFLOW_PRESETS[0].graph.nodes[0].id]);
   let selectedNodeId = $derived(selectedNodeIds[selectedNodeIds.length - 1] ?? '');
   let isCompareMode = $derived(selectedNodeIds.length >= 2);
@@ -148,6 +167,7 @@
     hiddenCompareModelIds = [];
     comparePairingMode = undefined;
     compareSelectedCandidateKey = null;
+    branchCandidateIdx = {};
   }
 
   function handleSelectNodes(ids: string[]) {
@@ -156,6 +176,7 @@
     hiddenCompareModelIds = [];
     comparePairingMode = undefined;
     compareSelectedCandidateKey = null;
+    branchCandidateIdx = {};
     selectedPeekSlotId = null;
     selectedEdgeId = null;
     if (selectedNodeIds.length >= 2) {
@@ -198,7 +219,10 @@
   let showRecipe = $state(false);
   let showCredits = $state(false);
   let shareToast = $state<string | null>(null);
+  let shareToastTone = $state<'ok' | 'error'>('ok');
   let shareToastTimer: ReturnType<typeof setTimeout> | null = null;
+  let hashError = $state<string | null>(null);
+  let hashRequestSeq = 0;
   let runError = $state<string | null>(null);
   let totalElapsedMs = $state<number | null>(null);
 
@@ -287,8 +311,9 @@
   let molPickMode = $state<'auto' | 'off' | 'hotspots' | 'motif' | 'mpnn'>('auto');
   let lastPickedResidue = $state<string | null>(null);
 
-  function showToastMessage(msg: string, ms = 3200) {
+  function showToastMessage(msg: string, ms = 3200, tone: 'ok' | 'error' = 'ok') {
     shareToast = msg;
+    shareToastTone = tone;
     if (shareToastTimer) clearTimeout(shareToastTimer);
     shareToastTimer = setTimeout(() => {
       shareToast = null;
@@ -382,12 +407,13 @@
     }
     if (pendingRun || showCredits || (showOnboarding && !onboardingInteractive)) return;
 
-    // Cmd/Ctrl + Z undo, Cmd/Ctrl + Shift + Z or Ctrl + Y redo (when not typing in a text field)
+    // Cmd/Ctrl + Z undo, Cmd/Ctrl + Shift + Z or Ctrl + Y redo (when not typing in a text field or previewing a draft)
     if (
       (ev.metaKey || ev.ctrlKey) &&
       !ev.altKey &&
-      !isEditableElement(ev.target) &&
-      !isEditableElement(document.activeElement)
+      !activeDraftPreview &&
+      !shouldAllowNativeTextUndo(ev.target) &&
+      !shouldAllowNativeTextUndo(document.activeElement)
     ) {
       const k = ev.key.toLowerCase();
       if (k === 'z' && !ev.shiftKey) {
@@ -482,6 +508,57 @@
     }
   }
 
+  async function applySharedHash(
+    rawHash: string,
+    isInitialMount = false,
+  ): Promise<{ loadedFromHash: boolean; attemptedSharedHash: boolean }> {
+    const reqId = ++hashRequestSeq;
+    const trimmed = rawHash.trim();
+    const isSharedHash = isSharedWorkflowHash(trimmed);
+    if (trimmed.length <= 2 && !isSharedHash) {
+      return { loadedFromHash: false, attemptedSharedHash: false };
+    }
+    if (!isInitialMount && isRunning) {
+      const msg = 'Cannot load shared workflow URL while a run is active — cancel the run first.';
+      hashError = msg;
+      showToastMessage(msg, 4200, 'error');
+      return { loadedFromHash: false, attemptedSharedHash: isSharedHash };
+    }
+    try {
+      const decoded = await decodeHashToGraph(rawHash);
+      if (reqId !== hashRequestSeq) {
+        return { loadedFromHash: false, attemptedSharedHash: isSharedHash };
+      }
+      if (decoded) {
+        hashError = null;
+        showOnboarding = false;
+        loadFullWorkflowGraph(decoded, { clearOutputs: true });
+        canvasFitViewTrigger += 1;
+        showToastMessage('Loaded shared workflow from URL', 3000, 'ok');
+        return { loadedFromHash: true, attemptedSharedHash: isSharedHash };
+      }
+      if (isSharedHash) {
+        const msg = isInitialMount
+          ? 'Could not decode shared workflow link — loaded default workflow.'
+          : 'Could not decode shared workflow link — kept current workflow.';
+        hashError = msg;
+        showToastMessage(msg, 4500, 'error');
+        return { loadedFromHash: false, attemptedSharedHash: true };
+      }
+    } catch (err) {
+      if (reqId !== hashRequestSeq) {
+        return { loadedFromHash: false, attemptedSharedHash: isSharedHash };
+      }
+      if (isSharedHash) {
+        const msg = `Invalid shared workflow URL: ${err instanceof Error ? err.message : 'decode failed'}`;
+        hashError = msg;
+        showToastMessage(msg, 4500, 'error');
+        return { loadedFromHash: false, attemptedSharedHash: true };
+      }
+    }
+    return { loadedFromHash: false, attemptedSharedHash: isSharedHash };
+  }
+
   onMount(async () => {
     try {
       const saved = localStorage.getItem('denovo-theme');
@@ -541,34 +618,14 @@
     webMcpReady = webMcpRegistered;
 
     // Load shared workflow from URL hash (#p=... or #g=...) if present
-    let loadedFromHash = false;
-    if (window.location.hash.length > 2) {
-      const rawHash = window.location.hash;
-      const isSharedHash = rawHash.startsWith('#g=') || rawHash.startsWith('#p=');
-      try {
-        const decoded = await decodeHashToGraph(rawHash);
-        if (decoded) {
-          graph = decoded;
-          selectedPresetId = decoded.id;
-          setSingleSelection(decoded.nodes[0]?.id ?? '');
-          showToastMessage('Loaded shared workflow from URL', 3000);
-          loadedFromHash = true;
-        } else if (isSharedHash) {
-          showToastMessage('Could not decode shared workflow link — loaded default workflow', 4200);
-        }
-      } catch (err) {
-        if (isSharedHash) {
-          showToastMessage(
-            `Invalid shared workflow URL: ${err instanceof Error ? err.message : 'decode failed'}`,
-            4500,
-          );
-        }
-      }
-    }
+    const { loadedFromHash, attemptedSharedHash } = await applySharedHash(window.location.hash, true);
 
     // Show welcome onboarding once on first direct visit (never interrupt shared links)
     try {
-      if (!loadedFromHash && localStorage.getItem('denovo-onboarding-seen') !== '1') {
+      if (
+        !shouldSuppressOnboardingForHash(loadedFromHash, attemptedSharedHash) &&
+        localStorage.getItem('denovo-onboarding-seen') !== '1'
+      ) {
         showOnboarding = true;
       }
     } catch {
@@ -642,6 +699,11 @@
     if (isRunning) return;
     const preset = WORKFLOW_PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
+    graphUndoStack = [];
+    graphRedoStack = [];
+    lastParamUndo = null;
+    lastLabelUndo = null;
+    hashError = null;
     selectedPresetId = presetId;
     const g = structuredClone(preset.graph);
     graph = g.nodes.some((n) => !n.position) ? autoLayoutGraph(g) : g;
@@ -676,6 +738,11 @@
 
   function prepareTourStarter() {
     if (isRunning) return;
+    graphUndoStack = [];
+    graphRedoStack = [];
+    lastParamUndo = null;
+    lastLabelUndo = null;
+    hashError = null;
     selectedPresetId = 'tour-starter';
     graph = autoLayoutGraph({
       id: 'tour-starter',
@@ -721,6 +788,7 @@
             selectedNodeId);
 
     const prevGraph = $state.snapshot(graph) as WorkflowGraph;
+    pushGraphUndo(prevGraph);
     const { graph: nextGraph, nodeId } = insertBlockSmart(
       prevGraph,
       adapterId,
@@ -834,42 +902,64 @@
     if (stChanged) nodeStates = nextStates;
   }
 
-  function pushGraphUndo(snapshot: WorkflowGraph) {
-    graphUndoStack.push(structuredClone(snapshot));
+  function pushGraphUndo(
+    snapshot: WorkflowGraph,
+    presetId = selectedPresetId,
+    opts?: { preserveCoalescing?: boolean },
+  ) {
+    graphUndoStack.push({ graph: structuredClone(snapshot), selectedPresetId: presetId });
     if (graphUndoStack.length > MAX_GRAPH_HISTORY) {
       graphUndoStack.shift();
     }
     graphRedoStack = [];
+    if (!opts?.preserveCoalescing) {
+      lastParamUndo = null;
+      lastLabelUndo = null;
+    }
   }
 
   function undoGraphEdit() {
     if (isRunning || graphUndoStack.length === 0) return;
-    const prev = graphUndoStack.pop()!;
-    graphRedoStack.push(structuredClone($state.snapshot(graph) as WorkflowGraph));
+    const entry = graphUndoStack.pop()!;
+    graphRedoStack.push({
+      graph: structuredClone($state.snapshot(graph) as WorkflowGraph),
+      selectedPresetId,
+    });
     if (graphRedoStack.length > MAX_GRAPH_HISTORY) {
       graphRedoStack.shift();
     }
-    handleGraphChange(prev, { recordHistory: false });
+    lastParamUndo = null;
+    lastLabelUndo = null;
+    handleGraphChange(entry.graph, { recordHistory: false });
+    selectedPresetId = entry.selectedPresetId;
     canvasFitViewTrigger += 1;
     showToastMessage('Undid graph edit', 1800);
   }
 
   function redoGraphEdit() {
     if (isRunning || graphRedoStack.length === 0) return;
-    const next = graphRedoStack.pop()!;
-    graphUndoStack.push(structuredClone($state.snapshot(graph) as WorkflowGraph));
+    const entry = graphRedoStack.pop()!;
+    graphUndoStack.push({
+      graph: structuredClone($state.snapshot(graph) as WorkflowGraph),
+      selectedPresetId,
+    });
     if (graphUndoStack.length > MAX_GRAPH_HISTORY) {
       graphUndoStack.shift();
     }
-    handleGraphChange(next, { recordHistory: false });
+    lastParamUndo = null;
+    lastLabelUndo = null;
+    handleGraphChange(entry.graph, { recordHistory: false });
+    selectedPresetId = entry.selectedPresetId;
     canvasFitViewTrigger += 1;
     showToastMessage('Redid graph edit', 1800);
   }
 
   function handleApplyPlannedGraph(next: WorkflowGraph, summary: string) {
     if (isRunning) return;
+    const prevPresetId = selectedPresetId;
+    hashError = null;
+    handleGraphChange(next, { prevPresetId });
     selectedPresetId = next.id;
-    handleGraphChange(next);
     const firstId = next.nodes[0]?.id ?? '';
     setSingleSelection(firstId);
     rightPanelTab = 'params';
@@ -877,10 +967,13 @@
     showToastMessage(`Drafted workflow: ${summary} (⌘Z to undo)`, 3200);
   }
 
-  function handleGraphChange(next: WorkflowGraph, opts?: { recordHistory?: boolean }) {
+  function handleGraphChange(
+    next: WorkflowGraph,
+    opts?: { recordHistory?: boolean; prevPresetId?: string },
+  ) {
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
     if (opts?.recordHistory !== false) {
-      pushGraphUndo(prevSnapshot);
+      pushGraphUndo(prevSnapshot, opts?.prevPresetId ?? selectedPresetId);
     }
     const nextById = new Map(next.nodes.map((n) => [n.id, n]));
     const prevById = new Map(prevSnapshot.nodes.map((n) => [n.id, n]));
@@ -987,6 +1080,27 @@
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
     const prevNode = prevSnapshot.nodes.find((n) => n.id === nodeId);
     const paramsChanged = !prevNode || !shallowParamsEqual(prevNode.params, params);
+    if (paramsChanged) {
+      const changedKeys = computeChangedParamKeys(prevNode?.params, params);
+      if (changedKeys.length > 0) {
+        const now = Date.now();
+        const paramSignature = changedKeys.join(',');
+        const action = classifyParamUndoAction(
+          nodeId,
+          paramSignature,
+          now,
+          lastParamUndo,
+          lastLabelUndo,
+        );
+        if (action === 'coalesce' && lastParamUndo) {
+          lastParamUndo.at = now;
+          graphRedoStack = [];
+        } else if (action === 'push') {
+          pushGraphUndo(prevSnapshot, selectedPresetId, { preserveCoalescing: true });
+          lastParamUndo = { nodeId, paramKey: paramSignature, at: now };
+        }
+      }
+    }
     const nextGraph: WorkflowGraph = {
       ...prevSnapshot,
       nodes: prevSnapshot.nodes.map((n) => (n.id === nodeId ? { ...n, params } : n)),
@@ -999,26 +1113,48 @@
   }
 
   function updateNodeLabel(nodeId: string, label: string) {
+    const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
+    const prevNode = prevSnapshot.nodes.find((n) => n.id === nodeId);
+    if (prevNode?.label === label) return;
+    const now = Date.now();
+    if (lastLabelUndo && lastLabelUndo.nodeId === nodeId && now - lastLabelUndo.at < 800) {
+      lastLabelUndo.at = now;
+      graphRedoStack = [];
+    } else {
+      pushGraphUndo(prevSnapshot, selectedPresetId, { preserveCoalescing: true });
+      lastLabelUndo = { nodeId, at: now };
+    }
     graph = {
-      ...graph,
-      nodes: graph.nodes.map((n) => (n.id === nodeId ? { ...n, label } : n)),
+      ...prevSnapshot,
+      nodes: prevSnapshot.nodes.map((n) => (n.id === nodeId ? { ...n, label } : n)),
     };
   }
 
-  let inputPreviewErrors = $derived.by((): string[] => {
-    const errs: string[] = [];
+  let graphValidationErrors = $derived(validateGraph(graph));
+  let inputPreviewErrorsByNode = $derived.by((): Record<string, string> => {
+    const errs: Record<string, string> = {};
     for (const node of graph.nodes) {
       if (node.adapterId !== 'pdb-input' && node.adapterId !== 'sequence-input') continue;
       const st = nodeStates[node.id];
       if (st?.status === 'error' && st.error) {
         const label = node.label || node.adapterId;
-        errs.push(`${label}: ${st.error}`);
+        const coveredByGraph = graphValidationErrors.some(
+          (msg) => msg.startsWith(`"${label}":`) && msg.includes(st.error!),
+        );
+        if (!coveredByGraph) {
+          errs[node.id] = `${label}: ${st.error}`;
+        }
       }
     }
     return errs;
   });
-  let validationErrors = $derived([...validateGraph(graph), ...inputPreviewErrors]);
-  let bioIssues = $derived(validateBioCapabilities(graph, outputsByNode));
+  let inputPreviewErrors = $derived(Object.values(inputPreviewErrorsByNode));
+  let validationErrors = $derived([...graphValidationErrors, ...inputPreviewErrors]);
+  let previewChecks = $derived(
+    computePreviewChecks(graph, activeDraftPreview, outputsByNode, inputPreviewErrorsByNode),
+  );
+  let displayedValidationErrors = $derived(previewChecks.displayedValidationErrors);
+  let bioIssues = $derived(previewChecks.bioIssues);
 
   // Instant CPU/fetch preview for starting inputs (PDB Input & Sequence Input) so users can
   // inspect structures in 3D or compare PDBs immediately without needing to click Run.
@@ -1054,136 +1190,21 @@
     return null;
   }
 
-  function parseLengthFromContig(contig: string | undefined): number | null {
-    const raw = String(contig ?? '').trim();
-    if (!raw) return null;
-    if (raw.includes('/0')) {
-      const afterBreak = raw.split('/0').slice(1).join(',');
-      const tokens = afterBreak.split(/[,\s]+/).filter(Boolean);
-      for (const tok of tokens) {
-        const m = tok.match(/^(\d+)(?:-(\d+))?$/);
-        if (m) {
-          const lo = Number(m[1]);
-          const hi = m[2] ? Number(m[2]) : lo;
-          return Math.round((lo + hi) / 2);
-        }
-      }
-    }
-    const bare = raw.match(/^(\d+)(?:-(\d+))?$/);
-    if (bare) {
-      const lo = Number(bare[1]);
-      const hi = bare[2] ? Number(bare[2]) : lo;
-      return Math.round((lo + hi) / 2);
-    }
-    return null;
-  }
-
-  // Auto-seed unconfigured (or previously auto-seeded) Genie 3 & RFD4-Proteina blocks when wired
-  // to a curated benchmark PDB Input on their unified `structure` port — fixes forked workflows
-  // like 1PRW -> Genie 3 + RFD4 so both immediately pick up the exact motif/binder/enzyme task,
-  // and resets stale auto-seeded Genie 3 constraints when switching to an RFD4-only benchmark (5O45 -> 1CTT).
+  // Auto-seed unconfigured (hasNoTaskParams) or previously auto-seeded Genie 3 & RFD4-Proteina blocks
+  // when wired to a curated benchmark PDB Input on their unified `structure` port, adapting the benchmark
+  // contig to preserve custom/planned lengths (e.g. 65 aa on 5O45, 80 aa on 1YCR) without pushing undo.
   $effect(() => {
     if (isRunning) return;
-    let patches: Record<string, Record<string, unknown>> | null = null;
-    for (const node of graph.nodes) {
-      if (node.adapterId !== 'genie3' && node.adapterId !== 'rfd4-proteina') {
-        continue;
-      }
-      const structEdge = graph.edges.find(
-        (e) => e.toNode === node.id && (e.toPort === 'structure' || e.toPort === 'template'),
-      );
-      if (!structEdge) continue;
-      const srcNode = graph.nodes.find((n) => n.id === structEdge.fromNode);
-      if (!srcNode || srcNode.adapterId !== 'pdb-input') continue;
-      const benchId = String(srcNode.params.benchmarkId ?? '').trim();
-      if (!benchId) continue;
-      const bench = getBenchmarkById(benchId);
-      if (!bench) continue;
-
-      const cp = node.params ?? {};
-      if (Boolean(cp.userEditedTask)) continue;
-      const seededId = String(cp.autoSeededBenchmarkId ?? '').trim();
-      if (seededId === bench.id) continue;
-
-      if (node.adapterId === 'rfd4-proteina') {
-        const hasNoTaskParams =
-          !String(cp.hotspots ?? '').trim() &&
-          !String(cp.motifSpan ?? '').trim() &&
-          !String(cp.lockChain ?? '').trim() &&
-          !String(cp.customSpecYaml ?? '').trim();
-        if (!hasNoTaskParams && !seededId) continue;
-
-        const bp = bench.conditionParams;
-        const parsedLen = parseLengthFromContig(bp.contig);
-        const nextMode =
-          bp.taskPreset !== 'custom'
-            ? 'preset'
-            : bench.category === 'binder'
-              ? 'binder'
-              : 'motif';
-        patches ??= {};
-        patches[node.id] = {
-          ...cp,
-          mode: nextMode,
-          ...(bp.taskPreset !== 'custom' ? { presetId: bp.taskPreset } : {}),
-          ...(parsedLen !== null ? { length: parsedLen } : {}),
-          contig: bp.contig,
-          lockChain: bp.lockChain ?? '',
-          hotspots: bp.hotspots ?? '',
-          motifSpan: bp.motifSpan ?? '',
-          unindexedMotif: Boolean(bp.unindexedMotif),
-          hbondMode: bp.hbondMode ?? 'none',
-          hbondSelection: bp.hbondSelection ?? '',
-          autoSeededBenchmarkId: bench.id,
-        };
-      } else if (node.adapterId === 'genie3') {
-        if (bench.supportsGenie3) {
-          const hasNoTaskParams =
-            !String(cp.hotspots ?? '').trim() &&
-            !String(cp.motifSpan ?? '').trim() &&
-            !String(cp.lockChain ?? '').trim();
-          if (!hasNoTaskParams && !seededId) continue;
-
-          const bp = bench.conditionParams;
-          const parsedLen = parseLengthFromContig(bp.contig);
-          const nextTaskMode = bench.category === 'binder' ? 'binder' : 'motif';
-          patches ??= {};
-          patches[node.id] = {
-            ...cp,
-            taskMode: nextTaskMode,
-            ...(parsedLen !== null ? { length: parsedLen } : {}),
-            contig: bp.contig,
-            lockChain: bp.lockChain ?? '',
-            hotspots: bp.hotspots ?? '',
-            motifSpan: bp.motifSpan ?? '',
-            autoSeededBenchmarkId: bench.id,
-          };
-        } else if (seededId) {
-          // Previously auto-seeded for a Genie 3-compatible benchmark, now switched to an
-          // RFD4-only benchmark (e.g. 5O45 -> 1CTT): reset stale constraints cleanly.
-          patches ??= {};
-          patches[node.id] = {
-            ...cp,
-            taskMode: 'unconditional',
-            contig: '',
-            lockChain: '',
-            hotspots: '',
-            motifSpan: '',
-            autoSeededBenchmarkId: bench.id,
-          };
-        }
-      }
-    }
+    const patches = computeBenchmarkAutoSeedPatches(graph);
     if (patches) {
-      const map = patches;
       const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
       const nextGraph: WorkflowGraph = {
         ...prevSnapshot,
-        nodes: prevSnapshot.nodes.map((n) => (map[n.id] ? { ...n, params: map[n.id] } : n)),
+        nodes: prevSnapshot.nodes.map((n) => (patches[n.id] ? { ...n, params: patches[n.id] } : n)),
       };
       graph = nextGraph;
       scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
-      invalidateNodes(getDownstreamNodeIds(nextGraph, Object.keys(map)));
+      invalidateNodes(getDownstreamNodeIds(nextGraph, Object.keys(patches)));
     }
   });
 
@@ -1223,6 +1244,7 @@
     const unsupportedGenie3Labels: string[] = [];
 
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
+    pushGraphUndo(prevSnapshot);
     const nextGraph: WorkflowGraph = {
       ...prevSnapshot,
       nodes: prevSnapshot.nodes.map((n) => {
@@ -1324,17 +1346,36 @@
       if (node.adapterId !== 'pdb-input' && node.adapterId !== 'sequence-input') continue;
       const sig = computeInputPreviewSig(node);
       if (!sig) {
+        const isCustomEmptyPdb =
+          node.adapterId === 'pdb-input' &&
+          String(node.params.mode ?? 'demo-bundle') === 'custom' &&
+          !String(node.params.pdbText ?? '').trim();
         const hadTracked =
           previewedInputSigs.has(node.id) ||
           inFlightInputSigs.has(node.id) ||
           failedInputSigs.has(node.id) ||
           Boolean(outputsByNode[node.id]) ||
-          Boolean(nodeStates[node.id]);
+          (!isCustomEmptyPdb && Boolean(nodeStates[node.id]));
         previewedInputSigs.delete(node.id);
         inFlightInputSigs.delete(node.id);
         failedInputSigs.delete(node.id);
         if (hadTracked) {
-          invalidateNodes(getDownstreamNodeIds(graph, [node.id]));
+          invalidateNodes(
+            getDownstreamNodeIds(graph, [node.id]),
+            isCustomEmptyPdb ? { keepStateIds: new Set([node.id]) } : undefined,
+          );
+        }
+        if (isCustomEmptyPdb) {
+          const errMsg = Boolean(node.params.missingUpload)
+            ? 'Missing uploaded PDB/mmCIF file.'
+            : 'Paste a PDB / mmCIF structure or upload a file.';
+          const curSt = nodeStates[node.id];
+          if (curSt?.status !== 'error' || curSt.error !== errMsg) {
+            nodeStates = {
+              ...nodeStates,
+              [node.id]: { nodeId: node.id, status: 'error', error: errMsg },
+            };
+          }
         }
         continue;
       }
@@ -1431,6 +1472,7 @@
     if (isRunning) return;
     const { nodeId, paramsPatch, nodeLabel } = fix;
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
+    pushGraphUndo(prevSnapshot);
     const nextGraph: WorkflowGraph = {
       ...prevSnapshot,
       nodes: prevSnapshot.nodes.map((n) =>
@@ -1514,6 +1556,7 @@
     localRunning = true;
     runTargetIds = targetGraph.nodes.map((n) => n.id);
     runError = null;
+    hashError = null;
     clearPendingProgress();
     if (!upToNodeId) {
       totalElapsedMs = null;
@@ -1693,6 +1736,9 @@
     const laid = next.nodes.some((n) => !n.position) ? autoLayoutGraph(next) : next;
     graphUndoStack = [];
     graphRedoStack = [];
+    lastParamUndo = null;
+    lastLabelUndo = null;
+    hashError = null;
     selectedPresetId = laid.id;
     graph = laid;
     setSingleSelection(laid.nodes[0]?.id ?? '');
@@ -2451,6 +2497,16 @@
           msaDepth: struct.provenance?.msaDepth,
           chainLengths: struct.chainLengths ?? struct.diagnostics?.chainLengths,
         };
+        continue;
+      }
+      const seqSet = values.find((a): a is SequenceSet => a.kind === 'SequenceSet');
+      if (seqSet) {
+        const cand = seqSet.candidates[selIdx] ?? seqSet.candidates[0] ?? null;
+        const ctxStruct = findContextStructure(graph, id, outputsByNode);
+        map[id] = {
+          collectionKind: seqSet.collectionKind,
+          chainLengths: cand?.chainLengths ?? ctxStruct?.chainLengths ?? ctxStruct?.diagnostics?.chainLengths,
+        };
       }
     }
     return map;
@@ -2493,8 +2549,34 @@
     return [];
   });
 
+  let isCanonicalViewerLayout = $derived(
+    Boolean(
+      (isCompareMode && comparisonState?.effectiveLayout === 'side-by-side') ||
+        (isMultiDesignAll3d && multiDesignViewMode === 'grid'),
+    ),
+  );
+
+  let compareEmptyMessage = $derived.by((): string | undefined => {
+    if (!isCompareMode || !comparisonState || comparisonState.models.length > 0) return undefined;
+    const allHaveOutputs = comparisonState.branches.every((b) => b.hasOutputs);
+    const anySeq = comparisonState.branches.some((b) => b.kind === 'sequence');
+    if (allHaveOutputs && anySeq) {
+      return 'Sequence-only comparison — no 3D coordinates emitted by these blocks (see scores, recovery, AA composition & sequence diff in the Compare table).';
+    }
+    if (anySeq) {
+      return 'Sequence-only comparison — run any un-run blocks to compare scores & sequences.';
+    }
+    return undefined;
+  });
+
   let compareViewerLabel = $derived.by((): string => {
     if (!comparisonState) return viewerLabel;
+    if (
+      comparisonState.models.length === 0 &&
+      comparisonState.branches.some((b) => b.kind === 'sequence')
+    ) {
+      return `Compare ${comparisonState.branches.length} blocks · Sequence comparison`;
+    }
     const alignTag = comparisonState.kabschAligned
       ? comparisonState.pairwise?.isSubstructure
         ? `✓ Motif Kabsch (${comparisonState.pairwise.alignedResidues} aa)`
@@ -2533,6 +2615,7 @@
   onpointermove={handleWindowPointerMove}
   onpointerup={handleWindowPointerUp}
   onkeydown={handleWindowKeydown}
+  onhashchange={() => void applySharedHash(window.location.hash, false)}
 />
 
 <!-- Single Compact Top Header Bar (~48px) -->
@@ -2696,16 +2779,15 @@
           <button type="button" class="menu-item" role="menuitem" onclick={exportWorkflowJson}>
             <span>Export JSON</span>
           </button>
-          <label class="menu-item" class:disabled={isRunning}>
+          <button
+            type="button"
+            class="menu-item"
+            role="menuitem"
+            disabled={isRunning}
+            onclick={() => importFileInput?.click()}
+          >
             <span>Import JSON / YAML</span>
-            <input
-              type="file"
-              accept=".json,.yaml,.yml"
-              hidden
-              disabled={isRunning}
-              onchange={importGraphJson}
-            />
-          </label>
+          </button>
           <button
             type="button"
             class="menu-item"
@@ -2740,6 +2822,16 @@
           </button>
         </div>
       {/if}
+      <input
+        bind:this={importFileInput}
+        type="file"
+        accept=".json,.yaml,.yml"
+        hidden
+        tabindex="-1"
+        aria-hidden="true"
+        disabled={isRunning}
+        onchange={importGraphJson}
+      />
     </div>
 
     <!-- Cancel CTA while any canvas or API run is active -->
@@ -2808,6 +2900,7 @@
           fitViewTrigger={canvasFitViewTrigger}
           onGraphChange={handleGraphChange}
           onApplyPlannedGraph={handleApplyPlannedGraph}
+          onDraftPreviewChange={(draft) => (activeDraftPreview = draft)}
           onSelectNode={handleSelectNode}
           onSelectNodes={handleSelectNodes}
           onBlockAdded={handleBlockAdded}
@@ -2820,7 +2913,13 @@
       </SvelteFlowProvider>
 
       {#if shareToast}
-        <div class="share-toast">{shareToast}</div>
+        <div
+          class="share-toast"
+          class:is-error={shareToastTone === 'error'}
+          role={shareToastTone === 'error' ? 'alert' : 'status'}
+        >
+          {shareToast}
+        </div>
       {/if}
 
       {#if showRecipe}
@@ -2833,9 +2932,9 @@
         </div>
       {/if}
 
-      {#if validationErrors.length > 0}
+      {#if displayedValidationErrors.length > 0}
         <div class="warn-banner">
-          <b>Workflow check:</b> {validationErrors.join(' · ')}
+          <b>Workflow check:</b> {displayedValidationErrors.join(' · ')}
         </div>
       {/if}
 
@@ -2846,7 +2945,7 @@
               <span class="bio-msg">
                 <b>Biological compatibility:</b> {issue.message}
               </span>
-              {#if issue.fix}
+              {#if issue.fix && !previewChecks.hideBioFixes}
                 <button
                   type="button"
                   class="bio-fix-btn"
@@ -2861,9 +2960,23 @@
         </div>
       {/if}
 
-      {#if runError}
+      {#if runError && !previewChecks.hideRunError}
         <div class="error-banner">
           <b>Pipeline error:</b> {runError}
+        </div>
+      {/if}
+
+      {#if hashError}
+        <div class="error-banner dismissible" role="alert">
+          <span><b>Shared link error:</b> {hashError}</span>
+          <button
+            type="button"
+            class="banner-dismiss"
+            onclick={() => (hashError = null)}
+            aria-label="Dismiss shared link error"
+          >
+            ×
+          </button>
         </div>
       {/if}
     </section>
@@ -2961,7 +3074,14 @@
               {sharedPreAligned ? 'Kabsch align (shared)' : 'Kabsch align'}
             </label>
             <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
-            <label title="Slowly rotate the 3D view (pauses while dragging)"><input type="checkbox" bind:checked={viewerSpin} /> Spin</label>
+            <label
+              class:disabled-opt={isCanonicalViewerLayout}
+              title={isCanonicalViewerLayout
+                ? 'Spin is paused in Side-by-Side / Grid layout to preserve A (left) → B (right) orientation'
+                : 'Slowly rotate the 3D view (pauses while dragging)'}
+            >
+              <input type="checkbox" disabled={isCanonicalViewerLayout} bind:checked={viewerSpin} /> Spin
+            </label>
             <button
               type="button"
               class="cmp-exit-mini"
@@ -3041,7 +3161,14 @@
             <label><input type="checkbox" name="viewer-show-designed" bind:checked={showDesigned} /> Designed</label>
             <label><input type="checkbox" name="viewer-show-refold" bind:checked={showRefold} /> Refold (pLDDT)</label>
             <label><input type="checkbox" name="viewer-illustrative" bind:checked={illustrative} /> Illustrative</label>
-            <label title="Slowly rotate the 3D view (pauses while dragging)"><input type="checkbox" name="viewer-spin" bind:checked={viewerSpin} /> Spin</label>
+            <label
+              class:disabled-opt={isCanonicalViewerLayout}
+              title={isCanonicalViewerLayout
+                ? 'Spin is paused in Side-by-Side / Grid layout to preserve A (left) → B (right) orientation'
+                : 'Slowly rotate the 3D view (pauses while dragging)'}
+            >
+              <input type="checkbox" name="viewer-spin" disabled={isCanonicalViewerLayout} bind:checked={viewerSpin} /> Spin
+            </label>
             {#if viewerStructureMeta?.trajectoryPdb}
               <label><input type="checkbox" name="viewer-show-trajectory" bind:checked={showTrajectory} /> Trajectory</label>
               {#if showTrajectory}
@@ -3132,7 +3259,8 @@
             showRefold={studioInputViewerActive || isMultiDesignAll3d ? false : showRefold}
             {showTrajectory}
             {illustrative}
-            spin={viewerSpin && !isRunning}
+            spin={viewerSpin && !isRunning && !isCanonicalViewerLayout}
+            canonicalCamera={isCanonicalViewerLayout}
             expanded={expandedPane === 'viewer' || studioOpen}
             {theme}
             height={expandedPane === 'viewer' || studioOpen ? '100%' : splitMode === 'horizontal' ? 350 : 460}
@@ -3150,7 +3278,7 @@
             highlightLayers={studioInputViewerActive ? studioPreview?.highlightLayers : undefined}
             hoveredToken={studioOpen ? studioHoveredToken : null}
             focusToken={studioOpen ? studioFocusToken : null}
-            emptyMessage={isCompareMode || isMultiDesignAll3d ? undefined : viewerEmptyMessage}
+            emptyMessage={isCompareMode ? compareEmptyMessage : isMultiDesignAll3d ? undefined : viewerEmptyMessage}
             emptyActionLabel={!isCompareMode && !isMultiDesignAll3d && isPeekingSequenceSlot && !showSeqParentBackbone && contextStructure
               ? 'Preview parent backbone'
               : undefined}
@@ -3275,66 +3403,70 @@
             {/snippet}
           </NodeStudioPopover>
         {:else}
-        <div class="right-tabs" role="tablist" aria-label="Block inspector tabs">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={rightPanelTab === 'params'}
-            class="r-tab"
-            class:active={rightPanelTab === 'params'}
-            onclick={() => (rightPanelTab = 'params')}
-          >
-            Parameters
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={rightPanelTab === 'peek'}
-            class="r-tab"
-            class:active={rightPanelTab === 'peek'}
-            onclick={() => (rightPanelTab = 'peek')}
-          >
-            {isCompareMode ? `Compare (${selectedNodeIds.length})` : 'Outputs'}
-            {#if hasPeekData || isCompareMode}
-              <span class="live-dot" title="Outputs or comparison ready"></span>
+        <div class="right-tabs">
+          <div class="r-tab-group" role="tablist" aria-label="Block inspector tabs">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={rightPanelTab === 'params'}
+              class="r-tab"
+              class:active={rightPanelTab === 'params'}
+              onclick={() => (rightPanelTab = 'params')}
+            >
+              Parameters
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={rightPanelTab === 'peek'}
+              class="r-tab"
+              class:active={rightPanelTab === 'peek'}
+              onclick={() => (rightPanelTab = 'peek')}
+            >
+              {isCompareMode ? `Compare (${selectedNodeIds.length})` : 'Outputs'}
+              {#if hasPeekData || isCompareMode}
+                <span class="live-dot" title="Outputs or comparison ready"></span>
+              {/if}
+            </button>
+          </div>
+          <div class="r-tab-actions">
+            {#if !isCompareMode && comparableBranchIds.length >= 2}
+              <button
+                type="button"
+                class="cmp-launch-btn"
+                title="Compare branches in 3D (or Ctrl/⌘-click / Shift-click blocks on the canvas)"
+                onclick={() => handleSelectNodes(comparableBranchIds)}
+              >
+                Compare branches ({comparableBranchIds.length})
+              </button>
+            {:else if selectedNode && (!isCompareMode || rightPanelTab === 'params')}
+              <span class="tab-node-ctx" title={selectedNode.label ?? selectedNode.adapterId}>
+                {isCompareMode ? 'Editing: ' : ''}{selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
+              </span>
             {/if}
-          </button>
-          {#if !isCompareMode && comparableBranchIds.length >= 2}
+            {#if selectedNode && !isCompareMode}
+              <ModelCardPopover adapterId={selectedNode.adapterId} params={selectedNode.params} compact />
+              <button
+                type="button"
+                class="pane-expand-btn studio-launch-btn"
+                onclick={() => openStudioForNode(selectedNode.id)}
+                title="Open Node Studio — inspect compiled inputs, annotated FASTA, and 3D overlays (Space)"
+                aria-label="Open Node Studio"
+              >
+                ⌖ Studio
+              </button>
+            {/if}
             <button
               type="button"
-              class="cmp-launch-btn"
-              title="Compare branches in 3D (or Ctrl/⌘-click / Shift-click blocks on the canvas)"
-              onclick={() => handleSelectNodes(comparableBranchIds)}
+              class="pane-expand-btn tab-expand-btn"
+              class:active={expandedPane === 'inspector'}
+              onclick={() => (expandedPane = expandedPane === 'inspector' ? 'none' : 'inspector')}
+              title={expandedPane === 'inspector' ? 'Collapse panel (Esc)' : 'Expand panel to full view'}
+              aria-label={expandedPane === 'inspector' ? 'Collapse inspector panel' : 'Expand inspector panel'}
             >
-              Compare branches ({comparableBranchIds.length})
+              {expandedPane === 'inspector' ? '⤡' : '⤢'}
             </button>
-          {:else if selectedNode && (!isCompareMode || rightPanelTab === 'params')}
-            <span class="tab-node-ctx" title={selectedNode.label ?? selectedNode.adapterId}>
-              {isCompareMode ? 'Editing: ' : ''}{selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
-            </span>
-          {/if}
-          {#if selectedNode && !isCompareMode}
-            <ModelCardPopover adapterId={selectedNode.adapterId} params={selectedNode.params} compact />
-            <button
-              type="button"
-              class="pane-expand-btn studio-launch-btn"
-              onclick={() => openStudioForNode(selectedNode.id)}
-              title="Open Node Studio — inspect compiled inputs, annotated FASTA, and 3D overlays (Space)"
-              aria-label="Open Node Studio"
-            >
-              ⌖ Studio
-            </button>
-          {/if}
-          <button
-            type="button"
-            class="pane-expand-btn tab-expand-btn"
-            class:active={expandedPane === 'inspector'}
-            onclick={() => (expandedPane = expandedPane === 'inspector' ? 'none' : 'inspector')}
-            title={expandedPane === 'inspector' ? 'Collapse panel (Esc)' : 'Expand panel to full view'}
-            aria-label={expandedPane === 'inspector' ? 'Collapse inspector panel' : 'Expand inspector panel'}
-          >
-            {expandedPane === 'inspector' ? '⤡' : '⤢'}
-          </button>
+          </div>
         </div>
 
         <div class="right-body">
@@ -3383,6 +3515,7 @@
               }}
               onChangePairingMode={(mode) => {
                 comparePairingMode = mode;
+                branchCandidateIdx = {};
               }}
               onSelectCandidateKey={(key) => {
                 compareSelectedCandidateKey = key;
@@ -3747,12 +3880,11 @@
     cursor: pointer;
     font-family: inherit;
   }
-  .menu-item:hover:not(:disabled):not(.disabled) {
+  .menu-item:hover:not(:disabled) {
     background: var(--bg-surface-hover);
     color: var(--text-primary);
   }
-  .menu-item:disabled,
-  .menu-item.disabled {
+  .menu-item:disabled {
     opacity: 0.45;
     cursor: not-allowed;
   }
@@ -3920,6 +4052,11 @@
     padding: 6px 10px;
     border-radius: 6px;
   }
+  .share-toast.is-error {
+    color: var(--err-text);
+    background: var(--err-bg);
+    border-color: var(--err-border);
+  }
   .warn-banner {
     background: var(--warn-bg);
     border: 1px solid var(--warn-border);
@@ -3986,6 +4123,30 @@
     font-size: 12px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     white-space: pre-wrap;
+  }
+  .error-banner.dismissible {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .banner-dismiss {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--err-border);
+    color: var(--err-text);
+    border-radius: 4px;
+    width: 22px;
+    height: 22px;
+    line-height: 1;
+    font-size: 14px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .banner-dismiss:hover {
+    background: rgba(255, 255, 255, 0.08);
   }
 
   .results-grid {
@@ -4178,10 +4339,10 @@
     }
   }
   .studio-launch-btn {
-    margin-left: 6px;
-    margin-bottom: 4px;
+    margin-left: 0;
     color: var(--accent);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+    flex-shrink: 0;
   }
   .pane-expand-btn {
     margin-left: auto;
@@ -4206,8 +4367,7 @@
     background: var(--bg-pill);
   }
   .tab-expand-btn {
-    margin-left: 6px;
-    margin-bottom: 4px;
+    margin-left: 0;
     padding: 2px 6px;
     flex-shrink: 0;
   }
@@ -4282,8 +4442,6 @@
     border-color: var(--accent);
   }
   .cmp-launch-btn {
-    margin-left: auto;
-    margin-bottom: 4px;
     border: 1px solid var(--accent);
     background: var(--bg-pill);
     color: var(--accent-soft);
@@ -4293,6 +4451,8 @@
     font-size: 10.5px;
     font-weight: 600;
     cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
   }
   .cmp-launch-btn:hover {
     background: var(--accent);
@@ -4342,15 +4502,36 @@
     border-radius: 8px;
     display: flex;
     flex-direction: column;
+    min-width: 0;
     overflow: hidden;
   }
   .right-tabs {
     display: flex;
     align-items: center;
-    gap: 4px;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    min-width: 0;
     padding: 6px 10px 0;
     border-bottom: 1px solid var(--border);
     background: var(--bg-surface-2);
+  }
+  .r-tab-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+  .r-tab-actions {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    min-width: 0;
+    max-width: 100%;
+    padding-bottom: 4px;
   }
   .r-tab {
     position: relative;
@@ -4366,6 +4547,7 @@
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;
+    white-space: nowrap;
     margin-bottom: -1px;
   }
   .r-tab:hover {
@@ -4384,27 +4566,28 @@
     box-shadow: 0 0 0 2px var(--ok-bg);
   }
   .tab-node-ctx {
-    margin-left: auto;
-    margin-bottom: 4px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10.5px;
     line-height: 1;
     color: var(--text-dim);
     min-width: 0;
-    flex: 0 1 160px;
+    flex: 0 1 auto;
+    max-width: 160px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .right-tabs > :global(.mc-pill) {
-    margin-bottom: 4px;
+  .r-tab-actions > :global(.mc-pill) {
     flex-shrink: 0;
   }
-  .right-tabs .pane-expand-btn {
+  .r-tab-actions .pane-expand-btn {
+    margin-left: 0;
     flex-shrink: 0;
   }
   .right-body {
     max-height: 520px;
+    min-width: 0;
+    width: 100%;
     overflow-y: auto;
   }
   .empty-inspector {

@@ -447,6 +447,7 @@ export interface DesignabilityRow {
   /** Recorded source structure lineage of the folded candidate. */
   sourceStructureId?: string;
   sequence: string;
+  chainLengths?: number[];
   scRmsd: number;
   scTm: number;
   meanPlddt: number;

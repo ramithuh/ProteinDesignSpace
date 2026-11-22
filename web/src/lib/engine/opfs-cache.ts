@@ -1,8 +1,36 @@
 // OPFS + CacheStorage weight caching utilities with streaming progress.
 // Runs in both Dedicated Web Workers (where OPFS is fastest) and main thread.
 
+import { ARTIFACT_DB_NAME, clearArtifactDatabase } from './artifact-store';
+
 const CACHE_NAME = 'denovo-run-weights-v1';
 const CACHE_PUT_TIMEOUT_MS = 5000;
+
+const VENDOR_CACHE_NAMES = new Set([
+  'ligandmpnn-v1',
+  'esmc-v1',
+  'lasermpnn-v1',
+  'thermompnn-v1',
+  'protpardelle-v1',
+  'dyna1-v1',
+  'gvp-transformer-v1',
+]);
+
+const VENDOR_CACHE_PREFIXES = [
+  'denovo-run',
+  'localfold-',
+  'rfd4p-',
+  'genie3-weights-',
+];
+
+const OPFS_WEIGHT_DIRS = [
+  'denovo-weights',
+  'esmc-v1',
+  'thermompnn-v1',
+  'protpardelle-v1',
+  'dyna1-v1',
+  'gvp-transformer-v1',
+];
 
 function fnv1a(str: string): string {
   let h = 0x811c9dc5;
@@ -275,14 +303,25 @@ export async function getCacheStats(): Promise<{
     }
   }
   const opfsFiles: Array<{ name: string; bytes: number }> = [];
-  const dir = await getWeightsDir(false);
-  if (dir) {
+  if (typeof navigator !== 'undefined' && navigator.storage?.getDirectory) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      for await (const [name, handle] of (dir as any).entries()) {
-        if (handle.kind === 'file') {
-          const f = await handle.getFile();
-          opfsFiles.push({ name, bytes: f.size });
+      const root = await navigator.storage.getDirectory();
+      for (const dirName of OPFS_WEIGHT_DIRS) {
+        const dir = await root.getDirectoryHandle(dirName, { create: false }).catch(() => null);
+        if (!dir) continue;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          for await (const [name, handle] of (dir as any).entries()) {
+            if (handle.kind === 'file') {
+              const f = await handle.getFile();
+              opfsFiles.push({
+                name: dirName === 'denovo-weights' ? name : `${dirName}/${name}`,
+                bytes: f.size,
+              });
+            }
+          }
+        } catch {
+          /* ignore */
         }
       }
     } catch {
@@ -292,14 +331,63 @@ export async function getCacheStats(): Promise<{
   return { usedBytes, quotaBytes, opfsFiles };
 }
 
-/** Clear all denovo.run OPFS and CacheStorage weight caches (including localfold, rfd4 & genie3 caches).
+const openCheckpointDbs = new Set<IDBDatabase>();
+
+function closeAllOpenCheckpointDbs(): void {
+  for (const db of openCheckpointDbs) {
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
+  }
+  openCheckpointDbs.clear();
+}
+
+async function deleteIndexedDbSafe(dbName: string): Promise<void> {
+  if (dbName === CHECKPOINT_DB_NAME) {
+    closeAllOpenCheckpointDbs();
+  }
+  if (typeof indexedDB === 'undefined' || typeof indexedDB.deleteDatabase !== 'function') {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, 2000);
+    try {
+      const req = indexedDB.deleteDatabase(dbName);
+      if (!req || typeof req !== 'object') {
+        finish();
+        return;
+      }
+      req.onsuccess = finish;
+      req.onerror = finish;
+    } catch {
+      finish();
+    }
+  });
+}
+
+/** Clear all denovo.run OPFS, CacheStorage, and IndexedDB weight/artifact caches across all vendor models.
  *  Note: persistent weight caches are managed independently of ExecutionScheduler's in-memory result-cache byte budget. */
-export async function clearAllModelCaches(): Promise<void> {
-  try {
-    const root = await navigator.storage?.getDirectory?.();
-    await root?.removeEntry('denovo-weights', { recursive: true }).catch(() => {});
-  } catch {
-    /* ignore */
+export async function clearAllModelCaches(options?: { preserveCheckpoints?: boolean }): Promise<void> {
+  if (typeof navigator !== 'undefined' && navigator.storage?.getDirectory) {
+    try {
+      const root = await navigator.storage.getDirectory();
+      await Promise.all(
+        OPFS_WEIGHT_DIRS.map((dirName) =>
+          root.removeEntry(dirName, { recursive: true }).catch(() => {}),
+        ),
+      );
+    } catch {
+      /* ignore */
+    }
   }
   if (typeof caches !== 'undefined') {
     try {
@@ -308,10 +396,8 @@ export async function clearAllModelCaches(): Promise<void> {
         keys
           .filter(
             (k) =>
-              k.startsWith('denovo-run') ||
-              k.startsWith('localfold-') ||
-              k.startsWith('rfd4p-') ||
-              k.startsWith('genie3-weights-'),
+              VENDOR_CACHE_NAMES.has(k) ||
+              VENDOR_CACHE_PREFIXES.some((prefix) => k.startsWith(prefix)),
           )
           .map((k) => caches.delete(k)),
       );
@@ -319,6 +405,34 @@ export async function clearAllModelCaches(): Promise<void> {
       /* ignore */
     }
   }
+
+  const preserveCheckpoints = Boolean(options?.preserveCheckpoints);
+  const idbPromises: Promise<void>[] = [clearArtifactDatabase(ARTIFACT_DB_NAME)];
+  const handledDbNames = new Set<string>([ARTIFACT_DB_NAME]);
+  if (!preserveCheckpoints) {
+    idbPromises.push(deleteIndexedDbSafe(CHECKPOINT_DB_NAME));
+    handledDbNames.add(CHECKPOINT_DB_NAME);
+  }
+  if (typeof indexedDB !== 'undefined' && typeof indexedDB.databases === 'function') {
+    try {
+      const dbs = await indexedDB.databases();
+      for (const dbInfo of dbs ?? []) {
+        const name = dbInfo?.name;
+        if (
+          name &&
+          name.startsWith('denovo-run') &&
+          !handledDbNames.has(name) &&
+          !(preserveCheckpoints && name === CHECKPOINT_DB_NAME)
+        ) {
+          handledDbNames.add(name);
+          idbPromises.push(deleteIndexedDbSafe(name));
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  await Promise.all(idbPromises);
 }
 
 /** Storage adapter interface for durable workflow run checkpoints (independent of model weight caches). */
@@ -359,6 +473,15 @@ export function createIndexedDbCheckpointStore(): CheckpointStorageAdapter {
     return createMemoryCheckpointStore();
   }
 
+  const closeDb = (db: IDBDatabase) => {
+    openCheckpointDbs.delete(db);
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
+  };
+
   const openDb = (): Promise<IDBDatabase> =>
     new Promise((resolve, reject) => {
       const req = indexedDB.open(CHECKPOINT_DB_NAME, 1);
@@ -368,7 +491,22 @@ export function createIndexedDbCheckpointStore(): CheckpointStorageAdapter {
           db.createObjectStore(CHECKPOINT_STORE_NAME);
         }
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        const db = req.result;
+        openCheckpointDbs.add(db);
+        db.onversionchange = () => {
+          openCheckpointDbs.delete(db);
+          try {
+            db.close();
+          } catch {
+            /* ignore */
+          }
+        };
+        db.onclose = () => {
+          openCheckpointDbs.delete(db);
+        };
+        resolve(db);
+      };
       req.onerror = () => reject(req.error ?? new Error('Failed to open checkpoint IndexedDB'));
     });
 
@@ -383,7 +521,7 @@ export function createIndexedDbCheckpointStore(): CheckpointStorageAdapter {
           tx.onerror = () => reject(tx.error ?? new Error('Failed to save checkpoint'));
         });
       } finally {
-        db.close();
+        closeDb(db);
       }
     },
     async load(key: string): Promise<string | null> {
@@ -396,7 +534,7 @@ export function createIndexedDbCheckpointStore(): CheckpointStorageAdapter {
           req.onerror = () => reject(req.error ?? new Error('Failed to load checkpoint'));
         });
       } finally {
-        db.close();
+        closeDb(db);
       }
     },
     async delete(key: string): Promise<void> {
@@ -409,7 +547,7 @@ export function createIndexedDbCheckpointStore(): CheckpointStorageAdapter {
           tx.onerror = () => reject(tx.error ?? new Error('Failed to delete checkpoint'));
         });
       } finally {
-        db.close();
+        closeDb(db);
       }
     },
     async listKeys(): Promise<string[]> {
@@ -422,7 +560,7 @@ export function createIndexedDbCheckpointStore(): CheckpointStorageAdapter {
           req.onerror = () => reject(req.error ?? new Error('Failed to list checkpoint keys'));
         });
       } finally {
-        db.close();
+        closeDb(db);
       }
     },
   };

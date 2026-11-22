@@ -5,7 +5,7 @@
 
 import { esmfold2Chains, esmfold2ParamIssue } from './localfold-esmfold2';
 import { LOCALFOLD_MODEL_OPTIONS } from './registry';
-import { getBenchmarkById } from './benchmarks';
+import { BENCHMARK_TARGETS, getBenchmarkById } from './benchmarks';
 import { planLocalFoldFanout } from './work-plan';
 import type { CollectionMember } from './collections';
 import {
@@ -37,6 +37,8 @@ interface CachedStructureBioSummary {
   diagnostics: StructureParseDiagnostics;
   missingBackboneCount: number;
   isCaOnly: boolean;
+  chainIds: string[];
+  resNums: number[];
 }
 
 const STRUCTURE_DIAG_CACHE_LIMIT = 32;
@@ -92,6 +94,8 @@ function getCachedStructureBioSummary(rawText: string, cropSpec = ''): CachedStr
     diagnostics: parsed.diagnostics,
     missingBackboneCount: missing.length,
     isCaOnly,
+    chainIds: parsed.chainIds,
+    resNums: parsed.resNums,
   };
   if (structureDiagCache.size >= STRUCTURE_DIAG_CACHE_LIMIT) {
     const oldest = structureDiagCache.keys().next().value as string | undefined;
@@ -828,6 +832,99 @@ export function validateBioCapabilities(
             nodeId: node.id,
             message: `${node.label ?? 'ProteinMPNN'} designs protein chains only — upstream ${nonProt.toUpperCase()} coordinates will be ignored during inverse folding.`,
           });
+        }
+      }
+    }
+
+    if (node.adapterId === 'antifold-esmif1') {
+      const variant = String(node.params.variant ?? 'antifold');
+      if (variant === 'antifold') {
+        const edge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
+        const src = edge ? graph.nodes.find((n) => n.id === edge.fromNode) : null;
+        if (src) {
+          const liveStruct = outputsByNode?.[src.id]?.structure as StructureArtifact | undefined;
+          const pdbText = src.adapterId === 'pdb-input' ? String(src.params.pdbText ?? '').trim() : '';
+          let parsedSummary: CachedStructureBioSummary | null = null;
+          if (pdbText) {
+            try {
+              const cropSpec = String(src.params.cropSegments ?? '').trim();
+              parsedSummary = getCachedStructureBioSummary(pdbText, cropSpec);
+            } catch {
+              parsedSummary = null;
+            }
+          }
+          const benchId =
+            src.adapterId === 'pdb-input' ? String(src.params.benchmarkId ?? '').trim() : '';
+          const bench = benchId ? getBenchmarkById(benchId) : undefined;
+          const pdbIdUpper =
+            src.adapterId === 'pdb-input' ? String(src.params.pdbId ?? '').trim().toUpperCase() : '';
+          const isDeNovoGenerator =
+            src.adapterId === 'rfd4-proteina' ||
+            src.adapterId === 'protpardelle' ||
+            src.adapterId === 'genie3';
+          const isDemoBundle =
+            src.adapterId === 'pdb-input' &&
+            String(src.params.mode ?? 'demo-bundle') === 'demo-bundle';
+          const isKnownNonAntibodyPdb =
+            pdbIdUpper === '1UBQ' ||
+            pdbIdUpper === '1CTT' ||
+            BENCHMARK_TARGETS.some((b) => b.pdbId === pdbIdUpper);
+          const targetChain = String(node.params.targetChain ?? '').trim().toUpperCase();
+          const chainTypes = liveStruct?.molecularContext?.chainTypes
+            ? Object.values(liveStruct.molecularContext.chainTypes)
+            : [];
+          const headerText = [
+            pdbText.slice(0, 8192),
+            liveStruct?.pdbText ? liveStruct.pdbText.slice(0, 8192) : '',
+            liveStruct?.label ?? '',
+            String(src.params.filename ?? ''),
+          ].join('\n');
+          const hasAntibodyHeaderCue =
+            !isDeNovoGenerator &&
+            !isDemoBundle &&
+            !bench &&
+            !isKnownNonAntibodyPdb &&
+            /\b(?:ANTIBODY|IMMUNOGLOBULIN|FAB|SCFV|VHH|NANOBODY|IGG|IMGT|KABAT)\b/i.test(headerText);
+          const hasAntibodyContext =
+            targetChain === 'H' ||
+            targetChain === 'L' ||
+            chainTypes.some(
+              (ct) => ct === 'antibody-H' || ct === 'antibody-L' || ct === 'nanobody',
+            ) ||
+            Boolean(liveStruct?.chainIds?.some((c) => c === 'H' || c === 'L')) ||
+            Boolean(parsedSummary?.chainIds?.some((c) => c === 'H' || c === 'L')) ||
+            hasAntibodyHeaderCue;
+
+          if (!hasAntibodyContext) {
+            const isShortNonIg =
+              (liveStruct !== undefined && liveStruct.length > 0 && liveStruct.length < 90) ||
+              (parsedSummary !== null &&
+                parsedSummary.nResidues > 0 &&
+                parsedSummary.nResidues < 90);
+
+            if (
+              isDeNovoGenerator ||
+              isDemoBundle ||
+              Boolean(bench) ||
+              isShortNonIg ||
+              isKnownNonAntibodyPdb
+            ) {
+              const regionsLabel = String(node.params.regions ?? '').trim();
+              const regionNote = regionsLabel ? ` (${regionsLabel} may match 0 residues)` : '';
+              issues.push({
+                severity: 'warning',
+                code: 'antifold-non-antibody',
+                nodeId: node.id,
+                message: `AntiFold is trained for IMGT/Kabat-numbered antibody/nanobody CDRs, whereas upstream appears to be a non-antibody structure${regionNote}. Switch to ESM-IF1 (or replace with SolubleMPNN).`,
+                fix: {
+                  label: 'Switch to ESM-IF1',
+                  nodeId: node.id,
+                  paramsPatch: { variant: 'esmif1' },
+                  nodeLabel: 'ESM-IF1',
+                },
+              });
+            }
+          }
         }
       }
     }
