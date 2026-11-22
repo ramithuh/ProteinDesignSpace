@@ -362,33 +362,27 @@
       dockMorphTimer = null;
     }
     const fromW = el.getBoundingClientRect().width;
-    const fromH = el.getBoundingClientRect().height;
     el.style.transition = 'none';
     el.style.width = '';
-    el.style.height = '';
     mutate();
     void tick().then(() => {
       if (!dockEl) return;
       const toW = dockEl.getBoundingClientRect().width;
-      const toH = dockEl.getBoundingClientRect().height;
-      if (Math.abs(toW - fromW) < 2 && Math.abs(toH - fromH) < 2) {
+      if (Math.abs(toW - fromW) < 2) {
         dockEl.style.transition = '';
         return;
       }
       dockEl.style.width = `${fromW}px`;
-      dockEl.style.height = `${fromH}px`;
       void dockEl.offsetWidth;
       dockEl.style.transition =
-        'width 300ms cubic-bezier(0.22, 1, 0.36, 1), height 260ms cubic-bezier(0.22, 1, 0.36, 1), bottom 340ms cubic-bezier(0.22, 1, 0.36, 1), transform 340ms cubic-bezier(0.22, 1, 0.36, 1), border-radius 260ms cubic-bezier(0.22, 1, 0.36, 1), border-color 220ms ease, box-shadow 260ms ease';
+        'width 260ms cubic-bezier(0.22, 1, 0.36, 1), bottom 320ms cubic-bezier(0.22, 1, 0.36, 1), transform 320ms cubic-bezier(0.22, 1, 0.36, 1), border-radius 240ms cubic-bezier(0.22, 1, 0.36, 1), border-color 200ms ease, box-shadow 240ms ease';
       dockEl.style.width = `${toW}px`;
-      dockEl.style.height = `${toH}px`;
       dockMorphTimer = setTimeout(() => {
         dockMorphTimer = null;
         if (!dockEl) return;
         dockEl.style.width = '';
-        dockEl.style.height = '';
         dockEl.style.transition = '';
-      }, 320);
+      }, 280);
     });
   }
 

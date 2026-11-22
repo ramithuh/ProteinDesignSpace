@@ -83,10 +83,15 @@
   function resizeTextarea() {
     const el = textareaEl;
     if (!el) return;
-    el.style.height = 'auto';
+    if (prompt.length === 0) {
+      el.style.height = '22px';
+      isMultiline = false;
+      return;
+    }
+    el.style.height = '22px';
     const nextH = Math.min(el.scrollHeight, 76);
     el.style.height = `${Math.max(22, nextH)}px`;
-    isMultiline = nextH > 32;
+    isMultiline = nextH > 30;
   }
 
   export function focusInput() {
@@ -315,6 +320,7 @@
         bind:this={textareaEl}
         bind:value={prompt}
         class="bar-textarea"
+        class:is-empty={prompt.length === 0}
         rows="1"
         maxlength="320"
         placeholder={graph.nodes.length > 0
@@ -416,7 +422,7 @@
     display: flex;
     align-items: center;
     width: 100%;
-    min-height: 34px;
+    min-height: 30px;
   }
 
   /* ---- Floating strip ABOVE the dock ---- */
@@ -565,17 +571,16 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 2px 4px 2px 10px;
-    animation: row-morph-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    padding: 0 2px 0 10px;
+    overflow: hidden;
+    animation: row-morph-in 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
   @keyframes row-morph-in {
     from {
       opacity: 0;
-      transform: translateY(2px);
     }
     to {
       opacity: 1;
-      transform: translateY(0);
     }
   }
   .planner-bar-root.is-multiline .input-row {
@@ -616,11 +621,16 @@
     color: var(--text-primary);
     font-family: inherit;
     font-size: 12.5px;
-    line-height: 1.45;
-    padding: 2px 0;
+    line-height: 22px;
+    height: 22px;
+    padding: 0;
     margin: 0;
     max-height: 76px;
     overflow-y: auto;
+  }
+  .bar-textarea.is-empty {
+    white-space: nowrap;
+    overflow: hidden;
   }
   .bar-textarea::placeholder {
     color: var(--text-dim);
