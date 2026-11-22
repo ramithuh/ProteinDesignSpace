@@ -2,11 +2,8 @@
 // model weight downloads, peak VRAM (sequential VRAM-mutex scheduling), WebGPU use,
 // and honest multi-design campaign fan-out / sequential GPU work counts.
 
-import {
-  ADAPTER_REGISTRY,
-  LOCALFOLD_MODEL_OPTIONS,
-  RFD4_BENCHMARK_OPTIONS,
-} from './registry';
+import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS, RFD4_BENCHMARK_OPTIONS } from './registry';
+import { validateSequenceText } from './param-validation';
 import type { AdapterManifest, WorkflowGraph, WorkflowNode } from './types';
 import { MAX_DESIGNS, MAX_SEQUENCES_PER_DESIGN } from './work-plan';
 
@@ -69,10 +66,8 @@ function countFastaSequences(raw: unknown): number {
   if (typeof raw !== 'string') return 1;
   const trimmed = raw.trim();
   if (!trimmed) return 1;
-  const headers = trimmed
-    .split(/\r?\n/)
-    .filter((line) => line.trim().startsWith('>')).length;
-  return Math.max(1, headers);
+  const check = validateSequenceText(trimmed);
+  return Math.max(1, check.numSequences);
 }
 
 interface GraphWorkloadEstimate {

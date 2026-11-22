@@ -60,9 +60,13 @@
 
   $effect(() => {
     if (!isInvalid) return;
-    invalidNumericCount += 1;
+    untrack(() => {
+      invalidNumericCount += 1;
+    });
     return () => {
-      invalidNumericCount = Math.max(0, invalidNumericCount - 1);
+      untrack(() => {
+        invalidNumericCount = Math.max(0, invalidNumericCount - 1);
+      });
     };
   });
 

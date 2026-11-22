@@ -292,6 +292,7 @@ export interface SequenceValidationResult {
   totalResidues: number;
   chainsInFirst: number;
   illegalChars: string[];
+  emptyHeaders?: string[];
   message: string;
 }
 
@@ -307,24 +308,36 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
       totalResidues: 0,
       chainsInFirst: 0,
       illegalChars: [],
+      emptyHeaders: [],
       message: 'Enter at least one amino acid sequence.',
     };
   }
 
   const lines = text.split(/\r?\n/);
   const entries: string[] = [];
+  const emptyHeaders: string[] = [];
   let cur = '';
+  let activeHeader: string | null = null;
   for (const line of lines) {
     const t = line.trim();
     if (!t) continue;
     if (t.startsWith('>')) {
-      if (cur) entries.push(cur);
+      if (activeHeader !== null && !cur) {
+        emptyHeaders.push(activeHeader);
+      } else if (cur) {
+        entries.push(cur);
+      }
+      activeHeader = t.slice(1).trim().split(/\s+/)[0] || '(unnamed)';
       cur = '';
     } else {
       cur += t.replace(/\s+/g, '').toUpperCase();
     }
   }
-  if (cur) entries.push(cur);
+  if (activeHeader !== null && !cur) {
+    emptyHeaders.push(activeHeader);
+  } else if (cur) {
+    entries.push(cur);
+  }
 
   if (entries.length === 0) {
     return {
@@ -333,6 +346,7 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
       totalResidues: 0,
       chainsInFirst: 0,
       illegalChars: [],
+      emptyHeaders,
       message: 'FASTA header found, but no sequence residues.',
     };
   }
@@ -365,6 +379,7 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
       totalResidues,
       chainsInFirst,
       illegalChars: [...illegal],
+      emptyHeaders,
       message: `Invalid residue character${illegal.size > 1 ? 's' : ''}: ${list} (use standard 20 AAs, or ':' between chains).`,
     };
   }
@@ -376,6 +391,7 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
       totalResidues,
       chainsInFirst,
       illegalChars: [],
+      emptyHeaders,
       message: 'Sequence contains no amino acid residues (minimum 5 aa required).',
     };
   }
@@ -387,6 +403,7 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
       totalResidues,
       chainsInFirst,
       illegalChars: [],
+      emptyHeaders,
       message: `Sequence too short (${maxLen} aa) — minimum 5 amino acids required.`,
     };
   }
@@ -398,7 +415,25 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
       totalResidues,
       chainsInFirst,
       illegalChars: [],
+      emptyHeaders,
       message: `Contains an entry shorter than 5 aa (${minLen} aa) which will be skipped.`,
+    };
+  }
+
+  if (emptyHeaders.length > 0) {
+    const preview = emptyHeaders
+      .slice(0, 3)
+      .map((h) => `>${h}`)
+      .join(', ');
+    const more = emptyHeaders.length > 3 ? ` (+${emptyHeaders.length - 3} more)` : '';
+    return {
+      status: 'warn',
+      numSequences: entries.length,
+      totalResidues,
+      chainsInFirst,
+      illegalChars: [],
+      emptyHeaders,
+      message: `Empty FASTA record (${preview}${more}) has no sequence residues and will be skipped.`,
     };
   }
 
@@ -414,6 +449,7 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
     totalResidues,
     chainsInFirst,
     illegalChars: [],
+    emptyHeaders: [],
     message: summary,
   };
 }
@@ -709,12 +745,39 @@ export function validateNodeParams(node: WorkflowNode): string[] {
     if (typeof p.omitAminoAcids === 'string' && p.omitAminoAcids.trim()) {
       const compact = p.omitAminoAcids.trim().toUpperCase().replace(/[\s,;]+/g, '');
       const badChars = new Set<string>();
+      const omittedCanonical = new Set<string>();
       for (const ch of compact) {
-        if (!VALID_AA_SET.has(ch) && ch !== 'X') badChars.add(ch);
+        if (VALID_AA_SET.has(ch)) omittedCanonical.add(ch);
+        else if (ch !== 'X') badChars.add(ch);
       }
       if (badChars.size > 0) {
         errs.push(
           `"${label}": omitAminoAcids contains invalid amino acid character(s): ${[...badChars].join(', ')} (use standard 1-letter AA codes e.g. C, M).`,
+        );
+      } else if (omittedCanonical.size >= VALID_AA_SET.size) {
+        errs.push(
+          `"${label}": omitAminoAcids excludes all 20 standard amino acids — leave at least 1 amino acid allowed for design.`,
+        );
+      }
+    }
+  }
+
+  if (node.adapterId === 'ligandmpnn' || node.adapterId === 'lasermpnn') {
+    if (typeof p.omitAminoAcids === 'string' && p.omitAminoAcids.trim()) {
+      const compact = p.omitAminoAcids.trim().toUpperCase().replace(/[\s,;]+/g, '');
+      const badChars = new Set<string>();
+      const omittedCanonical = new Set<string>();
+      for (const ch of compact) {
+        if (VALID_AA_SET.has(ch)) omittedCanonical.add(ch);
+        else if (ch !== 'X') badChars.add(ch);
+      }
+      if (badChars.size > 0) {
+        errs.push(
+          `"${label}": omitAminoAcids contains invalid amino acid character(s): ${[...badChars].join(', ')} (use standard 1-letter AA codes e.g. C, M).`,
+        );
+      } else if (omittedCanonical.size >= VALID_AA_SET.size) {
+        errs.push(
+          `"${label}": omitAminoAcids excludes all 20 standard amino acids — leave at least 1 amino acid allowed for design.`,
         );
       }
     }

@@ -15,6 +15,7 @@ import {
   type ParsedStructure,
 } from '$lib/protein-ops/pdb';
 import { normalizePdbId } from '$lib/protein-ops/rcsb';
+import { validateSequenceText } from './param-validation';
 import {
   selectFoldWorkItems,
   splitMultiChainSequence,
@@ -557,6 +558,7 @@ function tryMaterializeLocalPdbInput(node: WorkflowNode): StructureArtifact | nu
 function tryMaterializeLocalSequenceInput(node: WorkflowNode): SequenceSet | null {
   const raw = String(node.params.sequence ?? '').trim();
   if (!raw) return null;
+  if (validateSequenceText(raw).status === 'error') return null;
   const candidates: SequenceSet['candidates'] = [];
   if (raw.includes('>')) {
     const blocks = raw.split(/^\s*>/m).filter((b) => b.trim().length > 0);

@@ -596,4 +596,54 @@ describe('parameter validation & numeric sanitization', () => {
     expect(inspectorSrc).toContain('getVisibleParamFields');
     expect(inspectorSrc).toContain('getActiveModeSpec');
   });
+
+  it('Chrome QA regressions: NumericInput untrack, Sequence Input invalid residue / empty FASTA, RecipeDrawer format switch, and all-20-AA omitAminoAcids', async () => {
+    // 1. NumericInput must untrack module-level invalidNumericCount updates inside $effect to avoid effect_update_depth_exceeded
+    const numSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/NumericInput.svelte'), 'utf8');
+    expect(numSrc).toMatch(/untrack\(\(\)\s*=>\s*\{\s*invalidNumericCount\s*\+=\s*1;/);
+    expect(numSrc).toMatch(/untrack\(\(\)\s*=>\s*\{\s*invalidNumericCount\s*=\s*Math\.max/);
+
+    // 2. Sequence Input must NEVER silently strip illegal residues like 'X' during materialization
+    const { materializeSequenceInputNode } = await import('$lib/engine/scheduler');
+    expect(() =>
+      materializeSequenceInputNode({
+        id: 'seq-bad',
+        adapterId: 'sequence-input',
+        params: { sequence: 'ACDEFGXHIK' },
+      }),
+    ).toThrow(/Invalid residue character.*X/i);
+
+    // 3. Trailing >empty FASTA header warns and counts only non-empty records
+    const emptyCheck = validateSequenceText('>seq1\nACDEFGHIK\n>empty\n');
+    expect(emptyCheck.status).toBe('warn');
+    expect(emptyCheck.numSequences).toBe(1);
+    expect(emptyCheck.emptyHeaders).toEqual(['empty']);
+    expect(emptyCheck.message).toMatch(/>empty/);
+
+    // 4. Excluding all 20 standard amino acids is rejected pre-run across MPNN adapters
+    const all20 = 'ACDEFGHIKLMNPQRSTVWY';
+    for (const adapterId of ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn'] as const) {
+      const errs = validateNodeParams({
+        id: `omit20-${adapterId}`,
+        adapterId,
+        params: { omitAminoAcids: all20 },
+      });
+      expect(errs.join(' '), `Expected all-20 omit error for ${adapterId}`).toMatch(
+        /excludes all 20 standard amino acids/i,
+      );
+    }
+    // Positive control: excluding 19 AAs (leaving G allowed) passes
+    expect(
+      validateNodeParams({
+        id: 'omit19-ok',
+        adapterId: 'web-protein-mpnn',
+        params: { omitAminoAcids: 'ACDEFHIKLMNPQRSTVWY' },
+      }),
+    ).toEqual([]);
+
+    // 5. RecipeDrawer preserves valid unapplied edits across YAML <-> JSON and guards syntax-error discards
+    const recipeSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/RecipeDrawer.svelte'), 'utf8');
+    expect(recipeSrc).toContain('pendingSwitchFormat');
+    expect(recipeSrc).toContain('confirmDiscardAndSwitch');
+  });
 });

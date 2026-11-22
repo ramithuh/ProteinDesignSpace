@@ -23,6 +23,7 @@ import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/pro
 import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS, WORKFLOW_PRESETS } from './registry';
 import { validateGraph } from './graph-utils';
+import { validateSequenceText } from './param-validation';
 import { normalizeWorkflowGraph } from './share';
 import {
   resolveFoldConfidence,
@@ -208,6 +209,10 @@ export async function materializePdbInputNode(
 export function materializeSequenceInputNode(node: WorkflowNode): SequenceSet {
   const raw = String(node.params.sequence ?? '').trim();
   if (!raw) throw new Error('Sequence Input is empty');
+  const seqCheck = validateSequenceText(raw);
+  if (seqCheck.status === 'error') {
+    throw new Error(seqCheck.message);
+  }
   const candidates: Array<{
     id: string;
     key: string;

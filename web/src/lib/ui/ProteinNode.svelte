@@ -6,6 +6,7 @@
     RFD4_BENCHMARK_OPTIONS,
   } from '$lib/engine/registry';
   import { PORT_COLORS, STAGE_COLORS, STAGE_LABELS } from '$lib/engine/graph-utils';
+  import { validateSequenceText } from '$lib/engine/param-validation';
   import type { CanonicalArtifact, NodeProgressEvent } from '$lib/engine/types';
 
   export interface ProteinNodeData {
@@ -87,14 +88,13 @@
       }
       case 'sequence-input': {
         const raw = String(p.sequence ?? '');
-        const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-        const headers = lines.filter((l) => l.startsWith('>')).length;
-        const aaLen = lines
-          .filter((l) => !l.startsWith('>'))
-          .join('')
-          .replace(/[^A-Za-z]/g, '').length;
-        if (headers > 1) return `${headers} seqs · ${aaLen} aa`;
-        return `${aaLen || 0} aa FASTA`;
+        const check = validateSequenceText(raw);
+        const emptyCount = check.emptyHeaders?.length ?? 0;
+        const emptyNote = emptyCount > 0 ? ` · ${emptyCount} empty` : '';
+        if (check.numSequences > 1) {
+          return `${check.numSequences} seqs · ${check.totalResidues} aa${emptyNote}`;
+        }
+        return `${check.totalResidues || 0} aa FASTA${emptyNote}`;
       }
       case 'rfd4-conditioner': {
         const tp = String(p.taskPreset ?? 'custom');

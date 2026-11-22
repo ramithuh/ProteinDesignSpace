@@ -21,6 +21,7 @@
   let editorText = $state('');
   let dirty = $state(false);
   let parseErr = $state<string | null>(null);
+  let pendingSwitchFormat = $state<'yaml' | 'json' | null>(null);
   let shareStatus = $state<string | null>(null);
   let lastUrlLen = $state<number | null>(null);
   let textareaEl: HTMLTextAreaElement | null = $state(null);
@@ -46,6 +47,7 @@
       lastGraphId = gid;
       dirty = false;
       parseErr = null;
+      pendingSwitchFormat = null;
     }
     if (dirty) return;
     const plain = $state.snapshot(graph) as WorkflowGraph;
@@ -53,9 +55,33 @@
   });
 
   function switchFormat(next: 'yaml' | 'json') {
-    format = next;
+    if (next === format) return;
+    pendingSwitchFormat = null;
+    if (!dirty) {
+      format = next;
+      parseErr = null;
+      return;
+    }
+    // Preserve valid unapplied edits across YAML <-> JSON without losing work
+    try {
+      const parsed = parseRecipeToGraph(editorText);
+      format = next;
+      editorText = next === 'yaml' ? graphToYamlRecipe(parsed) : serializeWorkflowJson(parsed);
+      parseErr = null;
+    } catch (err) {
+      // Unapplied edits have a syntax error — ask before discarding instead of silently wiping
+      parseErr = err instanceof Error ? err.message : String(err);
+      pendingSwitchFormat = next;
+    }
+  }
+
+  function confirmDiscardAndSwitch() {
+    if (!pendingSwitchFormat) return;
+    const next = pendingSwitchFormat;
+    pendingSwitchFormat = null;
     dirty = false;
     parseErr = null;
+    format = next;
   }
 
   function yamlNodeExplicitlySetsMode(yamlText: string, nodeId: string): boolean {
@@ -234,8 +260,26 @@
       editorText = e.currentTarget.value;
       dirty = true;
       parseErr = null;
+      pendingSwitchFormat = null;
     }}
   ></textarea>
+
+  {#if pendingSwitchFormat}
+    <div class="discard-warn" role="alert">
+      <span>
+        Unapplied edits have a syntax error and cannot be converted to
+        <b>{pendingSwitchFormat === 'yaml' ? 'YAML Recipe' : 'Full JSON'}</b>.
+      </span>
+      <div class="discard-actions">
+        <button type="button" class="d-btn danger" onclick={confirmDiscardAndSwitch}>
+          Discard edits &amp; switch
+        </button>
+        <button type="button" class="d-btn" onclick={() => (pendingSwitchFormat = null)}>
+          Stay here
+        </button>
+      </div>
+    </div>
+  {/if}
 
   {#if parseErr}
     <div class="d-err">{parseErr}</div>
@@ -328,6 +372,29 @@
     color: #fff;
     border-color: #3b82f6;
     font-weight: 600;
+  }
+  .d-btn.danger {
+    background: var(--err-bg);
+    color: var(--err-text);
+    border-color: var(--err-border);
+    font-weight: 600;
+  }
+  .discard-warn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-text);
+    font-size: 11px;
+  }
+  .discard-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
   }
   textarea {
     width: 100%;
