@@ -451,6 +451,23 @@
         </div>
       </div>
 
+      <div class="onb-video-wrap">
+        <video
+          class="onb-video"
+          src="/demo-welcome.mp4"
+          poster="/demo-welcome-poster.webp"
+          autoplay
+          muted
+          loop
+          playsinline
+          controls
+          preload="metadata"
+        ></video>
+        <div class="onb-video-cap">
+          Live demo · 100% in-browser WebGPU motif scaffolding, Boltz-2 / Protenix-v2 / ESMFold2 co-folding &amp; 3D Compare
+        </div>
+      </div>
+
       <div class="onb-highlights">
         <div class="hl-item">
           <span class="hl-dot" style="background: #3b82f6"></span>
@@ -669,7 +686,7 @@
 
   .onb-card {
     width: 100%;
-    max-width: min(590px, calc(100vw - 24px));
+    max-width: min(660px, calc(100vw - 24px));
     max-height: calc(100vh - 24px);
     overflow-y: auto;
     box-sizing: border-box;
@@ -677,12 +694,35 @@
     border: 1px solid var(--border-strong);
     border-radius: 14px;
     box-shadow: 0 28px 70px rgba(0, 0, 0, 0.38);
-    padding: 26px 28px 18px;
+    padding: 22px 24px 16px;
     color: var(--text-body);
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 13px;
     outline: none;
+  }
+
+  .onb-video-wrap {
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border-strong);
+    background: #0b1020;
+  }
+
+  .onb-video {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    background: #0b1020;
+  }
+
+  .onb-video-cap {
+    padding: 6px 10px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--bg-surface-2);
+    border-top: 1px solid var(--border);
   }
 
   .onb-hero {
