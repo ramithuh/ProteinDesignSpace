@@ -141,6 +141,14 @@
   let showOnboarding = $state(false);
   let showExamplesGallery = $state(false);
   let activePaperInsight = $state<PaperInsightExample | null>(null);
+  let paperWalkthroughIdx = $state(0);
+  let hasActivePaperOutputs = $derived.by(() => {
+    if (!activePaperInsight) return false;
+    return activePaperInsight.walkthrough.some((step) => {
+      const outs = outputsByNode[step.nodeId];
+      return Boolean(outs && Object.keys(outs).length > 0);
+    });
+  });
   let onboardingInteractive = $state(false);
   let canvasFitViewTrigger = $state(0);
   let showSeqParentBackbone = $state(false);
@@ -863,6 +871,29 @@
     lastPickedResidue = null;
   }
 
+  function applyPaperWalkthroughStep(example: PaperInsightExample, stepIdx: number) {
+    if (!example.walkthrough.length) return;
+    const clamped = Math.max(0, Math.min(example.walkthrough.length - 1, stepIdx));
+    paperWalkthroughIdx = clamped;
+    const step = example.walkthrough[clamped];
+    if (!graph.nodes.some((n) => n.id === step.nodeId)) return;
+    const switchingNode = selectedNodeId !== step.nodeId;
+    setSingleSelection(step.nodeId);
+    selectedEdgeId = null;
+    rightPanelTab = step.tab;
+    selectedPeekSlotId =
+      step.tab === 'peek' && step.outputPort ? `out:${step.outputPort}` : null;
+    if (step.focusResidue && step.tab === 'peek') {
+      const targetTok = step.focusResidue;
+      viewerFocusToken = null;
+      setTimeout(() => {
+        if (activePaperInsight?.id === example.id && paperWalkthroughIdx === clamped) {
+          viewerFocusToken = targetTok;
+        }
+      }, switchingNode ? 180 : 30);
+    }
+  }
+
   async function selectPaperInsight(example: PaperInsightExample) {
     if (isRunning) return;
     const decoded = await decodeHashToGraph(example.hash);
@@ -872,6 +903,7 @@
     }
     showExamplesGallery = false;
     activePaperInsight = example;
+    paperWalkthroughIdx = 0;
     selectedPresetId = example.id;
     loadFullWorkflowGraph(
       { ...decoded, id: example.id, name: example.title },
@@ -1856,6 +1888,9 @@
         }
       }
       rightPanelTab = 'peek';
+      if (activePaperInsight && !upToNodeId) {
+        applyPaperWalkthroughStep(activePaperInsight, 0);
+      }
 
       void refreshCacheStats();
     } catch (err) {
@@ -3341,16 +3376,71 @@
     <!-- Graph Canvas Pane (Left in Horizontal Split, Top in Vertical Split) -->
     <section class="flow-panel">
       {#if activePaperInsight}
-        <div class="paper-banner" role="note">
-          <span class="pb-body">{activePaperInsight.canvasNote}</span>
-          <button
-            type="button"
-            class="pb-close"
-            aria-label="Dismiss note"
-            onclick={() => (activePaperInsight = null)}
-          >
-            ✕
-          </button>
+        {@const steps = activePaperInsight.walkthrough}
+        {@const curStep = steps[paperWalkthroughIdx] ?? steps[0]}
+        <div class="paper-banner" role="region" aria-label="Literature example walkthrough">
+          {#if hasActivePaperOutputs && curStep}
+            <div class="pb-guide">
+              <div class="pb-top">
+                <span class="pb-cite">{activePaperInsight.citation}</span>
+                <div class="pb-steps" role="tablist" aria-label="Walkthrough steps">
+                  {#each steps as st, i (st.title)}
+                    <button
+                      type="button"
+                      role="tab"
+                      class="pb-step-btn"
+                      class:active={paperWalkthroughIdx === i}
+                      aria-selected={paperWalkthroughIdx === i}
+                      onclick={() => applyPaperWalkthroughStep(activePaperInsight!, i)}
+                    >
+                      {i + 1}
+                    </button>
+                  {/each}
+                </div>
+                <span class="pb-step-title">{curStep.title}</span>
+                <div class="pb-nav">
+                  <button
+                    type="button"
+                    class="pb-nav-btn"
+                    disabled={paperWalkthroughIdx === 0}
+                    onclick={() =>
+                      applyPaperWalkthroughStep(activePaperInsight!, paperWalkthroughIdx - 1)}
+                    aria-label="Previous step"
+                  >
+                    ←
+                  </button>
+                  <button
+                    type="button"
+                    class="pb-nav-btn"
+                    disabled={paperWalkthroughIdx >= steps.length - 1}
+                    onclick={() =>
+                      applyPaperWalkthroughStep(activePaperInsight!, paperWalkthroughIdx + 1)}
+                  >
+                    Next →
+                  </button>
+                  <button
+                    type="button"
+                    class="pb-close"
+                    aria-label="Dismiss walkthrough"
+                    onclick={() => (activePaperInsight = null)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+              <div class="pb-body">{curStep.body}</div>
+            </div>
+          {:else}
+            <span class="pb-body">{activePaperInsight.canvasNote}</span>
+            <button
+              type="button"
+              class="pb-close"
+              aria-label="Dismiss note"
+              onclick={() => (activePaperInsight = null)}
+            >
+              ✕
+            </button>
+          {/if}
         </div>
       {/if}
 
@@ -4233,15 +4323,91 @@
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 7px 10px 7px 12px;
+    padding: 8px 10px 8px 12px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 10px;
   }
+  .pb-guide {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .pb-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .pb-cite {
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .pb-steps {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .pb-step-btn {
+    width: 20px;
+    height: 20px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--bg-surface-2);
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  .pb-step-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .pb-step-btn:hover:not(.active) {
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+  }
+  .pb-step-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .pb-nav {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .pb-nav-btn {
+    background: var(--bg-surface-2);
+    color: var(--text-body);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 2px 7px;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .pb-nav-btn:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+  }
+  .pb-nav-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
   .pb-body {
     font-size: 12px;
-    line-height: 1.4;
+    line-height: 1.42;
     color: var(--text-muted);
   }
   .pb-close {
