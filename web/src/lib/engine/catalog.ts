@@ -78,7 +78,8 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
     ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1', 'evodiff'],
   },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
-  { title: 'Evaluation', ids: ['thermompnn', 'esmc', 'dyna1', 'top-k-filter', 'designability-scorer', 'structure-compare'] },
+  { title: 'Property Prediction', ids: ['thermompnn', 'esmc', 'dyna1'] },
+  { title: 'Evaluation', ids: ['top-k-filter', 'designability-scorer', 'structure-compare'] },
 ];
 
 export const CONCISE_BLOCK_ROLES: Record<string, string> = {
@@ -888,9 +889,6 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
     };
   })(),
   (() => {
-    const sc = ADAPTER_REGISTRY['designability-scorer'];
-    const cmp = ADAPTER_REGISTRY['structure-compare'];
-    const tk = ADAPTER_REGISTRY['top-k-filter'];
     const th = ADAPTER_REGISTRY.thermompnn;
     const ec = ADAPTER_REGISTRY.esmc;
     const dy = ADAPTER_REGISTRY.dyna1;
@@ -902,7 +900,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         meta: `~${th.approxWeightsMB} MB · MIT`,
         insert: { adapterId: 'thermompnn', label: 'ThermoMPNN' },
         searchBlob:
-          `${th.id} ${th.shortName} ${th.displayName} ${CONCISE_BLOCK_ROLES.thermompnn} thermompnn ddg stability mutation ssm site saturation heatmap bfactor kuhlman mit`.toLowerCase(),
+          `${th.id} ${th.shortName} ${th.displayName} ${CONCISE_BLOCK_ROLES.thermompnn} thermompnn ddg stability mutation ssm site saturation heatmap bfactor kuhlman mit property`.toLowerCase(),
       },
       {
         key: 'esmc',
@@ -911,7 +909,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         meta: `~${ec.approxWeightsMB} MB · Apache-2.0`,
         insert: { adapterId: 'esmc', label: 'ESM-C 300M' },
         searchBlob:
-          `${ec.id} ${ec.shortName} ${ec.displayName} ${CONCISE_BLOCK_ROLES.esmc} esmc esm-c llr naturalness fitness mutation plm masked fill`.toLowerCase(),
+          `${ec.id} ${ec.shortName} ${ec.displayName} ${CONCISE_BLOCK_ROLES.esmc} esmc esm-c llr naturalness fitness mutation plm masked fill property`.toLowerCase(),
       },
       {
         key: 'dyna1',
@@ -920,8 +918,29 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         meta: `~${dy.approxWeightsMB} MB · MIT`,
         insert: { adapterId: 'dyna1', label: 'Dyna-1' },
         searchBlob:
-          `${dy.id} ${dy.shortName} ${dy.displayName} ${CONCISE_BLOCK_ROLES.dyna1} dyna1 dyna-1 dynamics flexibility exchange nmr conformational`.toLowerCase(),
+          `${dy.id} ${dy.shortName} ${dy.displayName} ${CONCISE_BLOCK_ROLES.dyna1} dyna1 dyna-1 dynamics flexibility exchange nmr conformational property`.toLowerCase(),
       },
+    ];
+    const subGroups: CatalogSubGroup[] = [{ title: 'Stability, Fitness & Dynamics', items }];
+    const identityBlob = 'property prediction properties biophysical stability fitness dynamics flexibility ddg llr nmr';
+    const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
+    return {
+      id: 'property-prediction',
+      title: 'Property Prediction',
+      stage: 'score',
+      subtitle: 'ThermoMPNN (ΔΔG), ESM-C 300M (LLR) & Dyna-1 (dynamics)',
+      countLabel: `${items.length}`,
+      footnote: 'Runs locally over WebGPU — stability, evolutionary fitness & conformational dynamics',
+      subGroups,
+      identityBlob,
+      searchBlob,
+    };
+  })(),
+  (() => {
+    const sc = ADAPTER_REGISTRY['designability-scorer'];
+    const cmp = ADAPTER_REGISTRY['structure-compare'];
+    const tk = ADAPTER_REGISTRY['top-k-filter'];
+    const items: CatalogSubItem[] = [
       {
         key: 'top-k-filter',
         label: tk.displayName,
@@ -944,14 +963,14 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         searchBlob: `${cmp.id} ${cmp.shortName} ${cmp.displayName} ${CONCISE_BLOCK_ROLES['structure-compare']} compare viewer superpose overlay align motif rmsd multi-model 3d`.toLowerCase(),
       },
     ];
-    const subGroups: CatalogSubGroup[] = [{ title: 'Stability, Fitness, Dynamics & Designability', items }];
-    const identityBlob = 'evaluation score scoring metrics';
+    const subGroups: CatalogSubGroup[] = [{ title: 'Filtering, Designability & 3D Compare', items }];
+    const identityBlob = 'evaluation score scoring metrics filter compare superpose';
     const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
     return {
       id: 'evaluation',
       title: 'Evaluation',
       stage: 'score',
-      subtitle: 'ThermoMPNN, ESM-C 300M, Dyna-1, Top-K & scRMSD',
+      subtitle: 'Top-K Filter, scRMSD / scTM & 3D Compare',
       countLabel: `${items.length}`,
       subGroups,
       identityBlob,

@@ -177,12 +177,13 @@ describe('engine/catalog & biologist terminology', () => {
     expect(multiRes.matchingSubItems).toHaveLength(7);
   });
 
-  it('exposes 5 compact top-level workflow categories with direct model flyouts and LocalFold footnote', () => {
+  it('exposes 6 compact top-level workflow categories with direct model flyouts and LocalFold footnote', () => {
     expect(CATALOG_CATEGORIES.map((c) => c.title)).toEqual([
       'Inputs',
       'Structure Generation',
       'Sequence Design',
       'Structure Prediction',
+      'Property Prediction',
       'Evaluation',
     ]);
 
@@ -212,11 +213,15 @@ describe('engine/catalog & biologist terminology', () => {
       'evodiff',
     ]);
 
-    const evalCat = CATALOG_CATEGORIES.find((c) => c.id === 'evaluation')!;
-    expect(evalCat.subGroups.flatMap((g) => g.items).map((i) => i.key)).toEqual([
+    const propCat = CATALOG_CATEGORIES.find((c) => c.id === 'property-prediction')!;
+    expect(propCat.subGroups.flatMap((g) => g.items).map((i) => i.key)).toEqual([
       'thermompnn',
       'esmc',
       'dyna1',
+    ]);
+
+    const evalCat = CATALOG_CATEGORIES.find((c) => c.id === 'evaluation')!;
+    expect(evalCat.subGroups.flatMap((g) => g.items).map((i) => i.key)).toEqual([
       'top-k-filter',
       'designability-scorer',
       'structure-compare',

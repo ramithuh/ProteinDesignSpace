@@ -17,11 +17,12 @@ Run state-of-the-art generative, inverse-folding, folding, and scoring models **
 ## Highlights
 
 - **Visual DAG Workflow Canvas** (`@xyflow/svelte`): Compose linear or branched protein design pipelines (e.g., comparing **AlphaFold 3 vs AlphaFold 2 vs RoseTTAFold 3**, or **SolubleMPNN vs LigandMPNN vs AntiFold** on a shared backbone), with typed color-coded ports, smart auto-wiring (`+ Add Block` / `/`), resizable split panes, and automatic layout.
-- **25 Composable Blocks Across 5 Stages** — all neural inference executes in sequential, VRAM-isolated Dedicated Web Workers with OPFS / CacheStorage weight persistence:
+- **25 Composable Blocks Across 6 Categories** — all neural inference executes in sequential, VRAM-isolated Dedicated Web Workers with OPFS / CacheStorage weight persistence:
   - **Structure Generation**: **RFD4-Proteina**, **La-Proteina (LD1 + AE1)**, **Proteina v1.2 (200M)**, **SiD-Protein (16-Step)**, **Genie 3**, **Genie 2**, **RFdiffusion (Base)**, **FrameFlow**, **FoldFlow 2 (ReFT + ESM-2)**, **BoltzGen-1**, and **ProtPardelle-1c**.
   - **Sequence Design**: **ProteinMPNN / SolubleMPNN / Cα-MPNN**, **LigandMPNN**, **LASErMPNN**, **AntiFold & ESM-IF1**, and **EvoDiff-Seq (OA-DM 38M)**.
   - **Structure Prediction** (via LocalFold): **AlphaFold 2** (Monomer & Multimer v3), **AlphaFold 3**, **Boltz-2**, **RoseTTAFold 3**, **Protenix v2**, **OpenFold 3**, **IntelliFold 2**, **OpenDDE**, **Mol1**, and **ESMFold2** (300M & 600M fast single-sequence).
-  - **Biophysical Evaluation & 3D Comparison**: **ThermoMPNN** (full L×20 site-saturation ΔΔG stability scan & B-factor painting), **ESM-C 300M** (zero-shot L×20 LLR fitness & naturalness), **Dyna-1** (millisecond conformational exchange), **Top-K Filter**, **Designability Scorer** (exact Kabsch SVD `scRMSD`, `scTM`, Motif RMSD, pLDDT, ipSAE), and **3D Superpose / Compare** (multi-model up to 6-way Kabsch & motif overlay).
+  - **Property Prediction**: **ThermoMPNN** (full L×20 site-saturation ΔΔG stability scan & B-factor painting), **ESM-C 300M** (zero-shot L×20 LLR fitness & naturalness), and **Dyna-1** (millisecond conformational exchange & flexibility).
+  - **Evaluation & 3D Compare**: **Top-K Filter**, **Designability Scorer** (exact Kabsch SVD `scRMSD`, `scTM`, Motif RMSD, pLDDT, ipSAE), and **3D Superpose / Compare** (multi-model up to 6-way Kabsch & motif overlay).
 - **Natural-Language Workflow Planner**: Describe a pipeline in plain English (`+ Describe`) to draft or edit multi-block graphs directly on the canvas.
 - **Shareable Links & Reproducible Recipes**: Compact `#p=` / `#g=` deflate-raw URLs, editable YAML/JSON workflow recipes, live intermediate peeking, diffusion trajectory playback, and a multi-round Campaign Inspector.
 
@@ -52,9 +53,9 @@ Run state-of-the-art generative, inverse-folding, folding, and scoring models **
 | **Sequence** | **AntiFold & ESM-IF1** | Antibody CDR inverse folding & GVP-Transformer inverse folding | [`ramithuh/antifold-esmif1-webgpu`](https://huggingface.co/ramithuh/antifold-esmif1-webgpu) | BSD-3 / MIT |
 | **Sequence** | **EvoDiff-Seq (38M)** | MSA-free order-agnostic discrete sequence diffusion & inpainting | [`ramithuh/evodiff-webgpu`](https://huggingface.co/ramithuh/evodiff-webgpu) | MIT / CC-BY-4.0 |
 | **Prediction** | **LocalFold Suite** | AF2, AF2-Multimer, AF3*, Boltz-2, RF3, Protenix-v2, OpenFold 3, IntelliFold 2, ESMFold2 | [`sokrypton/localfold`](https://github.com/sokrypton/localfold) | Apache-2.0 / MIT / CC-BY-4.0 (*AF3 non-commercial) |
-| **Evaluation** | **ThermoMPNN** | Full L×20 site-saturation ΔΔG stability scan & 3D B-factor painting | [`ramithuh/thermompnn-webgpu`](https://huggingface.co/ramithuh/thermompnn-webgpu) | MIT |
-| **Evaluation** | **ESM-C 300M** | Zero-shot L×20 LLR fitness heatmap, pseudo-perplexity & masked fill | [`ramithuh/esmc-webgpu`](https://huggingface.co/ramithuh/esmc-webgpu) | MIT |
-| **Evaluation** | **Dyna-1** | Millisecond conformational exchange & flexibility prediction | [`ramithuh/dyna1-webgpu`](https://huggingface.co/ramithuh/dyna1-webgpu) | MIT / ESM-3 Open |
+| **Property** | **ThermoMPNN** | Full L×20 site-saturation ΔΔG stability scan & 3D B-factor painting | [`ramithuh/thermompnn-webgpu`](https://huggingface.co/ramithuh/thermompnn-webgpu) | MIT |
+| **Property** | **ESM-C 300M** | Zero-shot L×20 LLR fitness heatmap, pseudo-perplexity & masked fill | [`ramithuh/esmc-webgpu`](https://huggingface.co/ramithuh/esmc-webgpu) | MIT |
+| **Property** | **Dyna-1** | Millisecond conformational exchange & flexibility prediction | [`ramithuh/dyna1-webgpu`](https://huggingface.co/ramithuh/dyna1-webgpu) | MIT / ESM-3 Open |
 | **Evaluation** | **Designability / 3D Compare** | Kabsch SVD `scRMSD`, `scTM`, ipSAE, multi-model & motif 3D superposition | Built-in CPU | MIT |
 
 ---
