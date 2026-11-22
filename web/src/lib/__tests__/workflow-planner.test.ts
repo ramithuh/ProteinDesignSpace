@@ -3,6 +3,7 @@ import {
   compileWorkflowPlanToGraph,
   type ConditionedDesignWorkflowPlan,
   type DeNovoWorkflowPlan,
+  type EditCurrentWorkflowPlan,
   type PdbWorkflowPlan,
 } from '$lib/engine/workflow-planner';
 import { validateGraph } from '$lib/engine/graph-utils';
@@ -144,5 +145,101 @@ describe('WorkflowPlan deterministic compiler', () => {
     expect(ligGraph.nodes.find((n) => n.adapterId === 'pdb-input')?.params.cropSegments).toBe(
       'A, BEN, CA',
     );
+  });
+
+  it('compiles multi-task PDB comparison (LigandMPNN vs LASErMPNN) and incremental edit_current operations (ThermoMPNN, RF3, Top-K splice)', () => {
+    const cmpPlan: PdbWorkflowPlan = {
+      kind: 'pdb',
+      pdbId: '3PTB',
+      crop: 'A, BEN, CA',
+      tasks: ['ligandmpnn', 'lasermpnn'],
+      targetChain: null,
+      regions: null,
+      numSequences: 2,
+      topK: null,
+      refold: false,
+      foldModels: [],
+      stabilityScan: false,
+      summary: '3PTB [A, BEN, CA]: Compare LigandMPNN vs LASErMPNN',
+    };
+    const { graph: cmpGraph } = compileWorkflowPlanToGraph(cmpPlan);
+    expect(validateGraph(cmpGraph)).toEqual([]);
+    expect(cmpGraph.nodes.filter((n) => n.adapterId === 'pdb-input')).toHaveLength(1);
+    expect(cmpGraph.nodes.some((n) => n.adapterId === 'ligandmpnn')).toBe(true);
+    expect(cmpGraph.nodes.some((n) => n.adapterId === 'lasermpnn')).toBe(true);
+
+    // Start with a Genie 3 -> Cα-MPNN -> AF2 -> scRMSD graph and incrementally edit it
+    const base = compileWorkflowPlanToGraph({
+      kind: 'de_novo',
+      generators: ['genie3'],
+      length: 80,
+      numDesigns: 1,
+      numSequences: 2,
+      topK: null,
+      refold: true,
+      foldModels: ['monomer'],
+      score: true,
+      stabilityScan: false,
+      summary: 'Genie 3 base',
+    }).graph;
+
+    const foldNode = base.nodes.find((n) => n.adapterId === 'localfold-af2')!;
+    const mpnnNode = base.nodes.find((n) => n.adapterId === 'web-protein-mpnn')!;
+
+    const editPlan: EditCurrentWorkflowPlan = {
+      kind: 'edit_current',
+      operations: [
+        {
+          action: 'insert_top_k',
+          attachToNodeId: foldNode.id,
+          model: null,
+          foldModels: [],
+          topK: 2,
+          numSequences: null,
+          targetChain: null,
+          regions: null,
+          score: true,
+        },
+        {
+          action: 'add_stability_scan',
+          attachToNodeId: foldNode.id,
+          model: null,
+          foldModels: [],
+          topK: null,
+          numSequences: null,
+          targetChain: null,
+          regions: null,
+          score: true,
+        },
+        {
+          action: 'add_fold_oracles',
+          attachToNodeId: mpnnNode.id,
+          model: null,
+          foldModels: ['rosettafold3'],
+          topK: null,
+          numSequences: null,
+          targetChain: null,
+          regions: null,
+          score: true,
+        },
+      ],
+      summary: 'Splice Top-2 before AF2, add ThermoMPNN, and add RF3 refold branch',
+    };
+
+    const edited = compileWorkflowPlanToGraph(editPlan, base);
+    expect(edited.isIncrementalEdit).toBe(true);
+    expect(edited.addedNodeCount).toBe(4); // Top-K + ThermoMPNN + RF3 + scRMSD
+    expect(validateGraph(edited.graph)).toEqual([]);
+    expect(edited.graph.nodes.some((n) => n.adapterId === 'top-k-filter')).toBe(true);
+    expect(edited.graph.nodes.some((n) => n.adapterId === 'thermompnn')).toBe(true);
+    expect(
+      edited.graph.nodes.some(
+        (n) => n.adapterId === 'localfold-af2' && n.params.model === 'rosettafold3',
+      ),
+    ).toBe(true);
+    // Original MPNN -> AF2 direct wire must be spliced through Top-K
+    expect(
+      edited.graph.edges.some((e) => e.fromNode === mpnnNode.id && e.toNode === foldNode.id),
+    ).toBe(false);
   });
 });

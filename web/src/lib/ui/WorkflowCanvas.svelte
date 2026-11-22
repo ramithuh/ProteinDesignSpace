@@ -886,6 +886,7 @@
 
   {#if plannerOpen}
     <WorkflowPlannerPopover
+      {graph}
       {disabled}
       triggerEl={plannerBtnEl}
       onApply={(nextGraph, summary) => {

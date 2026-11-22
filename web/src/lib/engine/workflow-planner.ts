@@ -1,11 +1,10 @@
 // Deterministic WorkflowPlan -> WorkflowGraph compiler + Cloudflare Workers AI client.
-// The LLM outputs a small validated intent JSON; TypeScript deterministically hydrates
-// curated benchmarks, adapter defaults, smart sequence routing, multi-oracle folding,
-// scRMSD scoring, validation, and auto-layout so zero broken wires can ever be produced.
+// Supports creating fresh multi-branch workflows (`de_novo`, `conditioned_design`, `pdb`)
+// AND safely editing/appending onto the user's current canvas (`edit_current`).
 
 import { getBenchmarkById } from './benchmarks';
 import { autoLayoutGraph, defaultParamsForAdapter, validateGraph } from './graph-utils';
-import { LOCALFOLD_MODEL_OPTIONS } from './registry';
+import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 
 export type GeneratorId = 'rfd4-proteina' | 'genie3';
@@ -30,11 +29,30 @@ export type PdbTaskId =
   | 'esmif1'
   | 'proteinmpnn';
 
+export type EditActionId =
+  | 'add_stability_scan'
+  | 'add_fold_oracles'
+  | 'add_sequence_designer'
+  | 'insert_top_k';
+
+export interface GraphEditOperation {
+  action: EditActionId;
+  attachToNodeId: string | null;
+  model: PdbTaskId | null;
+  foldModels: FoldOracleId[];
+  topK: number | null;
+  numSequences: number | null;
+  targetChain: string | null;
+  regions: string | null;
+  score: boolean;
+}
+
 export interface DeNovoWorkflowPlan {
   kind: 'de_novo';
   generators: GeneratorId[];
   length: number;
   numDesigns: number;
+  sequenceDesigners?: SequenceDesignerId[];
   sequenceDesigner?: SequenceDesignerId;
   numSequences: number;
   topK: number | null;
@@ -54,6 +72,7 @@ export interface ConditionedDesignWorkflowPlan {
   generators: GeneratorId[];
   length: number | null;
   numDesigns: number;
+  sequenceDesigners?: SequenceDesignerId[];
   sequenceDesigner?: SequenceDesignerId;
   numSequences: number;
   topK: number | null;
@@ -68,7 +87,8 @@ export interface PdbWorkflowPlan {
   kind: 'pdb';
   pdbId: string;
   crop: string | null;
-  task: PdbTaskId;
+  tasks?: PdbTaskId[];
+  task?: PdbTaskId;
   targetChain: string | null;
   regions: string | null;
   numSequences: number | null;
@@ -79,10 +99,17 @@ export interface PdbWorkflowPlan {
   summary: string;
 }
 
+export interface EditCurrentWorkflowPlan {
+  kind: 'edit_current';
+  operations: GraphEditOperation[];
+  summary: string;
+}
+
 export type WorkflowPlan =
   | DeNovoWorkflowPlan
   | ConditionedDesignWorkflowPlan
-  | PdbWorkflowPlan;
+  | PdbWorkflowPlan
+  | EditCurrentWorkflowPlan;
 
 export interface PlannerApiResponse {
   ok: boolean;
@@ -96,6 +123,8 @@ export interface PlannerApiResponse {
 export interface PlannedWorkflowResult {
   plan: WorkflowPlan;
   graph: WorkflowGraph;
+  isIncrementalEdit: boolean;
+  addedNodeCount: number;
   model: string;
   latencyMs: number;
   notes: string[];
@@ -109,12 +138,19 @@ function oracleShortLabel(modelId: FoldOracleId): string {
   return found?.shortLabel ?? modelId;
 }
 
-function makeUniqueIdFactory() {
+function makeUniqueIdFactory(existingIds?: Iterable<string>) {
+  const used = new Set<string>(existingIds ?? []);
   const counts = new Map<string, number>();
   return (prefix: string): string => {
-    const next = (counts.get(prefix) ?? 0) + 1;
-    counts.set(prefix, next);
-    return `${prefix}_${next}`;
+    let n = (counts.get(prefix) ?? 0) + 1;
+    let candidate = `${prefix}_${n}`;
+    while (used.has(candidate)) {
+      n++;
+      candidate = `${prefix}_${n}`;
+    }
+    counts.set(prefix, n);
+    used.add(candidate);
+    return candidate;
   };
 }
 
@@ -123,7 +159,7 @@ function attachDownstreamEval(opts: {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   branchTag: string;
-  backboneNodeId: string;
+  backboneNodeId: string | null;
   seqSourceNodeId: string;
   topK: number | null;
   refold: boolean;
@@ -185,7 +221,7 @@ function attachDownstreamEval(opts: {
         toPort: 'sequences',
       });
 
-      if (score) {
+      if (score && backboneNodeId) {
         const scId = nextId('score');
         const scLabel =
           oracles.length > 1 || branchTag
@@ -238,7 +274,7 @@ function attachGeneratorBranch(opts: {
   branchTag: string;
   sourcePdbNodeId: string | null;
   paramsOverride: Record<string, unknown>;
-  sequenceDesigner?: SequenceDesignerId;
+  sequenceDesigners: SequenceDesignerId[];
   numSequences: number;
   topK: number | null;
   refold: boolean;
@@ -254,7 +290,7 @@ function attachGeneratorBranch(opts: {
     branchTag,
     sourcePdbNodeId,
     paramsOverride,
-    sequenceDesigner,
+    sequenceDesigners,
     numSequences,
     topK,
     refold,
@@ -284,66 +320,369 @@ function attachGeneratorBranch(opts: {
     });
   }
 
-  // Decide sequence design block:
-  // - Genie 3 emits Cα-only backbones -> attach Cα-ProteinMPNN (or explicit sequenceDesigner)
-  // - RFD4-Proteina co-designs sequences natively -> use its `sequences` port directly
-  //   unless user explicitly asked for an external sequenceDesigner or unconditional MPNN pass
-  let seqSourceId = nodeId;
-  const needsExternalDesigner =
-    genId === 'genie3' || Boolean(sequenceDesigner);
+  // Decide sequence design branch(es):
+  // - If user explicitly requested 1+ sequenceDesigners (e.g. compare ProteinMPNN vs LigandMPNN), fan out!
+  // - Otherwise Genie 3 gets Cα-ProteinMPNN, and RFD4 uses its native `sequences` port directly.
+  const effectiveDesigners: Array<SequenceDesignerId | null> =
+    sequenceDesigners.length > 0
+      ? sequenceDesigners
+      : genId === 'genie3'
+        ? ['web-protein-mpnn']
+        : [null];
 
-  if (needsExternalDesigner) {
-    const designerAdapter: SequenceDesignerId =
-      sequenceDesigner ?? 'web-protein-mpnn';
-    const seqId = nextId('seq');
-    const isCa = designerAdapter === 'web-protein-mpnn' && genId === 'genie3';
-    const designerParams: Record<string, unknown> = {
-      ...defaultParamsForAdapter(designerAdapter),
-      numSequences,
-      ...(isCa ? { family: 'ca', modelName: 'v_48_020' } : {}),
-    };
-    const designerLabel =
-      designerAdapter === 'ligandmpnn'
-        ? 'LigandMPNN'
-        : designerAdapter === 'lasermpnn'
-          ? 'LASErMPNN'
-          : isCa
-            ? 'Cα-ProteinMPNN'
-            : 'ProteinMPNN';
-    nodes.push({
-      id: seqId,
-      adapterId: designerAdapter,
-      label: branchTag ? `${designerLabel} (${branchTag})` : designerLabel,
-      params: designerParams,
+  const multiDesigner = effectiveDesigners.length > 1;
+  for (const designerAdapter of effectiveDesigners) {
+    let seqSourceId = nodeId;
+    let subTag = branchTag;
+
+    if (designerAdapter) {
+      const seqId = nextId('seq');
+      const isCa = designerAdapter === 'web-protein-mpnn' && genId === 'genie3';
+      const designerParams: Record<string, unknown> = {
+        ...defaultParamsForAdapter(designerAdapter),
+        numSequences,
+        ...(isCa ? { family: 'ca', modelName: 'v_48_020' } : {}),
+      };
+      const designerLabel =
+        designerAdapter === 'ligandmpnn'
+          ? 'LigandMPNN'
+          : designerAdapter === 'lasermpnn'
+            ? 'LASErMPNN'
+            : isCa
+              ? 'Cα-ProteinMPNN'
+              : 'ProteinMPNN';
+      nodes.push({
+        id: seqId,
+        adapterId: designerAdapter,
+        label: branchTag ? `${designerLabel} (${branchTag})` : designerLabel,
+        params: designerParams,
+      });
+      edges.push({
+        fromNode: nodeId,
+        fromPort: 'structure',
+        toNode: seqId,
+        toPort: 'structure',
+      });
+      seqSourceId = seqId;
+      if (multiDesigner) {
+        subTag = branchTag ? `${branchTag} · ${designerLabel}` : designerLabel;
+      }
+    }
+
+    attachDownstreamEval({
+      nextId,
+      nodes,
+      edges,
+      branchTag: subTag,
+      backboneNodeId: nodeId,
+      seqSourceNodeId: seqSourceId,
+      topK,
+      refold,
+      foldModels,
+      score,
+      stabilityScan,
     });
-    edges.push({
-      fromNode: nodeId,
-      fromPort: 'structure',
-      toNode: seqId,
-      toPort: 'structure',
-    });
-    seqSourceId = seqId;
   }
-
-  attachDownstreamEval({
-    nextId,
-    nodes,
-    edges,
-    branchTag,
-    backboneNodeId: nodeId,
-    seqSourceNodeId: seqSourceId,
-    topK,
-    refold,
-    foldModels,
-    score,
-    stabilityScan,
-  });
 }
 
-export function compileWorkflowPlanToGraph(plan: WorkflowPlan): {
+function hasOutputPort(node: WorkflowNode, portName: string): boolean {
+  const adapter = ADAPTER_REGISTRY[node.adapterId];
+  return Boolean(adapter?.outputs?.[portName]);
+}
+
+function findUpstreamStructureForSeqNode(
+  seqNodeId: string,
+  nodes: WorkflowNode[],
+  edges: WorkflowEdge[],
+): string | null {
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  const visited = new Set<string>();
+  const queue = [seqNodeId];
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    const curNode = nodeById.get(cur);
+    if (curNode && hasOutputPort(curNode, 'structure') && curNode.adapterId !== 'localfold-af2') {
+      return curNode.id;
+    }
+    for (const e of edges) {
+      if (e.toNode === cur && !visited.has(e.fromNode)) {
+        queue.push(e.fromNode);
+      }
+    }
+  }
+  return null;
+}
+
+function applyEditCurrentPlan(
+  plan: EditCurrentWorkflowPlan,
+  currentGraph: WorkflowGraph,
+): { graph: WorkflowGraph; notes: string[] } {
+  const nodes: WorkflowNode[] = structuredClone(currentGraph.nodes);
+  const edges: WorkflowEdge[] = structuredClone(currentGraph.edges);
+  const notes: string[] = [];
+  const nextId = makeUniqueIdFactory(nodes.map((n) => n.id));
+
+  const resolveNode = (id: string | null | undefined): WorkflowNode | undefined =>
+    id ? nodes.find((n) => n.id === id) : undefined;
+
+  for (const op of plan.operations) {
+    if (op.action === 'add_stability_scan') {
+      let target = resolveNode(op.attachToNodeId);
+      if (!target || !hasOutputPort(target, 'structure')) {
+        // Prefer full-backbone structures: LocalFold > LASErMPNN > RFD4 > PDB Input > any structure
+        const priority = ['localfold-af2', 'lasermpnn', 'rfd4-proteina', 'pdb-input'];
+        for (const aid of priority) {
+          const matches = nodes.filter((n) => n.adapterId === aid && hasOutputPort(n, 'structure'));
+          if (matches.length > 0) {
+            target = matches[matches.length - 1];
+            break;
+          }
+        }
+        if (!target) {
+          target = [...nodes].reverse().find((n) => hasOutputPort(n, 'structure'));
+        }
+      }
+      if (!target) {
+        notes.push('Skipped ThermoMPNN: no structure-producing block exists on the canvas yet.');
+        continue;
+      }
+      if (target.adapterId === 'genie3') {
+        notes.push(
+          'Attached ThermoMPNN to Genie 3 (note: Genie 3 is Cα-only; add AF2 first for full-backbone ΔΔG scores).',
+        );
+      }
+      const thermoId = nextId('thermo');
+      nodes.push({
+        id: thermoId,
+        adapterId: 'thermompnn',
+        label: 'ThermoMPNN',
+        params: {
+          ...defaultParamsForAdapter('thermompnn'),
+          ...(op.targetChain ? { chain: op.targetChain } : {}),
+        },
+      });
+      edges.push({
+        fromNode: target.id,
+        fromPort: 'structure',
+        toNode: thermoId,
+        toPort: 'structure',
+      });
+    } else if (op.action === 'add_fold_oracles') {
+      let seqTarget = resolveNode(op.attachToNodeId);
+      if (!seqTarget || !hasOutputPort(seqTarget, 'sequences')) {
+        const seqPriority = [
+          'top-k-filter',
+          'web-protein-mpnn',
+          'ligandmpnn',
+          'lasermpnn',
+          'antifold-esmif1',
+          'rfd4-proteina',
+          'sequence-input',
+          'genie3',
+        ];
+        for (const aid of seqPriority) {
+          const matches = nodes.filter((n) => n.adapterId === aid && hasOutputPort(n, 'sequences'));
+          if (matches.length > 0) {
+            seqTarget = matches[matches.length - 1];
+            break;
+          }
+        }
+      }
+      if (!seqTarget) {
+        notes.push('Skipped refolding oracle: no sequence-producing block exists on the canvas yet.');
+        continue;
+      }
+      const backboneId = findUpstreamStructureForSeqNode(seqTarget.id, nodes, edges);
+      const models: FoldOracleId[] =
+        op.foldModels.length > 0 ? op.foldModels : ['rosettafold3'];
+
+      attachDownstreamEval({
+        nextId,
+        nodes,
+        edges,
+        branchTag: '',
+        backboneNodeId: backboneId,
+        seqSourceNodeId: seqTarget.id,
+        topK: null,
+        refold: true,
+        foldModels: models,
+        score: op.score && Boolean(backboneId),
+        stabilityScan: false,
+      });
+    } else if (op.action === 'add_sequence_designer') {
+      let structTarget = resolveNode(op.attachToNodeId);
+      if (!structTarget || !hasOutputPort(structTarget, 'structure')) {
+        const structPriority = ['pdb-input', 'rfd4-proteina', 'genie3', 'localfold-af2'];
+        for (const aid of structPriority) {
+          const matches = nodes.filter((n) => n.adapterId === aid && hasOutputPort(n, 'structure'));
+          if (matches.length > 0) {
+            structTarget = matches[matches.length - 1];
+            break;
+          }
+        }
+      }
+      if (!structTarget) {
+        notes.push('Skipped sequence designer: no structure block exists on the canvas yet.');
+        continue;
+      }
+      const m = op.model ?? 'proteinmpnn';
+      const adapterId =
+        m === 'ligandmpnn'
+          ? 'ligandmpnn'
+          : m === 'lasermpnn'
+            ? 'lasermpnn'
+            : m === 'antifold' || m === 'esmif1'
+              ? 'antifold-esmif1'
+              : m === 'thermompnn'
+                ? 'thermompnn'
+                : 'web-protein-mpnn';
+      const isCa = adapterId === 'web-protein-mpnn' && structTarget.adapterId === 'genie3';
+      const label =
+        adapterId === 'ligandmpnn'
+          ? 'LigandMPNN'
+          : adapterId === 'lasermpnn'
+            ? 'LASErMPNN'
+            : adapterId === 'thermompnn'
+              ? 'ThermoMPNN'
+              : adapterId === 'antifold-esmif1'
+                ? m === 'esmif1'
+                  ? 'ESM-IF1'
+                  : 'AntiFold'
+                : isCa
+                  ? 'Cα-ProteinMPNN'
+                  : 'ProteinMPNN';
+      const newId = nextId(m);
+      const params: Record<string, unknown> = {
+        ...defaultParamsForAdapter(adapterId),
+        ...(isCa ? { family: 'ca', modelName: 'v_48_020' } : {}),
+        ...(adapterId === 'antifold-esmif1' ? { variant: m } : {}),
+        ...(op.numSequences && adapterId !== 'thermompnn' ? { numSequences: op.numSequences } : {}),
+        ...(op.targetChain && adapterId === 'antifold-esmif1' ? { targetChain: op.targetChain } : {}),
+        ...(op.targetChain && adapterId === 'thermompnn' ? { chain: op.targetChain } : {}),
+        ...(op.regions && m === 'antifold' ? { regions: op.regions } : {}),
+      };
+      nodes.push({ id: newId, adapterId, label, params });
+      edges.push({
+        fromNode: structTarget.id,
+        fromPort: 'structure',
+        toNode: newId,
+        toPort: 'structure',
+      });
+
+      if (op.foldModels.length > 0 && hasOutputPort(nodes[nodes.length - 1], 'sequences')) {
+        attachDownstreamEval({
+          nextId,
+          nodes,
+          edges,
+          branchTag: label,
+          backboneNodeId: structTarget.id,
+          seqSourceNodeId: newId,
+          topK: op.topK,
+          refold: true,
+          foldModels: op.foldModels,
+          score: op.score,
+          stabilityScan: false,
+        });
+      }
+    } else if (op.action === 'insert_top_k') {
+      const topK = op.topK ?? 2;
+      // Find a `sequences` edge feeding a folding node (prefer attachToNodeId if it's a fold node or seq source)
+      let targetEdgeIdx = -1;
+      if (op.attachToNodeId) {
+        targetEdgeIdx = edges.findIndex(
+          (e) =>
+            e.fromPort === 'sequences' &&
+            e.toPort === 'sequences' &&
+            (e.toNode === op.attachToNodeId || e.fromNode === op.attachToNodeId),
+        );
+      }
+      if (targetEdgeIdx < 0) {
+        targetEdgeIdx = edges.findIndex(
+          (e) =>
+            e.fromPort === 'sequences' &&
+            e.toPort === 'sequences' &&
+            nodes.find((n) => n.id === e.toNode)?.adapterId === 'localfold-af2',
+        );
+      }
+      if (targetEdgeIdx >= 0) {
+        const orig = edges[targetEdgeIdx];
+        const tkId = nextId('topk');
+        nodes.push({
+          id: tkId,
+          adapterId: 'top-k-filter',
+          label: `Top-${topK} Filter`,
+          params: { ...defaultParamsForAdapter('top-k-filter'), topK },
+        });
+        // Rewire orig edge: orig.fromNode -> tkId -> orig.toNode
+        edges.splice(
+          targetEdgeIdx,
+          1,
+          { fromNode: orig.fromNode, fromPort: 'sequences', toNode: tkId, toPort: 'sequences' },
+          { fromNode: tkId, fromPort: 'sequences', toNode: orig.toNode, toPort: 'sequences' },
+        );
+      } else {
+        // No existing fold wire — attach Top-K to the latest sequence-producing node
+        const seqNode = [...nodes].reverse().find((n) => hasOutputPort(n, 'sequences'));
+        if (!seqNode) {
+          notes.push('Skipped Top-K Filter: no sequence-producing block exists on the canvas yet.');
+          continue;
+        }
+        const tkId = nextId('topk');
+        nodes.push({
+          id: tkId,
+          adapterId: 'top-k-filter',
+          label: `Top-${topK} Filter`,
+          params: { ...defaultParamsForAdapter('top-k-filter'), topK },
+        });
+        edges.push({
+          fromNode: seqNode.id,
+          fromPort: 'sequences',
+          toNode: tkId,
+          toPort: 'sequences',
+        });
+      }
+    }
+  }
+
+  const nextGraph: WorkflowGraph = {
+    ...currentGraph,
+    nodes,
+    edges,
+  };
+  const errors = validateGraph(nextGraph);
+  if (errors.length > 0) {
+    throw new Error(`Edited workflow failed validation: ${errors.join('; ')}`);
+  }
+  return {
+    graph: autoLayoutGraph(nextGraph),
+    notes,
+  };
+}
+
+export function compileWorkflowPlanToGraph(
+  plan: WorkflowPlan,
+  currentGraph?: WorkflowGraph,
+): {
   graph: WorkflowGraph;
   notes: string[];
+  isIncrementalEdit: boolean;
+  addedNodeCount: number;
 } {
+  if (plan.kind === 'edit_current') {
+    if (!currentGraph || currentGraph.nodes.length === 0) {
+      throw new Error('Cannot edit current graph because the canvas is empty.');
+    }
+    const { graph, notes } = applyEditCurrentPlan(plan, currentGraph);
+    return {
+      graph,
+      notes,
+      isIncrementalEdit: true,
+      addedNodeCount: Math.max(0, graph.nodes.length - currentGraph.nodes.length),
+    };
+  }
+
   const nextId = makeUniqueIdFactory();
   const nodes: WorkflowNode[] = [];
   const edges: WorkflowEdge[] = [];
@@ -353,6 +692,12 @@ export function compileWorkflowPlanToGraph(plan: WorkflowPlan): {
   if (plan.kind === 'de_novo') {
     const gens: GeneratorId[] = plan.generators.length > 0 ? plan.generators : ['genie3'];
     const multiBranch = gens.length > 1;
+    const explicitDesigners: SequenceDesignerId[] =
+      plan.sequenceDesigners && plan.sequenceDesigners.length > 0
+        ? plan.sequenceDesigners
+        : plan.sequenceDesigner
+          ? [plan.sequenceDesigner]
+          : [];
 
     for (const genId of gens) {
       const branchTag = multiBranch ? (genId === 'genie3' ? 'Genie 3' : 'RFD4') : '';
@@ -377,8 +722,12 @@ export function compileWorkflowPlanToGraph(plan: WorkflowPlan): {
         branchTag,
         sourcePdbNodeId: null,
         paramsOverride,
-        sequenceDesigner:
-          plan.sequenceDesigner ?? (genId === 'rfd4-proteina' ? 'web-protein-mpnn' : undefined),
+        sequenceDesigners:
+          explicitDesigners.length > 0
+            ? explicitDesigners
+            : genId === 'rfd4-proteina'
+              ? ['web-protein-mpnn']
+              : [],
         numSequences: plan.numSequences,
         topK: plan.topK,
         refold: plan.refold,
@@ -417,6 +766,12 @@ export function compileWorkflowPlanToGraph(plan: WorkflowPlan): {
       );
     }
 
+    const explicitDesigners: SequenceDesignerId[] =
+      plan.sequenceDesigners && plan.sequenceDesigners.length > 0
+        ? plan.sequenceDesigners
+        : plan.sequenceDesigner
+          ? [plan.sequenceDesigner]
+          : [];
     const multiBranch = gens.length > 1;
     const cp = bench?.conditionParams;
 
@@ -439,11 +794,7 @@ export function compileWorkflowPlanToGraph(plan: WorkflowPlan): {
         };
       } else {
         const mode =
-          plan.designTask === 'binder' || bench?.category === 'binder'
-            ? 'binder'
-            : plan.designTask === 'enzyme-ligand' || bench?.category === 'enzyme-ligand'
-              ? 'motif'
-              : 'motif';
+          plan.designTask === 'binder' || bench?.category === 'binder' ? 'binder' : 'motif';
         paramsOverride = {
           mode,
           numDesigns: plan.numDesigns,
@@ -467,7 +818,7 @@ export function compileWorkflowPlanToGraph(plan: WorkflowPlan): {
         branchTag,
         sourcePdbNodeId: pdbNodeId,
         paramsOverride,
-        sequenceDesigner: plan.sequenceDesigner,
+        sequenceDesigners: explicitDesigners,
         numSequences: plan.numSequences,
         topK: plan.topK,
         refold: plan.refold,
@@ -477,7 +828,7 @@ export function compileWorkflowPlanToGraph(plan: WorkflowPlan): {
       });
     }
   } else {
-    // kind === 'pdb'
+    // kind === 'pdb' (supports 1 or multiple parallel tasks, e.g. LigandMPNN vs LASErMPNN!)
     const pdbNodeId = nextId('pdb');
     const isDemo = !plan.pdbId || plan.pdbId.toLowerCase() === 'demo';
     nodes.push({
@@ -497,117 +848,128 @@ export function compileWorkflowPlanToGraph(plan: WorkflowPlan): {
       },
     });
 
-    if (plan.task === 'thermompnn') {
-      const thermoId = nextId('thermo');
-      nodes.push({
-        id: thermoId,
-        adapterId: 'thermompnn',
-        label: 'ThermoMPNN',
-        params: {
-          ...defaultParamsForAdapter('thermompnn'),
-          ...(plan.targetChain ? { chain: plan.targetChain } : {}),
-        },
-      });
-      edges.push({
-        fromNode: pdbNodeId,
-        fromPort: 'structure',
-        toNode: thermoId,
-        toPort: 'structure',
-      });
-    } else if (plan.task === 'antifold' || plan.task === 'esmif1') {
-      const afId = nextId(plan.task);
-      const isAnti = plan.task === 'antifold';
-      nodes.push({
-        id: afId,
-        adapterId: 'antifold-esmif1',
-        label: isAnti ? 'AntiFold' : 'ESM-IF1',
-        params: {
-          ...defaultParamsForAdapter('antifold-esmif1'),
-          variant: plan.task,
-          ...(plan.targetChain ? { targetChain: plan.targetChain } : {}),
-          ...(isAnti && plan.regions ? { regions: plan.regions } : {}),
-          ...(plan.numSequences ? { numSequences: plan.numSequences } : {}),
-        },
-      });
-      edges.push({
-        fromNode: pdbNodeId,
-        fromPort: 'structure',
-        toNode: afId,
-        toPort: 'structure',
-      });
-      if (plan.refold || plan.topK) {
-        attachDownstreamEval({
-          nextId,
-          nodes,
-          edges,
-          branchTag: '',
-          backboneNodeId: pdbNodeId,
-          seqSourceNodeId: afId,
-          topK: plan.topK,
-          refold: plan.refold,
-          foldModels: plan.foldModels,
-          score: plan.refold,
-          stabilityScan: plan.stabilityScan,
-        });
-      }
-    } else {
-      const adapterId =
-        plan.task === 'ligandmpnn'
-          ? 'ligandmpnn'
-          : plan.task === 'lasermpnn'
-            ? 'lasermpnn'
-            : 'web-protein-mpnn';
-      const label =
-        adapterId === 'ligandmpnn'
-          ? 'LigandMPNN'
-          : adapterId === 'lasermpnn'
-            ? 'LASErMPNN'
-            : 'ProteinMPNN';
-      const seqNodeId = nextId('seq');
-      nodes.push({
-        id: seqNodeId,
-        adapterId,
-        label,
-        params: {
-          ...defaultParamsForAdapter(adapterId),
-          ...(plan.numSequences ? { numSequences: plan.numSequences } : {}),
-        },
-      });
-      edges.push({
-        fromNode: pdbNodeId,
-        fromPort: 'structure',
-        toNode: seqNodeId,
-        toPort: 'structure',
-      });
+    const taskList: PdbTaskId[] =
+      plan.tasks && plan.tasks.length > 0
+        ? plan.tasks
+        : plan.task
+          ? [plan.task]
+          : ['thermompnn'];
+    const multiTask = taskList.length > 1;
 
-      if (plan.refold || plan.topK) {
-        attachDownstreamEval({
-          nextId,
-          nodes,
-          edges,
-          branchTag: '',
-          backboneNodeId: pdbNodeId,
-          seqSourceNodeId: seqNodeId,
-          topK: plan.topK,
-          refold: plan.refold,
-          foldModels: plan.foldModels,
-          score: plan.refold,
-          stabilityScan: plan.stabilityScan,
-        });
-      } else if (plan.stabilityScan && adapterId === 'lasermpnn') {
+    for (const task of taskList) {
+      if (task === 'thermompnn') {
         const thermoId = nextId('thermo');
         nodes.push({
           id: thermoId,
           adapterId: 'thermompnn',
           label: 'ThermoMPNN',
-          params: { ...defaultParamsForAdapter('thermompnn') },
+          params: {
+            ...defaultParamsForAdapter('thermompnn'),
+            ...(plan.targetChain ? { chain: plan.targetChain } : {}),
+          },
         });
         edges.push({
-          fromNode: seqNodeId,
+          fromNode: pdbNodeId,
           fromPort: 'structure',
           toNode: thermoId,
           toPort: 'structure',
         });
+      } else if (task === 'antifold' || task === 'esmif1') {
+        const afId = nextId(task);
+        const isAnti = task === 'antifold';
+        const label = isAnti ? 'AntiFold' : 'ESM-IF1';
+        nodes.push({
+          id: afId,
+          adapterId: 'antifold-esmif1',
+          label,
+          params: {
+            ...defaultParamsForAdapter('antifold-esmif1'),
+            variant: task,
+            ...(plan.targetChain ? { targetChain: plan.targetChain } : {}),
+            ...(isAnti && plan.regions ? { regions: plan.regions } : {}),
+            ...(plan.numSequences ? { numSequences: plan.numSequences } : {}),
+          },
+        });
+        edges.push({
+          fromNode: pdbNodeId,
+          fromPort: 'structure',
+          toNode: afId,
+          toPort: 'structure',
+        });
+        if (plan.refold || plan.topK) {
+          attachDownstreamEval({
+            nextId,
+            nodes,
+            edges,
+            branchTag: multiTask ? label : '',
+            backboneNodeId: pdbNodeId,
+            seqSourceNodeId: afId,
+            topK: plan.topK,
+            refold: plan.refold,
+            foldModels: plan.foldModels,
+            score: plan.refold,
+            stabilityScan: plan.stabilityScan,
+          });
+        }
+      } else {
+        const adapterId =
+          task === 'ligandmpnn'
+            ? 'ligandmpnn'
+            : task === 'lasermpnn'
+              ? 'lasermpnn'
+              : 'web-protein-mpnn';
+        const label =
+          adapterId === 'ligandmpnn'
+            ? 'LigandMPNN'
+            : adapterId === 'lasermpnn'
+              ? 'LASErMPNN'
+              : 'ProteinMPNN';
+        const seqNodeId = nextId(task);
+        nodes.push({
+          id: seqNodeId,
+          adapterId,
+          label,
+          params: {
+            ...defaultParamsForAdapter(adapterId),
+            ...(plan.numSequences ? { numSequences: plan.numSequences } : {}),
+          },
+        });
+        edges.push({
+          fromNode: pdbNodeId,
+          fromPort: 'structure',
+          toNode: seqNodeId,
+          toPort: 'structure',
+        });
+
+        if (plan.refold || plan.topK) {
+          attachDownstreamEval({
+            nextId,
+            nodes,
+            edges,
+            branchTag: multiTask ? label : '',
+            backboneNodeId: pdbNodeId,
+            seqSourceNodeId: seqNodeId,
+            topK: plan.topK,
+            refold: plan.refold,
+            foldModels: plan.foldModels,
+            score: plan.refold,
+            stabilityScan: plan.stabilityScan,
+          });
+        } else if (plan.stabilityScan && adapterId === 'lasermpnn') {
+          const thermoId = nextId('thermo');
+          nodes.push({
+            id: thermoId,
+            adapterId: 'thermompnn',
+            label: multiTask ? `ThermoMPNN (${label})` : 'ThermoMPNN',
+            params: { ...defaultParamsForAdapter('thermompnn') },
+          });
+          edges.push({
+            fromNode: seqNodeId,
+            fromPort: 'structure',
+            toNode: thermoId,
+            toPort: 'structure',
+          });
+        }
       }
     }
   }
@@ -627,22 +989,34 @@ export function compileWorkflowPlanToGraph(plan: WorkflowPlan): {
   return {
     graph: autoLayoutGraph(rawGraph),
     notes,
+    isIncrementalEdit: false,
+    addedNodeCount: nodes.length,
   };
 }
 
 export async function requestWorkflowPlan(
   prompt: string,
-  signal?: AbortSignal,
+  options?: { currentGraph?: WorkflowGraph; signal?: AbortSignal },
 ): Promise<PlannedWorkflowResult> {
   const endpoint =
     (import.meta.env.VITE_PLANNER_URL as string | undefined)?.trim() ||
     DEFAULT_PLANNER_ENDPOINT;
 
+  const currentNodes =
+    options?.currentGraph?.nodes.slice(0, 20).map((n) => ({
+      id: n.id,
+      adapterId: n.adapterId,
+      label: n.label,
+    })) ?? [];
+
   const resp = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: prompt.trim() }),
-    signal,
+    body: JSON.stringify({
+      prompt: prompt.trim(),
+      ...(currentNodes.length > 0 ? { currentNodes } : {}),
+    }),
+    signal: options?.signal,
   });
 
   let data: PlannerApiResponse | null = null;
@@ -661,10 +1035,15 @@ export async function requestWorkflowPlan(
     throw new Error(msg);
   }
 
-  const { graph, notes } = compileWorkflowPlanToGraph(data.plan);
+  const { graph, notes, isIncrementalEdit, addedNodeCount } = compileWorkflowPlanToGraph(
+    data.plan,
+    options?.currentGraph,
+  );
   return {
     plan: data.plan,
     graph,
+    isIncrementalEdit,
+    addedNodeCount,
     model: data.model || '@cf/google/gemma-4-26b-a4b-it',
     latencyMs: data.latencyMs ?? 0,
     notes,

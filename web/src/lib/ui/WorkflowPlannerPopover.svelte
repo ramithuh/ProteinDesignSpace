@@ -7,19 +7,20 @@
   import type { WorkflowGraph } from '$lib/engine/types';
 
   interface Props {
+    graph: WorkflowGraph;
     disabled?: boolean;
     triggerEl?: HTMLElement | null;
     onApply: (graph: WorkflowGraph, summary: string) => void;
     onClose: () => void;
   }
 
-  let { disabled = false, triggerEl = null, onApply, onClose }: Props = $props();
+  let { graph, disabled = false, triggerEl = null, onApply, onClose }: Props = $props();
 
   const EXAMPLES = [
     'Evaluate Genie 3 and RFD4 on the di-iron 4-helix bundle motif using AF2, RF3, and Protenix',
+    'Compare LigandMPNN vs LASErMPNN on 3PTB keeping BEN and CA',
+    'Add ThermoMPNN and a RoseTTAFold 3 refolding branch to my current graph',
     'Try RFD4 and Genie 3 for 100 length protein design and check refolding',
-    'Crop 3PTB to chain A keeping BEN and CA and design sequences with LigandMPNN',
-    'Design CDR3 on heavy chain H of 1FDL using AntiFold',
   ];
 
   let promptText = $state('');
@@ -50,7 +51,10 @@
     result = null;
 
     try {
-      const planned = await requestWorkflowPlan(q, ctrl.signal);
+      const planned = await requestWorkflowPlan(q, {
+        currentGraph: graph,
+        signal: ctrl.signal,
+      });
       if (ctrl.signal.aborted) return;
       result = planned;
     } catch (err) {
@@ -195,7 +199,14 @@
   {#if result}
     <div class="pp-preview">
       <div class="pp-prev-head">
-        <div class="pp-prev-summary">{result.plan.summary}</div>
+        <div class="pp-prev-title-row">
+          <div class="pp-prev-summary">{result.plan.summary}</div>
+          <span class="pp-mode-pill" class:edit={result.isIncrementalEdit}>
+            {result.isIncrementalEdit
+              ? `+${result.addedNodeCount} block${result.addedNodeCount === 1 ? '' : 's'} on current graph`
+              : 'New graph'}
+          </span>
+        </div>
         <span class="pp-prev-meta">
           {result.graph.nodes.length} blocks · {result.graph.edges.length} wires · {shortModelName}{#if result.latencyMs > 0} · {(result.latencyMs / 1000).toFixed(1)}s{/if}
         </span>
@@ -217,7 +228,7 @@
 
       <div class="pp-prev-actions">
         <button type="button" class="pp-apply-btn" {disabled} onclick={handleApply}>
-          Apply to Canvas
+          {result.isIncrementalEdit ? 'Apply Edit to Graph' : 'Apply to Canvas'}
         </button>
         <button
           type="button"
@@ -474,7 +485,29 @@
   .pp-prev-head {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 3px;
+  }
+  .pp-prev-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .pp-mode-pill {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .pp-mode-pill.edit {
+    background: rgba(16, 185, 129, 0.14);
+    border-color: rgba(16, 185, 129, 0.4);
+    color: #10b981;
   }
   .pp-prev-summary {
     font-size: 12.5px;
