@@ -2,10 +2,17 @@
 // Supports creating fresh multi-branch workflows (`de_novo`, `conditioned_design`, `pdb`, `sequence`)
 // AND safely editing/appending/removing/updating onto the user's current canvas (`edit_current`).
 
-import { adaptBenchmarkContigForLength, BENCHMARK_TARGETS, getBenchmarkById } from './benchmarks';
+import {
+  adaptBenchmarkContigForLength,
+  BENCHMARK_TARGETS,
+  getBenchmarkById,
+  type BenchmarkTargetMeta,
+} from './benchmarks';
 import { extractUpstreamHoloHints, validateBioCapabilities } from './bio-capabilities';
 import { autoLayoutGraph, defaultParamsForAdapter, validateConnection, validateGraph } from './graph-utils';
+import { sanitizeEvoDiffFixedSequence } from './param-validation';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
+import { parseStructureText } from '$lib/protein-ops/pdb';
 import type { BioCompatibilityIssue, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 
 export type GeneratorId = 'rfd4-proteina' | 'genie3' | 'protpardelle';
@@ -277,7 +284,7 @@ export interface PlannedWorkflowResult {
 
 export const DEFAULT_PLANNER_ENDPOINT = 'https://planner.denovo.run/api/plan';
 export const PLANNER_MIN_PROMPT_LENGTH = 4;
-export const PLANNER_TIMEOUT_MS = 15_000;
+export const PLANNER_TIMEOUT_MS = 30_000;
 
 const CROP_ALLOWLIST_RE = /^[A-Za-z0-9,:;+\s._-]{1,80}$/;
 const MAX_GENERATORS = 3;
@@ -1633,7 +1640,19 @@ function resolveBlockEdgePorts(
   } else if (toNode.adapterId === 'dyna1') {
     preferredPairs.push(['structure', 'structure'], ['sequences', 'sequences']);
   } else if (toNode.adapterId === 'esmc') {
-    preferredPairs.push(['sequences', 'sequences'], ['structure', 'structure']);
+    if (fromNode.adapterId === 'pdb-input') {
+      preferredPairs.push(['structure', 'structure'], ['sequences', 'sequences']);
+    } else {
+      preferredPairs.push(['sequences', 'sequences'], ['structure', 'structure']);
+    }
+  } else if (
+    toNode.adapterId === 'localfold-af2' ||
+    toNode.adapterId === 'evodiff' ||
+    toNode.adapterId === 'foldflow2'
+  ) {
+    preferredPairs.push(['sequences', 'sequences']);
+  } else if ('structure' in toAdapter.inputs || 'template' in toAdapter.inputs) {
+    preferredPairs.push(['structure', 'structure'], ['structure', 'template']);
   }
 
   const tmpGraph: WorkflowGraph = { id: 'tmp', name: 'tmp', nodes: allNodes, edges: existingEdges };
@@ -1656,87 +1675,236 @@ const MAX_BLOCK_GRAPH_NODES = 20;
 const MAX_BLOCK_GRAPH_EDGES = 36;
 const MAX_BLOCK_GRAPH_EDIT_OPS = 12;
 
+const CONTROLLED_METADATA_KEYS_BY_ADAPTER: Record<string, ReadonlySet<string>> = {
+  'pdb-input': new Set(['benchmarkId']),
+  'rfd4-proteina': new Set(['benchmarkId']),
+  genie3: new Set(['benchmarkId']),
+};
+
+const UI_TRACKING_PARAM_KEYS = new Set([
+  'autoSeededBenchmarkId',
+  'autoSeededLength',
+  'userEditedLength',
+  'userEditedTask',
+]);
+
+function isBroadChainCrop(crop: unknown): boolean {
+  return /^[A-Za-z](?:\s*,\s*[A-Za-z])*$/.test(String(crop ?? '').trim());
+}
+
+function transliterateBlockChars(raw: string): string {
+  return raw.toLowerCase().replace(/[αΑ]/g, 'a');
+}
+
+function normalizeBlockName(raw: string): string {
+  return transliterateBlockChars(raw)
+    .replace(/\(.*?\)/g, '')
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+const SUPPORTED_BLOCK_NAMES: ReadonlySet<string> = (() => {
+  const names = new Set<string>([
+    'evodiff',
+    'evodiffseq',
+    'evodiff38m',
+    'laproteina',
+    'sidprotein',
+    'proteina',
+    'frameflow',
+    'foldflow2',
+    'boltzgen',
+    'boltzgen1',
+    'protpardelle',
+    'protpardelle1c',
+    'rfdiffusion',
+    'genie2',
+    'genie3',
+    'rfd4',
+    'rfd4proteina',
+    'proteinmpnn',
+    'solublempnn',
+    'caproteinmpnn',
+    'ligandmpnn',
+    'lasermpnn',
+    'antifold',
+    'esmif1',
+    'antifoldesmif1',
+    'localfold',
+    'thermompnn',
+    'esmc',
+    'esmc300m',
+    'dyna1',
+  ]);
+  for (const manifest of Object.values(ADAPTER_REGISTRY)) {
+    for (const candidate of [manifest.id, manifest.shortName, manifest.displayName]) {
+      const full = transliterateBlockChars(candidate).replace(/[^a-z0-9]+/g, '');
+      const noParen = normalizeBlockName(candidate);
+      if (full) names.add(full);
+      if (noParen) names.add(noParen);
+    }
+  }
+  return names;
+})();
+
+function isSupportedBlockName(raw: string, compiledNodes?: readonly WorkflowNode[]): boolean {
+  const norm = normalizeBlockName(raw);
+  const normFull = transliterateBlockChars(raw).replace(/[^a-z0-9]+/g, '');
+  if (!norm && !normFull) return false;
+  if (SUPPORTED_BLOCK_NAMES.has(norm) || SUPPORTED_BLOCK_NAMES.has(normFull)) return true;
+  if (compiledNodes && compiledNodes.length > 0) {
+    for (const n of compiledNodes) {
+      const m = ADAPTER_REGISTRY[n.adapterId];
+      const candidates = [
+        n.adapterId,
+        n.label ?? '',
+        m?.shortName ?? '',
+        m?.displayName ?? '',
+      ];
+      for (const c of candidates) {
+        const cn = normalizeBlockName(c);
+        const cf = transliterateBlockChars(c).replace(/[^a-z0-9]+/g, '');
+        if ((norm && (cn === norm || cf === norm)) || (normFull && (cn === normFull || cf === normFull))) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function filterUnsupportedItems(
+  items: readonly string[],
+  compiledNodes?: readonly WorkflowNode[],
+): string[] {
+  return items.filter((item) => !isSupportedBlockName(item, compiledNodes));
+}
+
+function sanitizeRawBlockParamEntries(
+  adapterId: string,
+  rawParams: Record<string, unknown> | undefined,
+  opts?: { preserveUiTrackingKeys?: boolean; isPatch?: boolean },
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  if (!rawParams || typeof rawParams !== 'object') return sanitized;
+
+  const defaults = defaultParamsForAdapter(adapterId);
+  const manifest = Object.hasOwn(ADAPTER_REGISTRY, adapterId)
+    ? ADAPTER_REGISTRY[adapterId]
+    : undefined;
+  const schemaKeys = new Set((manifest?.paramSchema ?? []).map((f) => f.key));
+  const controlledKeys = CONTROLLED_METADATA_KEYS_BY_ADAPTER[adapterId];
+  const allowedKeys = new Set<string>([
+    ...Object.keys(defaults),
+    ...schemaKeys,
+    ...(controlledKeys ?? []),
+  ]);
+  const modeKey = manifest?.modeParamKey;
+  const validModes = manifest?.modes?.length
+    ? new Set(manifest.modes.map((m) => m.id))
+    : null;
+
+  for (const [k, v] of Object.entries(rawParams)) {
+    if (BLOCK_FORBIDDEN_KEYS.has(k)) continue;
+    if (k === 'fetchedPdbId' || k === 'pdbText' || k === 'customSpecYaml') continue;
+    if (v === null || v === undefined) continue;
+
+    if (opts?.preserveUiTrackingKeys && UI_TRACKING_PARAM_KEYS.has(k)) {
+      if (adapterId === 'rfd4-proteina' || adapterId === 'genie3') {
+        sanitized[k] = v;
+      }
+      continue;
+    }
+    if (UI_TRACKING_PARAM_KEYS.has(k)) continue;
+
+    if (adapterId === 'antifold-esmif1' && k === 'model') {
+      const rawVar = rawParams.variant;
+      const hasExplicitValidVariant =
+        rawVar != null && (!validModes || validModes.has(String(rawVar)));
+      if (!hasExplicitValidVariant) {
+        const lower = String(v).toLowerCase();
+        if (lower.includes('esm')) sanitized.variant = 'esmif1';
+        else if (lower.includes('anti')) sanitized.variant = 'antifold';
+      }
+      continue;
+    }
+    if (k === 'mode' && !allowedKeys.has('mode') && modeKey === 'variant') {
+      const rawVar = rawParams.variant;
+      const hasExplicitValidVariant =
+        rawVar != null && (!validModes || validModes.has(String(rawVar)));
+      if (!hasExplicitValidVariant) {
+        const cand = String(v).trim();
+        if (!validModes || validModes.has(cand)) {
+          sanitized.variant = cand;
+        } else {
+          const lower = cand.toLowerCase();
+          if (lower.includes('esm')) sanitized.variant = 'esmif1';
+          else if (lower.includes('anti')) sanitized.variant = 'antifold';
+        }
+      }
+      continue;
+    }
+    if (k === 'maxSequences' && !allowedKeys.has('maxSequences') && allowedKeys.has('numSequences')) {
+      if (rawParams.numSequences == null) {
+        sanitized.numSequences = v;
+      }
+      continue;
+    }
+    if (k === 'mode' && !allowedKeys.has('mode') && modeKey === 'taskMode') {
+      const rawTask = rawParams.taskMode;
+      const hasValidPrimary = rawTask != null && (!validModes || validModes.has(String(rawTask)));
+      if (!hasValidPrimary && (!validModes || validModes.has(String(v)))) {
+        sanitized.taskMode = v;
+      }
+      continue;
+    }
+    if (k === 'taskMode' && !allowedKeys.has('taskMode') && modeKey === 'mode') {
+      const rawMode = rawParams.mode;
+      const hasValidPrimary = rawMode != null && (!validModes || validModes.has(String(rawMode)));
+      if (!hasValidPrimary && (!validModes || validModes.has(String(v)))) {
+        sanitized.mode = v;
+      }
+      continue;
+    }
+
+    if (!allowedKeys.has(k)) continue;
+
+    if (modeKey && k === modeKey && validModes) {
+      if (validModes.has(String(v))) {
+        sanitized[k] = v;
+      }
+      continue;
+    }
+
+    if (k === 'cropSegments') {
+      const cleanCrop = validateOptionalCrop(String(v));
+      if (cleanCrop) sanitized.cropSegments = cleanCrop;
+      else if (opts?.isPatch && String(v).trim() === '') sanitized.cropSegments = '';
+      continue;
+    }
+    if (adapterId === 'evodiff' && k === 'fixedSequence') {
+      sanitized.fixedSequence = sanitizeEvoDiffFixedSequence(v);
+      continue;
+    }
+    if (k === 'pdbId' && typeof v === 'string') {
+      const up = v.trim().toUpperCase();
+      if (/^[0-9][A-Z0-9]{3}$/.test(up) || up === 'DEMO') {
+        sanitized.pdbId = up === 'DEMO' ? 'demo' : up;
+      }
+      continue;
+    }
+    sanitized[k] = v;
+  }
+  return sanitized;
+}
+
 function sanitizeBlockNodeParams(
   adapterId: string,
   rawParams: Record<string, unknown> | undefined,
+  opts?: { preserveUiTrackingKeys?: boolean },
 ): Record<string, unknown> {
   const defaults = defaultParamsForAdapter(adapterId);
-  const merged: Record<string, unknown> = { ...defaults };
-  const allowedKeys = new Set<string>([
-    ...Object.keys(defaults),
-    'benchmarkId',
-    'cropSegments',
-    'hotspots',
-    'motifSpan',
-    'unindexedMotif',
-    'contig',
-    'omitAminoAcids',
-    'fixedPositions',
-    'targetChain',
-    'regions',
-    'variant',
-    'family',
-    'model',
-    'msaMode',
-    'ligandCcdCodes',
-    'dnaSequences',
-    'rnaSequences',
-    'maxSequences',
-    'topK',
-    'length',
-    'numDesigns',
-    'numSequences',
-    'temperature',
-    'partialFraction',
-    'useLigandContext',
-    'sequence',
-    'label',
-    'mode',
-    'taskMode',
-    'pdbId',
-    'layout',
-    'colorMode',
-    'alignKabsch',
-    'symmetry',
-    'recyclingSteps',
-    'motifOffset',
-    'fixedSequence',
-    'maskPositions',
-    'steps',
-    'scale',
-    'motifRange',
-    'schedule',
-    'expRate',
-    'selfCondition',
-    'selfConditioning',
-    'rotationScaling',
-    'noiseScale',
-    'precision',
-  ]);
-  if (rawParams && typeof rawParams === 'object') {
-    for (const [k, v] of Object.entries(rawParams)) {
-      if (BLOCK_FORBIDDEN_KEYS.has(k) || !allowedKeys.has(k)) continue;
-      if (k === 'fetchedPdbId' || k === 'pdbText' || k === 'customSpecYaml') continue;
-      if (v === null || v === undefined) continue;
-      if (k === 'cropSegments') {
-        const cleanCrop = validateOptionalCrop(String(v));
-        if (cleanCrop) merged.cropSegments = cleanCrop;
-        continue;
-      }
-      if (adapterId === 'antifold-esmif1' && k === 'model') {
-        merged.variant = String(v).toLowerCase().includes('anti') ? 'antifold' : 'esmif1';
-        continue;
-      }
-      if (k === 'pdbId' && typeof v === 'string') {
-        const up = v.trim().toUpperCase();
-        if (/^[0-9][A-Z0-9]{3}$/.test(up) || up === 'DEMO') {
-          merged.pdbId = up === 'DEMO' ? 'demo' : up;
-        }
-        continue;
-      }
-      merged[k] = v;
-    }
-  }
+  const sanitized = sanitizeRawBlockParamEntries(adapterId, rawParams, opts);
+  const merged: Record<string, unknown> = { ...defaults, ...sanitized };
   if (adapterId === 'pdb-input') {
     delete merged.fetchedPdbId;
     delete merged.pdbText;
@@ -1745,7 +1913,12 @@ function sanitizeBlockNodeParams(
     if (bm) {
       merged.mode = 'pdb-id';
       if (!merged.pdbId || merged.pdbId === 'demo') merged.pdbId = bm.pdbId;
-      if (!merged.cropSegments && bm.cropSegments) merged.cropSegments = bm.cropSegments;
+      if (
+        bm.cropSegments &&
+        (!merged.cropSegments || (bm.category === 'binder' && isBroadChainCrop(merged.cropSegments)))
+      ) {
+        merged.cropSegments = bm.cropSegments;
+      }
     } else if (merged.pdbId && merged.pdbId !== 'demo') {
       merged.mode = 'pdb-id';
     } else {
@@ -1773,6 +1946,52 @@ const PASS2_AF3_MODELS = new Set(
   LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af3').map((m) => m.id),
 );
 
+function wireMissingScorerStructureEdges(nodes: WorkflowNode[], edges: WorkflowEdge[]): void {
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  for (const node of nodes) {
+    if (node.adapterId !== 'designability-scorer') continue;
+    const hasStruct = edges.some((e) => e.toNode === node.id && e.toPort === 'structure');
+    if (hasStruct) continue;
+    const visited = new Set<string>();
+    const queue = edges.filter((e) => e.toNode === node.id).map((e) => e.fromNode);
+    let fallbackPdb: string | null = null;
+    let foundGen: string | null = null;
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      if (visited.has(cur)) continue;
+      visited.add(cur);
+      const cn = nodeById.get(cur);
+      if (cn) {
+        if (PASS2_GENERATOR_ADAPTERS.has(cn.adapterId)) {
+          foundGen = cur;
+          break;
+        }
+        if (cn.adapterId === 'pdb-input' && !fallbackPdb) fallbackPdb = cur;
+      }
+      for (const pe of edges) {
+        if (pe.toNode === cur && !visited.has(pe.fromNode)) queue.push(pe.fromNode);
+      }
+    }
+    const srcId = foundGen ?? fallbackPdb;
+    if (srcId) {
+      edges.push({
+        fromNode: srcId,
+        fromPort: 'structure',
+        toNode: node.id,
+        toPort: 'structure',
+      });
+    }
+  }
+}
+
+function fixedPositionsLocksChain(fixedPositions: string, chain: string): boolean {
+  if (!fixedPositions.trim()) return false;
+  const upperChain = chain.trim().toUpperCase();
+  return fixedPositions
+    .split(/[\s,;]+/)
+    .some((tok) => tok.trim().toUpperCase() === upperChain);
+}
+
 /**
  * Pass 2a: Deterministic biological-feedback auto-repair on a drafted/edited WorkflowGraph.
  * Uses the exact same `validateBioCapabilities()` validator that drives UI banners so the
@@ -1793,7 +2012,28 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
   };
   const notes: string[] = [];
 
-  // 1. Infer curated benchmarkId when pdb-input has a unique curated benchmark pdbId wired to a generator
+  // 0. Normalize evodiff fixedSequence and stray mode/taskMode aliases
+  for (const node of cloned.nodes) {
+    if (node.adapterId === 'evodiff' && typeof node.params.fixedSequence === 'string') {
+      node.params.fixedSequence = sanitizeEvoDiffFixedSequence(node.params.fixedSequence);
+    }
+    const manifest = ADAPTER_REGISTRY[node.adapterId];
+    if (manifest?.modeParamKey === 'taskMode' && node.params.mode !== undefined) {
+      if (node.params.taskMode === undefined || node.params.taskMode === 'unconditional') {
+        const valid = !manifest.modes?.length || manifest.modes.some((m) => m.id === String(node.params.mode));
+        if (valid) node.params.taskMode = node.params.mode;
+      }
+      delete node.params.mode;
+    } else if (manifest?.modeParamKey === 'mode' && node.params.taskMode !== undefined) {
+      if (node.params.mode === undefined || node.params.mode === 'unconditional') {
+        const valid = !manifest.modes?.length || manifest.modes.some((m) => m.id === String(node.params.taskMode));
+        if (valid) node.params.mode = node.params.taskMode;
+      }
+      delete node.params.taskMode;
+    }
+  }
+
+  // 1. Infer curated benchmarkId when pdb-input has a curated benchmark pdbId wired to a generator
   const nodeByIdInit = new Map(cloned.nodes.map((n) => [n.id, n]));
   for (const node of cloned.nodes) {
     if (node.adapterId !== 'pdb-input') continue;
@@ -1814,10 +2054,23 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
       if (matches.length === 1) {
         bm = matches[0];
         node.params.benchmarkId = bm.id;
+      } else if (matches.length > 1) {
+        const wantsBinder = downstreamGens.some((g) => {
+          const m = String(g.params.mode ?? g.params.taskMode ?? '').trim();
+          const lock = String(g.params.lockChain ?? '').trim();
+          const hot = String(g.params.hotspots ?? '').trim();
+          const contig = String(g.params.contig ?? '').trim();
+          return m === 'binder' || Boolean(lock) || Boolean(hot) || contig.includes('/0');
+        });
+        bm = wantsBinder
+          ? (matches.find((b) => b.category === 'binder') ?? matches[0])
+          : (matches.find((b) => b.category === 'motif') ?? matches[0]);
+        if (bm) node.params.benchmarkId = bm.id;
       }
     }
     if (bm) {
-      if (!String(node.params.cropSegments ?? '').trim() && bm.cropSegments) {
+      const curCrop = String(node.params.cropSegments ?? '').trim();
+      if (bm.cropSegments && (!curCrop || (bm.category === 'binder' && isBroadChainCrop(curCrop)))) {
         node.params.cropSegments = bm.cropSegments;
       }
       const cp = bm.conditionParams;
@@ -1841,8 +2094,65 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
               ? adaptBenchmarkContigForLength(cp.contig, reqLen, bm.category)
               : cp.contig;
           }
+        } else if (gen.adapterId === 'genie3') {
+          if (!gen.params.taskMode || gen.params.taskMode === 'unconditional') {
+            gen.params.taskMode = bm.category === 'binder' ? 'binder' : 'motif';
+          }
+          if (bm.category === 'binder' && !gen.params.hotspots && cp.hotspots) {
+            gen.params.hotspots = cp.hotspots;
+          }
+          if (!gen.params.motifSpan && cp.motifSpan) {
+            gen.params.motifSpan = cp.motifSpan;
+          }
+          if (!gen.params.contig && cp.contig) {
+            const reqLen = typeof gen.params.length === 'number' ? gen.params.length : null;
+            gen.params.contig = reqLen
+              ? adaptBenchmarkContigForLength(cp.contig, reqLen, bm.category)
+              : cp.contig;
+          }
+        } else if (gen.adapterId === 'protpardelle') {
+          if (!gen.params.taskMode || gen.params.taskMode === 'unconditional') {
+            gen.params.taskMode = 'motif';
+          }
+          if (!gen.params.motifSelection && cp.motifSpan) {
+            gen.params.motifSelection = cp.motifSpan;
+          }
         }
       }
+    }
+  }
+
+  // 1b. Default/repair AntiFold targetChain -> 'H' for antibody CDR complexes (e.g. 6XEY)
+  // while preserving 1N8Z/1MEL auto-detection and structures lacking chain H or locking H.
+  for (const node of cloned.nodes) {
+    if (node.adapterId !== 'antifold-esmif1') continue;
+    if (String(node.params.variant ?? 'antifold') !== 'antifold') continue;
+    const structEdge = cloned.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
+    const src = structEdge ? nodeByIdInit.get(structEdge.fromNode) : undefined;
+    if (!src || src.adapterId !== 'pdb-input') continue;
+    const pdbId = String(src.params.pdbId ?? '').trim().toUpperCase();
+    if (pdbId === '1N8Z' || pdbId === '1MEL') continue;
+    const fixedPositions = String(node.params.fixedPositions ?? '').trim();
+    if (fixedPositionsLocksChain(fixedPositions, 'H')) continue;
+    const curTarget = String(node.params.targetChain ?? '').trim().toUpperCase();
+    if (curTarget && curTarget !== 'A') continue;
+
+    const pdbText = String(src.params.pdbText ?? '').trim();
+    if (pdbText) {
+      try {
+        const parsed = parseStructureText(pdbText);
+        if (parsed.nResidues >= 3 && !parsed.chainIds.some((c) => c.toUpperCase() === 'H')) {
+          continue;
+        }
+      } catch {
+        /* ignore unparseable stub */
+      }
+    }
+    const regions = String(node.params.regions ?? '').trim();
+    const isKnownAntibodyWithH = pdbId === '6XEY' || pdbId === '6W41' || pdbId === '1IGT';
+    const hasCdrCue = /\bcdr\b|\bcdr\d/i.test(regions) && !pdbId;
+    if (isKnownAntibodyWithH || hasCdrCue) {
+      node.params.targetChain = 'H';
     }
   }
 
@@ -1939,6 +2249,11 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
           ...(prevParams.numSequences !== undefined ? { numSequences: prevParams.numSequences } : {}),
           ...(prevParams.temperature !== undefined ? { temperature: prevParams.temperature } : {}),
           ...(prevParams.omitAminoAcids ? { omitAminoAcids: prevParams.omitAminoAcids } : {}),
+          ...(prevParams.fixedPositions ? { fixedPositions: prevParams.fixedPositions } : {}),
+          ...(prevParams.unlockInherited !== undefined
+            ? { unlockInherited: prevParams.unlockInherited }
+            : {}),
+          ...(prevParams.seed !== undefined ? { seed: prevParams.seed } : {}),
         };
         notes.push(`Switched ${targetId} to LigandMPNN to preserve upstream ligand/DNA context.`);
         changed = true;
@@ -2031,6 +2346,13 @@ function compileBlockGraphPlan(
     const nextId = makeUniqueIdFactory(existingIds);
     const idRemap = new Map<string, string>();
     const addedNodeIds: string[] = [];
+    const addedNodeIdSet = new Set<string>();
+    const changedPdbSourceIds = new Set<string>();
+    const changedPdbCategory = new Map<
+      string,
+      { prevBm?: BenchmarkTargetMeta; newBm?: BenchmarkTargetMeta }
+    >();
+    const explicitlyPatchedNodeKeys = new Map<string, Set<string>>();
 
     for (const op of (plan.editOps ?? []).slice(0, MAX_BLOCK_GRAPH_EDIT_OPS)) {
       if (op.action === 'add_node') {
@@ -2052,6 +2374,7 @@ function compileBlockGraphPlan(
           params: sanitizeBlockNodeParams(adapterId, op.params ?? undefined),
         });
         addedNodeIds.push(finalId);
+        addedNodeIdSet.add(finalId);
       } else if (op.action === 'add_edge') {
         const fromId = idRemap.get(op.fromId ?? '') ?? op.fromId ?? '';
         const toId = idRemap.get(op.toId ?? '') ?? op.toId ?? '';
@@ -2091,11 +2414,166 @@ function compileBlockGraphPlan(
         const targetId = idRemap.get(op.nodeId ?? '') ?? op.nodeId ?? '';
         const target = nodes.find((n) => n.id === targetId);
         if (!target || !op.params) continue;
-        const patch = sanitizeBlockNodeParams(target.adapterId, {
-          ...target.params,
-          ...op.params,
+        const sanitizedPatch = sanitizeRawBlockParamEntries(target.adapterId, op.params, {
+          preserveUiTrackingKeys: false,
+          isPatch: true,
         });
-        target.params = patch;
+        let patchedSet = explicitlyPatchedNodeKeys.get(target.id);
+        if (!patchedSet) {
+          patchedSet = new Set<string>();
+          explicitlyPatchedNodeKeys.set(target.id, patchedSet);
+        }
+        for (const k of Object.keys(sanitizedPatch)) patchedSet.add(k);
+
+        const merged: Record<string, unknown> = {
+          ...target.params,
+          ...sanitizedPatch,
+        };
+        if (target.adapterId === 'pdb-input') {
+          const prevMode = String(target.params.mode ?? '');
+          const prevPdbId = String(target.params.pdbId ?? '').trim().toUpperCase();
+          const prevBmId =
+            typeof target.params.benchmarkId === 'string' ? target.params.benchmarkId.trim() : '';
+          const prevBm = prevBmId ? getBenchmarkById(prevBmId) : undefined;
+
+          const hasExplicitMode = Object.hasOwn(sanitizedPatch, 'mode');
+          const explicitMode = hasExplicitMode ? String(sanitizedPatch.mode) : null;
+          const hasExplicitPdbId = Object.hasOwn(sanitizedPatch, 'pdbId');
+          const hasExplicitBmId = Object.hasOwn(sanitizedPatch, 'benchmarkId');
+          const explicitBmId = hasExplicitBmId ? String(sanitizedPatch.benchmarkId ?? '').trim() : '';
+          const explicitBm = explicitBmId ? getBenchmarkById(explicitBmId) : undefined;
+          const hasExplicitCrop = Object.hasOwn(sanitizedPatch, 'cropSegments');
+          const hasExplicitFilename = Object.hasOwn(sanitizedPatch, 'filename');
+
+          let structureChanged = false;
+
+          if (explicitBm) {
+            const bmPdbUpper = explicitBm.pdbId.trim().toUpperCase();
+            const bmChanged = explicitBm.id !== prevBmId || prevPdbId !== bmPdbUpper;
+            const leavingCustom = prevMode === 'custom';
+            merged.mode = 'pdb-id';
+            merged.pdbId = explicitBm.pdbId;
+            if (prevPdbId !== bmPdbUpper || leavingCustom) {
+              delete merged.pdbText;
+              delete merged.fetchedPdbId;
+              if (!hasExplicitFilename) delete merged.filename;
+              structureChanged = true;
+            }
+            if (bmChanged || leavingCustom) {
+              if (!hasExplicitCrop) {
+                merged.cropSegments = explicitBm.cropSegments ?? '';
+              }
+              structureChanged = true;
+            } else if (
+              explicitBm.cropSegments &&
+              !hasExplicitCrop &&
+              (!merged.cropSegments ||
+                (explicitBm.category === 'binder' && isBroadChainCrop(merged.cropSegments)))
+            ) {
+              merged.cropSegments = explicitBm.cropSegments;
+            }
+            if (bmChanged) {
+              changedPdbCategory.set(target.id, { prevBm, newBm: explicitBm });
+            }
+          } else {
+            if (!explicitMode && hasExplicitPdbId) {
+              merged.mode = merged.pdbId && merged.pdbId !== 'demo' ? 'pdb-id' : 'demo-bundle';
+            }
+            const nextMode = String(merged.mode ?? '');
+            const nextPdbIdUpper = String(merged.pdbId ?? '').trim().toUpperCase();
+            const leavingCustom = prevMode === 'custom' && nextMode !== 'custom';
+            const switchingToDemo = nextMode === 'demo-bundle' && prevMode !== 'demo-bundle';
+            const pdbIdChanged =
+              hasExplicitPdbId && (nextPdbIdUpper !== prevPdbId || leavingCustom);
+
+            if (switchingToDemo) {
+              delete merged.pdbText;
+              delete merged.fetchedPdbId;
+              if (!hasExplicitFilename) delete merged.filename;
+              if (!hasExplicitBmId) delete merged.benchmarkId;
+              if (!hasExplicitCrop) delete merged.cropSegments;
+              if (!hasExplicitPdbId) delete merged.pdbId;
+              structureChanged = true;
+            } else if (pdbIdChanged || leavingCustom) {
+              delete merged.pdbText;
+              delete merged.fetchedPdbId;
+              if ((leavingCustom || nextPdbIdUpper !== prevPdbId) && !hasExplicitFilename) {
+                delete merged.filename;
+              }
+              if (
+                !hasExplicitBmId &&
+                prevBmId &&
+                (!prevBm || prevBm.pdbId.toUpperCase() !== nextPdbIdUpper || nextPdbIdUpper !== prevPdbId)
+              ) {
+                delete merged.benchmarkId;
+              }
+              if (!hasExplicitCrop && (nextPdbIdUpper !== prevPdbId || leavingCustom)) {
+                delete merged.cropSegments;
+              }
+              if (nextPdbIdUpper) {
+                const matches = BENCHMARK_TARGETS.filter((b) => b.pdbId === nextPdbIdUpper);
+                if (matches.length === 1) {
+                  changedPdbCategory.set(target.id, { prevBm, newBm: matches[0] });
+                }
+              }
+              structureChanged = true;
+            }
+          }
+
+          if (structureChanged) {
+            changedPdbSourceIds.add(target.id);
+          }
+        }
+        target.params = merged;
+      }
+    }
+
+    // Clear stale residue/coordinate conditioning on pre-existing downstream generators
+    // whose upstream pdb-input switched structure or benchmark in editOps.
+    if (changedPdbSourceIds.size > 0) {
+      const STALE_GEN_COORD_KEYS = [
+        'motifSpan',
+        'hotspots',
+        'contig',
+        'lockChain',
+        'unindexedMotif',
+        'motifSelection',
+      ];
+      for (const edge of edges) {
+        if (!changedPdbSourceIds.has(edge.fromNode)) continue;
+        const downstream = nodes.find((n) => n.id === edge.toNode);
+        if (
+          !downstream ||
+          addedNodeIdSet.has(downstream.id) ||
+          !PASS2_GENERATOR_ADAPTERS.has(downstream.adapterId)
+        ) {
+          continue;
+        }
+        const patchedKeys = explicitlyPatchedNodeKeys.get(downstream.id);
+        for (const k of STALE_GEN_COORD_KEYS) {
+          if (!patchedKeys?.has(k)) {
+            delete downstream.params[k];
+          }
+        }
+        const catChange = changedPdbCategory.get(edge.fromNode);
+        if (catChange?.newBm) {
+          const manifest = ADAPTER_REGISTRY[downstream.adapterId];
+          const modeKey = manifest?.modeParamKey;
+          if (modeKey && !patchedKeys?.has(modeKey)) {
+            const curMode = String(downstream.params[modeKey] ?? '').trim();
+            const shouldAlignMode = catChange.prevBm
+              ? catChange.prevBm.category !== catChange.newBm.category
+              : !curMode || curMode === 'unconditional' || curMode === 'motif' || curMode === 'binder';
+            if (shouldAlignMode) {
+              const nextCatMode = catChange.newBm.category === 'binder' ? 'binder' : 'motif';
+              const validMode =
+                !manifest?.modes?.length || manifest.modes.some((m) => m.id === nextCatMode);
+              if (validMode) {
+                downstream.params[modeKey] = nextCatMode;
+              }
+            }
+          }
+        }
       }
     }
 
@@ -2122,6 +2600,8 @@ function compileBlockGraphPlan(
       }
     }
 
+    wireMissingScorerStructureEdges(nodes, edges);
+
     const nextGraphRaw: WorkflowGraph = {
       id: currentGraph.id,
       name: currentGraph.name,
@@ -2138,7 +2618,7 @@ function compileBlockGraphPlan(
     return {
       graph: autoLayoutGraph(nextGraph),
       notes,
-      unsupported,
+      unsupported: filterUnsupportedItems(unsupported, nextGraph.nodes),
       isIncrementalEdit: true,
       addedNodeCount: addedNodeIds.length,
     };
@@ -2148,6 +2628,7 @@ function compileBlockGraphPlan(
   const rawNodes = (plan.nodes ?? []).slice(0, MAX_BLOCK_GRAPH_NODES);
   const nodes: WorkflowNode[] = [];
   const seenIds = new Set<string>();
+  const explicitFamilyNodeIds = new Set<string>();
   for (const spec of rawNodes) {
     if (!Object.hasOwn(ADAPTER_REGISTRY, spec.adapter)) continue;
     const rawId = spec.id.trim();
@@ -2158,6 +2639,14 @@ function compileBlockGraphPlan(
     let n = 2;
     while (seenIds.has(id)) id = `${id}_${n++}`;
     seenIds.add(id);
+    if (
+      spec.adapter === 'web-protein-mpnn' &&
+      spec.params &&
+      typeof spec.params.family === 'string' &&
+      spec.params.family.trim().length > 0
+    ) {
+      explicitFamilyNodeIds.add(id);
+    }
     nodes.push({
       id,
       adapterId: spec.adapter,
@@ -2235,51 +2724,21 @@ function compileBlockGraphPlan(
   for (const e of edges) {
     const fn = nodeById.get(e.fromNode);
     const tn = nodeById.get(e.toNode);
-    if (fn && CA_ONLY_GENS.has(fn.adapterId) && tn?.adapterId === 'web-protein-mpnn' && !tn.params.family) {
+    if (
+      fn &&
+      CA_ONLY_GENS.has(fn.adapterId) &&
+      tn?.adapterId === 'web-protein-mpnn' &&
+      !explicitFamilyNodeIds.has(tn.id)
+    ) {
       tn.params.family = 'ca';
+      if (!tn.label || tn.label === 'ProteinMPNN' || tn.label === 'SolubleMPNN') {
+        tn.label = 'Cα-ProteinMPNN';
+      }
     }
   }
 
   // Ensure every designability-scorer has its structure input wired from nearest upstream generator/pdb
-  for (const node of nodes) {
-    if (node.adapterId !== 'designability-scorer') continue;
-    const hasStruct = edges.some((e) => e.toNode === node.id && e.toPort === 'structure');
-    if (hasStruct) continue;
-    // BFS backward from node.id
-    const visited = new Set<string>();
-    const queue = edges.filter((e) => e.toNode === node.id).map((e) => e.fromNode);
-    let fallbackPdb: string | null = null;
-    let foundGen: string | null = null;
-    while (queue.length > 0) {
-      const cur = queue.shift()!;
-      if (visited.has(cur)) continue;
-      visited.add(cur);
-      const cn = nodeById.get(cur);
-      if (cn) {
-        if (
-          cn.adapterId === 'rfd4-proteina' ||
-          cn.adapterId === 'genie3' ||
-          cn.adapterId === 'protpardelle'
-        ) {
-          foundGen = cur;
-          break;
-        }
-        if (cn.adapterId === 'pdb-input' && !fallbackPdb) fallbackPdb = cur;
-      }
-      for (const pe of edges) {
-        if (pe.toNode === cur && !visited.has(pe.fromNode)) queue.push(pe.fromNode);
-      }
-    }
-    const srcId = foundGen ?? fallbackPdb;
-    if (srcId) {
-      edges.push({
-        fromNode: srcId,
-        fromPort: 'structure',
-        toNode: node.id,
-        toPort: 'structure',
-      });
-    }
-  }
+  wireMissingScorerStructureEdges(nodes, edges);
 
   const rawGraph: WorkflowGraph = {
     id: `ai-plan-${stamp}`,
@@ -2297,7 +2756,7 @@ function compileBlockGraphPlan(
   return {
     graph: autoLayoutGraph(graph),
     notes,
-    unsupported,
+    unsupported: filterUnsupportedItems(unsupported, graph.nodes),
     isIncrementalEdit: false,
     addedNodeCount: graph.nodes.length,
   };
@@ -2324,13 +2783,13 @@ export function compileWorkflowPlanToGraph(
     });
   }
 
-  const unsupported = Array.isArray(plan.unsupported)
+  const rawUnsupported = Array.isArray(plan.unsupported)
     ? plan.unsupported
         .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
-        .slice(0, MAX_UNSUPPORTED_ITEMS)
         .map((s) => sanitizeDisplayText(s, '', 60))
         .filter(Boolean)
     : [];
+  const unsupported = filterUnsupportedItems(rawUnsupported).slice(0, MAX_UNSUPPORTED_ITEMS);
 
   if (plan.kind === 'block_graph') {
     return compileBlockGraphPlan(plan, currentGraph, unsupported, opts);
@@ -3515,8 +3974,10 @@ function extractPromptFoldModels(prompt: string): FoldOracleId[] {
 
 function extractPromptCdrRegions(prompt: string): string | null {
   const found: string[] = [];
-  for (const r of ['CDR1', 'CDR2', 'CDR3']) {
-    if (new RegExp(`\\b${r}\\b`, 'i').test(prompt)) found.push(r);
+  for (const num of ['1', '2', '3'] as const) {
+    if (new RegExp(`\\bcdr[\\s-]*(?:[hl][\\s-]*)?${num}\\b`, 'i').test(prompt)) {
+      found.push(`CDR${num}`);
+    }
   }
   if (found.length > 0) return found.join(' ');
   if (/\bcdrs?\b/i.test(prompt)) return 'CDR1 CDR2 CDR3';
@@ -3763,6 +4224,237 @@ export function parseDeterministicEditOperations(
   };
 }
 
+function extractPromptPartialRedesignSpan(prompt: string): {
+  chain: string;
+  start: number;
+  end: number;
+} | null {
+  const explicitChainMatch = /\bchain\s+([A-Za-z])\b/i.exec(prompt);
+  const firstNMatch =
+    /(?:redesign|remodel|mutate|replace|regenerate)\b[\s\S]{0,60}?\bfirst\s+(\d{1,3})\s+residues?\b/i.exec(
+      prompt,
+    );
+  if (firstNMatch) {
+    const end = Number(firstNMatch[1]);
+    if (Number.isInteger(end) && end >= 1 && end <= 500) {
+      return {
+        chain: (explicitChainMatch?.[1] ?? 'A').toUpperCase(),
+        start: 1,
+        end,
+      };
+    }
+  }
+  const rangeMatch =
+    /(?:redesign|remodel|mutate|replace|regenerate)\b[\s\S]{0,60}?\bresidues?\s+([A-Za-z])?\s*(\d{1,4})\s*[-–]\s*(\d{1,4})\b/i.exec(
+      prompt,
+    );
+  if (rangeMatch) {
+    const start = Number(rangeMatch[2]);
+    const end = Number(rangeMatch[3]);
+    if (Number.isInteger(start) && Number.isInteger(end) && start >= 1 && end >= start) {
+      return {
+        chain: (rangeMatch[1] ?? explicitChainMatch?.[1] ?? 'A').toUpperCase(),
+        start,
+        end,
+      };
+    }
+  }
+  return null;
+}
+
+function extractPromptAntibodyChainInfo(prompt: string): {
+  explicitChain: string | null;
+  inferredHlChain: 'H' | 'L' | null;
+} {
+  const chainMatch = /\bchain\s+([A-Za-z])\b/i.exec(prompt);
+  const explicitChain = chainMatch ? chainMatch[1].toUpperCase() : null;
+  const cdrChainMatch = /\bcdr[\s-]*([hl])\d?\b/i.exec(prompt);
+  let inferredHlChain: 'H' | 'L' | null = null;
+  if (cdrChainMatch) {
+    inferredHlChain = cdrChainMatch[1].toUpperCase() as 'H' | 'L';
+  } else if (/\blight\s+chain\b/i.test(prompt)) {
+    inferredHlChain = 'L';
+  } else if (/\bheavy\s+chain\b/i.test(prompt)) {
+    inferredHlChain = 'H';
+  }
+  return { explicitChain, inferredHlChain };
+}
+
+function reconcileBlockGraphPlan(
+  plan: BlockGraphWorkflowPlan,
+  prompt: string,
+): BlockGraphWorkflowPlan {
+  if (plan.mode === 'edit' || !Array.isArray(plan.nodes)) return plan;
+  const trimmed = prompt.trim();
+  const clonedNodes = plan.nodes.map((n) => ({
+    ...n,
+    params: n.params ? { ...n.params } : undefined,
+  }));
+  const promptPdbId = extractPromptPdbId(trimmed);
+  const hasAntibodyIntent =
+    /\b(?:antibody|antibodies|fab|scfv|cdr\d*|imgt|kabat|antifold)\b/i.test(trimmed) ||
+    promptPdbId === '6XEY' ||
+    promptPdbId === '6W41' ||
+    promptPdbId === '1IGT';
+  const isExcludedAutoChain = /\b(?:1N8Z|1MEL|nanobody|nanobodies|vhh)\b/i.test(trimmed);
+
+  // 1. Partial redesign (e.g. 1LVM "redesign first 10 residues of chain A")
+  const partialSpan = extractPromptPartialRedesignSpan(trimmed);
+  if (partialSpan) {
+    const { chain, start, end } = partialSpan;
+    const complement =
+      start <= 1
+        ? `${chain}${end + 1}-9999`
+        : `${chain}1-${start - 1}, ${chain}${end + 1}-9999`;
+    const invertedSpanRe = new RegExp(`^(?:${chain})?${start}\\s*-\\s*${end}$`, 'i');
+    for (const n of clonedNodes) {
+      if (!n.params) n.params = {};
+      if (n.adapter === 'pdb-input') {
+        const crop = String(n.params.cropSegments ?? '').trim();
+        if (crop && invertedSpanRe.test(crop)) {
+          n.params.cropSegments = chain;
+        }
+      } else if (n.adapter === 'rfd4-proteina' || n.adapter === 'genie3') {
+        const ms = String(n.params.motifSpan ?? '').trim();
+        if (ms && invertedSpanRe.test(ms)) {
+          delete n.params.motifSpan;
+        }
+      } else if (
+        n.adapter === 'web-protein-mpnn' ||
+        n.adapter === 'ligandmpnn' ||
+        n.adapter === 'lasermpnn' ||
+        n.adapter === 'antifold-esmif1'
+      ) {
+        const curFixed = String(n.params.fixedPositions ?? '').trim();
+        if (!curFixed || invertedSpanRe.test(curFixed)) {
+          n.params.fixedPositions = complement;
+        }
+      }
+    }
+  }
+
+  // 2. Antibody AntiFold targetChain & CDR regions (e.g. 6XEY vs 1N8Z/1MEL)
+  const { explicitChain, inferredHlChain } = extractPromptAntibodyChainInfo(trimmed);
+  const cdrRegions = extractPromptCdrRegions(trimmed);
+  const pdbNodes = clonedNodes.filter((n) => n.adapter === 'pdb-input');
+  const hasExcludedPdb = pdbNodes.some((n) => {
+    const pid = String(n.params?.pdbId ?? '').trim().toUpperCase();
+    return pid === '1N8Z' || pid === '1MEL';
+  });
+  const isExcludedAntibodyAuto = isExcludedAutoChain || hasExcludedPdb;
+  for (const n of clonedNodes) {
+    if (n.adapter !== 'antifold-esmif1') continue;
+    if (!n.params) n.params = {};
+    const rawVar = n.params.variant != null ? String(n.params.variant).trim().toLowerCase() : '';
+    const isExplicitEsmif =
+      rawVar === 'esmif1' ||
+      (rawVar !== 'antifold' &&
+        (String(n.params.mode ?? '').trim().toLowerCase().includes('esm') ||
+          String(n.params.model ?? '').trim().toLowerCase().includes('esm')));
+    if (isExplicitEsmif) continue;
+    const curRegions = String(n.params.regions ?? '').trim();
+    const isDefaultAllCdrs =
+      curRegions.toUpperCase().replace(/[\s,]+/g, ' ').trim() === 'CDR1 CDR2 CDR3';
+    if (
+      cdrRegions &&
+      (!curRegions ||
+        (isDefaultAllCdrs && cdrRegions !== 'CDR1 CDR2 CDR3') ||
+        cdrRegions.length > curRegions.length)
+    ) {
+      n.params.regions = cdrRegions;
+    }
+    const fixedPos = String(n.params.fixedPositions ?? '').trim();
+    const curTarget = String(n.params.targetChain ?? '').trim().toUpperCase();
+    if (explicitChain) {
+      if (!curTarget || curTarget !== explicitChain) {
+        n.params.targetChain = explicitChain;
+      }
+    } else if (isExcludedAntibodyAuto) {
+      if (curTarget === 'A' || curTarget === 'H') {
+        n.params.targetChain = '';
+      }
+    } else if (inferredHlChain) {
+      if (
+        !fixedPositionsLocksChain(fixedPos, inferredHlChain) &&
+        (!curTarget || curTarget === 'A')
+      ) {
+        n.params.targetChain = inferredHlChain;
+      }
+    } else if (hasAntibodyIntent && !fixedPositionsLocksChain(fixedPos, 'H')) {
+      if (!curTarget || curTarget === 'A') {
+        n.params.targetChain = 'H';
+      }
+    }
+  }
+
+  // 3. 1YCR prompt-guided benchmark disambiguation
+  const ycrPdb = pdbNodes.find(
+    (n) =>
+      (String(n.params?.pdbId ?? '').trim().toUpperCase() === '1YCR' || promptPdbId === '1YCR') &&
+      !String(n.params?.benchmarkId ?? '').trim(),
+  );
+  if (ycrPdb) {
+    if (!ycrPdb.params) ycrPdb.params = {};
+    const explicitBinderIntent =
+      /\b(?:binder|binders|hotspot|hotspots|ppi|interface)\b/i.test(trimmed) ||
+      /\bdesign\b[\s\S]{0,40}\bbind(?:er|ing)?\b/i.test(trimmed) ||
+      /\bbind\s+(?:to|against)\s+mdm2\b/i.test(trimmed) ||
+      /\bmdm2\s+binder\b/i.test(trimmed);
+    const explicitMotifIntent =
+      /\b(?:motif|scaffold|scaffolding|p53\s+helix|helix\s+motif)\b/i.test(trimmed);
+    const hasWeakBinderCue = /\b(?:mdm2|bind)\b/i.test(trimmed);
+    const hasWeakMotifCue = /\b(?:p53|helix|peptide)\b/i.test(trimmed);
+    const downstreamHasBinder = clonedNodes.some((n) => {
+      if (!PASS2_GENERATOR_ADAPTERS.has(n.adapter)) return false;
+      const m = String(n.params?.mode ?? n.params?.taskMode ?? '').trim();
+      const lock = String(n.params?.lockChain ?? '').trim();
+      const hot = String(n.params?.hotspots ?? '').trim();
+      const contig = String(n.params?.contig ?? '').trim();
+      return m === 'binder' || Boolean(lock) || Boolean(hot) || contig.includes('/0');
+    });
+    const downstreamHasMotif = clonedNodes.some((n) => {
+      if (!PASS2_GENERATOR_ADAPTERS.has(n.adapter)) return false;
+      const m = String(n.params?.mode ?? n.params?.taskMode ?? '').trim();
+      return m === 'motif';
+    });
+
+    let chooseBinder: boolean | null = null;
+    if (explicitBinderIntent && !explicitMotifIntent) chooseBinder = true;
+    else if (explicitMotifIntent && !explicitBinderIntent) chooseBinder = false;
+    else if (downstreamHasBinder && !downstreamHasMotif) chooseBinder = true;
+    else if (downstreamHasMotif && !downstreamHasBinder) chooseBinder = false;
+    else if (explicitBinderIntent) chooseBinder = true;
+    else if (explicitMotifIntent) chooseBinder = false;
+    else if (hasWeakBinderCue && !hasWeakMotifCue) chooseBinder = true;
+    else if (hasWeakMotifCue) chooseBinder = false;
+
+    if (chooseBinder !== null) {
+      ycrPdb.params.benchmarkId = chooseBinder ? 'mdm2_1ycr' : 'rfd_1ycr_p53';
+      for (const n of clonedNodes) {
+        if (!n.params) n.params = {};
+        if (n.adapter === 'rfd4-proteina') {
+          if (!n.params.mode || n.params.mode === 'unconditional') {
+            n.params.mode = chooseBinder ? 'binder' : 'motif';
+          }
+        } else if (n.adapter === 'genie3') {
+          if (!n.params.taskMode || n.params.taskMode === 'unconditional') {
+            n.params.taskMode = chooseBinder ? 'binder' : 'motif';
+          }
+        } else if (n.adapter === 'protpardelle' && !chooseBinder) {
+          if (!n.params.taskMode || n.params.taskMode === 'unconditional') {
+            n.params.taskMode = 'motif';
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    ...plan,
+    nodes: clonedNodes,
+  };
+}
+
 /**
  * Reconcile a planner response against explicit user prompt directives (and active canvas)
  * so stale/incomplete backend responses for Q1–Q9 are repaired cleanly before compilation,
@@ -3773,7 +4465,10 @@ export function reconcilePlannedWorkflow(
   prompt: string,
   currentGraph?: WorkflowGraph,
 ): WorkflowPlan {
-  if (plan.kind === 'unsupported' || plan.kind === 'block_graph') return plan;
+  if (plan.kind === 'unsupported') return plan;
+  if (plan.kind === 'block_graph') {
+    return reconcileBlockGraphPlan(plan, prompt);
+  }
   const trimmed = prompt.trim();
   const hasCurrentGraph = Boolean(currentGraph && currentGraph.nodes.length > 0);
   const promptPdbId = extractPromptPdbId(trimmed);
@@ -4175,8 +4870,41 @@ export function reconcilePlannedWorkflow(
     if (/\bdyna[\s-]*1\b/i.test(trimmed)) next.dynamicsScan = true;
     if (next.tasks?.includes('antifold')) {
       const cdrRegions = extractPromptCdrRegions(trimmed);
-      if (cdrRegions && (!next.regions || cdrRegions.length > next.regions.length)) {
+      const curRegions = String(next.regions ?? '').trim();
+      const isDefaultAllCdrs =
+        curRegions.toUpperCase().replace(/[\s,]+/g, ' ').trim() === 'CDR1 CDR2 CDR3';
+      if (
+        cdrRegions &&
+        (!curRegions ||
+          (isDefaultAllCdrs && cdrRegions !== 'CDR1 CDR2 CDR3') ||
+          cdrRegions.length > curRegions.length)
+      ) {
         next.regions = cdrRegions;
+      }
+      const { explicitChain, inferredHlChain } = extractPromptAntibodyChainInfo(trimmed);
+      const pdbUpper = String(next.pdbId ?? promptPdbId ?? '').trim().toUpperCase();
+      const isExcludedPdbOrNb =
+        pdbUpper === '1N8Z' ||
+        pdbUpper === '1MEL' ||
+        /\b(?:1N8Z|1MEL|nanobody|nanobodies|vhh)\b/i.test(trimmed);
+      const curTarget = String(next.targetChain ?? '').trim().toUpperCase();
+      if (explicitChain) {
+        if (!curTarget || curTarget !== explicitChain) {
+          next.targetChain = explicitChain;
+        }
+      } else if (isExcludedPdbOrNb) {
+        if (curTarget === 'A' || curTarget === 'H') {
+          next.targetChain = '';
+        }
+      } else if (inferredHlChain) {
+        if (!curTarget || curTarget === 'A') {
+          next.targetChain = inferredHlChain;
+        }
+      } else if (
+        (hasAntibodyIntent || pdbUpper === '6XEY' || pdbUpper === '6W41' || pdbUpper === '1IGT') &&
+        (!curTarget || curTarget === 'A')
+      ) {
+        next.targetChain = 'H';
       }
     }
     return next;

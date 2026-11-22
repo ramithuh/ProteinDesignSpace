@@ -537,7 +537,7 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
     const g3SolIssues = validateBioCapabilities(g3SolubleGraph);
     const caWarn = g3SolIssues.find((i) => i.code === 'mpnn-ca-only-backbone');
     expect(caWarn).toBeDefined();
-    expect(caWarn!.severity).toBe('warning');
+    expect(caWarn!.severity).toBe('error');
     expect(caWarn!.fix).toEqual({
       label: 'Switch to Cα-ProteinMPNN',
       nodeId: 'mpnn',
@@ -545,11 +545,11 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
       nodeLabel: 'Cα-ProteinMPNN',
     });
 
-    // Applying the fix clears the warning
+    // Applying the fix clears the error
     g3SolubleGraph.nodes[1].params.family = 'ca';
     expect(validateBioCapabilities(g3SolubleGraph).find((i) => i.code === 'mpnn-ca-only-backbone')).toBeUndefined();
 
-    // 4. Cα-only custom PDB -> SolubleMPNN also triggers Switch to Cα-ProteinMPNN warning
+    // 4. Cα-only custom PDB -> SolubleMPNN also triggers blocking Switch to Cα-ProteinMPNN error
     const caOnlyPdb = [
       'ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C  ',
       'ATOM      2  CA  GLY A   2       3.800   0.000   0.000  1.00  0.00           C  ',
@@ -566,7 +566,9 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
       edges: [{ fromNode: 'src', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' }],
     };
     const caPdbIssues = validateBioCapabilities(caPdbGraph);
-    expect(caPdbIssues.find((i) => i.code === 'mpnn-ca-only-backbone')?.fix?.label).toBe('Switch to Cα-ProteinMPNN');
+    const caPdbErr = caPdbIssues.find((i) => i.code === 'mpnn-ca-only-backbone');
+    expect(caPdbErr?.severity).toBe('error');
+    expect(caPdbErr?.fix?.label).toBe('Switch to Cα-ProteinMPNN');
   });
 
   it('Wave-3 MSA preflight recommendations: Target-Only MSA for locked-target binders, MMseqs2 for natural proteins, and warning-free single-seq for de novo monomers', () => {

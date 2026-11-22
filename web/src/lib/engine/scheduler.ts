@@ -212,6 +212,40 @@ export async function materializePdbInputNode(
 }
 
 /**
+ * Derive an optional `SequenceSet` from a materialized `pdb-input` `StructureArtifact`
+ * so `pdb-input` can directly feed sequence-consuming blocks (`localfold-af2`, `evodiff`, `foldflow2`).
+ * Returns `undefined` for non-protein structures (`length <= 0` or empty sequence, e.g. pure DNA).
+ */
+export function deriveSequenceSetFromStructure(art: StructureArtifact): SequenceSet | undefined {
+  const seq = art.sequence.trim().toUpperCase();
+  if (art.length <= 0 || !seq) return undefined;
+  const candidateId = art.label.replace(/\s+\([^)]*\)$/, '').trim() || art.id;
+  const chainLengths =
+    art.chainLengths && art.chainLengths.length > 0 ? [...art.chainLengths] : [seq.length];
+  return {
+    kind: 'SequenceSet',
+    id: `pdb-seq-${art.id}`,
+    parentStructureId: art.id,
+    sourceStructureId: art.id,
+    sourceModelId: art.sourceModelId || 'pdb-input',
+    collectionKind: 'independent-candidates',
+    candidates: [
+      {
+        id: candidateId,
+        key: art.id,
+        sequence: seq,
+        score: null,
+        globalScore: null,
+        sourceModelId: art.sourceModelId || 'pdb-input',
+        sourceStructureId: art.id,
+        sampleIndex: 0,
+        chainLengths,
+      },
+    ],
+  };
+}
+
+/**
  * Pure CPU materializer for a `sequence-input` node.
  * Shared by both ExecutionScheduler and instant live preview (no Run needed).
  */
@@ -633,6 +667,23 @@ export function deserializeCheckpoint(raw: string): SchedulerCheckpoint {
   return parsed as SchedulerCheckpoint;
 }
 
+const COMPARE_DISPLAY_ONLY_PARAM_KEYS = new Set(['layout', 'colorMode', 'alignKabsch']);
+
+function normalizeParamsForComputation(
+  adapterId: string,
+  params: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!params) return {};
+  if (adapterId !== 'structure-compare') return params;
+  const filtered: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (!COMPARE_DISPLAY_ONLY_PARAM_KEYS.has(key)) {
+      filtered[key] = value;
+    }
+  }
+  return filtered;
+}
+
 /**
  * Compute which node IDs in `nextGraph` are invalidated (stale) relative to `prevGraph`
  * after editing upstream node parameters, adapters, or incoming wires.
@@ -675,7 +726,8 @@ export function computeInvalidatedNodeIds(
     const changed =
       !prev ||
       prev.adapterId !== n.adapterId ||
-      canonicalJsonStringify(prev.params ?? {}) !== canonicalJsonStringify(n.params ?? {}) ||
+      canonicalJsonStringify(normalizeParamsForComputation(prev.adapterId, prev.params)) !==
+        canonicalJsonStringify(normalizeParamsForComputation(n.adapterId, n.params)) ||
       prevIncoming.get(n.id) !== nextIncoming.get(n.id);
     if (changed) {
       stale.add(n.id);
@@ -1458,10 +1510,12 @@ export class ExecutionScheduler {
     inputs: Record<string, CanonicalArtifact>,
     onProgress?: (ev: NodeProgressEvent) => void,
     upstreamLineageHint?: string,
+    multiInputs?: Record<string, CanonicalArtifact[]>,
   ): Promise<Record<string, CanonicalArtifact>> {
     if (node.adapterId === 'pdb-input') {
       const art = await materializePdbInputNode(node, onProgress);
-      return { structure: art };
+      const sequences = deriveSequenceSetFromStructure(art);
+      return sequences ? { structure: art, sequences } : { structure: art };
     }
 
     if (node.adapterId === 'sequence-input') {
@@ -1471,8 +1525,11 @@ export class ExecutionScheduler {
 
     if (node.adapterId === 'structure-compare') {
       const ref = inputs.reference as StructureArtifact | undefined;
-      const primary = (inputs.structures as StructureArtifact | undefined) ?? ref;
-      if (!primary || primary.kind !== 'StructureArtifact') {
+      const structList = (
+        multiInputs?.structures ?? (inputs.structures ? [inputs.structures] : [])
+      ).filter((a): a is StructureArtifact => a?.kind === 'StructureArtifact');
+      const primary = structList[0] ?? (ref?.kind === 'StructureArtifact' ? ref : undefined);
+      if (!primary) {
         throw new Error('structure-compare requires at least one upstream StructureArtifact');
       }
       const layout = String(node.params.layout ?? 'overlay');
@@ -1485,7 +1542,39 @@ export class ExecutionScheduler {
         progress: 0.5,
         detail: `Comparing structures (${layout}, ${alignKabsch ? 'Kabsch' : 'raw'}, ${colorMode})...`,
       });
-      return { structure: primary };
+      const seenIds = new Set<string>();
+      const combinedItems: StructureArtifact[] = [];
+      const addItem = (item: StructureArtifact | undefined) => {
+        if (!item || seenIds.has(item.id)) return;
+        seenIds.add(item.id);
+        combinedItems.push(item);
+      };
+      addItem(ref);
+      for (const s of structList) addItem(s);
+
+      if (combinedItems.length <= 1 && !ref) {
+        return { structure: primary };
+      }
+      const keys = combinedItems.map((item, idx) => item.designKey ?? item.id ?? `item-${idx}`);
+      const outputStructure: StructureArtifact = {
+        ...primary,
+        ...(ref && primary.id !== ref.id ? { parentStructureId: ref.id } : {}),
+        ...(combinedItems.length > 1
+          ? {
+              collection: {
+                kind: 'Collection',
+                schema: 'denovo.collection/v1',
+                id: `${primary.id}::compare-${combinedItems.length}`,
+                collectionKind: 'independent-candidates',
+                requestedCount: combinedItems.length,
+                complete: true,
+                items: combinedItems,
+                keys,
+              },
+            }
+          : {}),
+      };
+      return { structure: outputStructure };
     }
 
     if (node.adapterId === 'top-k-filter') {
@@ -2696,6 +2785,7 @@ export class ExecutionScheduler {
 
         // Gather upstream inputs (preserving all upstream IDs on multi-input fan-in ports for cache keys)
         const inputs: Record<string, CanonicalArtifact> = {};
+        const multiInputs: Record<string, CanonicalArtifact[]> = {};
         const inputIds: Record<string, string | string[]> = {};
         let upstreamLineageHint: string | undefined;
         for (const edge of graph.edges) {
@@ -2707,6 +2797,8 @@ export class ExecutionScheduler {
               inputs[edge.toPort] = up;
             }
             if (isMulti) {
+              const prevList = multiInputs[edge.toPort];
+              multiInputs[edge.toPort] = prevList ? [...prevList, up] : [up];
               const prev = inputIds[edge.toPort];
               inputIds[edge.toPort] = Array.isArray(prev) ? [...prev, up.id] : [up.id];
             } else {
@@ -2732,7 +2824,11 @@ export class ExecutionScheduler {
 
         // Content-addressed memoization key (canonicalized key order prevents spurious misses)
         const cacheKey = fnv1a(
-          canonicalJsonStringify({ adapter: node.adapterId, params: node.params, inputIds }),
+          canonicalJsonStringify({
+            adapter: node.adapterId,
+            params: normalizeParamsForComputation(node.adapterId, node.params),
+            inputIds,
+          }),
         );
 
         let nodeOutputs: Record<string, CanonicalArtifact>;
@@ -2766,7 +2862,13 @@ export class ExecutionScheduler {
           try {
             let rawOutputs: unknown;
             if (manifest.runtime === 'cpu-ts') {
-              rawOutputs = await this.runCpuNode(node, inputs, onProgress, upstreamLineageHint);
+              rawOutputs = await this.runCpuNode(
+                node,
+                inputs,
+                onProgress,
+                upstreamLineageHint,
+                multiInputs,
+              );
               elapsedMs = performance.now() - nStart;
             } else {
               // Layer 2 biological capability guard before launching GPU worker / downloading weights
