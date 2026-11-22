@@ -242,4 +242,33 @@ describe('WorkflowPlan deterministic compiler', () => {
       edited.graph.edges.some((e) => e.fromNode === mpnnNode.id && e.toNode === foldNode.id),
     ).toBe(false);
   });
+
+  it('propagates unsupported model notices on partial matches and throws UnsupportedWorkflowError on fully unsupported plans', () => {
+    const partial = compileWorkflowPlanToGraph({
+      kind: 'de_novo',
+      generators: ['genie3'],
+      length: 100,
+      numDesigns: 1,
+      numSequences: 2,
+      topK: null,
+      refold: true,
+      foldModels: ['rosettafold3'],
+      score: true,
+      stabilityScan: false,
+      unsupported: ['Chroma', 'Chai-1'],
+      summary: '100aa de novo: Genie 3 → RoseTTAFold 3 (partial match)',
+    });
+    expect(validateGraph(partial.graph)).toEqual([]);
+    expect(partial.unsupported).toEqual(['Chroma', 'Chai-1']);
+
+    expect(() =>
+      compileWorkflowPlanToGraph({
+        kind: 'unsupported',
+        unsupported: ['BindCraft', 'Chai-1'],
+        reason: "BindCraft and Chai-1 aren't available in denovo.run yet.",
+        suggestions: ['Use RFD4-Proteina or Genie 3'],
+        summary: 'BindCraft and Chai-1 are not in denovo.run',
+      }),
+    ).toThrow(/BindCraft and Chai-1/);
+  });
 });

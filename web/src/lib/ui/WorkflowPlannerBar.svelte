@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import {
     requestWorkflowPlan,
+    UnsupportedWorkflowError,
     type PlannedWorkflowResult,
   } from '$lib/engine/workflow-planner';
   import type { WorkflowGraph } from '$lib/engine/types';
@@ -60,9 +61,16 @@
     return ALL_EXAMPLES.filter((ex) => !ex.requiresExisting || hasNodes).slice(0, 3);
   });
 
+  interface UnsupportedNotice {
+    reason: string;
+    unsupported: string[];
+    suggestions: string[];
+  }
+
   let prompt = $state('');
   let loading = $state(false);
   let errorMsg = $state<string | null>(null);
+  let unsupportedNotice = $state<UnsupportedNotice | null>(null);
   let infoOpen = $state(false);
   let notesExpanded = $state(false);
   let isMultiline = $state(false);
@@ -72,7 +80,12 @@
 
   let trimmedPrompt = $derived(prompt.trim());
   let showExamples = $derived(
-    trimmedPrompt.length === 0 && !loading && !draftPreview && !errorMsg && !infoOpen,
+    trimmedPrompt.length === 0 &&
+      !loading &&
+      !draftPreview &&
+      !errorMsg &&
+      !unsupportedNotice &&
+      !infoOpen,
   );
   let showCharCount = $derived(prompt.length > 220 && !draftPreview);
 
@@ -112,6 +125,12 @@
   export function handleEscape(): boolean {
     if (infoOpen) {
       infoOpen = false;
+      return true;
+    }
+    if (unsupportedNotice || errorMsg) {
+      unsupportedNotice = null;
+      errorMsg = null;
+      focusInput();
       return true;
     }
     if (loading) {
@@ -164,6 +183,7 @@
     abortCtrl = new AbortController();
     loading = true;
     errorMsg = null;
+    unsupportedNotice = null;
     infoOpen = false;
     notesExpanded = false;
     onDraftChange(null);
@@ -176,7 +196,15 @@
       onDraftChange(planned);
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') return;
-      errorMsg = err instanceof Error ? err.message : 'Failed to plan workflow.';
+      if (err instanceof UnsupportedWorkflowError) {
+        unsupportedNotice = {
+          reason: err.message,
+          unsupported: err.unsupported,
+          suggestions: err.suggestions,
+        };
+      } else {
+        errorMsg = err instanceof Error ? err.message : 'Failed to plan workflow.';
+      }
       focusInput();
     } finally {
       loading = false;
@@ -217,7 +245,7 @@
 </script>
 
 <div class="planner-bar-root" class:is-multiline={isMultiline} class:is-review={Boolean(draftPreview)}>
-  <!-- Floating strip ABOVE the dock bar: error OR starter chips OR compiler notes -->
+  <!-- Floating strip ABOVE the dock bar: error OR unsupported notice OR starter chips OR partial-match/compiler notes -->
   {#if errorMsg}
     <div class="above-strip err-pill" role="alert">
       <span class="err-msg">{errorMsg}</span>
@@ -232,6 +260,37 @@
       >
         ×
       </button>
+    </div>
+  {:else if unsupportedNotice}
+    <div class="above-strip warn-card" role="status">
+      <div class="warn-head">
+        <span class="warn-icon" aria-hidden="true">⚠</span>
+        <span class="warn-title">
+          {#if unsupportedNotice.unsupported.length > 0}
+            Not in denovo.run: <strong>{unsupportedNotice.unsupported.join(', ')}</strong>
+          {:else}
+            Not supported in denovo.run yet
+          {/if}
+        </span>
+        <button
+          type="button"
+          class="strip-x"
+          onclick={() => {
+            unsupportedNotice = null;
+            focusInput();
+          }}
+          aria-label="Dismiss notice"
+        >
+          ×
+        </button>
+      </div>
+      <div class="warn-reason">{unsupportedNotice.reason}</div>
+      {#if unsupportedNotice.suggestions.length > 0}
+        <div class="warn-suggestions">
+          <span class="warn-try">Available instead:</span>
+          {unsupportedNotice.suggestions.join(' · ')}
+        </div>
+      {/if}
     </div>
   {:else if showExamples}
     <div class="above-strip chip-row" role="list" aria-label="Example workflow prompts">
@@ -248,22 +307,39 @@
         </button>
       {/each}
     </div>
-  {:else if draftPreview && draftPreview.notes.length > 0}
-    <div class="above-strip note-pill">
-      <button
-        type="button"
-        class="note-toggle"
-        onclick={() => (notesExpanded = !notesExpanded)}
-        title={draftPreview.notes.join(' · ')}
-      >
-        <span class="note-spark" aria-hidden="true">✦</span>
-        <span class="note-text" class:expanded={notesExpanded}>
-          {notesExpanded ? draftPreview.notes.join(' · ') : draftPreview.notes[0]}
-        </span>
-        {#if draftPreview.notes.length > 1}
-          <span class="note-more">+{draftPreview.notes.length - 1}</span>
-        {/if}
-      </button>
+  {:else if draftPreview && (draftPreview.unsupported.length > 0 || draftPreview.notes.length > 0)}
+    <div class="above-strip note-stack">
+      {#if draftPreview.unsupported.length > 0}
+        <div
+          class="warn-pill"
+          role="status"
+          title={`Unavailable models omitted: ${draftPreview.unsupported.join(', ')}`}
+        >
+          <span class="warn-icon" aria-hidden="true">⚠</span>
+          <span>
+            Not in denovo.run: <strong>{draftPreview.unsupported.join(', ')}</strong> — drafted with
+            available models
+          </span>
+        </div>
+      {/if}
+      {#if draftPreview.notes.length > 0}
+        <div class="note-pill">
+          <button
+            type="button"
+            class="note-toggle"
+            onclick={() => (notesExpanded = !notesExpanded)}
+            title={draftPreview.notes.join(' · ')}
+          >
+            <span class="note-spark" aria-hidden="true">✦</span>
+            <span class="note-text" class:expanded={notesExpanded}>
+              {notesExpanded ? draftPreview.notes.join(' · ') : draftPreview.notes[0]}
+            </span>
+            {#if draftPreview.notes.length > 1}
+              <span class="note-more">+{draftPreview.notes.length - 1}</span>
+            {/if}
+          </button>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -276,6 +352,14 @@
             ? `+${draftPreview.addedNodeCount} block${draftPreview.addedNodeCount === 1 ? '' : 's'}`
             : `New · ${draftPreview.graph.nodes.length} blocks`}
         </span>
+        {#if draftPreview.unsupported.length > 0}
+          <span
+            class="partial-pill"
+            title={`Omitted unavailable models: ${draftPreview.unsupported.join(', ')}`}
+          >
+            Partial
+          </span>
+        {/if}
         <span class="review-summary" title={draftPreview.plan.summary}>
           {draftPreview.plan.summary}
         </span>
@@ -522,6 +606,81 @@
   }
   .strip-x:hover {
     opacity: 1;
+  }
+
+  .note-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  .warn-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--warn-border);
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    font-size: 11.5px;
+    line-height: 1.35;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+    white-space: normal;
+    text-align: center;
+    max-width: min(600px, calc(100vw - 28px));
+  }
+  .warn-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 9px 13px;
+    border-radius: 12px;
+    border: 1px solid var(--warn-border);
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    font-size: 11.5px;
+    line-height: 1.4;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    width: min(540px, calc(100vw - 28px));
+    white-space: normal;
+  }
+  .warn-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .warn-title {
+    flex: 1;
+    font-weight: 600;
+  }
+  .warn-icon {
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .warn-reason {
+    opacity: 0.92;
+  }
+  .warn-suggestions {
+    font-size: 11px;
+    opacity: 0.88;
+    border-top: 1px solid color-mix(in srgb, var(--warn-border) 45%, transparent);
+    padding-top: 4px;
+    margin-top: 1px;
+  }
+  .warn-try {
+    font-weight: 600;
+  }
+  .partial-pill {
+    font-size: 10.5px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-text);
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
   .note-pill {

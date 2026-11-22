@@ -19,6 +19,8 @@ export type FoldOracleId =
   | 'opendde'
   | 'mol1'
   | 'intellifold2'
+  | 'ef2-fast-300m'
+  | 'ef2-fast-600m'
   | 'af3';
 
 export type PdbTaskId =
@@ -60,6 +62,7 @@ export interface DeNovoWorkflowPlan {
   foldModels: FoldOracleId[];
   score: boolean;
   stabilityScan: boolean;
+  unsupported?: string[];
   summary: string;
 }
 
@@ -80,6 +83,7 @@ export interface ConditionedDesignWorkflowPlan {
   foldModels: FoldOracleId[];
   score: boolean;
   stabilityScan: boolean;
+  unsupported?: string[];
   summary: string;
 }
 
@@ -96,12 +100,22 @@ export interface PdbWorkflowPlan {
   refold: boolean;
   foldModels: FoldOracleId[];
   stabilityScan: boolean;
+  unsupported?: string[];
   summary: string;
 }
 
 export interface EditCurrentWorkflowPlan {
   kind: 'edit_current';
   operations: GraphEditOperation[];
+  unsupported?: string[];
+  summary: string;
+}
+
+export interface UnsupportedWorkflowPlan {
+  kind: 'unsupported';
+  unsupported: string[];
+  reason: string;
+  suggestions: string[];
   summary: string;
 }
 
@@ -109,7 +123,30 @@ export type WorkflowPlan =
   | DeNovoWorkflowPlan
   | ConditionedDesignWorkflowPlan
   | PdbWorkflowPlan
-  | EditCurrentWorkflowPlan;
+  | EditCurrentWorkflowPlan
+  | UnsupportedWorkflowPlan;
+
+export class UnsupportedWorkflowError extends Error {
+  readonly unsupported: string[];
+  readonly suggestions: string[];
+  readonly model: string;
+  readonly latencyMs: number;
+
+  constructor(opts: {
+    reason: string;
+    unsupported: string[];
+    suggestions: string[];
+    model: string;
+    latencyMs: number;
+  }) {
+    super(opts.reason);
+    this.name = 'UnsupportedWorkflowError';
+    this.unsupported = opts.unsupported;
+    this.suggestions = opts.suggestions;
+    this.model = opts.model;
+    this.latencyMs = opts.latencyMs;
+  }
+}
 
 export interface PlannerApiResponse {
   ok: boolean;
@@ -121,10 +158,11 @@ export interface PlannerApiResponse {
 }
 
 export interface PlannedWorkflowResult {
-  plan: WorkflowPlan;
+  plan: Exclude<WorkflowPlan, UnsupportedWorkflowPlan>;
   graph: WorkflowGraph;
   isIncrementalEdit: boolean;
   addedNodeCount: number;
+  unsupported: string[];
   model: string;
   latencyMs: number;
   notes: string[];
@@ -667,9 +705,24 @@ export function compileWorkflowPlanToGraph(
 ): {
   graph: WorkflowGraph;
   notes: string[];
+  unsupported: string[];
   isIncrementalEdit: boolean;
   addedNodeCount: number;
 } {
+  if (plan.kind === 'unsupported') {
+    throw new UnsupportedWorkflowError({
+      reason: plan.reason,
+      unsupported: plan.unsupported ?? [],
+      suggestions: plan.suggestions ?? [],
+      model: '',
+      latencyMs: 0,
+    });
+  }
+
+  const unsupported = Array.isArray(plan.unsupported)
+    ? plan.unsupported.filter((s) => typeof s === 'string' && s.trim().length > 0)
+    : [];
+
   if (plan.kind === 'edit_current') {
     if (!currentGraph || currentGraph.nodes.length === 0) {
       throw new Error('Cannot edit current graph because the canvas is empty.');
@@ -678,6 +731,7 @@ export function compileWorkflowPlanToGraph(
     return {
       graph,
       notes,
+      unsupported,
       isIncrementalEdit: true,
       addedNodeCount: Math.max(0, graph.nodes.length - currentGraph.nodes.length),
     };
@@ -989,6 +1043,7 @@ export function compileWorkflowPlanToGraph(
   return {
     graph: autoLayoutGraph(rawGraph),
     notes,
+    unsupported,
     isIncrementalEdit: false,
     addedNodeCount: nodes.length,
   };
@@ -1035,17 +1090,29 @@ export async function requestWorkflowPlan(
     throw new Error(msg);
   }
 
-  const { graph, notes, isIncrementalEdit, addedNodeCount } = compileWorkflowPlanToGraph(
-    data.plan,
-    options?.currentGraph,
-  );
+  const model = data.model || '@cf/google/gemma-4-26b-a4b-it';
+  const latencyMs = data.latencyMs ?? 0;
+
+  if (data.plan.kind === 'unsupported') {
+    throw new UnsupportedWorkflowError({
+      reason: data.plan.reason,
+      unsupported: data.plan.unsupported ?? [],
+      suggestions: data.plan.suggestions ?? [],
+      model,
+      latencyMs,
+    });
+  }
+
+  const { graph, notes, unsupported, isIncrementalEdit, addedNodeCount } =
+    compileWorkflowPlanToGraph(data.plan, options?.currentGraph);
   return {
     plan: data.plan,
     graph,
     isIncrementalEdit,
     addedNodeCount,
-    model: data.model || '@cf/google/gemma-4-26b-a4b-it',
-    latencyMs: data.latencyMs ?? 0,
+    unsupported,
+    model,
+    latencyMs,
     notes,
   };
 }
