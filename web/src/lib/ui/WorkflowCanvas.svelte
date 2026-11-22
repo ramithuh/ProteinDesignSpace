@@ -1461,7 +1461,7 @@
   }
   .dock-divider {
     width: 1px;
-    height: 18px;
+    height: 20px;
     background: var(--border-strong);
     opacity: 0.7;
     flex-shrink: 0;
@@ -1469,13 +1469,13 @@
   .add-block-btn {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 7px;
     background: var(--bg-pill);
     color: var(--text-primary);
     border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border-strong));
     border-radius: 999px;
-    padding: 5px 12px;
-    font-size: 12px;
+    padding: 7px 15px;
+    font-size: 13.5px;
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
@@ -1492,13 +1492,13 @@
   .dock-ai-btn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     background: transparent;
     color: var(--text-primary);
     border: 1px solid transparent;
     border-radius: 999px;
-    padding: 5px 11px;
-    font-size: 11.5px;
+    padding: 7px 14px;
+    font-size: 13.5px;
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
@@ -1515,7 +1515,7 @@
   }
   .ai-sparkle {
     color: var(--accent-bright);
-    font-size: 12px;
+    font-size: 14px;
     line-height: 1;
   }
   .ai-label-short {
@@ -1528,8 +1528,8 @@
     color: var(--text-secondary);
     border: 1px solid transparent;
     border-radius: 999px;
-    padding: 5px 11px;
-    font-size: 11.5px;
+    padding: 7px 13px;
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;
@@ -1549,7 +1549,7 @@
     .canvas-action-dock.planner-active {
       bottom: calc(34px + env(safe-area-inset-bottom, 0px));
       width: calc(100% - 16px);
-      border-radius: 18px;
+      border-radius: 22px;
     }
     .canvas-action-dock.is-centered {
       bottom: 50%;
@@ -1560,12 +1560,12 @@
       display: none;
     }
     .add-block-btn {
-      padding: 5px 10px;
-      font-size: 11.5px;
+      padding: 6px 12px;
+      font-size: 12.5px;
     }
     .dock-ai-btn {
-      padding: 5px 9px;
-      font-size: 11px;
+      padding: 6px 11px;
+      font-size: 12.5px;
     }
     .ai-label-full {
       display: none;
@@ -1574,25 +1574,25 @@
       display: inline;
     }
     .dock-tool-btn {
-      padding: 5px 9px;
-      font-size: 11px;
+      padding: 6px 10px;
+      font-size: 12px;
     }
   }
   .plus {
     color: var(--accent-bright);
-    font-size: 14px;
+    font-size: 16px;
     line-height: 1;
     font-weight: 700;
   }
   .kbd-hint {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 9.5px;
+    font-size: 10.5px;
     color: var(--text-dim);
     background: var(--bg-surface-2);
     border: 1px solid var(--border);
-    border-radius: 3px;
-    padding: 0 4px;
-    line-height: 1.4;
+    border-radius: 4px;
+    padding: 1px 5px;
+    line-height: 1.35;
   }
   .canvas-tools {
     position: absolute;

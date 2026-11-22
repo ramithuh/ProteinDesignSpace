@@ -84,14 +84,14 @@
     const el = textareaEl;
     if (!el) return;
     if (prompt.length === 0) {
-      el.style.height = '22px';
+      el.style.height = '24px';
       isMultiline = false;
       return;
     }
-    el.style.height = '22px';
-    const nextH = Math.min(el.scrollHeight, 76);
-    el.style.height = `${Math.max(22, nextH)}px`;
-    isMultiline = nextH > 30;
+    el.style.height = '24px';
+    const nextH = Math.min(el.scrollHeight, 84);
+    el.style.height = `${Math.max(24, nextH)}px`;
+    isMultiline = nextH > 32;
   }
 
   export function focusInput() {
@@ -464,13 +464,13 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 12px;
+    padding: 6px 13px;
     border-radius: 999px;
     border: 1px solid var(--border-strong);
     background: var(--bg-surface);
     color: var(--text-secondary);
     font-family: inherit;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 500;
     cursor: pointer;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
@@ -591,7 +591,7 @@
 
   .bar-sparkle {
     color: var(--accent-bright);
-    font-size: 13px;
+    font-size: 15px;
     line-height: 1;
     flex-shrink: 0;
     align-self: center;
@@ -620,12 +620,12 @@
     background: transparent;
     color: var(--text-primary);
     font-family: inherit;
-    font-size: 12.5px;
-    line-height: 22px;
-    height: 22px;
+    font-size: 14px;
+    line-height: 24px;
+    height: 24px;
     padding: 0;
     margin: 0;
-    max-height: 76px;
+    max-height: 84px;
     overflow-y: auto;
   }
   .bar-textarea.is-empty {
@@ -658,13 +658,13 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 6px 13px;
+    padding: 7px 14px;
     border-radius: 999px;
     border: 1px solid var(--accent);
     background: var(--accent);
     color: #fff;
     font-family: inherit;
-    font-size: 11.5px;
+    font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     flex-shrink: 0;
@@ -680,7 +680,7 @@
   .btn-send kbd,
   .btn-apply kbd {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 9.5px;
+    font-size: 10.5px;
     padding: 0 4px;
     border-radius: 3px;
     background: rgba(255, 255, 255, 0.22);
@@ -726,9 +726,9 @@
     flex: 1;
   }
   .mode-pill {
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 700;
-    padding: 2px 8px;
+    padding: 3px 9px;
     border-radius: 999px;
     background: var(--bg-pill);
     border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
@@ -742,7 +742,7 @@
     color: var(--ok-text);
   }
   .review-summary {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
     overflow: hidden;
@@ -752,7 +752,7 @@
   }
   .review-ms {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10px;
+    font-size: 10.5px;
     color: var(--text-dim);
     flex-shrink: 0;
   }
@@ -767,13 +767,13 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 5px 12px;
+    padding: 7px 14px;
     border-radius: 999px;
     border: 1px solid var(--accent);
     background: var(--accent);
     color: #fff;
     font-family: inherit;
-    font-size: 11.5px;
+    font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
@@ -783,13 +783,13 @@
     filter: brightness(1.08);
   }
   .btn-ghost {
-    padding: 5px 10px;
+    padding: 7px 12px;
     border-radius: 999px;
     border: 1px solid var(--border-strong);
     background: transparent;
     color: var(--text-secondary);
     font-family: inherit;
-    font-size: 11.5px;
+    font-size: 12.5px;
     font-weight: 500;
     cursor: pointer;
     white-space: nowrap;
@@ -833,7 +833,7 @@
     }
   }
   .micro-text {
-    font-size: 10.5px;
+    font-size: 11.5px;
     color: var(--text-dim);
     line-height: 1.3;
   }
