@@ -173,7 +173,37 @@ export interface UnsupportedWorkflowPlan {
   summary: string;
 }
 
+export interface BlockGraphNodeSpec {
+  id: string;
+  adapter: string;
+  label: string;
+  params?: Record<string, unknown>;
+}
+
+export type BlockGraphEdgePair = [string, string];
+
+export interface BlockGraphEditOp {
+  action: 'add_node' | 'add_edge' | 'remove_node' | 'update_params';
+  nodeId?: string | null;
+  adapter?: string | null;
+  label?: string | null;
+  fromId?: string | null;
+  toId?: string | null;
+  params?: Record<string, unknown> | null;
+}
+
+export interface BlockGraphWorkflowPlan {
+  kind: 'block_graph';
+  mode: 'new' | 'edit';
+  nodes?: BlockGraphNodeSpec[];
+  edges?: BlockGraphEdgePair[];
+  editOps?: BlockGraphEditOp[];
+  unsupported?: string[];
+  summary: string;
+}
+
 export type WorkflowPlan =
+  | BlockGraphWorkflowPlan
   | DeNovoWorkflowPlan
   | ConditionedDesignWorkflowPlan
   | PdbWorkflowPlan
@@ -1574,6 +1604,370 @@ function applyEditCurrentPlan(
   };
 }
 
+function resolveBlockEdgePorts(
+  fromNode: WorkflowNode,
+  toNode: WorkflowNode,
+  existingEdges: WorkflowEdge[],
+  allNodes: WorkflowNode[],
+): { fromPort: string; toPort: string } | null {
+  const fromAdapter = ADAPTER_REGISTRY[fromNode.adapterId];
+  const toAdapter = ADAPTER_REGISTRY[toNode.adapterId];
+  if (!fromAdapter || !toAdapter) return null;
+
+  // Prefer semantic primary port pairs first
+  const preferredPairs: Array<[string, string]> = [];
+  if (fromNode.adapterId === 'localfold-af2' && toNode.adapterId === 'designability-scorer') {
+    preferredPairs.push(['folds', 'folds']);
+  } else if (toNode.adapterId === 'designability-scorer') {
+    preferredPairs.push(['structure', 'structure'], ['folds', 'folds']);
+  } else if (toNode.adapterId === 'dyna1') {
+    preferredPairs.push(['structure', 'structure'], ['sequences', 'sequences']);
+  } else if (toNode.adapterId === 'esmc') {
+    preferredPairs.push(['sequences', 'sequences'], ['structure', 'structure']);
+  }
+
+  const tmpGraph: WorkflowGraph = { id: 'tmp', name: 'tmp', nodes: allNodes, edges: existingEdges };
+  for (const [fp, tp] of preferredPairs) {
+    const res = validateConnection(tmpGraph, fromNode.id, fp, toNode.id, tp);
+    if (res.valid) return { fromPort: fp, toPort: tp };
+  }
+
+  for (const outName of Object.keys(fromAdapter.outputs)) {
+    for (const inName of Object.keys(toAdapter.inputs)) {
+      const res = validateConnection(tmpGraph, fromNode.id, outName, toNode.id, inName);
+      if (res.valid) return { fromPort: outName, toPort: inName };
+    }
+  }
+  return null;
+}
+
+function sanitizeBlockNodeParams(
+  adapterId: string,
+  rawParams: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const defaults = defaultParamsForAdapter(adapterId);
+  const merged: Record<string, unknown> = { ...defaults };
+  if (rawParams && typeof rawParams === 'object') {
+    for (const [k, v] of Object.entries(rawParams)) {
+      if (v === null || v === undefined) continue;
+      if (k === 'cropSegments') {
+        const cleanCrop = validateOptionalCrop(String(v));
+        if (cleanCrop) merged.cropSegments = cleanCrop;
+        continue;
+      }
+      if (adapterId === 'antifold-esmif1' && k === 'model') {
+        merged.variant = String(v).toLowerCase().includes('anti') ? 'antifold' : 'esmif1';
+        continue;
+      }
+      merged[k] = v;
+    }
+  }
+  if (adapterId === 'pdb-input') {
+    const bmId = typeof merged.benchmarkId === 'string' ? merged.benchmarkId : '';
+    const bm = bmId ? getBenchmarkById(bmId) : undefined;
+    if (bm) {
+      merged.mode = 'pdb-id';
+      if (!merged.pdbId || merged.pdbId === 'demo') merged.pdbId = bm.pdbId;
+      if (!merged.cropSegments && bm.cropSegments) merged.cropSegments = bm.cropSegments;
+    } else if (merged.pdbId && merged.pdbId !== 'demo') {
+      merged.mode = 'pdb-id';
+    } else {
+      merged.mode = 'demo-bundle';
+    }
+  }
+  return merged;
+}
+
+function compileBlockGraphPlan(
+  plan: BlockGraphWorkflowPlan,
+  currentGraph: WorkflowGraph | undefined,
+  unsupported: string[],
+): {
+  graph: WorkflowGraph;
+  notes: string[];
+  unsupported: string[];
+  isIncrementalEdit: boolean;
+  addedNodeCount: number;
+} {
+  const notes: string[] = [];
+  const stamp = Date.now().toString(36).slice(-5);
+
+  if (plan.mode === 'edit') {
+    if (!currentGraph || currentGraph.nodes.length === 0) {
+      throw new Error('Cannot edit current graph because the canvas is empty.');
+    }
+    // Proxy-safe deep copy of Svelte 5 $state graph
+    const nodes: WorkflowNode[] = currentGraph.nodes.map((n) => ({
+      id: n.id,
+      adapterId: n.adapterId,
+      label: n.label,
+      params: { ...(n.params ?? {}) },
+      ...(n.position ? { position: { x: n.position.x, y: n.position.y } } : {}),
+    }));
+    let edges: WorkflowEdge[] = currentGraph.edges.map((e) => ({
+      fromNode: e.fromNode,
+      fromPort: e.fromPort,
+      toNode: e.toNode,
+      toPort: e.toPort,
+    }));
+
+    const existingIds = new Set(nodes.map((n) => n.id));
+    const nextId = makeUniqueIdFactory(existingIds);
+    const idRemap = new Map<string, string>();
+    const addedNodeIds: string[] = [];
+
+    for (const op of plan.editOps ?? []) {
+      if (op.action === 'add_node') {
+        const adapterId = op.adapter ?? '';
+        if (!ADAPTER_REGISTRY[adapterId]) continue;
+        const requestedId = op.nodeId?.trim();
+        const finalId =
+          requestedId && !existingIds.has(requestedId) ? requestedId : nextId(adapterId.split('-')[0]);
+        existingIds.add(finalId);
+        if (requestedId) idRemap.set(requestedId, finalId);
+        nodes.push({
+          id: finalId,
+          adapterId,
+          label: sanitizeDisplayText(op.label, ADAPTER_REGISTRY[adapterId].shortName, 64),
+          params: sanitizeBlockNodeParams(adapterId, op.params ?? undefined),
+        });
+        addedNodeIds.push(finalId);
+      } else if (op.action === 'add_edge') {
+        const fromId = idRemap.get(op.fromId ?? '') ?? op.fromId ?? '';
+        const toId = idRemap.get(op.toId ?? '') ?? op.toId ?? '';
+        const fromNode = nodes.find((n) => n.id === fromId);
+        const toNode = nodes.find((n) => n.id === toId);
+        if (!fromNode || !toNode) continue;
+        const resolved = resolveBlockEdgePorts(fromNode, toNode, edges, nodes);
+        if (resolved) {
+          edges.push({
+            fromNode: fromNode.id,
+            fromPort: resolved.fromPort,
+            toNode: toNode.id,
+            toPort: resolved.toPort,
+          });
+        }
+      } else if (op.action === 'remove_node') {
+        const targetId = idRemap.get(op.nodeId ?? '') ?? op.nodeId ?? '';
+        const idx = nodes.findIndex((n) => n.id === targetId);
+        if (idx === -1) continue;
+        const removed = nodes[idx];
+        const inc = edges.filter((e) => e.toNode === targetId);
+        const out = edges.filter((e) => e.fromNode === targetId);
+        nodes.splice(idx, 1);
+        edges = edges.filter((e) => e.fromNode !== targetId && e.toNode !== targetId);
+        // Splice pass-through 1-in/1-out filters (like top-k-filter) cleanly
+        if (removed.adapterId === 'top-k-filter' && inc.length === 1 && out.length > 0) {
+          for (const oe of out) {
+            edges.push({
+              fromNode: inc[0].fromNode,
+              fromPort: inc[0].fromPort,
+              toNode: oe.toNode,
+              toPort: oe.toPort,
+            });
+          }
+        }
+      } else if (op.action === 'update_params') {
+        const targetId = idRemap.get(op.nodeId ?? '') ?? op.nodeId ?? '';
+        const target = nodes.find((n) => n.id === targetId);
+        if (!target || !op.params) continue;
+        const patch = sanitizeBlockNodeParams(target.adapterId, {
+          ...target.params,
+          ...op.params,
+        });
+        target.params = patch;
+      }
+    }
+
+    // Auto-wire any newly added node that had no explicit add_edge in editOps
+    for (const nid of addedNodeIds) {
+      const hasIn = edges.some((e) => e.toNode === nid);
+      const addedNode = nodes.find((n) => n.id === nid);
+      if (!addedNode || hasIn || Object.keys(ADAPTER_REGISTRY[addedNode.adapterId].inputs).length === 0) {
+        continue;
+      }
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const cand = nodes[i];
+        if (cand.id === nid) continue;
+        const resolved = resolveBlockEdgePorts(cand, addedNode, edges, nodes);
+        if (resolved) {
+          edges.push({
+            fromNode: cand.id,
+            fromPort: resolved.fromPort,
+            toNode: nid,
+            toPort: resolved.toPort,
+          });
+          break;
+        }
+      }
+    }
+
+    const nextGraph: WorkflowGraph = {
+      id: currentGraph.id,
+      name: currentGraph.name,
+      ...(currentGraph.description !== undefined ? { description: currentGraph.description } : {}),
+      nodes,
+      edges,
+    };
+    const errs = validateGraph(nextGraph);
+    if (errs.length > 0) {
+      throw new Error(`Edited block-graph workflow failed validation: ${errs.join('; ')}`);
+    }
+    return {
+      graph: autoLayoutGraph(nextGraph),
+      notes,
+      unsupported,
+      isIncrementalEdit: true,
+      addedNodeCount: addedNodeIds.length,
+    };
+  }
+
+  // mode === 'new'
+  const rawNodes = plan.nodes ?? [];
+  const nodes: WorkflowNode[] = [];
+  const seenIds = new Set<string>();
+  for (const spec of rawNodes) {
+    if (!ADAPTER_REGISTRY[spec.adapter]) continue;
+    let id = spec.id.trim() || `${spec.adapter.split('-')[0]}_${nodes.length + 1}`;
+    let n = 2;
+    while (seenIds.has(id)) id = `${spec.id}_${n++}`;
+    seenIds.add(id);
+    nodes.push({
+      id,
+      adapterId: spec.adapter,
+      label: sanitizeDisplayText(spec.label, ADAPTER_REGISTRY[spec.adapter].shortName, 64),
+      params: sanitizeBlockNodeParams(spec.adapter, spec.params),
+    });
+  }
+
+  if (nodes.length === 0) {
+    throw new Error('Block-graph workflow plan contained no valid blocks.');
+  }
+
+  // Benchmark auto-seeding onto downstream generators (motifSpan / hotspots / length)
+  const pdbWithBm = nodes.find(
+    (n) => n.adapterId === 'pdb-input' && typeof n.params.benchmarkId === 'string' && n.params.benchmarkId,
+  );
+  if (pdbWithBm) {
+    const bm = getBenchmarkById(String(pdbWithBm.params.benchmarkId));
+    if (bm) {
+      const cp = bm.conditionParams;
+      for (const node of nodes) {
+        if (node.adapterId === 'rfd4-proteina') {
+          if (!node.params.mode || node.params.mode === 'unconditional') {
+            node.params.mode = bm.category === 'binder' ? 'binder' : 'motif';
+          }
+          if (bm.category === 'binder' && !node.params.hotspots && cp.hotspots) {
+            node.params.hotspots = cp.hotspots;
+          }
+          if (!node.params.contig && cp.contig) {
+            const reqLen = typeof node.params.length === 'number' ? node.params.length : null;
+            node.params.contig = reqLen
+              ? adaptBenchmarkContigForLength(cp.contig, reqLen, bm.category)
+              : cp.contig;
+          }
+        } else if (node.adapterId === 'genie3') {
+          if (!node.params.taskMode || node.params.taskMode === 'unconditional') {
+            node.params.taskMode = bm.category === 'binder' ? 'binder' : 'motif';
+          }
+          if (bm.category === 'binder' && !node.params.hotspots && cp.hotspots) {
+            node.params.hotspots = cp.hotspots;
+          }
+          if (!node.params.motifSpan && cp.motifSpan) {
+            node.params.motifSpan = cp.motifSpan;
+          }
+        }
+      }
+    }
+  }
+
+  const edges: WorkflowEdge[] = [];
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  for (const [fromId, toId] of plan.edges ?? []) {
+    const fn = nodeById.get(fromId);
+    const tn = nodeById.get(toId);
+    if (!fn || !tn || fromId === toId) continue;
+    const resolved = resolveBlockEdgePorts(fn, tn, edges, nodes);
+    if (resolved) {
+      edges.push({
+        fromNode: fn.id,
+        fromPort: resolved.fromPort,
+        toNode: tn.id,
+        toPort: resolved.toPort,
+      });
+    }
+  }
+
+  // Ensure Genie 3 -> web-protein-mpnn uses family='ca' unless explicitly overridden
+  for (const e of edges) {
+    const fn = nodeById.get(e.fromNode);
+    const tn = nodeById.get(e.toNode);
+    if (fn?.adapterId === 'genie3' && tn?.adapterId === 'web-protein-mpnn' && !tn.params.family) {
+      tn.params.family = 'ca';
+    }
+  }
+
+  // Ensure every designability-scorer has its structure input wired from nearest upstream generator/pdb
+  for (const node of nodes) {
+    if (node.adapterId !== 'designability-scorer') continue;
+    const hasStruct = edges.some((e) => e.toNode === node.id && e.toPort === 'structure');
+    if (hasStruct) continue;
+    // BFS backward from node.id
+    const visited = new Set<string>();
+    const queue = edges.filter((e) => e.toNode === node.id).map((e) => e.fromNode);
+    let fallbackPdb: string | null = null;
+    let foundGen: string | null = null;
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      if (visited.has(cur)) continue;
+      visited.add(cur);
+      const cn = nodeById.get(cur);
+      if (cn) {
+        if (
+          cn.adapterId === 'rfd4-proteina' ||
+          cn.adapterId === 'genie3' ||
+          cn.adapterId === 'protpardelle'
+        ) {
+          foundGen = cur;
+          break;
+        }
+        if (cn.adapterId === 'pdb-input' && !fallbackPdb) fallbackPdb = cur;
+      }
+      for (const pe of edges) {
+        if (pe.toNode === cur && !visited.has(pe.fromNode)) queue.push(pe.fromNode);
+      }
+    }
+    const srcId = foundGen ?? fallbackPdb;
+    if (srcId) {
+      edges.push({
+        fromNode: srcId,
+        fromPort: 'structure',
+        toNode: node.id,
+        toPort: 'structure',
+      });
+    }
+  }
+
+  const graph: WorkflowGraph = {
+    id: `ai-plan-${stamp}`,
+    name: sanitizeDisplayText(plan.summary, 'AI Drafted Workflow', 110),
+    description: sanitizeDisplayText(plan.summary, '', 200),
+    nodes,
+    edges,
+  };
+  const errs = validateGraph(graph);
+  if (errs.length > 0) {
+    throw new Error(`Drafted block-graph workflow failed validation: ${errs.join('; ')}`);
+  }
+  return {
+    graph: autoLayoutGraph(graph),
+    notes,
+    unsupported,
+    isIncrementalEdit: false,
+    addedNodeCount: graph.nodes.length,
+  };
+}
+
 export function compileWorkflowPlanToGraph(
   plan: WorkflowPlan,
   currentGraph?: WorkflowGraph,
@@ -1601,6 +1995,10 @@ export function compileWorkflowPlanToGraph(
         .map((s) => sanitizeDisplayText(s, '', 60))
         .filter(Boolean)
     : [];
+
+  if (plan.kind === 'block_graph') {
+    return compileBlockGraphPlan(plan, currentGraph, unsupported);
+  }
 
   if (plan.kind === 'edit_current') {
     if (!currentGraph || currentGraph.nodes.length === 0) {
@@ -3039,7 +3437,7 @@ export function reconcilePlannedWorkflow(
   prompt: string,
   currentGraph?: WorkflowGraph,
 ): WorkflowPlan {
-  if (plan.kind === 'unsupported') return plan;
+  if (plan.kind === 'unsupported' || plan.kind === 'block_graph') return plan;
   const trimmed = prompt.trim();
   const hasCurrentGraph = Boolean(currentGraph && currentGraph.nodes.length > 0);
   const promptPdbId = extractPromptPdbId(trimmed);
