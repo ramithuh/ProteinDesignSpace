@@ -305,4 +305,15 @@ describe('CSV formatters', () => {
     expect(lines[2]).toBe('2,H100A,G,0.780000,1.265700');
     expect(lines[3]).toBe('3,H100B,Y,,0.000000');
   });
+
+  it('MolSuperposeViewer samples polymer CA B-factors so HETATM ACE/HOH crystal B-factors cannot skew Dyna-1 [0,1] domain', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const viewerSrc = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/lib/viewer/MolSuperposeViewer.svelte'),
+      'utf8',
+    );
+    expect(viewerSrc).toContain('u?.polymerElements');
+    expect(viewerSrc).toContain("atomIdCol.value(el) === 'CA'");
+  });
 });

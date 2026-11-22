@@ -161,8 +161,9 @@
 
   /**
    * Build a Mol* `'uncertainty'` (B-factor continuous ramp) color argument, adapting the
-   * numeric domain to the observed polymer B-factors so both raw (`0..1` dynamics prob,
-   * signed `ΔΔG` kcal/mol) and `0..100`-scaled structures display full blue↔white↔red contrast.
+   * numeric domain to the observed polymer Cα B-factors so both raw (`0..1` dynamics prob,
+   * signed `ΔΔG` kcal/mol) and `0..100`-scaled structures display full blue↔white↔red contrast
+   * without being skewed by untouched crystal waters (`HOH`), ligands, or peptide caps (`ACE`).
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function resolveUncertaintyColorArg(
@@ -171,23 +172,50 @@
   ): Record<string, unknown> {
     try {
       const units = struct?.data?.units;
-      let min = Infinity;
-      let max = -Infinity;
+      let caMin = Infinity;
+      let caMax = -Infinity;
+      let polyMin = Infinity;
+      let polyMax = -Infinity;
+      let allMin = Infinity;
+      let allMax = -Infinity;
       if (Array.isArray(units)) {
         for (const u of units) {
           const bCol = u?.model?.atomicConformation?.B_iso_or_equiv;
-          const elems = u?.elements;
-          if (!bCol || !elems || typeof bCol.value !== 'function') continue;
-          const n = elems.length;
-          for (let i = 0; i < n; i++) {
-            const v = bCol.value(elems[i]);
-            if (typeof v === 'number' && Number.isFinite(v)) {
-              if (v < min) min = v;
-              if (v > max) max = v;
+          const atomIdCol = u?.model?.atomicHierarchy?.atoms?.label_atom_id;
+          const polyElems = u?.polymerElements;
+          const allElems = u?.elements;
+          if (!bCol || typeof bCol.value !== 'function') continue;
+
+          // Prefer polymer Cα atoms (excludes waters, ligands, and terminal caps like ACE/NME)
+          if (polyElems && polyElems.length > 0) {
+            const np = polyElems.length;
+            for (let i = 0; i < np; i++) {
+              const el = polyElems[i];
+              const v = bCol.value(el);
+              if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+              if (v < polyMin) polyMin = v;
+              if (v > polyMax) polyMax = v;
+              if (atomIdCol && typeof atomIdCol.value === 'function' && atomIdCol.value(el) === 'CA') {
+                if (v < caMin) caMin = v;
+                if (v > caMax) caMax = v;
+              }
+            }
+          }
+          if (allElems && allElems.length > 0 && !Number.isFinite(caMin)) {
+            const na = allElems.length;
+            for (let i = 0; i < na; i++) {
+              const v = bCol.value(allElems[i]);
+              if (typeof v === 'number' && Number.isFinite(v)) {
+                if (v < allMin) allMin = v;
+                if (v > allMax) allMax = v;
+              }
             }
           }
         }
       }
+      const min = Number.isFinite(caMin) ? caMin : Number.isFinite(polyMin) ? polyMin : allMin;
+      const max = Number.isFinite(caMax) ? caMax : Number.isFinite(polyMax) ? polyMax : allMax;
+
       if (Number.isFinite(min) && Number.isFinite(max)) {
         if (semantics === 'dynamics-prob') {
           if (min >= -0.05 && max <= 1.05) {
@@ -197,7 +225,7 @@
         }
         if (semantics === 'ddg-stability') {
           if (min < 0) {
-            const lim = Math.max(1.5, Math.min(6, Math.max(Math.abs(min), Math.abs(max))));
+            const lim = Math.max(1.5, Math.min(4, Math.max(Math.abs(min), Math.abs(max))));
             return { color: 'uncertainty', colorParams: { domain: [-lim, lim] } };
           }
           if (max <= 100.5 && min >= 0) {
