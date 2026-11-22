@@ -57,6 +57,7 @@
   import ComparePeekPanel, { type CompareBranchMeta } from '$lib/ui/ComparePeekPanel.svelte';
   import CreditsModal from '$lib/ui/CreditsModal.svelte';
   import ExamplesGalleryModal from '$lib/ui/ExamplesGalleryModal.svelte';
+  import PaperWalkthroughOverlay from '$lib/ui/PaperWalkthroughOverlay.svelte';
   import FirstRunModal from '$lib/ui/FirstRunModal.svelte';
   import { type PaperInsightExample } from '$lib/engine/paper-gallery';
   import ModelCardPopover from '$lib/ui/ModelCardPopover.svelte';
@@ -142,9 +143,11 @@
   let showExamplesGallery = $state(false);
   let activePaperInsight = $state<PaperInsightExample | null>(null);
   let paperWalkthroughIdx = $state(0);
+  let showPaperWalkthrough = $state(false);
   let hasActivePaperOutputs = $derived.by(() => {
     if (!activePaperInsight) return false;
     return activePaperInsight.walkthrough.some((step) => {
+      if (!step.nodeId) return false;
       const outs = outputsByNode[step.nodeId];
       return Boolean(outs && Object.keys(outs).length > 0);
     });
@@ -478,6 +481,8 @@
     showRecipe = false;
     expandedPane = 'none';
     hashError = null;
+    activePaperInsight = null;
+    showPaperWalkthrough = false;
     if (typeof window !== 'undefined' && window.location.hash) {
       window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
     }
@@ -844,6 +849,7 @@
     if (!preset) return;
     showExamplesGallery = false;
     activePaperInsight = null;
+    showPaperWalkthrough = false;
     graphUndoStack = [];
     graphRedoStack = [];
     lastParamUndo = null;
@@ -876,14 +882,15 @@
     const clamped = Math.max(0, Math.min(example.walkthrough.length - 1, stepIdx));
     paperWalkthroughIdx = clamped;
     const step = example.walkthrough[clamped];
-    if (!graph.nodes.some((n) => n.id === step.nodeId)) return;
+    if (!step.nodeId || !graph.nodes.some((n) => n.id === step.nodeId)) return;
+    const targetTab = step.tab ?? 'peek';
     const switchingNode = selectedNodeId !== step.nodeId;
     setSingleSelection(step.nodeId);
     selectedEdgeId = null;
-    rightPanelTab = step.tab;
+    rightPanelTab = targetTab;
     selectedPeekSlotId =
-      step.tab === 'peek' && step.outputPort ? `out:${step.outputPort}` : null;
-    if (step.focusResidue && step.tab === 'peek') {
+      targetTab === 'peek' && step.outputPort ? `out:${step.outputPort}` : null;
+    if (step.focusResidue && targetTab === 'peek') {
       const targetTok = step.focusResidue;
       viewerFocusToken = null;
       setTimeout(() => {
@@ -904,10 +911,11 @@
     showExamplesGallery = false;
     activePaperInsight = example;
     paperWalkthroughIdx = 0;
+    showPaperWalkthrough = true;
     selectedPresetId = example.id;
     loadFullWorkflowGraph(
       { ...decoded, id: example.id, name: example.title },
-      { clearOutputs: true },
+      { clearOutputs: true, keepPaperInsight: true },
     );
     canvasFitViewTrigger += 1;
     showToastMessage(`Loaded example: ${example.title}`, 2600, 'ok');
@@ -1889,7 +1897,11 @@
       }
       rightPanelTab = 'peek';
       if (activePaperInsight && !upToNodeId) {
-        applyPaperWalkthroughStep(activePaperInsight, 0);
+        const firstResultIdx = activePaperInsight.walkthrough.findIndex(
+          (st) => st.phase === 'result',
+        );
+        showPaperWalkthrough = true;
+        applyPaperWalkthroughStep(activePaperInsight, firstResultIdx >= 0 ? firstResultIdx : 0);
       }
 
       void refreshCacheStats();
@@ -2019,7 +2031,14 @@
     return `https://github.com/ramithuh/ProteinDesignSpace/issues/new?${params.toString()}`;
   }
 
-  function loadFullWorkflowGraph(next: WorkflowGraph, opts?: { clearOutputs?: boolean }) {
+  function loadFullWorkflowGraph(
+    next: WorkflowGraph,
+    opts?: { clearOutputs?: boolean; keepPaperInsight?: boolean },
+  ) {
+    if (!opts?.keepPaperInsight) {
+      activePaperInsight = null;
+      showPaperWalkthrough = false;
+    }
     const laid = next.nodes.some((n) => !n.position) ? autoLayoutGraph(next) : next;
     graphUndoStack = [];
     graphRedoStack = [];
@@ -2982,6 +3001,22 @@
       </span>
       <span class="gallery-trigger-chev" aria-hidden="true">▾</span>
     </button>
+
+    {#if activePaperInsight && !showPaperWalkthrough && !isRunning}
+      <button
+        type="button"
+        class="walkthrough-reopen-btn"
+        onclick={() => {
+          showPaperWalkthrough = true;
+          if (hasActivePaperOutputs && activePaperInsight) {
+            applyPaperWalkthroughStep(activePaperInsight, paperWalkthroughIdx);
+          }
+        }}
+        title="Reopen guided walkthrough for this literature example"
+      >
+        Walkthrough
+      </button>
+    {/if}
   </div>
 
   <div class="hdr-right">
@@ -3374,76 +3409,7 @@
       : `--top-pane: ${verticalSplitPct}%;`}
   >
     <!-- Graph Canvas Pane (Left in Horizontal Split, Top in Vertical Split) -->
-    <section class="flow-panel">
-      {#if activePaperInsight}
-        {@const steps = activePaperInsight.walkthrough}
-        {@const curStep = steps[paperWalkthroughIdx] ?? steps[0]}
-        <div class="paper-banner" role="region" aria-label="Literature example walkthrough">
-          {#if hasActivePaperOutputs && curStep}
-            <div class="pb-guide">
-              <div class="pb-top">
-                <span class="pb-cite">{activePaperInsight.citation}</span>
-                <div class="pb-steps" role="tablist" aria-label="Walkthrough steps">
-                  {#each steps as st, i (st.title)}
-                    <button
-                      type="button"
-                      role="tab"
-                      class="pb-step-btn"
-                      class:active={paperWalkthroughIdx === i}
-                      aria-selected={paperWalkthroughIdx === i}
-                      onclick={() => applyPaperWalkthroughStep(activePaperInsight!, i)}
-                    >
-                      {i + 1}
-                    </button>
-                  {/each}
-                </div>
-                <span class="pb-step-title">{curStep.title}</span>
-                <div class="pb-nav">
-                  <button
-                    type="button"
-                    class="pb-nav-btn"
-                    disabled={paperWalkthroughIdx === 0}
-                    onclick={() =>
-                      applyPaperWalkthroughStep(activePaperInsight!, paperWalkthroughIdx - 1)}
-                    aria-label="Previous step"
-                  >
-                    ←
-                  </button>
-                  <button
-                    type="button"
-                    class="pb-nav-btn"
-                    disabled={paperWalkthroughIdx >= steps.length - 1}
-                    onclick={() =>
-                      applyPaperWalkthroughStep(activePaperInsight!, paperWalkthroughIdx + 1)}
-                  >
-                    Next →
-                  </button>
-                  <button
-                    type="button"
-                    class="pb-close"
-                    aria-label="Dismiss walkthrough"
-                    onclick={() => (activePaperInsight = null)}
-                  >
-                    ✕
-                  </button>
-                </div>
-              </div>
-              <div class="pb-body">{curStep.body}</div>
-            </div>
-          {:else}
-            <span class="pb-body">{activePaperInsight.canvasNote}</span>
-            <button
-              type="button"
-              class="pb-close"
-              aria-label="Dismiss note"
-              onclick={() => (activePaperInsight = null)}
-            >
-              ✕
-            </button>
-          {/if}
-        </div>
-      {/if}
-
+    <section class="flow-panel" data-tour="workflow-canvas">
       <SvelteFlowProvider>
         <WorkflowCanvas
           {graph}
@@ -3605,7 +3571,7 @@
       class:stacked-pane={splitMode === 'horizontal'}
       class:is-studio-open={studioOpen}
     >
-      <div class="viewer-col" class:is-expanded={expandedPane === 'viewer'}>
+      <div class="viewer-col" class:is-expanded={expandedPane === 'viewer'} data-tour="viewer-panel">
         <div class="viewer-bar">
           {#if isCompareMode && comparisonState}
             <div class="seg-group" role="group" aria-label="3D comparison layout">
@@ -4200,6 +4166,19 @@
   />
 {/if}
 
+{#if activePaperInsight && showPaperWalkthrough && !showOnboarding && !showExamplesGallery && !pendingRun && !showCredits}
+  <PaperWalkthroughOverlay
+    example={activePaperInsight}
+    stepIdx={paperWalkthroughIdx}
+    hasOutputs={hasActivePaperOutputs}
+    {isRunning}
+    canRun={!isRunning && validationErrors.length === 0 && !hasInvalidNumeric}
+    onSelectStep={(idx) => applyPaperWalkthroughStep(activePaperInsight!, idx)}
+    onRun={() => void runWorkflow(false)}
+    onDismiss={() => (showPaperWalkthrough = false)}
+  />
+{/if}
+
 {#if showCredits}
   <CreditsModal onClose={() => (showCredits = false)} />
 {/if}
@@ -4318,111 +4297,22 @@
     flex-shrink: 0;
   }
 
-  .paper-banner {
-    flex-shrink: 0;
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 8px 10px 8px 12px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-  }
-  .pb-guide {
-    width: 100%;
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-  }
-  .pb-top {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .pb-cite {
-    font-size: 11px;
-    color: var(--text-dim);
-    white-space: nowrap;
-  }
-  .pb-steps {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-  }
-  .pb-step-btn {
-    width: 20px;
-    height: 20px;
-    border-radius: 5px;
-    border: 1px solid var(--border);
-    background: var(--bg-surface-2);
-    color: var(--text-muted);
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10.5px;
-    font-weight: 600;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-  }
-  .pb-step-btn.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .pb-step-btn:hover:not(.active) {
-    border-color: var(--border-strong);
-    color: var(--text-primary);
-  }
-  .pb-step-title {
+  .walkthrough-reopen-btn {
+    background: transparent;
+    color: var(--accent-soft);
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    padding: 5px 10px;
     font-size: 12px;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-  .pb-nav {
-    margin-left: auto;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .pb-nav-btn {
-    background: var(--bg-surface-2);
-    color: var(--text-body);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 2px 7px;
-    font-size: 11px;
     font-weight: 500;
     cursor: pointer;
-  }
-  .pb-nav-btn:hover:not(:disabled) {
-    border-color: var(--border-strong);
-    color: var(--text-primary);
-  }
-  .pb-nav-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-  .pb-body {
-    font-size: 12px;
-    line-height: 1.42;
-    color: var(--text-muted);
-  }
-  .pb-close {
-    background: transparent;
-    color: var(--text-dim);
-    border: none;
-    border-radius: 5px;
-    padding: 2px 6px;
-    font-size: 12px;
-    cursor: pointer;
+    white-space: nowrap;
     flex-shrink: 0;
   }
-  .pb-close:hover {
-    background: var(--bg-surface-2);
-    color: var(--text-primary);
+  .walkthrough-reopen-btn:hover {
+    border-color: var(--accent);
+    background: var(--bg-pill);
+    color: var(--accent-bright);
   }
 
   .pop-wrap {

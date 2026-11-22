@@ -21,8 +21,16 @@ describe('PAPER_INSIGHT_EXAMPLES gallery', () => {
       expect(validateGraph(decoded!)).toEqual([]);
 
       const nodeById = new Map(decoded!.nodes.map((n) => [n.id, n]));
-      for (const step of ex.walkthrough) {
-        const targetNode = nodeById.get(step.nodeId);
+      expect(ex.walkthrough[0]?.phase).toBe('setup');
+      expect(ex.walkthrough[0]?.spotlightTarget).toBe('canvas');
+      expect(ex.walkthrough[1]?.phase).toBe('run');
+      expect(ex.walkthrough[1]?.spotlightTarget).toBe('run');
+      const resultSteps = ex.walkthrough.filter((s) => s.phase === 'result');
+      expect(resultSteps.length).toBeGreaterThanOrEqual(2);
+      for (const step of resultSteps) {
+        expect(['viewer', 'inspector']).toContain(step.spotlightTarget);
+        expect(step.nodeId).toBeTruthy();
+        const targetNode = nodeById.get(step.nodeId!);
         expect(targetNode, `${ex.id} walkthrough references unknown nodeId "${step.nodeId}"`).toBeDefined();
         if (step.outputPort) {
           const manifest = ADAPTER_REGISTRY[targetNode!.adapterId];

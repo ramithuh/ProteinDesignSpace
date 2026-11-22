@@ -1,8 +1,14 @@
+export type PaperWalkthroughPhase = 'setup' | 'run' | 'result';
+export type PaperSpotlightTarget = 'canvas' | 'run' | 'viewer' | 'inspector';
+
 export interface PaperWalkthroughStep {
+  phase: PaperWalkthroughPhase;
+  spotlightTarget: PaperSpotlightTarget;
   title: string;
   body: string;
-  nodeId: string;
-  tab: 'peek' | 'params';
+  /** Result-step navigation target on the graph/inspector. */
+  nodeId?: string;
+  tab?: 'peek' | 'params';
   outputPort?: string;
   focusResidue?: string;
 }
@@ -27,18 +33,34 @@ export const PAPER_INSIGHT_EXAMPLES: PaperInsightExample[] = [
     finding:
       'A single L45→Y45 substitution flips a 56-residue protein from a 3-helix bundle into a 4β+α fold (2LHD) — a classic fold-switching test for structure predictors.',
     canvasNote:
-      'Alexander et al. (PNAS 2009): Click ▶ Run to compare ESMFold2 against experimental NMR 2LHD in a 2-step walkthrough.',
+      'Alexander et al. (PNAS 2009): Compare ESMFold2 against experimental NMR 2LHD on a 1-mutation fold switch.',
     tools: ['ESMFold2', '3D Compare'],
     walkthrough: [
       {
+        phase: 'setup',
+        spotlightTarget: 'canvas',
+        title: 'What we\'re testing: 1-mutation fold switch',
+        body: 'This pipeline sends the GB98 sequence (L45→Y45) into ESMFold2 and aligns its prediction against the experimental NMR structure 2LHD (4β+α) in 3D Compare — testing whether single-sequence folding catches a single-residue fold flip.',
+      },
+      {
+        phase: 'run',
+        spotlightTarget: 'run',
+        title: 'Click Run to fold & compare',
+        body: 'Run ESMFold2 and 3D Compare locally on your GPU to overlay the predicted fold against experimental NMR 2LHD.',
+      },
+      {
+        phase: 'result',
+        spotlightTarget: 'viewer',
         title: 'Compare predicted vs. experimental fold',
         body: 'Experimental NMR GB98 (2LHD, cyan) is a 4β+α sheet-and-helix fold, while ESMFold2 (orange) stays trapped in a 3-helix bundle (~9.6 Å away, pLDDT ~51) — illustrating the fold-switching blind spot.',
         nodeId: 'cmp',
         tab: 'peek',
       },
       {
+        phase: 'result',
+        spotlightTarget: 'inspector',
         title: 'Try flipping residue 45 back (Y→L)',
-        body: 'In the sequence box on the right, change residue 45 from Y back to L (GA98) and click Run — ESMFold2 predicts the same 3-helix fold, but confidence jumps from pLDDT ~51 to ~74.',
+        body: 'In the sequence box here, change residue 45 from Y back to L (GA98) and click Run — ESMFold2 predicts the same 3-helix fold, but confidence jumps from pLDDT ~51 to ~74.',
         nodeId: 'seq_gb',
         tab: 'params',
       },
@@ -52,10 +74,24 @@ export const PAPER_INSIGHT_EXAMPLES: PaperInsightExample[] = [
     finding:
       'Oncogenic G12 and Q61 mutations break Ras GTPase signaling while keeping H-Ras (1CRR) folded and dynamic — unlike buried core mutations that destabilize the fold.',
     canvasNote:
-      'Ostrem et al. (Nature 2013): Click ▶ Run for a 3-step walkthrough contrasting stability, evolution, and switch dynamics on H-Ras (1CRR).',
+      'Ostrem et al. (Nature 2013): Contrast stability, evolution, and switch dynamics on H-Ras (1CRR).',
     tools: ['ESM-C', 'ThermoMPNN', 'Dyna-1'],
     walkthrough: [
       {
+        phase: 'setup',
+        spotlightTarget: 'canvas',
+        title: 'What we\'re testing: cancer drivers vs. fold stability',
+        body: 'H-Ras (1CRR) fans out in parallel to ThermoMPNN (stability ΔΔG), ESM-C (evolutionary constraint), and Dyna-1 (backbone dynamics) — testing whether oncogenic G12/Q61 mutations preserve fold stability while breaking evolutionarily conserved switch function.',
+      },
+      {
+        phase: 'run',
+        spotlightTarget: 'run',
+        title: 'Click Run to score stability, evolution & dynamics',
+        body: 'Run all three models locally on WebGPU to compare stability, mutational fitness, and switch-pocket dynamics across H-Ras.',
+      },
+      {
+        phase: 'result',
+        spotlightTarget: 'viewer',
         title: 'Stability: cancer drivers stay folded',
         body: 'In ThermoMPNN, buried hydrophobic core sites (V7, L19, F82) paint red (destabilizing, +1.6 to +2.8 kcal/mol), while oncogenic G12C/D/V and Q61H/L near Mg²⁺·GDP are stabilizing (ΔΔG < 0).',
         nodeId: 'thermo',
@@ -64,6 +100,8 @@ export const PAPER_INSIGHT_EXAMPLES: PaperInsightExample[] = [
         focusResidue: 'A12',
       },
       {
+        phase: 'result',
+        spotlightTarget: 'inspector',
         title: 'Evolution: G12 and Q61 are strongly forbidden',
         body: 'In ESM-C\'s mutational heatmap, those exact G12 and Q61 hotspots show deep evolutionary intolerance (LLR −8 to −13): they preserve fold stability while breaking GTPase turn-off.',
         nodeId: 'esmc',
@@ -72,6 +110,8 @@ export const PAPER_INSIGHT_EXAMPLES: PaperInsightExample[] = [
         focusResidue: 'A12',
       },
       {
+        phase: 'result',
+        spotlightTarget: 'viewer',
         title: 'Dynamics: P-loop & Switch II pocket',
         body: 'Dyna-1 (sequence + 3D structure) highlights conformational exchange in the P-loop and Switch II pocket (Q61) — the dynamic cryptic pocket targeted by covalent K-Ras(G12C) inhibitors.',
         nodeId: 'dyna',
@@ -89,18 +129,34 @@ export const PAPER_INSIGHT_EXAMPLES: PaperInsightExample[] = [
     finding:
       'Mutational scanning of ubiquitin (1D3Z) revealed strict constraint at recognition sites (I44, K48, L73) alongside tolerance for natural human-to-yeast substitutions and a flexible C-terminal tail.',
     canvasNote:
-      'Roscoe et al. (JMB 2013): Click ▶ Run for a 3-step walkthrough of evolutionary tolerance, recognition patches, and C-terminal dynamics on ubiquitin (1D3Z).',
+      'Roscoe et al. (JMB 2013): Inspect evolutionary tolerance, recognition patches, and C-terminal dynamics on ubiquitin (1D3Z).',
     tools: ['ESM-C', 'Dyna-1'],
     walkthrough: [
       {
+        phase: 'setup',
+        spotlightTarget: 'canvas',
+        title: 'What we\'re testing: conservation vs. tail flexibility',
+        body: 'NMR human ubiquitin (1D3Z) feeds into ESM-C (zero-shot scan of all 1,444 single mutations) and Dyna-1 (sequence + 3D structure dynamics) — testing whether they recover natural yeast substitutions, the essential I44/K48 patch, and the flexible conjugation tail.',
+      },
+      {
+        phase: 'run',
+        spotlightTarget: 'run',
+        title: 'Click Run to scan mutations & dynamics',
+        body: 'Execute ESM-C and Dyna-1 locally on WebGPU, then step through the three literature findings in the outputs and 3D viewer.',
+      },
+      {
+        phase: 'result',
+        spotlightTarget: 'inspector',
         title: 'Top substitutions rediscover yeast ubiquitin',
-        body: 'Scroll to the top-ranked mutations in the ESM-C table below: without any MSA, ESM-C places natural human-to-yeast substitutions (P19S #1, E24D #5, A28S #18) at the very top of 1,444 mutants.',
+        body: 'Look at the top-ranked mutations in the ESM-C table here: without any MSA, ESM-C places natural human-to-yeast substitutions (P19S #1, E24D #5, A28S #18) at the very top of 1,444 mutants.',
         nodeId: 'esmc',
         tab: 'peek',
         outputPort: 'mutations',
         focusResidue: 'A19',
       },
       {
+        phase: 'result',
+        spotlightTarget: 'inspector',
         title: 'Essential recognition & linkage patch (I44 / K48)',
         body: 'Inspect positions I44, K48, and L73 in the L×20 heatmap — Roscoe et al.\'s indispensable ubiquitin recognition and poly-ubiquitin linkage sites are deeply intolerant across nearly every substitution.',
         nodeId: 'esmc',
@@ -109,6 +165,8 @@ export const PAPER_INSIGHT_EXAMPLES: PaperInsightExample[] = [
         focusResidue: 'A44',
       },
       {
+        phase: 'result',
+        spotlightTarget: 'viewer',
         title: 'Flexible C-terminal conjugation tail (RLRGG)',
         body: 'In Dyna-1 (sequence + 3D structure), ubiquitin\'s folded β-grasp core sits cool and rigid, while the disordered C-terminal RLRGG tail (R74–G76) lights up flexible for E1/E2 conjugation.',
         nodeId: 'dyna',
