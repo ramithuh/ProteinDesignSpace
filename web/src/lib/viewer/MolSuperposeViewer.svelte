@@ -93,6 +93,55 @@
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let pluginPromise: Promise<any> | null = null;
   let destroyed = false;
+
+  const COMP_TO_AA1: Record<string, string> = {
+    ALA: 'A', ARG: 'R', ASN: 'N', ASP: 'D', CYS: 'C',
+    GLN: 'Q', GLU: 'E', GLY: 'G', HIS: 'H', ILE: 'I',
+    LEU: 'L', LYS: 'K', MET: 'M', PHE: 'F', PRO: 'P',
+    SER: 'S', THR: 'T', TRP: 'W', TYR: 'Y', VAL: 'V',
+    MSE: 'M', SEC: 'U', PYL: 'O',
+  };
+
+  interface HoveredResidueInfo {
+    compId: string;
+    aa1: string | null;
+    chain: string;
+    seqId: number;
+    insCode: string;
+    atomName: string;
+    isNonPolymer: boolean;
+    bFactor: number | null;
+  }
+
+  let hoveredResidue = $state<HoveredResidueInfo | null>(null);
+
+  let hoveredResidueLabel = $derived.by((): string => {
+    const h = hoveredResidue;
+    if (!h) return '';
+    const parts = [h.compId];
+    if (!h.isNonPolymer && Number.isFinite(h.seqId)) {
+      parts.push(`${h.seqId}${h.insCode}`);
+    }
+    if (h.aa1) {
+      parts.push(`(${h.aa1})`);
+    }
+    return parts.join(' ');
+  });
+
+  let hoveredMetricText = $derived.by((): string | null => {
+    const h = hoveredResidue;
+    if (!h || h.isNonPolymer || h.bFactor === null || !Number.isFinite(h.bFactor)) return null;
+    const sem = bfactorSemantics as string | undefined;
+    if (sem === 'dynamics-prob') return `${h.bFactor.toFixed(2)} p(exch)`;
+    if (sem === 'ddg-stability') {
+      return `${h.bFactor >= 0 ? '+' : ''}${h.bFactor.toFixed(2)} kcal/mol`;
+    }
+    if (sem === 'llr-fitness') {
+      return `${h.bFactor >= 0 ? '+' : ''}${h.bFactor.toFixed(2)} LLR`;
+    }
+    if (sem === 'plddt') return `pLDDT ${h.bFactor.toFixed(1)}`;
+    return null;
+  });
   let trajModelRef = $state<string | null>(null);
   let modelRefs = new Map<string, string[]>();
   let loadSeq = 0;
@@ -433,6 +482,62 @@
         const DNA_COMP_IDS = new Set(['DA', 'DT', 'DG', 'DC', 'DI', 'T']);
         const RNA_COMP_IDS = new Set(['A', 'U', 'G', 'C', 'I']);
         const WATER_COMP_IDS = new Set(['HOH', 'WAT', 'DOD', 'H2O']);
+
+        ctx.behaviors.interaction.hover.subscribe((ev) => {
+          const loci = ev.current.loci;
+          if (!StructureElement.Loci.is(loci) || loci.elements.length === 0) {
+            hoveredResidue = null;
+            return;
+          }
+          const loc = StructureElement.Loci.getFirstLocation(loci);
+          if (!loc) {
+            hoveredResidue = null;
+            return;
+          }
+          const compId = String(StructureProperties.atom.label_comp_id(loc) || 'UNK').toUpperCase();
+          if (WATER_COMP_IDS.has(compId)) {
+            hoveredResidue = null;
+            return;
+          }
+          const chain = String(StructureProperties.chain.auth_asym_id(loc) || 'A');
+          const seqId = Number(StructureProperties.residue.auth_seq_id(loc));
+          let insCode = '';
+          try {
+            const rawIns = String(StructureProperties.residue.pdbx_PDB_ins_code(loc) ?? '').trim();
+            if (rawIns && rawIns !== '?' && rawIns !== '.') insCode = rawIns;
+          } catch {
+            insCode = '';
+          }
+          let atomName = '';
+          try {
+            atomName = String(StructureProperties.atom.label_atom_id(loc) ?? '').trim();
+          } catch {
+            atomName = '';
+          }
+          let rawEntityType = 'polymer';
+          try {
+            rawEntityType = String(StructureProperties.entity.type(loc) ?? 'polymer').toLowerCase();
+          } catch {
+            rawEntityType = 'polymer';
+          }
+          let bFactor: number | null = null;
+          try {
+            const bf = Number(StructureProperties.atom.B_iso_or_equiv(loc));
+            if (Number.isFinite(bf)) bFactor = bf;
+          } catch {
+            bFactor = null;
+          }
+          hoveredResidue = {
+            compId,
+            aa1: COMP_TO_AA1[compId] ?? null,
+            chain,
+            seqId,
+            insCode,
+            atomName,
+            isNonPolymer: rawEntityType !== 'polymer',
+            bFactor,
+          };
+        });
 
         ctx.behaviors.interaction.click.subscribe((ev) => {
           if (!onResidueClick) return;
@@ -1860,7 +1965,31 @@
       <span class="swatch plddt"></span> Refold (pLDDT)
     </div>
   {/if}
-  <div bind:this={containerEl} class="canvas-wrap">
+  {#if hoveredResidue && hasAnyStructure}
+    <div
+      class="hover-readout"
+      class:has-compare-legend={Boolean(models && models.length > 0)}
+      role="status"
+      aria-live="polite"
+    >
+      <span class="hr-res">{hoveredResidueLabel}</span>
+      <span class="hr-sep" aria-hidden="true">·</span>
+      <span class="hr-chain">Chain {hoveredResidue.chain}</span>
+      {#if hoveredResidue.isNonPolymer && hoveredResidue.atomName}
+        <span class="hr-sep" aria-hidden="true">·</span>
+        <span class="hr-meta">{hoveredResidue.atomName}</span>
+      {:else if hoveredMetricText}
+        <span class="hr-sep" aria-hidden="true">·</span>
+        <span class="hr-metric">{hoveredMetricText}</span>
+      {/if}
+    </div>
+  {/if}
+  <div
+    bind:this={containerEl}
+    class="canvas-wrap"
+    role="presentation"
+    onmouseleave={() => (hoveredResidue = null)}
+  >
     <canvas bind:this={canvasEl} class="mol-canvas"></canvas>
   </div>
   {#if (!models || models.length === 0) && !designedPdb && !refoldPdb}
@@ -1954,6 +2083,43 @@
     padding: 4px 10px;
     border-radius: 4px;
     pointer-events: none;
+  }
+  .hover-readout {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    z-index: 11;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    padding: 3px 9px;
+    border-radius: 5px;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  .hover-readout.has-compare-legend {
+    bottom: 42px;
+  }
+  .hr-res {
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .hr-sep {
+    color: var(--text-dim);
+  }
+  .hr-chain,
+  .hr-meta {
+    color: var(--text-muted);
+  }
+  .hr-metric {
+    color: var(--accent-bright);
+    font-weight: 600;
   }
   .compare-legend {
     position: absolute;
