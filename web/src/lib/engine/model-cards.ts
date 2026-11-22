@@ -49,6 +49,7 @@ export const HOSTED_PORT_CARD_IDS = [
   'lasermpnn-webgpu',
   'antifold-esmif1-webgpu',
   'esmc-webgpu',
+  'protpardelle-webgpu',
   'dyna1-webgpu',
 ] as const;
 
@@ -624,8 +625,9 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
 
   'esmc-webgpu': {
     id: 'esmc-webgpu',
+    adapterId: 'esmc',
     displayName: 'ESM C 300M',
-    status: 'weights-hosted',
+    status: 'live',
     activePrecisionId: 'int8',
     precisions: [
       {
@@ -687,6 +689,73 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
       'Input admission policy caps sequences at 1,022 internal residues (+ BOS/EOS); masked-marginal LLR and naturalness sweeps execute L forward passes.',
       'Multi-mutant LLR scoring sums single-site log-likelihood ratios additively and does not model epistasis.',
       'Full FP32 bundle is 1.33 GB (61 shards); INT8 (335 MB) is practical for interactive browser use with ~0.8–2.8% LLR quantization error.',
+    ],
+  },
+
+  'protpardelle-webgpu': {
+    id: 'protpardelle-webgpu',
+    adapterId: 'protpardelle',
+    displayName: 'ProtPardelle-1c',
+    status: 'live',
+    activePrecisionId: 'int8',
+    precisions: [
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Packed I8 matrices + per-output-row F32 scales; F32 norms, embeddings & activations (~25.5–36.0 MB per denoiser + ~28.9 MB MiniMPNN)',
+        approxSizeMB: 26,
+        parityVsPytorchFp32: {
+          metric: 'GPU denoiser trace relRMS vs INT8 PyTorch oracle (all 16 checkpoints)',
+          value: '1.32e-5 (uncond) · 6.63e-5 (motif) · 9.65e-5 (all-atom); weight relRMS 1.02e-2 vs FP32',
+          scope: 'All 16 checkpoints & 111 sampler replay cases across unconditional, motif, tip-atom, partial & multichain modes',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+        latencyHint: '8.7 ms (64 aa) · 11.1 ms (128 aa) per step warm; 1.03 s cold',
+        caveat:
+          'INT8 quantization can shift discrete MiniMPNN categorical choices during free sampling; switch to FP16 (~50 MB) for closer FP32 parity.',
+      },
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'F16 weight storage (core unpack2x16float or shader-f16) with F32 accumulation (~50.5–71.4 MB per denoiser + ~57.0 MB MiniMPNN)',
+        approxSizeMB: 51,
+        parityVsPytorchFp32: {
+          metric: 'Neural-output quantization relRMS vs PyTorch FP32',
+          value: '5.84e-3 (weight relRMS 2.03e-4; GPU vs FP16 oracle ≤ 9.65e-5)',
+          scope: 'All 16 checkpoints & 111 sampler replay cases',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+        latencyHint: '9.3 ms (64 aa) · 11.9 ms (128 aa) per step warm; 1.23 s cold',
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Reference F32 tensors (~100.7–142.6 MB per denoiser); exact checkpoint reload',
+        approxSizeMB: 101,
+        parityVsPytorchFp32: {
+          metric: 'GPU sampler replay final relRMS vs PyTorch FP32',
+          value: '1.36e-6–5.95e-6 across all 16 presets (exact token & atom masks)',
+          scope: '111 replay cases across 15 structural checkpoints + MiniMPNN',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+        latencyHint: '9.2 ms (64 aa) · 11.4 ms (128 aa) per step warm; 1.41 s cold',
+      },
+    ],
+    upstreamRepo: 'https://github.com/ProteinDesignLab/protpardelle-1c',
+    upstreamCommit: 'ee378400f25b801fa481028000f9060183d7fb4c',
+    weightsRepo: 'https://huggingface.co/ramithuh/protpardelle-webgpu',
+    weightsRevision: 'dc2e820def02',
+    license: 'MIT (code) · CC-BY-4.0 (ProtPardelle-1c weights)',
+    citation:
+      'Chu et al. (2024) An all-atom protein generative model (ProtPardelle), PNAS / ProteinDesignLab protpardelle-1c.',
+    limitations: [
+      'Hosted on Hugging Face with INT8 (~26–36 MB) and FP16 (~50–71 MB) tiers across 6 structural denoisers + MiniMPNN.',
+      'External full ProteinMPNN redesign inside the sampler loop is excluded (wire denovo.run’s ProteinMPNN/LigandMPNN blocks downstream instead).',
+      'Secondary-structure and adjacency-conditioned weights were not released upstream.',
+      'Released denoisers are protein-only; heteroatoms/ligands in input PDBs do not enter denoiser coordinates.',
     ],
   },
 

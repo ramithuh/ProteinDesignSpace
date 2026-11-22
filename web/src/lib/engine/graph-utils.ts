@@ -145,6 +145,28 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         chain: '',
         bfactorAggregate: 'best-stabilizing',
       };
+    case 'protpardelle':
+      return {
+        taskMode: 'unconditional',
+        checkpoint: 'cc91_epoch383',
+        precision: 'int8',
+        length: 80,
+        numDesigns: 1,
+        numSteps: 100,
+        sidechainMode: true,
+        motifSelection: '',
+        rewindSteps: 40,
+        stepScale: 1.2,
+        temperature: 0.1,
+        seed: 42,
+      };
+    case 'esmc':
+      return {
+        mode: 'wildtype',
+        precision: 'int8',
+        maskPositions: '',
+        maxSequences: 1,
+      };
     case 'top-k-filter':
       return {
         mode: 'per-backbone',

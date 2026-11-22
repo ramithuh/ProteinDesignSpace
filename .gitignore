@@ -51,4 +51,8 @@ web/static/vendor/ligandmpnn/weights/
 web/static/vendor/lasermpnn/weights/
 !web/static/vendor/antifold-esmif1/
 web/static/vendor/antifold-esmif1/weights/
+!web/static/vendor/protpardelle/
+web/static/vendor/protpardelle/weights/
+!web/static/vendor/esmc/
+web/static/vendor/esmc/weights/
 .upstream-tmp/

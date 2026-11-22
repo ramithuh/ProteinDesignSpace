@@ -509,15 +509,27 @@
       webgpuDetail = 'unavailable in browser';
     } else {
       try {
-        const adapter = await navigator.gpu.requestAdapter();
+        let adapter: GPUAdapter | null = null;
+        for (let attempt = 0; attempt < 3 && !adapter; attempt++) {
+          if (attempt > 0) {
+            await new Promise((r) => setTimeout(r, attempt * 250));
+          }
+          adapter =
+            (await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })) ??
+            (await navigator.gpu.requestAdapter());
+        }
         if (!adapter) {
           webgpuSupported = false;
           webgpuDetail = 'no GPU adapter';
         } else {
           webgpuSupported = true;
-          const info = (adapter as unknown as { info?: { vendor?: string; architecture?: string } }).info;
+          const info = (
+            adapter as unknown as {
+              info?: { vendor?: string; architecture?: string; description?: string };
+            }
+          ).info;
           const f16 = adapter.features.has('shader-f16') ? 'f16' : 'f32';
-          const tag = info?.vendor || info?.architecture || 'ready';
+          const tag = info?.description || info?.vendor || info?.architecture || 'ready';
           webgpuDetail = `${tag} (${f16})`;
         }
       } catch {
@@ -584,6 +596,13 @@
   }
 
   function handleProgress(ev: NodeProgressEvent) {
+    if (webgpuSupported === false && (ev.status === 'running' || ev.status === 'done')) {
+      const node = graph.nodes.find((n) => n.id === ev.nodeId);
+      if (node && ADAPTER_REGISTRY[node.adapterId]?.runtime !== 'cpu-ts') {
+        webgpuSupported = true;
+        webgpuDetail = 'ready (worker verified)';
+      }
+    }
     const prev = pendingProgressEvents[ev.nodeId] ?? nodeStates[ev.nodeId];
     const statusChanged = !prev || prev.status !== ev.status;
     pendingProgressEvents[ev.nodeId] = ev;

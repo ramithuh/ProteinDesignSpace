@@ -256,6 +256,8 @@ describe('declarative ParamSchema & modes single source of truth', () => {
       { adapterId: 'ligandmpnn', file: 'src/lib/workers/ligandmpnn.worker.ts' },
       { adapterId: 'lasermpnn', file: 'src/lib/workers/lasermpnn.worker.ts' },
       { adapterId: 'antifold-esmif1', file: 'src/lib/workers/antifold.worker.ts' },
+      { adapterId: 'protpardelle', file: 'src/lib/workers/protpardelle.worker.ts' },
+      { adapterId: 'esmc', file: 'src/lib/workers/esmc.worker.ts' },
     ];
 
     for (const target of WORKER_TARGETS) {

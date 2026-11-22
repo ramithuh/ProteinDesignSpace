@@ -102,6 +102,24 @@
       url: 'https://github.com/oxpig/AntiFold',
       linkLabel: 'oxpig/AntiFold',
     },
+    {
+      name: 'ProtPardelle-1c',
+      role: 'All-Atom & Backbone Protein Diffusion',
+      detail:
+        'All-atom and backbone EDM protein diffusion supporting motif scaffolding, sidechain-tip conditioning, partial diffusion, and MiniMPNN co-design (Chu et al., ProteinDesignLab), ported to native WebGPU.',
+      license: 'MIT (code) · CC-BY-4.0 (weights)',
+      url: 'https://github.com/ProteinDesignLab/protpardelle-1c',
+      linkLabel: 'ProteinDesignLab/protpardelle-1c',
+    },
+    {
+      name: 'ESM-C 300M',
+      role: 'Protein Language Model (Zero-Shot LLR & Fill)',
+      detail:
+        '333M-parameter ESM Cambrian protein language model (Biohub / EvolutionaryScale) for zero-shot L×20 mutation fitness heatmaps, pseudo-perplexity naturalness scoring, and masked sequence fill in WebGPU.',
+      license: 'MIT (Biohub)',
+      url: 'https://github.com/Biohub/esm',
+      linkLabel: 'Biohub/esm',
+    },
   ];
 
   const TOOL_CREDITS: CreditItem[] = [

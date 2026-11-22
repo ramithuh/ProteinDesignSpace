@@ -10,6 +10,8 @@ import ThermoMpnnWorker from '$lib/workers/thermompnn.worker?worker';
 import LigandMpnnWorker from '$lib/workers/ligandmpnn.worker?worker';
 import LaserMpnnWorker from '$lib/workers/lasermpnn.worker?worker';
 import AntiFoldWorker from '$lib/workers/antifold.worker?worker';
+import ProtPardelleWorker from '$lib/workers/protpardelle.worker?worker';
+import EsmcWorker from '$lib/workers/esmc.worker?worker';
 import {
   cropRawAllAtomStructure,
   generateSampleHelixBundlePdb,
@@ -1279,6 +1281,10 @@ export class ExecutionScheduler {
         return new LaserMpnnWorker();
       case 'antifold-esmif1':
         return new AntiFoldWorker();
+      case 'protpardelle':
+        return new ProtPardelleWorker();
+      case 'esmc':
+        return new EsmcWorker();
       default:
         throw new Error(`No GPU worker registered for adapter "${adapterId}"`);
     }

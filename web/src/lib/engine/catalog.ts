@@ -57,13 +57,13 @@ export interface FilteredCatalogEntry {
 
 export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
   { title: 'Inputs', ids: ['pdb-input', 'sequence-input'] },
-  { title: 'Structure Generation', ids: ['rfd4-proteina', 'genie3'] },
+  { title: 'Structure Generation', ids: ['rfd4-proteina', 'genie3', 'protpardelle'] },
   {
     title: 'Sequence Design',
     ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1'],
   },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
-  { title: 'Evaluation', ids: ['thermompnn', 'top-k-filter', 'designability-scorer'] },
+  { title: 'Evaluation', ids: ['thermompnn', 'esmc', 'top-k-filter', 'designability-scorer'] },
 ];
 
 export const CONCISE_BLOCK_ROLES: Record<string, string> = {
@@ -71,12 +71,14 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   'sequence-input': 'Paste amino acid sequences (plain text or FASTA)',
   'rfd4-proteina': 'All-atom backbone and sequence co-design',
   genie3: 'Fast de novo backbone diffusion (23.3M parameters)',
+  protpardelle: 'All-atom & backbone EDM diffusion, motif scaffolding & MiniMPNN co-design',
   'web-protein-mpnn': 'Inverse folding (SolubleMPNN, ProteinMPNN, Cα-only)',
   ligandmpnn: 'Ligand-, metal- & nucleic-acid-aware protein sequence design',
   lasermpnn: 'Ligand-aware sequence & all-atom sidechain rotamer co-design',
   'antifold-esmif1': 'Antibody CDR (AntiFold) & general protein inverse folding (ESM-IF1)',
   'localfold-af2': 'Predict 3D structures (AlphaFold2, RF3, Boltz-2, AlphaFold 3 & more)',
   thermompnn: 'Full L×20 site-saturation ΔΔG stability scan & B-factor painting',
+  esmc: 'ESM-C 300M zero-shot L×20 LLR fitness heatmap, naturalness & masked fill',
   'top-k-filter': 'Rank and filter top-K sequences per backbone or globally before folding',
   'designability-scorer': 'Kabsch alignment, scRMSD, scTM & pLDDT pass rate',
 };
@@ -248,6 +250,108 @@ function buildSubGroupsForAdapter(adapterId: string): {
     return {
       subCountLabel: `${items.length} variants`,
       subGroups: [{ title: 'Model Variants', items }],
+    };
+  }
+
+  if (adapterId === 'protpardelle') {
+    const items: CatalogSubItem[] = [
+      {
+        key: 'cc91_epoch383',
+        label: 'ProtPardelle-1c · All-Atom (cc91)',
+        subtitle: 'All-atom monomer diffusion, motif scaffolding & MiniMPNN co-design',
+        meta: '~26 MB · CC-BY-4.0',
+        insert: {
+          adapterId: 'protpardelle',
+          params: { checkpoint: 'cc91_epoch383', sidechainMode: true },
+          label: 'ProtPardelle (All-Atom)',
+        },
+        searchBlob: 'protpardelle 1c cc91 allatom all-atom monomer motif diffusion minimpnn codesign'.toLowerCase(),
+      },
+      {
+        key: 'cc91_tip_epoch480',
+        label: 'ProtPardelle-1c · Tip-Atom Motif (cc91_tip)',
+        subtitle: 'Sidechain-tip atom motif scaffolding & enzyme active-site framing',
+        meta: '~26 MB · CC-BY-4.0',
+        insert: {
+          adapterId: 'protpardelle',
+          params: { checkpoint: 'cc91_tip_epoch480', taskMode: 'motif', sidechainMode: true },
+          label: 'ProtPardelle (Tip Motif)',
+        },
+        searchBlob: 'protpardelle cc91_tip tip atom sidechain motif scaffolding enzyme'.toLowerCase(),
+      },
+      {
+        key: 'cc58_epoch416',
+        label: 'ProtPardelle-1c · Backbone (cc58)',
+        subtitle: 'Fast backbone diffusion & crop-conditioned motif scaffolding',
+        meta: '~26 MB · CC-BY-4.0',
+        insert: {
+          adapterId: 'protpardelle',
+          params: { checkpoint: 'cc58_epoch416', sidechainMode: false },
+          label: 'ProtPardelle (Backbone)',
+        },
+        searchBlob: 'protpardelle cc58 backbone diffusion motif'.toLowerCase(),
+      },
+      {
+        key: 'cc94_epoch3100',
+        label: 'ProtPardelle-1c · Multichain All-Atom (cc94)',
+        subtitle: 'Multichain all-atom complex generation & conditioning',
+        meta: '~26 MB · CC-BY-4.0',
+        insert: {
+          adapterId: 'protpardelle',
+          params: { checkpoint: 'cc94_epoch3100', sidechainMode: true },
+          label: 'ProtPardelle (Multichain)',
+        },
+        searchBlob: 'protpardelle cc94 multichain complex all-atom'.toLowerCase(),
+      },
+    ];
+    return {
+      subCountLabel: `${items.length} presets`,
+      subGroups: [{ title: 'Checkpoints', items }],
+    };
+  }
+
+  if (adapterId === 'esmc') {
+    const items: CatalogSubItem[] = [
+      {
+        key: 'esmc-wildtype',
+        label: 'ESM-C 300M · Wild-Type LLR (Fast)',
+        subtitle: '1-pass L×20 zero-shot fitness heatmap & WT log-p track (~40 ms)',
+        meta: '~335 MB · MIT',
+        insert: {
+          adapterId: 'esmc',
+          params: { mode: 'wildtype', precision: 'int8' },
+          label: 'ESM-C 300M (WT LLR)',
+        },
+        searchBlob: 'esmc esm-c esm cambrian 300m llr zero-shot fitness mutation wildtype plm'.toLowerCase(),
+      },
+      {
+        key: 'esmc-masked',
+        label: 'ESM-C 300M · Masked-Marginal & PPPL',
+        subtitle: 'Full L-pass masked-marginal LLR matrix & pseudo-perplexity naturalness',
+        meta: '~335 MB · MIT',
+        insert: {
+          adapterId: 'esmc',
+          params: { mode: 'masked', precision: 'int8' },
+          label: 'ESM-C 300M (Masked)',
+        },
+        searchBlob: 'esmc esm-c masked marginal naturalness pseudo-perplexity pppl llr'.toLowerCase(),
+      },
+      {
+        key: 'esmc-fill',
+        label: 'ESM-C 300M · Masked Sequence Fill',
+        subtitle: 'Mask selected residue positions and predict top-1 amino acids',
+        meta: '~335 MB · MIT',
+        insert: {
+          adapterId: 'esmc',
+          params: { mode: 'fill', precision: 'int8' },
+          label: 'ESM-C 300M (Fill)',
+        },
+        searchBlob: 'esmc esm-c fill mask sequence design infill plm'.toLowerCase(),
+      },
+    ];
+    return {
+      subCountLabel: `${items.length} modes`,
+      subGroups: [{ title: 'Inference Modes', items }],
     };
   }
 

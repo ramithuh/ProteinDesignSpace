@@ -155,6 +155,20 @@
         if (data.autoModeHint) return `${data.autoModeHint} · ${len} aa · ${steps} steps`;
         return `${len} aa · ${steps} steps`;
       }
+      case 'protpardelle': {
+        const ckpt = String(p.checkpoint ?? 'cc91_epoch383').split('_')[0];
+        const mode = String(p.taskMode ?? 'unconditional');
+        const steps = Number(p.numSteps ?? 100);
+        if (mode === 'motif') return `${ckpt} · Motif · ${steps} steps`;
+        if (mode === 'partial') return `${ckpt} · Partial (${Number(p.rewindSteps ?? 40)})`;
+        return `${ckpt} · ${Number(p.length ?? 80)} aa · ${steps} steps`;
+      }
+      case 'esmc': {
+        const mode = String(p.mode ?? 'wildtype');
+        const prec = String(p.precision ?? 'int8').toUpperCase();
+        const tag = mode === 'masked' ? 'Masked LLR' : mode === 'fill' ? 'Fill' : 'WT LLR';
+        return `${tag} · ${prec}`;
+      }
       case 'web-protein-mpnn': {
         const fam =
           p.family === 'proteinmpnn'

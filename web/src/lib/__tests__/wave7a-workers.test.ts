@@ -90,6 +90,35 @@ const WAVE7A_SPECS = [
       'variant',
     ],
   },
+  {
+    name: 'ProtPardelle-1c',
+    vendorDir: 'static/vendor/protpardelle',
+    workerFile: 'src/lib/workers/protpardelle.worker.ts',
+    factoryExport: 'createProtpardelleEngine',
+    hfBaseUrl: 'https://huggingface.co/ramithuh/protpardelle-webgpu/resolve/main',
+    expectedParamKeys: [
+      'checkpoint',
+      'length',
+      'motifSelection',
+      'numDesigns',
+      'numSteps',
+      'precision',
+      'rewindSteps',
+      'seed',
+      'sidechainMode',
+      'stepScale',
+      'taskMode',
+      'temperature',
+    ],
+  },
+  {
+    name: 'ESM-C 300M',
+    vendorDir: 'static/vendor/esmc',
+    workerFile: 'src/lib/workers/esmc.worker.ts',
+    factoryExport: 'createEsmcEngine',
+    hfBaseUrl: 'https://huggingface.co/ramithuh/esmc-webgpu/resolve/main/esmc-300m',
+    expectedParamKeys: ['maskPositions', 'maxSequences', 'mode', 'precision'],
+  },
 ] as const;
 
 describe('Wave-7A WebGPU vendored engines & workers', () => {

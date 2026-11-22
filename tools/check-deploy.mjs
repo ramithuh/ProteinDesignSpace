@@ -25,6 +25,8 @@ for (const req of [
   'vendor/localfold/webgpu/esmfold2/fold.js',
   'vendor/rfd4-proteina/webgpu/index.js',
   'vendor/genie3/webgpu/index.js',
+  'vendor/protpardelle/webgpu/index.js',
+  'vendor/esmc/webgpu/index.js',
 ]) {
   if (!existsSync(resolve(buildDir, req))) {
     console.error(`[check:deploy] FAIL: required build asset missing: ${req}`);
@@ -32,11 +34,13 @@ for (const req of [
   }
 }
 
-if (existsSync(resolve(buildDir, 'vendor/genie3/weights'))) {
-  console.error(
-    '[check:deploy] FAIL: vendor/genie3/weights should not be bundled in Cloudflare Pages output (serve weights from HuggingFace).',
-  );
-  process.exit(1);
+for (const w of ['vendor/genie3/weights', 'vendor/protpardelle/weights', 'vendor/esmc/weights']) {
+  if (existsSync(resolve(buildDir, w))) {
+    console.error(
+      `[check:deploy] FAIL: ${w} should not be bundled in Cloudflare Pages output (serve weights from HuggingFace).`,
+    );
+    process.exit(1);
+  }
 }
 
 /** @type {Array<{ path: string; bytes: number }>} */

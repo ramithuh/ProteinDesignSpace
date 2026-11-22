@@ -541,6 +541,49 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
       continue;
     }
 
+    if (node.adapterId === 'protpardelle') {
+      const checkpoint = String(node.params.checkpoint ?? 'cc91_epoch383');
+      const precision = String(node.params.precision ?? 'int8');
+      const sidechain = Boolean(node.params.sidechainMode ?? true);
+      const isBb = checkpoint.startsWith('bb');
+      const baseMB = isBb ? (precision === 'fp16' ? 71 : 36) : precision === 'fp16' ? 51 : 26;
+      const mpnnMB = sidechain && !isBb && checkpoint !== 'cc58_epoch416' && checkpoint !== 'cc95_epoch3490'
+        ? (precision === 'fp16' ? 57 : 29)
+        : 0;
+      const key = `protpardelle:${checkpoint}:${precision}:${sidechain ? 'aa' : 'bb'}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          key,
+          label: `ProtPardelle-1c (${checkpoint} · ${precision.toUpperCase()})`,
+          approxMB: baseMB + mpnnMB,
+          estimatedVramMB: manifest.estimatedVramMB,
+          runtime: manifest.runtime,
+          plannedItems: 0,
+        });
+      }
+      addPlannedItems(key, nodeItems);
+      continue;
+    }
+
+    if (node.adapterId === 'esmc') {
+      const precision = String(node.params.precision ?? 'int8');
+      const approxMB = precision === 'fp16' ? 667 : 335;
+      const estimatedVramMB = precision === 'fp16' ? 1150 : manifest.estimatedVramMB;
+      const key = `esmc:${precision}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          key,
+          label: `ESM-C 300M (${precision.toUpperCase()})`,
+          approxMB,
+          estimatedVramMB,
+          runtime: manifest.runtime,
+          plannedItems: 0,
+        });
+      }
+      addPlannedItems(key, nodeItems);
+      continue;
+    }
+
     if (!byKey.has(manifest.id)) {
       byKey.set(manifest.id, {
         key: manifest.id,

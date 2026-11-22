@@ -31,6 +31,10 @@ const EXPECTED_HOSTED_REVISIONS: Record<(typeof HOSTED_PORT_CARD_IDS)[number], {
     repo: 'https://huggingface.co/ramithuh/esmc-webgpu',
     rev: '773a9473acb5',
   },
+  'protpardelle-webgpu': {
+    repo: 'https://huggingface.co/ramithuh/protpardelle-webgpu',
+    rev: 'dc2e820def02',
+  },
   'dyna1-webgpu': {
     repo: 'https://huggingface.co/ramithuh/dyna1-webgpu',
     rev: 'eec62e7debef',
@@ -63,7 +67,7 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
 
   it('ensures every card in MODEL_CARDS has a valid activePrecisionId and complete provenance', () => {
     const cards = Object.values(MODEL_CARDS);
-    expect(cards.length).toBe(10); // 8 live GPU/ONNX adapters + 2 remaining hosted WebGPU ports
+    expect(cards.length).toBe(11); // 10 live GPU/ONNX adapters + 1 remaining hosted WebGPU port (Dyna-1)
 
     for (const card of cards) {
       expect(card.precisions.length).toBeGreaterThan(0);
@@ -81,13 +85,15 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
     }
   });
 
-  it('includes all 6 HF-hosted WebGPU ports with exact measured parity metrics, pinned HF URLs, Wave-7A live promotion, and honest limitations', () => {
-    expect(HOSTED_PORT_CARD_IDS).toHaveLength(6);
-    const liveWave7Cards: Record<string, string> = {
-      'thermompnn-webgpu': 'thermompnn',
-      'ligandmpnn-webgpu': 'ligandmpnn',
-      'lasermpnn-webgpu': 'lasermpnn',
-      'antifold-esmif1-webgpu': 'antifold-esmif1',
+  it('includes all 7 HF-hosted WebGPU ports with exact measured parity metrics, pinned HF URLs, live promotion, and honest limitations', () => {
+    expect(HOSTED_PORT_CARD_IDS).toHaveLength(7);
+    const liveWave7Cards: Record<string, { adapterId: string; defaultPrecision: string }> = {
+      'thermompnn-webgpu': { adapterId: 'thermompnn', defaultPrecision: 'fp16' },
+      'ligandmpnn-webgpu': { adapterId: 'ligandmpnn', defaultPrecision: 'fp16' },
+      'lasermpnn-webgpu': { adapterId: 'lasermpnn', defaultPrecision: 'fp16' },
+      'antifold-esmif1-webgpu': { adapterId: 'antifold-esmif1', defaultPrecision: 'fp16' },
+      'esmc-webgpu': { adapterId: 'esmc', defaultPrecision: 'int8' },
+      'protpardelle-webgpu': { adapterId: 'protpardelle', defaultPrecision: 'int8' },
     };
 
     for (const id of HOSTED_PORT_CARD_IDS) {
@@ -95,8 +101,8 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
       expect(card, `Missing hosted port card "${id}"`).toBeDefined();
       if (id in liveWave7Cards) {
         expect(card.status).toBe('live');
-        expect(card.adapterId).toBe(liveWave7Cards[id]);
-        expect(card.activePrecisionId).toBe('fp16');
+        expect(card.adapterId).toBe(liveWave7Cards[id].adapterId);
+        expect(card.activePrecisionId).toBe(liveWave7Cards[id].defaultPrecision);
       } else {
         expect(card.status).toBe('weights-hosted');
       }
