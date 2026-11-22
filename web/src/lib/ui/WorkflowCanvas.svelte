@@ -1415,7 +1415,7 @@
   }
   .canvas-action-dock {
     position: absolute;
-    bottom: calc(50px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(54px + env(safe-area-inset-bottom, 0px));
     left: 50%;
     transform: translate(-50%, 0);
     z-index: 25;

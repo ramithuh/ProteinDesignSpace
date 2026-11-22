@@ -429,7 +429,7 @@
   .above-strip {
     position: absolute;
     left: 50%;
-    bottom: calc(100% + 16px);
+    bottom: calc(100% + 22px);
     transform: translateX(-50%);
     max-width: min(760px, calc(100vw - 24px));
     z-index: 3;
@@ -808,7 +808,7 @@
   .micro-footer {
     position: absolute;
     left: 50%;
-    top: calc(100% + 14px);
+    top: calc(100% + 22px);
     transform: translateX(-50%);
     z-index: 12;
     display: inline-flex;
