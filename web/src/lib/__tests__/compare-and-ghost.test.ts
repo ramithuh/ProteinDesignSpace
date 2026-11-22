@@ -1421,4 +1421,68 @@ describe('multi-select 3D comparison state', () => {
     expect(genCmp.branches[0].seqRecoveryPct).toBeNull();
     expect(genCmp.branches[1].seqRecoveryPct).toBeNull();
   });
+
+  it('3D Compare renders all 4 heterogeneous branches (RFD4 + AF2 + Genie3 + AF2) instead of collapsing to 1 on generic seq-1 key collision', () => {
+    const pdb = generateSampleHelixBundlePdb();
+    const parsed = parsePdbBackbone(pdb);
+    const geom = computeGeometryStats(parsed.caCoords);
+    const makeStruct = (id: string, seq: string): StructureArtifact => ({
+      kind: 'StructureArtifact',
+      id,
+      label: id,
+      sourceModelId: id,
+      length: parsed.nResidues,
+      sequence: seq,
+      caCoords: parsed.caCoords,
+      backbone4Coords: parsed.backbone4Coords,
+      geometry: geom,
+      pdbText: pdb,
+    });
+    const makeFold = (id: string, seq: string, plddt: number): FoldedStructure => ({
+      kind: 'FoldedStructure',
+      id,
+      parentStructureId: id,
+      folds: [
+        {
+          sequenceId: 'seq-1',
+          key: 'seq-1',
+          sequence: seq,
+          foldModelId: 'localfold-af2-monomer-int5',
+          pdbText: pdb,
+          caCoords: parsed.caCoords,
+          plddt: new Float32Array(parsed.nResidues).fill(plddt),
+          meanPlddt: plddt,
+          ptm: 0.85,
+          elapsedMs: 100,
+        },
+      ],
+    });
+    const seqRfd = 'A'.repeat(parsed.nResidues);
+    const seqGenie = 'G'.repeat(parsed.nResidues);
+    const graph: WorkflowGraph = {
+      id: 'hetero-4-cmp',
+      name: 'Hetero 4 Compare',
+      nodes: [
+        { id: 'rfd4_1', adapterId: 'rfd4-proteina', label: 'RFD4 (Motif)', params: {} },
+        { id: 'fold_rfd4', adapterId: 'localfold-af2', label: 'AF2 (RFD4)', params: {} },
+        { id: 'genie_1', adapterId: 'genie3', label: 'Genie 3 (Motif)', params: {} },
+        { id: 'fold_genie', adapterId: 'localfold-af2', label: 'AF2 (Genie3)', params: {} },
+      ],
+      edges: [],
+    };
+    const outs: Record<string, Record<string, CanonicalArtifact>> = {
+      rfd4_1: { structure: makeStruct('rfd4-out', seqRfd) },
+      fold_rfd4: { folds: makeFold('fold-rfd4', seqRfd, 88) },
+      genie_1: { structure: makeStruct('genie-out', seqGenie) },
+      fold_genie: { folds: makeFold('fold-genie', seqGenie, 82) },
+    };
+    const cmp = buildComparisonState(graph, ['rfd4_1', 'fold_rfd4', 'genie_1', 'fold_genie'], outs, {
+      layout: 'overlay',
+      colorMode: 'by-model',
+      alignKabsch: true,
+    });
+    expect(cmp.pairingMode).toBe('branch-best');
+    expect(cmp.models).toHaveLength(4);
+    expect(cmp.branches.every((b) => !b.missingSelectedCandidate)).toBe(true);
+  });
 });

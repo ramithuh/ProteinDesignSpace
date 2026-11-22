@@ -983,21 +983,35 @@ function branchesShareCandidateIdentity(
   branchItems: readonly KeyedCollectionBranch<BranchCandidateRef>[],
 ): { hasSharedKey: boolean; hasSharedSequence: boolean } {
   const keyBranchCount = new Map<string, number>();
+  const keyDistinctSeqs = new Map<string, Set<string>>();
   const seqBranchCount = new Map<string, number>();
   for (const br of branchItems) {
     const localKeys = new Set<string>();
     const localSeqs = new Set<string>();
     for (const item of br.items) {
-      if (item.key) localKeys.add(item.key);
       const seq = item.sequence?.trim().toUpperCase();
+      if (item.key) {
+        localKeys.add(item.key);
+        if (seq && seq.length >= 3) {
+          let s = keyDistinctSeqs.get(item.key);
+          if (!s) {
+            s = new Set<string>();
+            keyDistinctSeqs.set(item.key, s);
+          }
+          s.add(seq);
+        }
+      }
       if (seq && seq.length >= 3) localSeqs.add(seq);
     }
     for (const k of localKeys) keyBranchCount.set(k, (keyBranchCount.get(k) ?? 0) + 1);
     for (const s of localSeqs) seqBranchCount.set(s, (seqBranchCount.get(s) ?? 0) + 1);
   }
   let hasSharedKey = false;
-  for (const count of keyBranchCount.values()) {
-    if (count >= 2) {
+  for (const [k, count] of keyBranchCount.entries()) {
+    // Do not treat generic auto-label collisions (e.g. "seq-1" from two unrelated MPNN runs
+    // with completely different amino acid sequences) as the same candidate identity.
+    const seqs = keyDistinctSeqs.get(k);
+    if (count >= 2 && (!seqs || seqs.size <= 1)) {
       hasSharedKey = true;
       break;
     }
@@ -1937,18 +1951,30 @@ export function buildComparisonState(
   const branchCollections = capped.map((id) => extractBranchCandidateItems(graph, id, outputsByNode));
   const { hasSharedKey, hasSharedSequence } = branchesShareCandidateIdentity(branchCollections);
   const hasSharedIdentity = hasSharedKey || hasSharedSequence;
-  const pairingMode: ComparisonPairingMode =
-    opts.pairingMode ?? (hasSharedIdentity ? 'by-candidate' : 'branch-best');
-  const pairingLabel =
-    pairingMode === 'by-candidate'
-      ? 'Same candidate (by identity)'
-      : 'Branch best (independently ranked winners)';
 
   // Use sequence fallback only when branches do not share explicit candidate keys
   // (e.g., comparing branches with different per-branch auto-labels for the same sequence).
   const joined = joinKeyedCollections(branchCollections, {
     matchBySequenceFallback: !hasSharedKey && hasSharedSequence,
   });
+
+  // Default to 'by-candidate' when branches share a genuine candidate identity — EXCEPT when
+  // comparing mixed artifact kinds (e.g. generator `structure` + refold `fold` branches like
+  // RFD4 + AF2(RFD4) + Genie3 + AF2(Genie3) wired into one 3D Compare) without a full-overlap
+  // candidate, in which case default to 'branch-best' so every branch renders in 3D!
+  const populated = branchCollections.filter((b) => b.items.length > 0);
+  const populatedKinds = new Set(populated.map((b) => b.items[0]?.value.kind));
+  const hasMixedKinds = populatedKinds.size > 1;
+  const hasFullOverlapRow =
+    populated.length >= 2 && joined.rows.some((r) => r.presentCount >= populated.length);
+
+  const pairingMode: ComparisonPairingMode =
+    opts.pairingMode ??
+    (hasSharedIdentity && (!hasMixedKinds || hasFullOverlapRow) ? 'by-candidate' : 'branch-best');
+  const pairingLabel =
+    pairingMode === 'by-candidate'
+      ? 'Same candidate (by identity)'
+      : 'Branch best (independently ranked winners)';
 
   let selectedCandidateKey: string | null = null;
   if (pairingMode === 'by-candidate') {
@@ -1968,7 +1994,15 @@ export function buildComparisonState(
       ) {
         selectedCandidateKey = firstBranch.items[firstExplicitIdx].key;
       } else {
-        selectedCandidateKey = joined.keys[0] ?? null;
+        // Prefer the first row with maximum branch coverage so multi-branch comparisons
+        // don't accidentally default to a single-branch orphan candidate.
+        let bestRow = joined.rows[0] ?? null;
+        for (const row of joined.rows) {
+          if (bestRow && row.presentCount > bestRow.presentCount) {
+            bestRow = row;
+          }
+        }
+        selectedCandidateKey = bestRow?.key ?? joined.keys[0] ?? null;
       }
     }
   }
