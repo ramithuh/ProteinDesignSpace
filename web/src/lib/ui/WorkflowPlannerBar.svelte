@@ -425,6 +425,17 @@
     transform: translateX(-50%);
     max-width: min(720px, calc(100vw - 24px));
     z-index: 3;
+    animation: strip-float-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes strip-float-in {
+    from {
+      opacity: 0;
+      transform: translateX(-50%) translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
   }
 
   .chip-row {
@@ -553,6 +564,17 @@
     gap: 8px;
     width: 100%;
     padding: 2px 4px 2px 10px;
+    animation: row-morph-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes row-morph-in {
+    from {
+      opacity: 0;
+      transform: translateY(2px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
   .planner-bar-root.is-multiline .input-row {
     align-items: flex-end;
@@ -682,6 +704,7 @@
     gap: 10px;
     width: 100%;
     padding: 2px 4px 2px 8px;
+    animation: row-morph-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
   .review-info {
     display: flex;
@@ -784,6 +807,17 @@
     white-space: nowrap;
     max-width: calc(100vw - 20px);
     pointer-events: auto;
+    animation: footer-fade-in 240ms ease 60ms both;
+  }
+  @keyframes footer-fade-in {
+    from {
+      opacity: 0;
+      transform: translateX(-50%) translateY(-3px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
   }
   .micro-text {
     font-size: 10.5px;
@@ -883,7 +917,11 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    .bar-sparkle.spinning {
+    .bar-sparkle.spinning,
+    .above-strip,
+    .input-row,
+    .review-row,
+    .micro-footer {
       animation: none;
     }
     .ex-pill {

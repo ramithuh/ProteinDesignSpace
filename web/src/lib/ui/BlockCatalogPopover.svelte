@@ -605,7 +605,7 @@
     outline: none;
   }
   .catalog-shell.place-above {
-    bottom: 76px;
+    bottom: 94px;
     top: auto;
   }
   .catalog-shell.place-below {

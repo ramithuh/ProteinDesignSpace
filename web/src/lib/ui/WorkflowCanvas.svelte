@@ -104,6 +104,8 @@
   let validationToast = $state<string | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let canvasEl: HTMLDivElement | null = $state(null);
+  let dockEl: HTMLDivElement | null = $state(null);
+  let dockMorphTimer: ReturnType<typeof setTimeout> | null = null;
   let addBtnEl: HTMLButtonElement | null = $state(null);
   let wireBtnEl: HTMLButtonElement | null = $state(null);
   let wirePopoverEl: HTMLDivElement | null = $state(null);
@@ -231,8 +233,8 @@
         ? 0.42
         : 0.34
       : compact
-        ? 0.36
-        : 0.22;
+        ? 0.38
+        : 0.26;
     return {
       padding: {
         top: 0.12,
@@ -316,6 +318,7 @@
     return () => {
       if (toastTimer) clearTimeout(toastTimer);
       if (clearConfirmTimer) clearTimeout(clearConfirmTimer);
+      if (dockMorphTimer) clearTimeout(dockMorphTimer);
       cancelPendingFit();
     };
   });
@@ -344,9 +347,55 @@
     scheduleFitView(triggerChanged ? 260 : 220);
   });
 
+  function morphDock(mutate: () => void) {
+    const el = dockEl;
+    const prefersReduced =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (!el || prefersReduced) {
+      mutate();
+      return;
+    }
+    if (dockMorphTimer) {
+      clearTimeout(dockMorphTimer);
+      dockMorphTimer = null;
+    }
+    const fromW = el.getBoundingClientRect().width;
+    const fromH = el.getBoundingClientRect().height;
+    el.style.transition = 'none';
+    el.style.width = '';
+    el.style.height = '';
+    mutate();
+    void tick().then(() => {
+      if (!dockEl) return;
+      const toW = dockEl.getBoundingClientRect().width;
+      const toH = dockEl.getBoundingClientRect().height;
+      if (Math.abs(toW - fromW) < 2 && Math.abs(toH - fromH) < 2) {
+        dockEl.style.transition = '';
+        return;
+      }
+      dockEl.style.width = `${fromW}px`;
+      dockEl.style.height = `${fromH}px`;
+      void dockEl.offsetWidth;
+      dockEl.style.transition =
+        'width 300ms cubic-bezier(0.22, 1, 0.36, 1), height 260ms cubic-bezier(0.22, 1, 0.36, 1), border-radius 260ms cubic-bezier(0.22, 1, 0.36, 1), border-color 220ms ease, box-shadow 260ms ease';
+      dockEl.style.width = `${toW}px`;
+      dockEl.style.height = `${toH}px`;
+      dockMorphTimer = setTimeout(() => {
+        dockMorphTimer = null;
+        if (!dockEl) return;
+        dockEl.style.width = '';
+        dockEl.style.height = '';
+        dockEl.style.transition = '';
+      }, 320);
+    });
+  }
+
   function setDraftPreview(next: PlannedWorkflowResult | null) {
     const hadDraft = draftPreview !== null;
-    draftPreview = next;
+    morphDock(() => {
+      draftPreview = next;
+    });
     if (next || hadDraft) {
       scheduleFitView(next ? 260 : 220);
     }
@@ -358,19 +407,24 @@
     cancelClearConfirm();
     wireLegendOpen = false;
     catalogOpen = false;
-    plannerOpen = true;
+    morphDock(() => {
+      plannerOpen = true;
+    });
     void tick().then(() => plannerBarRef?.focusInput());
   }
 
   function closeInlinePlanner() {
     plannerBarRef?.abortPending();
-    if (draftPreview) {
+    const hadDraft = draftPreview !== null;
+    morphDock(() => {
       draftPreview = null;
+      plannerOpen = false;
+      plannerHasText = false;
+      plannerLoading = false;
+    });
+    if (hadDraft) {
       scheduleFitView(220);
     }
-    plannerOpen = false;
-    plannerHasText = false;
-    plannerLoading = false;
   }
 
   // Close wire legend on click-outside
@@ -1046,6 +1100,7 @@
 
   <!-- Floating Bottom-Center Action Dock: morphs seamlessly into the inline workflow prompt bar -->
   <div
+    bind:this={dockEl}
     class="canvas-action-dock canvas-overlay"
     class:planner-active={plannerOpen}
     class:planner-review={Boolean(draftPreview)}
@@ -1362,12 +1417,13 @@
   }
   .canvas-action-dock {
     position: absolute;
-    bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(46px + env(safe-area-inset-bottom, 0px));
     left: 50%;
     transform: translateX(-50%);
     z-index: 25;
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 4px;
     padding: 4px;
     border-radius: 999px;
@@ -1377,11 +1433,11 @@
     border: 1px solid var(--border-strong);
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24), var(--node-shadow);
     white-space: nowrap;
+    box-sizing: border-box;
     transition:
-      width 200ms cubic-bezier(0.2, 0.8, 0.2, 1),
-      border-radius 180ms ease,
-      border-color 160ms ease,
-      box-shadow 160ms ease;
+      border-radius 240ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 200ms ease,
+      box-shadow 240ms ease;
   }
   .canvas-action-dock.planner-active {
     z-index: 32;
@@ -1390,7 +1446,7 @@
     border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
     box-shadow:
       0 0 0 1.5px color-mix(in srgb, var(--accent) 28%, transparent),
-      0 14px 36px rgba(0, 0, 0, 0.26),
+      0 14px 36px rgba(0, 0, 0, 0.24),
       var(--node-shadow);
     white-space: normal;
   }
@@ -1483,10 +1539,10 @@
   }
   @media (max-width: 640px), (hover: none) {
     .canvas-action-dock {
-      bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+      bottom: calc(28px + env(safe-area-inset-bottom, 0px));
     }
     .canvas-action-dock.planner-active {
-      bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+      bottom: calc(34px + env(safe-area-inset-bottom, 0px));
       width: calc(100% - 16px);
       border-radius: 18px;
     }
@@ -1622,7 +1678,7 @@
   }
   .ghost-bar {
     position: absolute;
-    bottom: 78px;
+    bottom: 96px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 24;
