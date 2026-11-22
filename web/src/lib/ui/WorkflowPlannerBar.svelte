@@ -71,7 +71,9 @@
   let abortCtrl: AbortController | null = null;
 
   let trimmedPrompt = $derived(prompt.trim());
-  let showExamples = $derived(trimmedPrompt.length === 0 && !loading && !draftPreview && !errorMsg);
+  let showExamples = $derived(
+    trimmedPrompt.length === 0 && !loading && !draftPreview && !errorMsg && !infoOpen,
+  );
   let showCharCount = $derived(prompt.length > 220 && !draftPreview);
 
   $effect(() => {
@@ -798,6 +800,7 @@
     left: 50%;
     top: calc(100% + 7px);
     transform: translateX(-50%);
+    z-index: 12;
     display: inline-flex;
     align-items: center;
     gap: 5px;
