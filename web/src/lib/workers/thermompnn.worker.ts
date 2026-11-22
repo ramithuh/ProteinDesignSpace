@@ -316,9 +316,9 @@ self.onmessage = async (ev: MessageEvent) => {
         const dstOff = outIdx * K;
         if (isValid) {
           values.set(res.ddg.subarray(srcOff, srcOff + K), dstOff);
-          const agg = aggregateRow(res.ddg, srcOff, alphabet, wt, bfactorAggregate);
-          meanPerPosition[outIdx] = agg;
-          aggByKey.set(`${r.chain}:${r.number}:${r.ins}`, agg);
+          meanPerPosition[outIdx] = aggregateRow(res.ddg, srcOff, alphabet, wt, 'mean-ddg');
+          const paintAgg = aggregateRow(res.ddg, srcOff, alphabet, wt, bfactorAggregate);
+          aggByKey.set(`${r.chain}:${r.number}:${r.ins}`, paintAgg);
         } else {
           values.fill(Number.NaN, dstOff, dstOff + K);
           meanPerPosition[outIdx] = Number.NaN;

@@ -172,7 +172,7 @@ function buildSubGroupsForAdapter(adapterId: string): {
     ).map((opt) => ({
       key: opt.id,
       label: opt.label,
-      meta: `~${opt.approxMB} MB · Protein sequences`,
+      meta: `~${opt.approxMB} MB · ${opt.license}`,
       insert: { adapterId: 'localfold-af2', params: { model: opt.id, msaMode: 'single' }, label: opt.shortLabel },
       searchBlob: `${opt.id} ${opt.label} ${opt.shortLabel} esmfold2 esm-c protein multimer single sequence`.toLowerCase(),
     }));

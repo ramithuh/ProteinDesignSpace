@@ -2070,13 +2070,13 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
   },
   {
     id: 'pdb-refold-qc',
-    name: 'PDB → ProteinMPNN → LocalFold',
+    name: 'PDB → SolubleMPNN → LocalFold',
     badge: 'Quick Start Pipeline',
     summary:
       'Start from the built-in 53-residue 3-helix bundle (or any uploaded PDB/mmCIF), design sequences with SolubleMPNN, fold with LocalFold, and inspect Kabsch superposition and scRMSD.',
     graph: {
       id: 'pdb-refold-qc',
-      name: 'PDB → ProteinMPNN → LocalFold',
+      name: 'PDB → SolubleMPNN → LocalFold',
       nodes: [
         {
           id: 'src',

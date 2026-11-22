@@ -397,14 +397,18 @@
     </div>
 
     <div class="mh-legend" aria-label="Diverging score color scale centered at zero">
-      <span class="mh-leg-end fav">
-        Favorable ({lowerBetter ? `−${colorBound.toFixed(1)}` : `+${colorBound.toFixed(1)}`}{unitSuffix})
-      </span>
-      <span class="mh-leg-bar" aria-hidden="true"></span>
-      <span class="mh-leg-mid">0</span>
-      <span class="mh-leg-end unfav">
-        Unfavorable ({lowerBetter ? `+${colorBound.toFixed(1)}` : `−${colorBound.toFixed(1)}`}{unitSuffix})
-      </span>
+      <div class="mh-leg-scale">
+        <span class="mh-leg-end fav">
+          Favorable ({lowerBetter ? `−${colorBound.toFixed(1)}` : `+${colorBound.toFixed(1)}`}{unitSuffix})
+        </span>
+        <span class="mh-leg-bar-wrap" aria-hidden="true">
+          <span class="mh-leg-bar"></span>
+          <span class="mh-leg-zero">0</span>
+        </span>
+        <span class="mh-leg-end unfav">
+          Unfavorable ({lowerBetter ? `+${colorBound.toFixed(1)}` : `−${colorBound.toFixed(1)}`}{unitSuffix})
+        </span>
+      </div>
       <span class="mh-wt-key"><span class="mh-wt-dot"></span>WT</span>
     </div>
   {:else}
@@ -577,16 +581,30 @@
   .mh-legend {
     display: flex;
     align-items: center;
-    gap: 6px;
+    justify-content: space-between;
+    gap: 8px;
     flex-wrap: wrap;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10px;
     color: var(--text-dim);
   }
+  .mh-leg-scale {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .mh-leg-bar-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex: 1 1 72px;
+    min-width: 56px;
+    max-width: 180px;
+  }
   .mh-leg-bar {
-    flex: 1;
-    min-width: 80px;
-    max-width: 220px;
+    width: 100%;
     height: 7px;
     border-radius: 999px;
     border: 1px solid var(--border-subtle);
@@ -599,8 +617,21 @@
       #991b1b 100%
     );
   }
-  .mh-leg-mid {
+  .mh-leg-zero {
+    position: absolute;
+    left: 50%;
+    top: -1px;
+    transform: translateX(-50%);
+    font-size: 8px;
+    line-height: 9px;
+    padding: 0 2px;
+    border-radius: 2px;
+    background: var(--bg-surface);
     color: var(--text-muted);
+    font-weight: 700;
+  }
+  .mh-leg-end {
+    white-space: nowrap;
   }
   .mh-leg-end.fav {
     color: var(--accent-soft);
@@ -612,7 +643,8 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    margin-left: auto;
+    white-space: nowrap;
+    flex-shrink: 0;
     color: var(--text-muted);
   }
   .mh-wt-dot {

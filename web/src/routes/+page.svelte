@@ -868,6 +868,7 @@
 
   function handleApplyPlannedGraph(next: WorkflowGraph, summary: string) {
     if (isRunning) return;
+    selectedPresetId = next.id;
     handleGraphChange(next);
     const firstId = next.nodes[0]?.id ?? '';
     setSingleSelection(firstId);
@@ -1768,10 +1769,16 @@
       const labelOf = (n: WorkflowGraph['nodes'][number]) =>
         n.label || ADAPTER_REGISTRY[n.adapterId]?.shortName || n.adapterId;
 
+      const isFixedPosAdapter = (aid: string) =>
+        aid === 'web-protein-mpnn' ||
+        aid === 'ligandmpnn' ||
+        aid === 'lasermpnn' ||
+        aid === 'antifold-esmif1';
+
       if (molPickMode === 'mpnn') {
-        const allMpnn = graph.nodes.filter((n) => n.adapterId === 'web-protein-mpnn');
+        const allMpnn = graph.nodes.filter((n) => isFixedPosAdapter(n.adapterId));
         const target =
-          selectedNode?.adapterId === 'web-protein-mpnn'
+          selectedNode && isFixedPosAdapter(selectedNode.adapterId)
             ? selectedNode
             : allMpnn.length === 1
               ? allMpnn[0]
@@ -1811,7 +1818,7 @@
       // Auto mode: ONLY edit the selected block (if MPNN or already-conditioned generator),
       // OR a single unambiguous conditioned generator when viewing an input structure.
       // Never silently flip an unconditional generator to binder, and never mutate an unselected branch.
-      if (selectedNode?.adapterId === 'web-protein-mpnn') {
+      if (selectedNode && isFixedPosAdapter(selectedNode.adapterId)) {
         return {
           node: selectedNode,
           nodeName: labelOf(selectedNode),
@@ -1957,7 +1964,15 @@
   let hasConditionerNode = $derived(
     graph.nodes.some((n) => n.adapterId === 'rfd4-proteina' || n.adapterId === 'genie3'),
   );
-  let hasMpnnNode = $derived(graph.nodes.some((n) => n.adapterId === 'web-protein-mpnn'));
+  let hasMpnnNode = $derived(
+    graph.nodes.some(
+      (n) =>
+        n.adapterId === 'web-protein-mpnn' ||
+        n.adapterId === 'ligandmpnn' ||
+        n.adapterId === 'lasermpnn' ||
+        n.adapterId === 'antifold-esmif1',
+    ),
+  );
 
   $effect(() => {
     if ((molPickMode === 'hotspots' || molPickMode === 'motif') && !hasConditionerNode) {
@@ -4328,13 +4343,17 @@
     font-size: 10.5px;
     line-height: 1;
     color: var(--text-dim);
-    max-width: 180px;
+    min-width: 0;
+    flex: 0 1 160px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .right-tabs > :global(.mc-pill) {
     margin-bottom: 4px;
+    flex-shrink: 0;
+  }
+  .right-tabs .pane-expand-btn {
     flex-shrink: 0;
   }
   .right-body {

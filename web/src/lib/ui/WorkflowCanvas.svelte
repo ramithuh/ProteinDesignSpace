@@ -998,8 +998,8 @@
   ondrop={handleDrop}
   ondblclick={handlePaneDblClick}
 >
-  <!-- Quiet Top-Left tips (wide desktop only, dismissible) -->
-  {#if !isRunning && !canvasHintDismissed && !autoCommitProposed}
+  <!-- Quiet Top-Left tips (wide desktop only, dismissible; hidden during draft preview) -->
+  {#if !isRunning && !canvasHintDismissed && !autoCommitProposed && !draftPreview}
     <div class="canvas-tips canvas-overlay" role="region" aria-label="Canvas quick tips">
       <span class="dock-tip">Click wire to peek</span>
       <span class="dock-sep" aria-hidden="true">·</span>

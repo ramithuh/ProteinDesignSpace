@@ -304,6 +304,8 @@
     line-height: 1;
     gap: 4px;
     box-sizing: border-box;
+    max-width: 112px;
+    min-width: 0;
   }
 
   .mc-pill-dot {
