@@ -722,4 +722,35 @@ describe('engine/share', () => {
     const seqYamlBack = parseRecipeToGraph(graphToYamlRecipe(seqEmptyLabel));
     expect(seqYamlBack.nodes[0].params.label).toBe('');
   });
+
+  it('never emits #g= share links ending in _ or - and recovers links truncated by Markdown/chat autolinkers', async () => {
+    // Real-world 1CTT AME + Boltz-2 + Protenix-v2 + EF2 Fast + 3D Compare hash that previously ended in `_`
+    const legacyTrailingUnderscoreHash =
+      '#g=lVRdb5swFP0r6D4byTioWf3WJYu2h0zT0qcihBx_MDRsmDFVtCr_fbIpCTTp2r5Y5tx77jnX94onMECzDFqxLxJA0AJ6At0ICdRjcSUAwV4a_ksz-_ubAApMyyLhzhVcMM8Q-wAnq_t7QMBt0-5kqaVxHVC4SzBB0V2CU3-SW38uPEIfvvtz_fUBjiiQo23jKgU5ysAqkQY7dmJHhzAC3hhXlUBhieMlBjQEdi0zr-oBgt5URsiDFIMKdbaXCEyv17KrStMBTY4Ifm7WabTjTKmmFsFKXZWFbo0JduqqZEb4T-_L9Hon__TScBnoPt3zin1Tu7-AQI3ua6AQQO9Es8OUNlZdcbFqhIfAP83zw3z2rJjAqXZrG1c8kpfVPSxNdfiwwI9nYvw4iHDdhlb50H3DWR10mSIBn6lKRWLFOhcvMNbXlHXHtsP0usqUtYT_m_myIdGGdS5aYLyFPEcgZ9vZOdtz11tf57QjZ3C2OtPc2RDn-fPQyTyaT_IceJtzntCcda2J8bWtVNL6VLhYomvpJ6y7thjvYLzaweXAX7R-GX9DLfc_FZplKUaf0hxli_FyM15upxeyJDnKEjLF0huc58d_';
+
+    // 1. Original link decodes cleanly
+    const fullDecoded = await decodeHashToGraph(legacyTrailingUnderscoreHash);
+    expect(fullDecoded).not.toBeNull();
+    expect(fullDecoded!.nodes).toHaveLength(7);
+
+    // 2. Truncated link (GFM/X/Slack autolinker stripped trailing `_`) STILL decodes cleanly!
+    const strippedDecoded = await decodeHashToGraph(legacyTrailingUnderscoreHash.slice(0, -1));
+    expect(strippedDecoded).not.toBeNull();
+    expect(strippedDecoded!.nodes).toHaveLength(7);
+    expect(strippedDecoded!.edges).toEqual(fullDecoded!.edges);
+
+    // 3. Trailing prose punctuation (e.g. period or closing paren) is tolerated
+    const punctuatedDecoded = await decodeHashToGraph(legacyTrailingUnderscoreHash + '.)');
+    expect(punctuatedDecoded).not.toBeNull();
+    expect(punctuatedDecoded!.nodes).toHaveLength(7);
+
+    // 4. Re-encoding that exact graph produces a fresh #g= hash that does NOT end in `_` or `-`
+    const reencoded = await encodeGraphToHash(fullDecoded!);
+    expect(reencoded.mode).toBe('compressed-dag');
+    expect(reencoded.hash).not.toMatch(/[_-]$/);
+    const roundTripped = await decodeHashToGraph(reencoded.hash);
+    expect(roundTripped).not.toBeNull();
+    expect(roundTripped!.nodes).toHaveLength(7);
+    expect(roundTripped!.edges).toEqual(fullDecoded!.edges);
+  });
 });

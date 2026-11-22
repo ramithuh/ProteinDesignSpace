@@ -377,8 +377,14 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
       ? { n: compactNodes, e: compactEdges, p: compactPositions }
       : { n: compactNodes, e: compactEdges },
   );
-  const compressed = await deflateRaw(payload);
-  const hash = `#g=${toBase64Url(compressed)}`;
+  // Avoid trailing `_` or `-` in base64url payloads: GFM/chat/social autolinkers
+  // strip trailing `_` from bare URLs. Trailing whitespace is valid JSON and 100%
+  // backwards-compatible with all decoders.
+  let b64 = toBase64Url(await deflateRaw(payload));
+  for (let pad = 1; pad <= 8 && /[_-]$/.test(b64); pad++) {
+    b64 = toBase64Url(await deflateRaw(payload + ' '.repeat(pad)));
+  }
+  const hash = `#g=${b64}`;
   return { hash, length: hash.length, mode: 'compressed-dag', strippedPdb };
 }
 
@@ -589,32 +595,55 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
   }
 
   if (clean.startsWith('g=')) {
-    const encoded = clean.slice(2);
-    let rawBytes: Uint8Array;
-    try {
-      rawBytes = fromBase64Url(encoded);
-    } catch {
-      return null;
-    }
-    let jsonText: string;
-    try {
-      jsonText = await inflateRaw(rawBytes);
-    } catch (inflateErr) {
-      if (inflateErr instanceof Error && /maximum (decompressed|allowed) size/i.test(inflateErr.message)) {
-        throw inflateErr;
+    const normalizedEncoded = clean
+      .slice(2)
+      .replace(/%5[fF]/g, '_')
+      .replace(/%2[dD]/g, '-')
+      .replace(/\\_/g, '_')
+      .replace(/[.,;:!?)\]}>'"]+$/, '');
+
+    const tryDecodeCompressedObj = async (
+      candidate: string,
+    ): Promise<{ n: unknown[]; e: unknown[]; p?: unknown } | null> => {
+      let rawBytes: Uint8Array;
+      try {
+        rawBytes = fromBase64Url(candidate);
+      } catch {
+        return null;
       }
-      if (rawBytes.byteLength > MAX_INFLATED_BYTES) {
-        throw new Error('Shared workflow payload exceeds maximum allowed size.');
+      let jsonText: string;
+      try {
+        jsonText = await inflateRaw(rawBytes);
+      } catch (inflateErr) {
+        if (inflateErr instanceof Error && /maximum (decompressed|allowed) size/i.test(inflateErr.message)) {
+          throw inflateErr;
+        }
+        if (rawBytes.byteLength > MAX_INFLATED_BYTES) {
+          throw new Error('Shared workflow payload exceeds maximum allowed size.');
+        }
+        jsonText = new TextDecoder().decode(rawBytes);
       }
-      jsonText = new TextDecoder().decode(rawBytes);
+      let parsedObj: unknown;
+      try {
+        parsedObj = JSON.parse(jsonText);
+      } catch {
+        return null;
+      }
+      if (!isPlainObject(parsedObj) || !Array.isArray(parsedObj.n) || !Array.isArray(parsedObj.e)) {
+        return null;
+      }
+      return { n: parsedObj.n, e: parsedObj.e, p: parsedObj.p };
+    };
+
+    let obj = await tryDecodeCompressedObj(normalizedEncoded);
+    if (!obj) {
+      // Recover links whose trailing `_` or `-` was stripped by Markdown/chat/social autolinkers.
+      for (const suffix of ['_', '-', '__']) {
+        obj = await tryDecodeCompressedObj(normalizedEncoded + suffix);
+        if (obj) break;
+      }
     }
-    let obj: unknown;
-    try {
-      obj = JSON.parse(jsonText);
-    } catch {
-      return null;
-    }
-    if (!isPlainObject(obj) || !Array.isArray(obj.n) || !Array.isArray(obj.e)) return null;
+    if (!obj) return null;
     if (obj.n.length > MAX_IMPORT_NODES || obj.e.length > MAX_IMPORT_EDGES) {
       throw new Error(
         `Shared workflow exceeds size limits (max ${MAX_IMPORT_NODES} blocks, ${MAX_IMPORT_EDGES} wires).`,
