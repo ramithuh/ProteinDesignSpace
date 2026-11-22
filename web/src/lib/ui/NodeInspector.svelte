@@ -92,8 +92,9 @@
   function getStructureBackboneCount(struct: StructureArtifact | null | undefined): number {
     if (!struct) return 0;
     const raw = struct as StructureArtifact & {
-      collection?: { items?: unknown[]; members?: unknown[] };
-      structureCollection?: { items?: unknown[]; members?: unknown[] };
+      collection?: { items?: unknown[]; members?: unknown[]; collectionKind?: string };
+      structureCollection?: { items?: unknown[]; members?: unknown[]; collectionKind?: string };
+      collectionKind?: string;
     };
     const items =
       raw.collection?.items ??
@@ -104,7 +105,13 @@
       return items.length;
     }
     const repTotal = struct.representativeSelection?.totalMembers;
-    if (typeof repTotal === 'number' && Number.isFinite(repTotal) && repTotal > 1) {
+    const colKind = raw.collection?.collectionKind ?? raw.structureCollection?.collectionKind ?? raw.collectionKind;
+    if (
+      colKind === 'multi-design' &&
+      typeof repTotal === 'number' &&
+      Number.isFinite(repTotal) &&
+      repTotal > 1
+    ) {
       return Math.round(repTotal);
     }
     return 1;
@@ -311,7 +318,13 @@
         flushPendingTextCommit();
       } else {
         clearTimeout(pendingTextCommit.timer);
+        pendingTextCommit = null;
       }
+    }
+    // Commit normal-sized sequence edits immediately so canvas badges & Workflow check stay in lockstep
+    if (key === 'sequence' && value.length <= 8000) {
+      onUpdate(targetNodeId, { ...baseParams, [key]: value });
+      return;
     }
     const timer = setTimeout(() => {
       if (pendingTextCommit?.timer === timer) {

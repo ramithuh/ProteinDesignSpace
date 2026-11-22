@@ -124,6 +124,7 @@
   let dockCentered = $derived(graph.nodes.length === 0 && !draftPreview && !catalogOpen);
   let clearConfirmPending = $state(false);
   let clearConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+  let clearBtnEl = $state<HTMLButtonElement | null>(null);
   let modKeyLabel = $state('Ctrl/⌘');
 
   function cancelClearConfirm() {
@@ -430,6 +431,21 @@
       if (!(target instanceof globalThis.Node)) return;
       if (wirePopoverEl?.contains(target) || wireBtnEl?.contains(target)) return;
       wireLegendOpen = false;
+    }
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+    };
+  });
+
+  // Disarm Clear? Confirm on click-outside (never on the Clear button itself)
+  $effect(() => {
+    if (!clearConfirmPending) return;
+    function handlePointerDown(ev: PointerEvent) {
+      const target = ev.target;
+      if (!(target instanceof globalThis.Node)) return;
+      if (clearBtnEl?.contains(target)) return;
+      cancelClearConfirm();
     }
     window.addEventListener('pointerdown', handlePointerDown);
     return () => {
@@ -955,14 +971,21 @@
       clearConfirmTimer = setTimeout(() => {
         clearConfirmPending = false;
         clearConfirmTimer = null;
-      }, 3500);
+      }, 15000);
       return;
     }
     cancelClearConfirm();
     clearProposals();
     catalogOpen = false;
     wireLegendOpen = false;
-    onGraphChange({ ...graph, nodes: [], edges: [] });
+    onGraphChange({
+      ...graph,
+      id: 'custom-workflow',
+      name: 'Custom Workflow',
+      description: '',
+      nodes: [],
+      edges: [],
+    });
     onSelectNode('');
   }
 
@@ -1062,6 +1085,7 @@
       ?
     </button>
     <button
+      bind:this={clearBtnEl}
       type="button"
       class="c-btn danger"
       class:confirm-danger={clearConfirmPending}

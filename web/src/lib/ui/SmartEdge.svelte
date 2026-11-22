@@ -166,6 +166,10 @@
     }
   }
 
+  :global(.svelte-flow__edgelabel-renderer:has(.ghost-pill)) {
+    z-index: 1005 !important;
+  }
+
   .ghost-pill {
     display: inline-flex;
     align-items: center;

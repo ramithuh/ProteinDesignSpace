@@ -1,4 +1,4 @@
-import type { AtomGranularity, BioCompatibilityFix } from './types';
+import type { AtomGranularity, BfactorSemantics, BioCompatibilityFix } from './types';
 
 export type StudioBrushRole = 'fixed' | 'hotspot' | 'motif' | 'tied' | 'crop';
 
@@ -119,6 +119,7 @@ export interface NodeInputPreview {
   previewStructureMeta?: {
     label: string;
     atomGranularity?: AtomGranularity;
+    bfactorSemantics?: BfactorSemantics;
     length: number;
   };
   /** Derived 3D highlight layers for zero-reload Mol* overpaint. */

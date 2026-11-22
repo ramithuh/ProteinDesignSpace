@@ -818,11 +818,13 @@
       <div class="align-scroll">
         {#each fastaEntries as entry, eIdx (entry.id)}
           {@const idPct = eIdx === 0 ? 100 : computeIdentityPct(refEntry.sequence, entry.sequence)}
+          {@const rawHdr = entry.header.replace(/^>/, '')}
+          {@const cleanName = entry.scoreLabel && rawHdr.includes(' | ') ? rawHdr.split(' | ')[0] : rawHdr}
           <div class="align-row" class:is-selected={entry.selected}>
             <div class="align-meta">
               <div class="align-hdr" title={entry.header}>
                 <span class="align-idx">#{eIdx + 1}</span>
-                <span class="align-name">{entry.header.replace(/^>/, '')}</span>
+                <span class="align-name">{cleanName}</span>
                 {#if entry.scoreLabel}
                   <span class="align-score">{entry.scoreLabel}</span>
                 {/if}

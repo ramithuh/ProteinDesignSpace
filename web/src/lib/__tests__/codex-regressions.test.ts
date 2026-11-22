@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { WORKFLOW_PRESETS } from '$lib/engine/registry';
-import { defaultParamsForAdapter } from '$lib/engine/graph-utils';
+import { defaultParamsForAdapter, proposeConnectionsForNode } from '$lib/engine/graph-utils';
+import { validateSequenceText } from '$lib/engine/param-validation';
 import { decodeHashToGraph, encodeGraphToHash } from '$lib/engine/share';
 import {
   selectFoldWorkItems,
@@ -479,5 +480,104 @@ describe('Codex computer-use regression suite', () => {
     const canvasSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/WorkflowCanvas.svelte'), 'utf8');
     expect(canvasSrc).toContain('fitViewTrigger = 0');
     expect(canvasSrc).toContain('triggerChanged');
+  });
+
+  it('locks in fixes for GitHub issues #22-#31 (Clear confirm, Cancel reset, Studio pLDDT, recipe reset, seq sync, dup score, backbone count, Studio header, illegal AA ellipsis, motif wiring)', () => {
+    // #30: Invalid amino acid characters > 6 include (+N more)
+    const seqCheck = validateSequenceText('MKT*BXZ123');
+    expect(seqCheck.status).toBe('error');
+    expect(seqCheck.illegalChars).toEqual(['*', 'B', 'X', 'Z', '1', '2', '3']);
+    expect(seqCheck.message).toContain('*, B, X, Z, 1, 2 (+1 more)');
+
+    // #31b: Adding designability-scorer with empty selectedNodeId still proposes folds + ancestor structure
+    const motifGraph: WorkflowGraph = {
+      id: 'motif-wire-test',
+      name: 'Motif Wire Test',
+      nodes: [
+        { id: 'pdb', adapterId: 'pdb-input', label: '1YCR', params: {}, position: { x: 0, y: 0 } },
+        { id: 'gen', adapterId: 'genie3', label: 'Genie 3', params: {}, position: { x: 300, y: 0 } },
+        { id: 'mpnn', adapterId: 'web-protein-mpnn', label: 'MPNN', params: {}, position: { x: 600, y: 0 } },
+        { id: 'fold', adapterId: 'localfold-af2', label: 'AF2', params: {}, position: { x: 900, y: 0 } },
+        { id: 'score', adapterId: 'designability-scorer', label: 'scRMSD', params: {}, position: { x: 1200, y: 0 } },
+      ],
+      edges: [
+        { fromNode: 'pdb', fromPort: 'structure', toNode: 'gen', toPort: 'structure' },
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
+        { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+      ],
+    };
+    const proposed = proposeConnectionsForNode(motifGraph, 'score', '');
+    expect(proposed).toEqual(
+      expect.arrayContaining([
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+        { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+      ]),
+    );
+
+    // #24: compileNodeInputPreview preserves plddt-0-100 bfactorSemantics for completed AF2 fold
+    const samplePdb = generateSampleHelixBundlePdb();
+    const af2Coords = new Float32Array(30);
+    const af2Struct: StructureArtifact = {
+      kind: 'StructureArtifact',
+      id: 'foldstruct-1',
+      label: 'mpnn-1 (monomer, pLDDT 85.0)',
+      sourceModelId: 'localfold-af2',
+      bfactorSemantics: 'plddt-0-100',
+      atomGranularity: 'all-atom',
+      length: 10,
+      sequence: 'ACDEFGHIKL',
+      caCoords: af2Coords,
+      backbone4Coords: new Float32Array(120),
+      pdbText: samplePdb,
+      geometry: computeGeometryStats(af2Coords),
+    };
+    const af2Seqs: SequenceSet = {
+      kind: 'SequenceSet',
+      id: 's1',
+      parentStructureId: 'none',
+      sourceModelId: 'sequence-input',
+      candidates: [{ id: 'seq-1', sequence: 'ACDEFGHIKL', score: 0, globalScore: 0, sourceModelId: 'sequence-input' }],
+    };
+    const af2Graph: WorkflowGraph = {
+      id: 'af2-studio-plddt',
+      name: 'AF2 Studio pLDDT',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', label: 'Seq', params: { sequence: 'ACDEFGHIKL' } },
+        { id: 'fold', adapterId: 'localfold-af2', label: 'AF2', params: defaultParamsForAdapter('localfold-af2') },
+      ],
+      edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+    };
+    const af2Prev = compileNodeInputPreview(af2Graph, 'fold', {
+      seq: { sequences: af2Seqs },
+      fold: { structure: af2Struct },
+    });
+    expect(af2Prev.previewStructureMeta?.bfactorSemantics).toBe('plddt-0-100');
+
+    // Source guards for UI/layout/lifecycle fixes (#22, #23, #25, #26, #27, #28, #29, #31a, #31c)
+    const canvasSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/WorkflowCanvas.svelte'), 'utf8');
+    expect(canvasSrc).toContain('}, 15000);');
+    expect(canvasSrc).toContain("id: 'custom-workflow'");
+    expect(canvasSrc).toContain('clearBtnEl?.contains(target)');
+
+    const pageSrc = readFileSync(resolve(process.cwd(), 'src/routes/+page.svelte'), 'utf8');
+    expect(pageSrc).toContain("detail: 'Cancelled'");
+    expect(pageSrc).toContain('studioPreview?.previewStructureMeta?.bfactorSemantics');
+    expect(pageSrc).toContain('selectedUpstreamSequences');
+    expect(pageSrc).toContain('hasNoTaskParams');
+
+    const inspectorSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/NodeInspector.svelte'), 'utf8');
+    expect(inspectorSrc).toContain("colKind === 'multi-design'");
+    expect(inspectorSrc).toContain("key === 'sequence' && value.length <= 8000");
+
+    const fastaSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/AnnotatedFastaView.svelte'), 'utf8');
+    expect(fastaSrc).toContain("rawHdr.includes(' | ') ? rawHdr.split(' | ')[0] : rawHdr");
+
+    const studioSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/NodeStudioPopover.svelte'), 'utf8');
+    expect(studioSrc).toContain('flex: 1 1 320px;');
+    expect(studioSrc).toContain('flex-shrink: 0;');
+
+    const edgeSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/SmartEdge.svelte'), 'utf8');
+    expect(edgeSrc).toContain('.svelte-flow__edgelabel-renderer:has(.ghost-pill)');
+    expect(edgeSrc).toContain('z-index: 1005 !important');
   });
 });

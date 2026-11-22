@@ -1038,6 +1038,7 @@ export function compileNodeInputPreview(
           atomGranularity: fullParsed.atomPresence.every((p) => p.hasCA && !p.hasN && !p.hasC)
             ? 'ca-only'
             : 'all-atom',
+          bfactorSemantics: 'crystal-b',
           length: keptParsed.nResidues,
         };
 
@@ -1310,6 +1311,7 @@ export function compileNodeInputPreview(
         previewStructureMeta = {
           label: structure.label,
           atomGranularity: structure.atomGranularity ?? (atomMode === 'ca' ? 'ca-only' : 'backbone4'),
+          bfactorSemantics: structure.bfactorSemantics,
           length: compiled.residues.length,
         };
 
@@ -1759,6 +1761,7 @@ export function compileNodeInputPreview(
             ? {
                 label: template.label,
                 atomGranularity: template.atomGranularity ?? 'all-atom',
+                bfactorSemantics: template.bfactorSemantics,
                 length: template.length,
               }
             : undefined;
@@ -1975,6 +1978,7 @@ export function compileNodeInputPreview(
             previewStructureMeta = {
               label: template.label,
               atomGranularity: template.atomGranularity,
+              bfactorSemantics: template.bfactorSemantics,
               length: template.length,
             };
           }
@@ -2081,6 +2085,7 @@ export function compileNodeInputPreview(
             previewStructureMeta = {
               label: template.label,
               atomGranularity: template.atomGranularity,
+              bfactorSemantics: template.bfactorSemantics,
               length: template.length,
             };
           }
@@ -2407,6 +2412,9 @@ export function compileNodeInputPreview(
         previewStructureMeta = {
           label: ctxStruct.label,
           atomGranularity: ctxStruct.atomGranularity,
+          bfactorSemantics:
+            ctxStruct.bfactorSemantics ??
+            (ctxStruct.sourceModelId === 'pdb-input' ? 'crystal-b' : undefined),
           length: ctxStruct.length,
         };
       }
@@ -2639,6 +2647,7 @@ export function compileNodeInputPreview(
       previewStructureMeta = {
         label: structure.label,
         atomGranularity: structure.atomGranularity,
+        bfactorSemantics: structure.bfactorSemantics,
         length: structure.length,
       };
       totalResidues = structure.length;
@@ -2796,6 +2805,7 @@ export function compileNodeInputPreview(
       previewStructureMeta = {
         label: structure.label,
         atomGranularity: structure.atomGranularity ?? 'backbone4',
+        bfactorSemantics: structure.bfactorSemantics,
         length: parsed.nResidues,
       };
       const scannedSeq = allRes
@@ -3002,6 +3012,7 @@ export function compileNodeInputPreview(
         previewStructureMeta = {
           label: structure.label,
           atomGranularity: structure.atomGranularity ?? 'all-atom',
+          bfactorSemantics: structure.bfactorSemantics,
           length: parsed.nResidues,
         };
         fastaEntries = [
@@ -3376,6 +3387,7 @@ export function compileNodeInputPreview(
         previewStructureMeta = {
           label: structure.label,
           atomGranularity: structure.atomGranularity ?? 'backbone4',
+          bfactorSemantics: structure.bfactorSemantics,
           length: parsed.nResidues,
         };
         fastaEntries = [

@@ -372,7 +372,8 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
 
   const chainsInFirst = entries[0].split(/[:/]/).filter(Boolean).length;
   if (illegal.size > 0) {
-    const list = [...illegal].slice(0, 6).join(', ');
+    const shown = [...illegal].slice(0, 6).join(', ');
+    const list = illegal.size > 6 ? `${shown} (+${illegal.size - 6} more)` : shown;
     return {
       status: 'error',
       numSequences: entries.length,

@@ -76,10 +76,18 @@
     return availableBrushes[0];
   });
 
-  // Reset brush choice when switching nodes
+  let nodeChipsEl = $state<HTMLDivElement | null>(null);
+
+  // Reset brush choice when switching nodes and keep active node chip scrolled into view
   $effect(() => {
     void node.id;
     selectedBrushKey = null;
+    if (nodeChipsEl) {
+      const activeEl = nodeChipsEl.querySelector('.node-chip.active');
+      if (activeEl instanceof HTMLElement && typeof activeEl.scrollIntoView === 'function') {
+        activeEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+      }
+    }
   });
 
   let showOmitStrip = $derived(
@@ -242,7 +250,7 @@
         >
           ◀
         </button>
-        <div class="node-chips">
+        <div class="node-chips" bind:this={nodeChipsEl}>
           {#each allNodes as n (n.id)}
             <button
               type="button"
@@ -537,7 +545,7 @@
     align-items: center;
     gap: 4px;
     min-width: 0;
-    flex: 1;
+    flex: 1 1 320px;
   }
   .nav-arrow {
     width: 24px;
@@ -581,6 +589,7 @@
     font-weight: 500;
     cursor: pointer;
     white-space: nowrap;
+    flex-shrink: 0;
     font-family: inherit;
   }
   .node-chip:hover {

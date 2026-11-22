@@ -454,6 +454,8 @@
       </button>
     {:else if isNodeQueued}
       <div class="status-line queued-text">queued…</div>
+    {:else if st?.status === 'idle' && st?.detail === 'Cancelled'}
+      <div class="status-line muted">Cancelled</div>
     {:else}
       <div class="status-line muted">
         {activeWeightsMB > 0 ? `~${activeWeightsMB} MB` : 'ready'}

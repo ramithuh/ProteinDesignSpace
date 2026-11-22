@@ -937,8 +937,22 @@
       totalElapsedMs = null;
     }
 
-    graph = next;
-    scheduler.invalidateEditedGraph(prevSnapshot, next);
+    // Reset stale workflow id/name/preset whenever the canvas becomes empty (e.g. Clear or deleting last node)
+    const normalizedNext: WorkflowGraph =
+      next.nodes.length === 0 && prevSnapshot.nodes.length > 0
+        ? {
+            ...next,
+            id: 'custom-workflow',
+            name: 'Custom Workflow',
+            description: '',
+          }
+        : next;
+    if (next.nodes.length === 0 && prevSnapshot.nodes.length > 0) {
+      selectedPresetId = 'custom-workflow';
+    }
+
+    graph = normalizedNext;
+    scheduler.invalidateEditedGraph(prevSnapshot, normalizedNext);
 
     // Prune deleted node IDs from selection & hidden compare models (resetting if all remaining would be hidden)
     let nextSelected = selectedNodeIds;
@@ -1092,13 +1106,12 @@
       if (seededId === bench.id) continue;
 
       if (node.adapterId === 'rfd4-proteina') {
-        const isUntouched =
-          String(cp.mode ?? 'unconditional') === 'unconditional' &&
+        const hasNoTaskParams =
           !String(cp.hotspots ?? '').trim() &&
           !String(cp.motifSpan ?? '').trim() &&
           !String(cp.lockChain ?? '').trim() &&
           !String(cp.customSpecYaml ?? '').trim();
-        if (!isUntouched && !seededId) continue;
+        if (!hasNoTaskParams && !seededId) continue;
 
         const bp = bench.conditionParams;
         const parsedLen = parseLengthFromContig(bp.contig);
@@ -1125,12 +1138,11 @@
         };
       } else if (node.adapterId === 'genie3') {
         if (bench.supportsGenie3) {
-          const isUntouched =
-            String(cp.taskMode ?? 'unconditional') === 'unconditional' &&
+          const hasNoTaskParams =
             !String(cp.hotspots ?? '').trim() &&
             !String(cp.motifSpan ?? '').trim() &&
             !String(cp.lockChain ?? '').trim();
-          if (!isUntouched && !seededId) continue;
+          if (!hasNoTaskParams && !seededId) continue;
 
           const bp = bench.conditionParams;
           const parsedLen = parseLengthFromContig(bp.contig);
@@ -1601,6 +1613,20 @@
         if (Object.keys(err.outputsByNode).length > 0) {
           outputsByNode = { ...outputsByNode, ...err.outputsByNode };
         }
+        const cleanedStates: Record<string, NodeProgressEvent> = {};
+        for (const [nid, st] of Object.entries(nodeStates)) {
+          if (st.status === 'running' || st.status === 'loading') {
+            cleanedStates[nid] = {
+              ...st,
+              status: 'idle',
+              progress: undefined,
+              detail: 'Cancelled',
+            };
+          } else {
+            cleanedStates[nid] = st;
+          }
+        }
+        nodeStates = cleanedStates;
         runError = null;
         showToastMessage('Run cancelled — completed steps preserved.', 3200);
       } else {
@@ -2018,7 +2044,8 @@
     selectedNode ? findContextStructure(graph, selectedNode.id, outputsByNode) : null,
   );
 
-  // Directly wired upstream template StructureArtifact for live motif/hotspot source-residue resolution
+  // Strictly upstream StructureArtifact for live motif/hotspot resolution and backbone counting
+  // (never falls back to selectedNode's own output structure, e.g. AF2's representative fold).
   let selectedUpstreamStructure = $derived.by((): StructureArtifact | null => {
     if (!selectedNode) return null;
     const edge = graph.edges.find(
@@ -2028,7 +2055,23 @@
       const art = outputsByNode[edge.fromNode]?.[edge.fromPort];
       if (art?.kind === 'StructureArtifact') return art;
     }
-    return contextStructure;
+    const incoming = graph.edges.filter((e) => e.toNode === selectedNode.id);
+    for (const inc of incoming) {
+      const upstream = findContextStructure(graph, inc.fromNode, outputsByNode);
+      if (upstream) return upstream;
+    }
+    return null;
+  });
+
+  // Directly wired upstream SequenceSet for accurate multi-backbone / sequence fan-out telemetry
+  let selectedUpstreamSequences = $derived.by((): SequenceSet | null => {
+    if (!selectedNode) return null;
+    const edge = graph.edges.find(
+      (e) => e.toNode === selectedNode.id && e.toPort === 'sequences',
+    );
+    if (!edge) return null;
+    const art = outputsByNode[edge.fromNode]?.[edge.fromPort];
+    return art?.kind === 'SequenceSet' ? art : null;
   });
 
   // Typed views of the currently peeked modality
@@ -3101,7 +3144,9 @@
             atomGranularity={studioInputViewerActive
               ? (studioPreview?.previewStructureMeta?.atomGranularity ?? viewerAtomGranularity)
               : viewerAtomGranularity}
-            bfactorSemantics={studioInputViewerActive ? 'none' : viewerBfactorSemantics}
+            bfactorSemantics={studioInputViewerActive
+              ? (studioPreview?.previewStructureMeta?.bfactorSemantics ?? 'none')
+              : viewerBfactorSemantics}
             highlightLayers={studioInputViewerActive ? studioPreview?.highlightLayers : undefined}
             hoveredToken={studioOpen ? studioHoveredToken : null}
             focusToken={studioOpen ? studioFocusToken : null}
@@ -3175,6 +3220,7 @@
                 nodeOutput={outputsByNode[selectedNode.id]}
                 nodeState={nodeStates[selectedNode.id]}
                 upstreamStructure={selectedUpstreamStructure}
+                upstreamSequences={selectedUpstreamSequences}
                 hasStructureInput={graph.edges.some(
                   (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
                 )}
@@ -3301,6 +3347,7 @@
                 nodeOutput={outputsByNode[selectedNode.id]}
                 nodeState={nodeStates[selectedNode.id]}
                 upstreamStructure={selectedUpstreamStructure}
+                upstreamSequences={selectedUpstreamSequences}
                 hasStructureInput={graph.edges.some(
                   (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
                 )}

@@ -678,13 +678,13 @@ export function proposeConnectionsForNode(
       if (n.id === newNodeId || !n.position) continue;
       const dx = dropPos.x - n.position.x;
       const dy = Math.abs(dropPos.y - n.position.y);
-      // Upstream neighbor sits to the left (dx > 0) within ~420px horizontally and 220px vertically
-      const inUpstreamZone = dx >= -60 && dx <= 420 && dy <= 220;
+      // Upstream neighbor sits to the left (dx > 0) within ~540px horizontally and 260px vertically
+      const inUpstreamZone = dx >= -60 && dx <= 540 && dy <= 260;
       const inDownstreamZone =
         (manifest.stage === 'source' || manifest.stage === 'condition') &&
         dx <= 60 &&
-        dx >= -420 &&
-        dy <= 220;
+        dx >= -540 &&
+        dy <= 260;
       if (!inUpstreamZone && !inDownstreamZone) continue;
       const d = Math.hypot(dx, dy);
       if (d < bestDist) {
@@ -698,6 +698,26 @@ export function proposeConnectionsForNode(
     }
   } else if (selectedNodeId) {
     anchorNode = graphWithNode.nodes.find((n) => n.id === selectedNodeId && n.id !== newNodeId);
+  }
+
+  // When inserted via catalog click without an active node selection (or into a small graph
+  // where a terminal compatible producer is unambiguous), fall back to the rightmost compatible node.
+  if (!anchorNode && !dropPos) {
+    const others = graphWithNode.nodes.filter((n) => n.id !== newNodeId);
+    const isUpstreamInsert = manifest.stage === 'source' || manifest.stage === 'condition';
+    const compatible = others.filter((n) =>
+      isUpstreamInsert
+        ? Boolean(findFirstValidEdge(newNodeId, n.id, true))
+        : Boolean(findFirstValidEdge(n.id, newNodeId, true)),
+    );
+    if (compatible.length > 0) {
+      compatible.sort((a, b) => {
+        const ax = a.position?.x ?? 0;
+        const bx = b.position?.x ?? 0;
+        return isUpstreamInsert ? ax - bx : bx - ax;
+      });
+      anchorNode = compatible[0];
+    }
   }
 
   if (!anchorNode) return [];
