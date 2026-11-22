@@ -627,6 +627,20 @@ function inferNodeOutputProfile(
       ...(isBinderTask ? { hasLockedTarget: true } : {}),
     };
   } else if (
+    node.adapterId === 'proteina' ||
+    node.adapterId === 'sid-protein' ||
+    node.adapterId === 'genie2'
+  ) {
+    const est = Number(node.params.length ?? 100);
+    profile = {
+      entities: new Set<BioEntityKind>(['protein']),
+      stoichiometry: 'monomer',
+      chainCount: 1,
+      estimatedTokens: est,
+      isCaOnly: true,
+      missingBackboneCount: est,
+    };
+  } else if (
     node.adapterId === 'web-protein-mpnn' ||
     node.adapterId === 'ligandmpnn' ||
     node.adapterId === 'lasermpnn' ||
@@ -681,6 +695,54 @@ function inferNodeOutputProfile(
   visiting.delete(node.id);
   cache.set(node.id, profile);
   return profile;
+}
+
+/**
+ * Walk upstream of `targetNodeId` to recover holo ligand CCD codes and DNA sequences
+ * from curated benchmarks, explicit `cropSegments` (e.g. `A:ZN, A:DHZ`), or live StructureArtifacts.
+ */
+export function extractUpstreamHoloHints(
+  graph: WorkflowGraph,
+  targetNodeId: string,
+  outputsByNode?: Record<string, Record<string, CanonicalArtifact>>,
+): { ligandCcdCodes: string[]; dnaSequences: string[] } {
+  const ligands = new Set<string>();
+  const dnas = new Set<string>();
+  const visited = new Set<string>();
+  const queue = [targetNodeId];
+  const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
+
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    const n = nodeById.get(cur);
+    if (n?.adapterId === 'pdb-input') {
+      const bmId = String(n.params.benchmarkId ?? '').trim();
+      const bm = bmId ? getBenchmarkById(bmId) : undefined;
+      const crop = String(n.params.cropSegments ?? bm?.cropSegments ?? '');
+      for (const m of crop.matchAll(/\b[A-Za-z]:([A-Z0-9]{1,5})\b/g)) {
+        if (!/^\d+[A-Z]?$/.test(m[1])) ligands.add(m[1].toUpperCase());
+      }
+      if (bm?.id === 'rfd4_7m5w_bdna') {
+        dnas.add('TGAATGAA');
+        dnas.add('TTCATTCA');
+      }
+      const liveStruct = outputsByNode?.[n.id]?.structure as StructureArtifact | undefined;
+      if (liveStruct?.diagnostics?.ligandNames?.length) {
+        for (const lig of liveStruct.diagnostics.ligandNames) {
+          const clean = String(lig).trim().toUpperCase();
+          if (/^[A-Z0-9]{1,5}$/.test(clean)) ligands.add(clean);
+        }
+      }
+    }
+    for (const e of graph.edges) {
+      if (e.toNode === cur && !visited.has(e.fromNode)) {
+        queue.push(e.fromNode);
+      }
+    }
+  }
+  return { ligandCcdCodes: [...ligands], dnaSequences: [...dnas] };
 }
 
 /**
@@ -788,13 +850,56 @@ export function validateBioCapabilities(
           severity: 'warning',
           code: 'rfd4-preset-ignores-template',
           nodeId: node.id,
-          message: `${node.label ?? 'RFD4-Proteina'} is set to built-in Preset mode ("${String(node.params.presetId ?? 'custom_cath_monomer')}"), which loads a remote example archive and ignores the wired input structure. Switch to Motif / Binder / Partial mode to condition on your wired template.`,
+          message: `${node.label ?? 'RFD4-Proteina'} is set to built-in Preset mode ("${String(node.params.presetId ?? 'custom_cath_monomer')}"), which loads a remote example archive and ignores the wired input structure. Switch to Motif / Context Mode to condition on your wired template.`,
           fix: {
             label: 'Switch to Motif / Context Mode',
             nodeId: node.id,
             paramsPatch: { mode: 'motif' },
           },
         });
+      }
+      if (mode === 'motif') {
+        const rawHotspots = String(node.params.hotspots ?? '').trim();
+        if (rawHotspots.length > 0) {
+          const hotspotTokens = rawHotspots
+            .split(/[,\s]+/)
+            .map((t) => t.trim())
+            .filter((t) => /^[A-Za-z]?\d+$/.test(t));
+          const rawMotif = String(node.params.motifSpan ?? '').trim();
+          const paramsPatch: Record<string, unknown> = { hotspots: '' };
+          let detail = 'Clear binder hotspots';
+          if (hotspotTokens.length >= 2) {
+            const nums = hotspotTokens.map((t) => Number(t.replace(/^[A-Za-z]/, '')));
+            const minNum = Math.min(...nums);
+            const maxNum = Math.max(...nums);
+            const rangeMatch = /^([A-Za-z])?(\d+)-(\d+)$/.exec(rawMotif);
+            const isCollapsedRange =
+              !rawMotif ||
+              (rangeMatch !== null &&
+                Number(rangeMatch[2]) === minNum &&
+                Number(rangeMatch[3]) === maxNum &&
+                maxNum - minNum > hotspotTokens.length);
+            if (isCollapsedRange) {
+              const recovered = hotspotTokens
+                .map((t) => (/^\d+$/.test(t) ? `A${t}` : t.toUpperCase()))
+                .join(', ');
+              paramsPatch.motifSpan = recovered;
+              paramsPatch.unindexedMotif = true;
+              detail = `Keep discrete motif (${recovered}, unindexed)`;
+            }
+          }
+          issues.push({
+            severity: 'warning',
+            code: 'rfd4-hotspots-in-motif-mode',
+            nodeId: node.id,
+            message: `${node.label ?? 'RFD4-Proteina'} is in Motif mode, but binder hotspots ("${rawHotspots}") are set${paramsPatch.motifSpan ? ` and motifSpan "${rawMotif}" collapses all residues ${rawMotif} instead of just ${String(paramsPatch.motifSpan)}` : ''}.`,
+            fix: {
+              label: detail,
+              nodeId: node.id,
+              paramsPatch,
+            },
+          });
+        }
       }
     }
 
@@ -1004,16 +1109,30 @@ export function validateBioCapabilities(
 
       if (nonProtEntities.size > 0 && !hasExplicitAf3NonProt) {
         const nonProt = [...nonProtEntities].join('/');
+        const holoHints = extractUpstreamHoloHints(graph, node.id, outputsByNode);
+        const holoPatch: Record<string, unknown> = {};
+        if (holoHints.ligandCcdCodes.length > 0) {
+          holoPatch.ligandCcdCodes = holoHints.ligandCcdCodes.join(', ');
+        }
+        if (holoHints.dnaSequences.length > 0) {
+          holoPatch.dnaSequences = holoHints.dnaSequences.join(':');
+        }
+        const holoParts = [
+          holoHints.ligandCcdCodes.length > 0 ? holoHints.ligandCcdCodes.join(', ') : '',
+          holoHints.dnaSequences.length > 0 ? 'DNA' : '',
+        ].filter(Boolean);
+        const holoSummary = holoParts.join(' + ');
+
         if (meta.family !== 'af3') {
           issues.push({
             severity: 'warning',
             code: 'af2-non-protein-entity',
             nodeId: node.id,
-            message: `${modelDisplay} is protein-only, while upstream involves ${nonProt.toUpperCase()}. Switch to RoseTTAFold3 or Boltz-2 (note: current browser refolding folds the protein chain apo unless ligand/DNA context is configured).`,
+            message: `${modelDisplay} is protein-only, while upstream involves ${nonProt.toUpperCase()}. Switch to RoseTTAFold3 or Boltz-2${holoSummary ? ` with ${holoSummary}` : ''} for holo co-folding.`,
             fix: {
-              label: 'Switch to RoseTTAFold3',
+              label: holoSummary ? `Switch to RoseTTAFold3 (${holoSummary})` : 'Switch to RoseTTAFold3',
               nodeId: node.id,
-              paramsPatch: { model: 'rosettafold3' },
+              paramsPatch: { model: 'rosettafold3', ...holoPatch },
               nodeLabel: 'RoseTTAFold 3',
             },
           });
@@ -1022,7 +1141,18 @@ export function validateBioCapabilities(
             severity: 'warning',
             code: 'af3-apo-refold-note',
             nodeId: node.id,
-            message: `${modelDisplay} currently receives protein sequences only — upstream ${nonProt.toUpperCase()} coordinates were not forwarded into structure prediction (apo protein refold).`,
+            message: holoSummary
+              ? `${modelDisplay} is set to apo (protein-only) while upstream includes ${nonProt.toUpperCase()} (${holoSummary}) — add holo context to co-fold with the ligand/nucleic acid.`
+              : `${modelDisplay} is set to apo (protein-only) — add ligand CCD codes or DNA/RNA sequences in Parameters to co-fold with upstream ${nonProt.toUpperCase()}.`,
+            ...(Object.keys(holoPatch).length > 0
+              ? {
+                  fix: {
+                    label: `Co-fold with ${holoSummary}`,
+                    nodeId: node.id,
+                    paramsPatch: holoPatch,
+                  },
+                }
+              : {}),
           });
         }
       } else if (up.stoichiometry === 'multimer' && meta.family === 'af2') {

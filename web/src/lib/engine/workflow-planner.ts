@@ -3,9 +3,10 @@
 // AND safely editing/appending/removing/updating onto the user's current canvas (`edit_current`).
 
 import { adaptBenchmarkContigForLength, BENCHMARK_TARGETS, getBenchmarkById } from './benchmarks';
+import { extractUpstreamHoloHints, validateBioCapabilities } from './bio-capabilities';
 import { autoLayoutGraph, defaultParamsForAdapter, validateConnection, validateGraph } from './graph-utils';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
-import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
+import type { BioCompatibilityIssue, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 
 export type GeneratorId = 'rfd4-proteina' | 'genie3' | 'protpardelle';
 export type SequenceDesignerId =
@@ -1667,6 +1668,7 @@ function sanitizeBlockNodeParams(
     'cropSegments',
     'hotspots',
     'motifSpan',
+    'unindexedMotif',
     'contig',
     'omitAminoAcids',
     'fixedPositions',
@@ -1676,6 +1678,9 @@ function sanitizeBlockNodeParams(
     'family',
     'model',
     'msaMode',
+    'ligandCcdCodes',
+    'dnaSequences',
+    'rnaSequences',
     'maxSequences',
     'topK',
     'length',
@@ -1750,10 +1755,249 @@ function sanitizeBlockNodeParams(
   return merged;
 }
 
+const PASS2_GENERATOR_ADAPTERS = new Set([
+  'rfd4-proteina',
+  'genie3',
+  'genie2',
+  'protpardelle',
+  'rfdiffusion',
+  'boltzgen',
+  'la-proteina',
+  'proteina',
+  'sid-protein',
+  'frameflow',
+  'foldflow2',
+]);
+
+const PASS2_AF3_MODELS = new Set(
+  LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af3').map((m) => m.id),
+);
+
+/**
+ * Pass 2a: Deterministic biological-feedback auto-repair on a drafted/edited WorkflowGraph.
+ * Uses the exact same `validateBioCapabilities()` validator that drives UI banners so the
+ * AI planner and UI compatibility checks stay in sync at 0 ms latency and 0 extra LLM calls.
+ */
+export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
+  graph: WorkflowGraph;
+  notes: string[];
+} {
+  const cloned: WorkflowGraph = {
+    ...graph,
+    nodes: graph.nodes.map((n) => ({
+      ...n,
+      params: { ...(n.params ?? {}) },
+      ...(n.position ? { position: { x: n.position.x, y: n.position.y } } : {}),
+    })),
+    edges: graph.edges.map((e) => ({ ...e })),
+  };
+  const notes: string[] = [];
+
+  // 1. Infer curated benchmarkId when pdb-input has a unique curated benchmark pdbId wired to a generator
+  const nodeByIdInit = new Map(cloned.nodes.map((n) => [n.id, n]));
+  for (const node of cloned.nodes) {
+    if (node.adapterId !== 'pdb-input') continue;
+    const pdbId = String(node.params.pdbId ?? '').trim().toUpperCase();
+    if (!pdbId) continue;
+
+    const downstreamGens = cloned.edges
+      .filter((e) => e.fromNode === node.id)
+      .map((e) => nodeByIdInit.get(e.toNode))
+      .filter((n): n is WorkflowNode => Boolean(n && PASS2_GENERATOR_ADAPTERS.has(n.adapterId)));
+
+    let bm =
+      typeof node.params.benchmarkId === 'string' && node.params.benchmarkId
+        ? getBenchmarkById(node.params.benchmarkId)
+        : undefined;
+    if (!bm && downstreamGens.length > 0) {
+      const matches = BENCHMARK_TARGETS.filter((b) => b.pdbId === pdbId);
+      if (matches.length === 1) {
+        bm = matches[0];
+        node.params.benchmarkId = bm.id;
+      }
+    }
+    if (bm) {
+      if (!String(node.params.cropSegments ?? '').trim() && bm.cropSegments) {
+        node.params.cropSegments = bm.cropSegments;
+      }
+      const cp = bm.conditionParams;
+      for (const gen of downstreamGens) {
+        if (gen.adapterId === 'rfd4-proteina') {
+          if (!gen.params.mode || gen.params.mode === 'unconditional') {
+            gen.params.mode = bm.category === 'binder' ? 'binder' : 'motif';
+          }
+          if (bm.category === 'binder' && !gen.params.hotspots && cp.hotspots) {
+            gen.params.hotspots = cp.hotspots;
+          }
+          if (!gen.params.motifSpan && cp.motifSpan) {
+            gen.params.motifSpan = cp.motifSpan;
+          }
+          if (cp.unindexedMotif && gen.params.unindexedMotif !== true) {
+            gen.params.unindexedMotif = true;
+          }
+          if (!gen.params.contig && cp.contig) {
+            const reqLen = typeof gen.params.length === 'number' ? gen.params.length : null;
+            gen.params.contig = reqLen
+              ? adaptBenchmarkContigForLength(cp.contig, reqLen, bm.category)
+              : cp.contig;
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Sync explicit holo co-folding params (ligandCcdCodes / dnaSequences / rnaSequences) across
+  //    parallel AF3-lineage fold siblings fed from the same upstream sequences node.
+  const af3BySeqSource = new Map<string, WorkflowNode[]>();
+  for (const node of cloned.nodes) {
+    if (node.adapterId !== 'localfold-af2') continue;
+    const modelId = String(node.params.model ?? 'monomer');
+    if (!PASS2_AF3_MODELS.has(modelId)) continue;
+    const seqEdge = cloned.edges.find((e) => e.toNode === node.id && e.toPort === 'sequences');
+    if (!seqEdge) continue;
+    const list = af3BySeqSource.get(seqEdge.fromNode) ?? [];
+    list.push(node);
+    af3BySeqSource.set(seqEdge.fromNode, list);
+  }
+  for (const siblings of af3BySeqSource.values()) {
+    if (siblings.length < 2) continue;
+    const sharedLig = siblings.map((n) => String(n.params.ligandCcdCodes ?? '').trim()).find(Boolean) ?? '';
+    const sharedDna = siblings.map((n) => String(n.params.dnaSequences ?? '').trim()).find(Boolean) ?? '';
+    const sharedRna = siblings.map((n) => String(n.params.rnaSequences ?? '').trim()).find(Boolean) ?? '';
+    for (const n of siblings) {
+      if (sharedLig && !String(n.params.ligandCcdCodes ?? '').trim()) {
+        n.params.ligandCcdCodes = sharedLig;
+        notes.push(`Synced holo ligands (${sharedLig}) onto ${n.label ?? n.id}.`);
+      }
+      if (sharedDna && !String(n.params.dnaSequences ?? '').trim()) {
+        n.params.dnaSequences = sharedDna;
+        notes.push(`Synced DNA sequence onto ${n.label ?? n.id}.`);
+      }
+      if (sharedRna && !String(n.params.rnaSequences ?? '').trim()) {
+        n.params.rnaSequences = sharedRna;
+        notes.push(`Synced RNA sequence onto ${n.label ?? n.id}.`);
+      }
+    }
+  }
+
+  // 3. Iteratively apply structured validateBioCapabilities() fixes (up to 4 passes for cascading fixes)
+  for (let iter = 0; iter < 4; iter++) {
+    const issues = validateBioCapabilities(cloned);
+    if (issues.length === 0) break;
+    let changed = false;
+    const nodeById = new Map(cloned.nodes.map((n) => [n.id, n]));
+
+    for (const issue of issues) {
+      const targetId = issue.fix?.nodeId ?? issue.nodeId;
+      const node = nodeById.get(targetId);
+      if (!node) continue;
+
+      if (issue.fix) {
+        Object.assign(node.params, issue.fix.paramsPatch);
+        if (issue.fix.nodeLabel) {
+          node.label = issue.fix.nodeLabel;
+        }
+        notes.push(`Auto-configured ${node.label ?? node.id}: ${issue.fix.label}.`);
+        changed = true;
+      } else if (
+        (issue.code === 'genie3-unsupported-benchmark' || issue.code === 'genie3-unsupported-entities') &&
+        node.adapterId === 'genie3'
+      ) {
+        const prevParams = node.params;
+        const tplEdge = cloned.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
+        const tplNode = tplEdge ? nodeById.get(tplEdge.fromNode) : undefined;
+        const bmId =
+          tplNode?.adapterId === 'pdb-input' && typeof tplNode.params.benchmarkId === 'string'
+            ? tplNode.params.benchmarkId
+            : '';
+        const bm = bmId ? getBenchmarkById(bmId) : undefined;
+        const cp = bm?.conditionParams;
+        const reqLen = typeof prevParams.length === 'number' ? prevParams.length : undefined;
+        node.adapterId = 'rfd4-proteina';
+        node.label = 'RFD4-Proteina';
+        node.params = {
+          ...defaultParamsForAdapter('rfd4-proteina'),
+          mode: bm?.category === 'binder' ? 'binder' : 'motif',
+          ...(reqLen !== undefined ? { length: reqLen } : {}),
+          ...(prevParams.numDesigns !== undefined ? { numDesigns: prevParams.numDesigns } : {}),
+          ...(cp?.motifSpan ? { motifSpan: cp.motifSpan } : {}),
+          ...(cp?.unindexedMotif ? { unindexedMotif: true } : {}),
+          ...(cp?.hotspots && bm?.category === 'binder' ? { hotspots: cp.hotspots } : {}),
+          ...(cp?.contig
+            ? { contig: reqLen ? adaptBenchmarkContigForLength(cp.contig, reqLen, bm!.category) : cp.contig }
+            : {}),
+        };
+        notes.push(`Switched ${targetId} from Genie 3 to RFD4-Proteina for all-atom ligand/DNA conditioning.`);
+        changed = true;
+      } else if (issue.code === 'mpnn-non-protein-stripped' && node.adapterId === 'web-protein-mpnn') {
+        const prevParams = node.params;
+        node.adapterId = 'ligandmpnn';
+        node.label = 'LigandMPNN';
+        node.params = {
+          ...defaultParamsForAdapter('ligandmpnn'),
+          useLigandContext: true,
+          ...(prevParams.numSequences !== undefined ? { numSequences: prevParams.numSequences } : {}),
+          ...(prevParams.temperature !== undefined ? { temperature: prevParams.temperature } : {}),
+          ...(prevParams.omitAminoAcids ? { omitAminoAcids: prevParams.omitAminoAcids } : {}),
+        };
+        notes.push(`Switched ${targetId} to LigandMPNN to preserve upstream ligand/DNA context.`);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  return { graph: cloned, notes };
+}
+
+function serializeGraphForFeedback(graph: WorkflowGraph): string {
+  const nodesStr = graph.nodes
+    .map((n) => {
+      const p: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(n.params ?? {})) {
+        if (v !== '' && v !== null && v !== undefined && v !== false) {
+          p[k] = typeof v === 'string' && v.length > 60 ? `${v.slice(0, 60)}...` : v;
+        }
+      }
+      return `- ${n.id} (${n.adapterId}, label="${n.label ?? n.adapterId}") params=${JSON.stringify(p)}`;
+    })
+    .join('\n');
+  const edgesStr = graph.edges
+    .map((e) => `- ${e.fromNode}.${e.fromPort} -> ${e.toNode}.${e.toPort}`)
+    .join('\n');
+  return `Nodes:\n${nodesStr}\nEdges:\n${edgesStr}`.slice(0, 2450);
+}
+
+function formatGraphFeedbackIssues(
+  graph: WorkflowGraph,
+  graphErrors: string[],
+  bioIssues: BioCompatibilityIssue[],
+): string[] {
+  const out: string[] = [];
+  for (const ge of graphErrors) {
+    out.push(`[GRAPH_ERROR] ${ge}`);
+  }
+  for (const i of bioIssues) {
+    const holo =
+      i.code === 'af3-apo-refold-note' || i.code === 'af2-non-protein-entity'
+        ? extractUpstreamHoloHints(graph, i.nodeId)
+        : null;
+    const hint = holo
+      ? [
+          holo.ligandCcdCodes.length > 0 ? ` [upstream ligands: ${holo.ligandCcdCodes.join(', ')}]` : '',
+          holo.dnaSequences.length > 0 ? ` [upstream DNA: ${holo.dnaSequences.join(':')}]` : '',
+        ].join('')
+      : '';
+    out.push(`[${i.severity.toUpperCase()} ${i.code}] node="${i.nodeId}": ${i.message}${hint}`);
+  }
+  return out.slice(0, 10);
+}
+
 function compileBlockGraphPlan(
   plan: BlockGraphWorkflowPlan,
   currentGraph: WorkflowGraph | undefined,
   unsupported: string[],
+  opts?: { lenient?: boolean },
 ): {
   graph: WorkflowGraph;
   notes: string[];
@@ -1878,15 +2122,17 @@ function compileBlockGraphPlan(
       }
     }
 
-    const nextGraph: WorkflowGraph = {
+    const nextGraphRaw: WorkflowGraph = {
       id: currentGraph.id,
       name: currentGraph.name,
       ...(currentGraph.description !== undefined ? { description: currentGraph.description } : {}),
       nodes,
       edges,
     };
+    const { graph: nextGraph, notes: repairNotes } = repairDraftedWorkflowFromBioFeedback(nextGraphRaw);
+    notes.push(...repairNotes);
     const errs = validateGraph(nextGraph);
-    if (errs.length > 0) {
+    if (errs.length > 0 && !opts?.lenient) {
       throw new Error(`Edited block-graph workflow failed validation: ${errs.join('; ')}`);
     }
     return {
@@ -2035,15 +2281,17 @@ function compileBlockGraphPlan(
     }
   }
 
-  const graph: WorkflowGraph = {
+  const rawGraph: WorkflowGraph = {
     id: `ai-plan-${stamp}`,
     name: sanitizeDisplayText(plan.summary, 'AI Drafted Workflow', 110),
     description: sanitizeDisplayText(plan.summary, '', 200),
     nodes,
     edges,
   };
+  const { graph, notes: repairNotes } = repairDraftedWorkflowFromBioFeedback(rawGraph);
+  notes.push(...repairNotes);
   const errs = validateGraph(graph);
-  if (errs.length > 0) {
+  if (errs.length > 0 && !opts?.lenient) {
     throw new Error(`Drafted block-graph workflow failed validation: ${errs.join('; ')}`);
   }
   return {
@@ -2058,6 +2306,7 @@ function compileBlockGraphPlan(
 export function compileWorkflowPlanToGraph(
   plan: WorkflowPlan,
   currentGraph?: WorkflowGraph,
+  opts?: { lenient?: boolean },
 ): {
   graph: WorkflowGraph;
   notes: string[];
@@ -2084,7 +2333,7 @@ export function compileWorkflowPlanToGraph(
     : [];
 
   if (plan.kind === 'block_graph') {
-    return compileBlockGraphPlan(plan, currentGraph, unsupported);
+    return compileBlockGraphPlan(plan, currentGraph, unsupported, opts);
   }
 
   if (plan.kind === 'edit_current') {
@@ -4199,8 +4448,64 @@ export async function requestWorkflowPlan(
     });
   }
 
-  const { graph, notes, unsupported, isIncrementalEdit, addedNodeCount } =
-    compileWorkflowPlanToGraph(reconciledPlan, options?.currentGraph);
+  let { graph, notes, unsupported, isIncrementalEdit, addedNodeCount } =
+    compileWorkflowPlanToGraph(reconciledPlan, options?.currentGraph, { lenient: true });
+  let totalLatencyMs = latencyMs;
+
+  // Pass 2b (Conditional LLM feedback edit): ONLY fires if deterministic Pass 2a still left
+  // unresolved structural errors (validateGraph) or biological incompatibilities (validateBioCapabilities).
+  const remainingGraphErrs = validateGraph(graph);
+  const remainingBioIssues = validateBioCapabilities(graph);
+  if (
+    reconciledPlan.kind === 'block_graph' &&
+    (remainingGraphErrs.length > 0 || remainingBioIssues.length > 0)
+  ) {
+    const feedbackIssues = formatGraphFeedbackIssues(graph, remainingGraphErrs, remainingBioIssues);
+    if (feedbackIssues.length > 0) {
+      const p2Sig = combineSignalWithTimeout(options?.signal, PLANNER_TIMEOUT_MS);
+      try {
+        const draftNodes = graph.nodes.slice(0, 20).map((n) => ({
+          id: n.id,
+          adapterId: n.adapterId,
+          label: n.label,
+        }));
+        const p2Resp = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: trimmed,
+            currentNodes: draftNodes,
+            graphFeedback: {
+              graphSummary: serializeGraphForFeedback(graph),
+              issues: feedbackIssues,
+            },
+          }),
+          signal: p2Sig.signal,
+        });
+        if (p2Resp.ok) {
+          const p2Data = (await p2Resp.json()) as PlannerApiResponse;
+          if (p2Data?.ok && p2Data.plan && p2Data.plan.kind === 'block_graph') {
+            totalLatencyMs += p2Data.latencyMs ?? 0;
+            const p2Compiled = compileWorkflowPlanToGraph(p2Data.plan, graph, { lenient: true });
+            const p2Errs = validateGraph(p2Compiled.graph);
+            if (p2Errs.length === 0) {
+              graph = p2Compiled.graph;
+              notes = [...notes, ...p2Compiled.notes];
+            }
+          }
+        }
+      } catch {
+        /* Pass 2b is best-effort; fall through to final validation check */
+      } finally {
+        p2Sig.cleanup();
+      }
+    }
+  }
+
+  const finalErrs = validateGraph(graph);
+  if (finalErrs.length > 0) {
+    throw new Error(`Drafted block-graph workflow failed validation: ${finalErrs.join('; ')}`);
+  }
 
   writeSessionCache(cacheKey, { plan: reconciledPlan, model });
 
@@ -4211,7 +4516,7 @@ export async function requestWorkflowPlan(
     addedNodeCount,
     unsupported,
     model,
-    latencyMs,
+    latencyMs: totalLatencyMs,
     notes,
   };
 }
