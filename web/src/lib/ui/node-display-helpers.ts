@@ -300,7 +300,16 @@ export function formatNodeParamSummary(
     }
     case 'dyna1': {
       const prec = String(p.precision ?? 'int8').toUpperCase();
-      return `Exchange prob · ${prec}`;
+      const mode = String(p.inputMode ?? 'auto');
+      const modeLbl =
+        mode === 'seq+struct'
+          ? 'Seq+Struct'
+          : mode === 'seq-only'
+            ? 'Seq-only'
+            : mode === 'struct-only'
+              ? 'Struct-only'
+              : 'Auto (Seq+Struct)';
+      return `${modeLbl} · ${prec}`;
     }
     case 'thermompnn': {
       const chain = String(p.chain ?? '').trim();

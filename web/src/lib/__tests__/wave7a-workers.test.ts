@@ -126,7 +126,7 @@ const WAVE7A_SPECS = [
     workerFile: 'src/lib/workers/dyna1.worker.ts',
     factoryExport: 'createDyna1Engine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/dyna1-webgpu/resolve/main',
-    expectedParamKeys: ['maxSequences', 'precision'],
+    expectedParamKeys: ['inputMode', 'maxSequences', 'precision'],
   },
   {
     name: 'RFdiffusion (Base)',

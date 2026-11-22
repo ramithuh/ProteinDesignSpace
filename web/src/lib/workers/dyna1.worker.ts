@@ -1,9 +1,16 @@
 /// <reference lib="webworker" />
-// Dedicated WebGPU worker wrapping ramithuh/dyna1-webgpu (MIT · Dyna-1 + ESM-3 small backbone)
-// Predicts per-residue millisecond conformational exchange probabilities (0..1) from sequence
-// and optionally paints dynamics probabilities onto an upstream 3D structure's B-factors.
+// Dedicated WebGPU worker wrapping ramithuh/dyna1-webgpu (MIT · Dyna-1 + ESM-3 small + VQ-VAE Structure Encoder)
+// Predicts per-residue millisecond conformational exchange probabilities (0..1) using
+// sequence + 3D structure tokens (when a full-backbone structure is connected), structure-only,
+// or sequence-only mode, and paints dynamics probabilities onto 3D B-factors.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import {
+  extractDyna1Backbone3Coords,
+  normalizeDyna1InputMode,
+  resolveDyna1Mode,
+  type Dyna1ResolvedMode,
+} from '$lib/engine/dyna1-helpers';
 import { paintStructureBfactors } from '$lib/protein-ops/bfactor-paint';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type {
@@ -157,18 +164,23 @@ async function ensureEngine(id: number, precision: Precision) {
           return await resp.arrayBuffer();
         },
         onProgress: (prog: { phase?: string; loaded?: number; total?: number }) => {
-          if (prog.phase !== 'weights') return;
+          if (prog.phase !== 'weights' && prog.phase !== 'structure-encoder') return;
           const loaded = prog.loaded ?? 0;
           const total = prog.total ?? 0;
           const frac = total > 0 ? loaded / total : 0.4;
           const mb = (loaded / 1024 / 1024).toFixed(1);
           const totMb = total > 0 ? (total / 1024 / 1024).toFixed(1) : '?';
+          const isStructEnc = prog.phase === 'structure-encoder';
           self.postMessage({
             id,
             type: 'progress',
             phase: 'weights',
-            progress: Math.min(0.78, 0.05 + frac * 0.73),
-            detail: `Dyna-1 weights (${precision.toUpperCase()}): ${mb} / ${totMb} MB`,
+            progress: isStructEnc
+              ? Math.min(0.84, 0.72 + frac * 0.12)
+              : Math.min(0.72, 0.05 + frac * 0.67),
+            detail: isStructEnc
+              ? `Dyna-1 ESM-3 structure encoder: ${mb} / ${totMb} MB`
+              : `Dyna-1 weights (${precision.toUpperCase()}): ${mb} / ${totMb} MB`,
           });
         },
       });
@@ -219,15 +231,30 @@ self.onmessage = async (ev: MessageEvent) => {
       const t0 = performance.now();
       const p = msg.params ?? {};
       const precision = normalizePrecision(p.precision);
+      const requestedInputMode = normalizeDyna1InputMode(p.inputMode);
       const maxSequences = Math.max(1, Math.min(8, Math.round(Number(p.maxSequences ?? 1))));
 
       const seqSet = msg.inputs?.sequences as SequenceSet | undefined;
       const struct = msg.inputs?.structure as StructureArtifact | undefined;
+      const backbone3 = extractDyna1Backbone3Coords(struct);
 
       let sourceCandidates: SequenceCandidate[] = [];
       const parentStructureId: string | undefined = struct?.id ?? seqSet?.parentStructureId;
 
-      if (seqSet && seqSet.candidates.length > 0) {
+      if (requestedInputMode === 'struct-only' && struct) {
+        sourceCandidates = [
+          {
+            id: struct.id,
+            key: struct.designKey ?? struct.id,
+            sequence: struct.sequence || 'A'.repeat(struct.length),
+            chainLengths: struct.chainLengths,
+            score: null,
+            globalScore: null,
+            sourceModelId: struct.sourceModelId,
+            sourceStructureId: struct.id,
+          },
+        ];
+      } else if (seqSet && seqSet.candidates.length > 0) {
         sourceCandidates = seqSet.candidates.slice(0, maxSequences);
       } else if (struct && struct.sequence) {
         sourceCandidates = [
@@ -244,11 +271,19 @@ self.onmessage = async (ev: MessageEvent) => {
         ];
       } else {
         throw new Error(
-          'Dyna-1 requires an upstream SequenceSet (or StructureArtifact to extract its sequence).',
+          'Dyna-1 requires an upstream StructureArtifact or SequenceSet.',
         );
       }
 
-      const cleanedSeqs = sourceCandidates.map((c) => cleanCanonicalSequence(c.sequence, c.id));
+      const cleanedSeqs = sourceCandidates.map((c) =>
+        requestedInputMode === 'struct-only'
+          ? c.sequence.replace(/[\s:/,-]+/g, '').toUpperCase() || 'X'.repeat(backbone3?.length ?? 0)
+          : cleanCanonicalSequence(c.sequence, c.id),
+      );
+      const resolvedModes: Dyna1ResolvedMode[] = cleanedSeqs.map((seq) =>
+        resolveDyna1Mode(requestedInputMode, seq.length, backbone3),
+      );
+
       const activeEngine = await ensureEngine(msg.id, precision);
       const controller = new AbortController();
       activeAbort = controller;
@@ -256,6 +291,7 @@ self.onmessage = async (ev: MessageEvent) => {
       const scoredCandidates: SequenceCandidate[] = [];
       let primaryProbs = new Float32Array(0);
       let primarySeq = cleanedSeqs[0];
+      let primaryMode: Dyna1ResolvedMode = resolvedModes[0];
       let primaryMean = 0;
       let primaryMin = 0;
       let primaryMax = 0;
@@ -265,16 +301,40 @@ self.onmessage = async (ev: MessageEvent) => {
         for (let i = 0; i < sourceCandidates.length; i++) {
           const cand = sourceCandidates[i];
           const seq = cleanedSeqs[i];
+          const mode = resolvedModes[i];
+          const useStruct = (mode === 'seq+struct' || mode === 'struct-only') && backbone3 !== null;
 
           self.postMessage({
             id: msg.id,
             type: 'progress',
             phase: 'score',
-            progress: Math.min(0.95, 0.8 + (i / sourceCandidates.length) * 0.15),
-            detail: `Dyna-1 dynamics prediction on ${cand.id} (${seq.length} aa)...`,
+            progress: Math.min(0.95, 0.84 + (i / sourceCandidates.length) * 0.11),
+            detail: `Dyna-1 (${mode}) on ${cand.id} (${useStruct ? backbone3!.length : seq.length} aa)...`,
           });
 
-          const res = await activeEngine.predict(seq, { signal: controller.signal });
+          const res = await activeEngine.predict(
+            mode === 'struct-only' ? null : seq,
+            {
+              mode,
+              ...(useStruct ? { structureCoords: backbone3!.coords } : {}),
+              signal: controller.signal,
+              onProgress: (prog: { phase?: string; loaded?: number; total?: number }) => {
+                if (prog.phase !== 'structure-encoder') return;
+                const loaded = prog.loaded ?? 0;
+                const total = prog.total ?? 0;
+                const frac = total > 0 ? loaded / total : 0.4;
+                const mb = (loaded / 1024 / 1024).toFixed(1);
+                const totMb = total > 0 ? (total / 1024 / 1024).toFixed(1) : '?';
+                self.postMessage({
+                  id: msg.id,
+                  type: 'progress',
+                  phase: 'weights',
+                  progress: Math.min(0.84, 0.72 + frac * 0.12),
+                  detail: `Dyna-1 ESM-3 structure encoder: ${mb} / ${totMb} MB`,
+                });
+              },
+            },
+          );
           const probs = new Float32Array(res.probs as Float32Array);
 
           let sum = 0;
@@ -295,7 +355,8 @@ self.onmessage = async (ev: MessageEvent) => {
 
           if (i === 0) {
             primaryProbs = probs;
-            primarySeq = seq;
+            primarySeq = seq.length === probs.length ? seq : 'X'.repeat(probs.length);
+            primaryMode = mode;
             primaryMean = mean;
             primaryMin = minV;
             primaryMax = maxV;
@@ -315,7 +376,7 @@ self.onmessage = async (ev: MessageEvent) => {
         if (activeAbort === controller) activeAbort = null;
       }
 
-      const L = primarySeq.length;
+      const L = primaryProbs.length;
       const residueIds =
         struct?.sourceResidues && struct.sourceResidues.length === L
           ? struct.sourceResidues.map((r) => `${r.authChainId}${r.resNum}${r.insCode ?? ''}`)
@@ -323,16 +384,25 @@ self.onmessage = async (ev: MessageEvent) => {
 
       const runHash = fnv1a(
         JSON.stringify({
-          seq: primarySeq,
+          seq: primaryMode === 'struct-only' ? '' : primarySeq,
+          structId: primaryMode !== 'seq-only' ? struct?.id ?? '' : '',
+          mode: primaryMode,
           count: scoredCandidates.length,
           precision,
         }),
       );
 
+      const modeTag =
+        primaryMode === 'seq+struct'
+          ? 'seq+struct'
+          : primaryMode === 'struct-only'
+            ? 'struct-only'
+            : 'seq-only';
+
       const track: ResidueTrackArtifact = {
         kind: 'ResidueTrack',
         id: `dyna1-track-${precision}-${runHash}`,
-        label: `Dyna-1 Exchange Prob (mean ${primaryMean.toFixed(2)} · ${Math.round(primaryFlexFrac * 100)}% flex · ${precision.toUpperCase()})`,
+        label: `Dyna-1 Exchange Prob (mean ${primaryMean.toFixed(2)} · ${Math.round(primaryFlexFrac * 100)}% flex · ${modeTag} · ${precision.toUpperCase()})`,
         sourceModelId: 'dyna1',
         parentStructureId,
         quantity: 'dynamics-prob',

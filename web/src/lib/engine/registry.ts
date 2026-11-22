@@ -2731,7 +2731,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     approxWeightsMB: 844,
     licenseNote: 'MIT (Dyna-1 classifier & port) · ESM-3 small open v1 backbone',
     description:
-      'Predicts per-residue millisecond conformational exchange probabilities (0 = rigid, 1 = flexible) from protein sequences using ESM-3 small + Dyna-1 in WebGPU, painting dynamics onto 3D B-factors when a structure is connected.',
+      'Predicts per-residue millisecond conformational exchange probabilities (0 = rigid, 1 = flexible) using ESM-3 small + VQ-VAE Structure Encoder + Dyna-1 in WebGPU. Automatically conditions on both sequence and 3D backbone coordinates when a structure is connected (matching upstream dyna1.py --use_pdb_seq), and paints dynamics onto 3D B-factors.',
     inputs: {
       sequences: { type: 'SequenceSet', required: false },
       structure: { type: 'StructureArtifact', required: false },
@@ -2742,6 +2742,21 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       sequences: { type: 'SequenceSet' },
     },
     paramSchema: [
+      {
+        key: 'inputMode',
+        label: 'Conditioning Mode',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'auto',
+        options: [
+          { value: 'auto', label: 'Auto (Seq + Structure if wired)' },
+          { value: 'seq+struct', label: 'Sequence + Structure (recommended)' },
+          { value: 'seq-only', label: 'Sequence only' },
+          { value: 'struct-only', label: 'Structure only' },
+        ],
+        description:
+          'Auto uses ESM-3 VQ-VAE 3D structure tokens + sequence whenever a full-backbone structure is connected (~88 MB encoder cached once), or sequence-only otherwise.',
+      },
       {
         key: 'precision',
         label: 'Weight Precision',

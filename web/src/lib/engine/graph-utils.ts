@@ -264,6 +264,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
       };
     case 'dyna1':
       return {
+        inputMode: 'auto',
         precision: 'int8',
         maxSequences: 1,
       };
