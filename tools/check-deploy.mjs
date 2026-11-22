@@ -5,7 +5,7 @@
  * asset exceeds Cloudflare Pages' 25 MiB per-file limit.
  */
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,6 +20,10 @@ if (!existsSync(resolve(buildDir, 'index.html'))) {
 
 for (const req of [
   '_headers',
+  'vendor/ort/ort-wasm-simd-threaded.jspi.mjs',
+  'vendor/ort/ort-wasm-simd-threaded.jspi.wasm',
+  'vendor/ort/ort-wasm-simd-threaded.mjs',
+  'vendor/ort/ort-wasm-simd-threaded.wasm',
   'vendor/localfold/webgpu/index.js',
   'vendor/localfold/web/esmfold2-model.js',
   'vendor/localfold/webgpu/esmfold2/fold.js',
@@ -74,6 +78,29 @@ if (oversized.length > 0) {
   console.error('[check:deploy] FAIL: Files exceed Cloudflare Pages 25 MiB limit:');
   for (const f of oversized) {
     console.error(`  - ${f.path}: ${(f.bytes / 1024 / 1024).toFixed(2)} MiB`);
+  }
+  process.exit(1);
+}
+
+// Ensure every ONNX Runtime Web WASM/MJS runtime filename referenced by built app/worker JS
+// actually exists under `web/build/vendor/ort/` (prevents silent runtime 404/SPA-HTML failures
+// like onnxruntime-web/webgpu trying to fetch an unshipped >25 MiB asyncify binary).
+const ortRefsMissing = [];
+const ortRefRe = /ort-wasm-[a-z0-9.-]+\.(?:mjs|wasm)\b/g;
+for (const f of files) {
+  if (!f.path.startsWith('_app/') || !f.path.endsWith('.js')) continue;
+  const text = readFileSync(resolve(buildDir, f.path), 'utf8');
+  const refs = new Set(text.match(ortRefRe) || []);
+  for (const ref of refs) {
+    if (!existsSync(resolve(buildDir, 'vendor/ort', ref))) {
+      ortRefsMissing.push({ chunk: f.path, ref });
+    }
+  }
+}
+if (ortRefsMissing.length > 0) {
+  console.error('[check:deploy] FAIL: Built JS references ORT runtime files missing from vendor/ort/:');
+  for (const m of ortRefsMissing) {
+    console.error(`  - ${m.chunk} -> vendor/ort/${m.ref}`);
   }
   process.exit(1);
 }

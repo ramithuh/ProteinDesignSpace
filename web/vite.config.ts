@@ -3,9 +3,10 @@ import { defineConfig, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 
 /**
- * mpnn.worker.ts loads ONNX Runtime Web WASM binaries from jsDelivr CDN via `wasmPaths`.
- * Stripping Vite's auto-emitted `ort-wasm-*.wasm` assets (~24–26 MiB each) keeps every
- * output file well under Cloudflare Pages' 25 MiB single-file asset limit.
+ * mpnn.worker.ts loads first-party same-origin ONNX Runtime Web WASM binaries from
+ * `/vendor/ort/` via `wasmPaths` (synced from npm-locked `node_modules/onnxruntime-web`).
+ * Stripping Vite's auto-emitted duplicate `ort-wasm-*.wasm` assets keeps every
+ * output file under Cloudflare Pages' 25 MiB single-file asset limit.
  */
 function stripUnusedOrtWasm(): Plugin {
   return {
@@ -23,16 +24,34 @@ function stripUnusedOrtWasm(): Plugin {
 export default defineConfig({
   plugins: [sveltekit(), stripUnusedOrtWasm()],
   resolve: {
-    alias: {
+    alias: [
       // proteinmpnn-web ships TS source in GitHub installs (prepack only runs on publish).
       // Alias straight to src/index.ts so Vite bundles it cleanly in workers & main thread.
-      'proteinmpnn-web': resolve(__dirname, 'node_modules/proteinmpnn-web/src/index.ts'),
-    },
+      {
+        find: /^proteinmpnn-web$/,
+        replacement: resolve(__dirname, 'node_modules/proteinmpnn-web/src/index.ts'),
+      },
+      // In onnxruntime-web@1.24.3:
+      // - `onnxruntime-web/webgpu` requires `ort-wasm-simd-threaded.asyncify.wasm` (25.93 MiB),
+      //   exceeding Cloudflare Pages' 25 MiB per-file asset limit.
+      // - The default `onnxruntime-web` JSEP build omits `maxStorageBuffersPerShaderStage` in
+      //   its WebGPU `requestDevice()` call, causing silent Concat pipeline validation errors.
+      // Route WebGPU sessions to the modern C++ WebGPU EP via JSPI (`16.11 MiB < 25 MiB`),
+      // and WASM sessions (Safari/Firefox/CPU fallback) to the lean WASM runtime (`11.79 MiB`).
+      {
+        find: /^onnxruntime-web\/webgpu$/,
+        replacement: resolve(__dirname, 'node_modules/onnxruntime-web/dist/ort.jspi.bundle.min.mjs'),
+      },
+      {
+        find: /^onnxruntime-web$/,
+        replacement: resolve(__dirname, 'node_modules/onnxruntime-web/dist/ort.wasm.bundle.min.mjs'),
+      },
+    ],
   },
   // onnxruntime-web ships its own WASM artifacts and uses dynamic imports —
   // letting Vite optimize-deps it usually breaks the WASM resolution.
   optimizeDeps: {
-    exclude: ['onnxruntime-web'],
+    exclude: ['onnxruntime-web', 'onnxruntime-web/webgpu', 'onnxruntime-web/jspi', 'onnxruntime-web/wasm'],
   },
   build: {
     rollupOptions: {

@@ -30,6 +30,19 @@ let model: ProteinMPNN | null = null;
 let loadedKey: string | null = null;
 let loadedBackendMode: 'auto' | 'wasm' = 'auto';
 
+function supportsWebAssemblyJspi(): boolean {
+  return (
+    typeof WebAssembly !== 'undefined' &&
+    typeof (WebAssembly as unknown as { Suspending?: unknown }).Suspending === 'function'
+  );
+}
+
+function isOrtWebGpuFallbackError(err: unknown): boolean {
+  if (isWebGpuDeviceLostError(err)) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /no available backend|initWasm|webgpu|jspi|suspending|requestAdapter|adapter/i.test(msg);
+}
+
 function fnv1a(str: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) {
@@ -45,7 +58,14 @@ async function ensureModel(
   modelName: string,
   backendOverride: 'auto' | 'wasm' = 'auto',
 ) {
-  const key = `${family}:${modelName}:${backendOverride}`;
+  const effectiveBackend: 'auto' | 'wasm' =
+    backendOverride === 'wasm' ||
+    !supportsWebAssemblyJspi() ||
+    typeof navigator === 'undefined' ||
+    !('gpu' in navigator)
+      ? 'wasm'
+      : 'auto';
+  const key = `${family}:${modelName}:${effectiveBackend}`;
   if (model && loadedKey === key) return;
   if (model) {
     await model.dispose().catch(() => {});
@@ -54,7 +74,7 @@ async function ensureModel(
   }
 
   const url = modelManifestURL(family, modelName);
-  const backendTag = backendOverride === 'wasm' ? ' (WASM CPU fallback)' : '';
+  const backendTag = effectiveBackend === 'wasm' ? ' (WASM CPU)' : '';
   self.postMessage({
     id,
     type: 'progress',
@@ -71,19 +91,16 @@ async function ensureModel(
       // Suppress non-fatal ONNX Runtime WARNING logs (which ORT Web emits via console.error
       // in DevTools) while preserving genuine ERROR/FATAL diagnostics.
       try {
-        const ortWeb = await import('onnxruntime-web');
-        if (ortWeb?.env) ortWeb.env.logLevel = 'error';
-      } catch {
-        /* ignore if unavailable */
-      }
-      try {
-        const ortGpu = await import('onnxruntime-web/webgpu');
-        if (ortGpu?.env) ortGpu.env.logLevel = 'error';
+        const ortMod =
+          effectiveBackend === 'wasm'
+            ? await import('onnxruntime-web')
+            : await import('onnxruntime-web/webgpu');
+        if (ortMod?.env) ortMod.env.logLevel = 'error';
       } catch {
         /* ignore if unavailable */
       }
       return await ProteinMPNN.load(url, {
-        backend: backendOverride,
+        backend: effectiveBackend,
         wasmPaths: WASM_PATHS,
         numThreads: 1,
         sessionOptions: { logSeverityLevel: 3 },
@@ -120,7 +137,7 @@ async function ensureModel(
 
   model = await loadOnce(false);
   loadedKey = key;
-  loadedBackendMode = backendOverride;
+  loadedBackendMode = effectiveBackend;
 }
 
 self.onmessage = async (ev: MessageEvent) => {
@@ -466,13 +483,13 @@ self.onmessage = async (ev: MessageEvent) => {
       try {
         seqSet = await executeRun(loadedBackendMode);
       } catch (runErr) {
-        if (loadedBackendMode !== 'wasm' && isWebGpuDeviceLostError(runErr)) {
+        if (loadedBackendMode !== 'wasm' && isOrtWebGpuFallbackError(runErr)) {
           self.postMessage({
             id: msg.id,
             type: 'progress',
             phase: 'weights',
             progress: 0.05,
-            detail: 'WebGPU session lost — retrying ProteinMPNN on WASM CPU fallback...',
+            detail: 'WebGPU session unavailable — retrying ProteinMPNN on WASM CPU fallback...',
           });
           seqSet = await executeRun('wasm');
         } else {

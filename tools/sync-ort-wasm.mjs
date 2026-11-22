@@ -5,7 +5,7 @@
  * `mpnn.worker.ts` loads 100% first-party same-origin binaries with zero
  * third-party CDN execution (and stays under Cloudflare Pages' 25 MiB limit).
  */
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,8 +19,8 @@ const CANDIDATE_DISTS = [
 ];
 
 const REQUIRED_FILES = [
-  'ort-wasm-simd-threaded.jsep.mjs',
-  'ort-wasm-simd-threaded.jsep.wasm',
+  'ort-wasm-simd-threaded.jspi.mjs',
+  'ort-wasm-simd-threaded.jspi.wasm',
   'ort-wasm-simd-threaded.mjs',
   'ort-wasm-simd-threaded.wasm',
 ];
@@ -32,6 +32,12 @@ if (!distDir) {
 }
 
 mkdirSync(OUT_DIR, { recursive: true });
+const requiredSet = new Set(REQUIRED_FILES);
+for (const existing of readdirSync(OUT_DIR)) {
+  if (!requiredSet.has(existing)) {
+    rmSync(resolve(OUT_DIR, existing), { force: true });
+  }
+}
 for (const file of REQUIRED_FILES) {
   const src = resolve(distDir, file);
   const dst = resolve(OUT_DIR, file);
