@@ -21,6 +21,7 @@
     targetPosition,
     markerStart,
     markerEnd,
+    selected,
     style,
     interactionWidth,
     label,
@@ -39,6 +40,9 @@
   );
   let onDismiss = $derived(
     typeof data?.onDismiss === 'function' ? (data.onDismiss as () => void) : undefined,
+  );
+  let onDelete = $derived(
+    typeof data?.onDelete === 'function' ? (data.onDelete as () => void) : undefined,
   );
 
   // Memoize obstacle rects strictly by node geometry so progress/data ticks never re-route edges
@@ -106,10 +110,29 @@
   {labelStyle}
   {markerStart}
   {markerEnd}
-  {interactionWidth}
+  interactionWidth={interactionWidth ?? 22}
   class={isProposed ? 'ghost-wire-path' : undefined}
   {style}
 />
+
+{#if selected && !isProposed && onDelete}
+  <EdgeLabel x={routed.labelX} y={routed.labelY} transparent selectEdgeOnClick={false}>
+    <button
+      type="button"
+      class="edge-delete-btn"
+      title="Delete wire (Backspace / Delete)"
+      aria-label="Delete wire"
+      onpointerdown={(e) => e.stopPropagation()}
+      onmousedown={(e) => e.stopPropagation()}
+      onclick={(e) => {
+        e.stopPropagation();
+        onDelete?.();
+      }}
+    >
+      ×
+    </button>
+  </EdgeLabel>
+{/if}
 
 {#if isProposed && onAccept && onDismiss}
   <EdgeLabel x={routed.labelX} y={routed.labelY} transparent selectEdgeOnClick={false}>
@@ -166,8 +189,35 @@
     }
   }
 
-  :global(.svelte-flow__edgelabel-renderer:has(.ghost-pill)) {
+  :global(.svelte-flow__edgelabel-renderer:has(.ghost-pill)),
+  :global(.svelte-flow__edgelabel-renderer:has(.edge-delete-btn)) {
     z-index: 1005 !important;
+  }
+
+  .edge-delete-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    pointer-events: auto;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+  }
+  .edge-delete-btn:hover {
+    background: var(--err-strong, #ef4444);
+    border-color: var(--err-strong, #ef4444);
+    color: #fff;
+    transform: scale(1.1);
   }
 
   .ghost-pill {

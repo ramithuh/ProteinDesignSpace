@@ -528,10 +528,50 @@
       if (selectedNodeIds.length > 1 && onSelectNodes) {
         onSelectNodes(selectedNodeId ? [selectedNodeId] : []);
       }
+      if (selectedEdgeId) {
+        onSelectNode(selectedNodeId);
+      }
       return;
     }
     if (disabled || ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (isEditableElement(ev.target) || isEditableElement(document.activeElement)) return;
+
+    // Deterministic Delete / Backspace: remove selected wire first (never touching nodes),
+    // otherwise remove selected block(s). Works reliably regardless of SVG focus.
+    if (!draftPreview && (ev.key === 'Backspace' || ev.key === 'Delete')) {
+      if (selectedEdgeId) {
+        const exists = graph.edges.some(
+          (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) === selectedEdgeId,
+        );
+        if (exists) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          removeEdge(selectedEdgeId);
+          return;
+        }
+      }
+      const targetIds =
+        selectedNodeIds.length > 0
+          ? selectedNodeIds
+          : selectedNodeId
+            ? [selectedNodeId]
+            : [];
+      const rmNodeIds = new Set(targetIds.filter((id) => graph.nodes.some((n) => n.id === id)));
+      if (rmNodeIds.size > 0) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        clearProposals();
+        const nextNodes = graph.nodes.filter((n) => !rmNodeIds.has(n.id));
+        const nextEdges = graph.edges.filter(
+          (e) => !rmNodeIds.has(e.fromNode) && !rmNodeIds.has(e.toNode),
+        );
+        onGraphChange({ ...graph, nodes: nextNodes, edges: nextEdges });
+        if (rmNodeIds.has(selectedNodeId)) {
+          onSelectNode(nextNodes[0]?.id ?? '');
+        }
+        return;
+      }
+    }
 
     // Enter while reviewing a live canvas draft applies it immediately,
     // unless focus is on a review-bar button (e.g. Tab -> Refine / × -> Enter)
@@ -736,6 +776,7 @@
         targetHandle: e.toPort,
         selected: isSel,
         animated: activeFeed || isDraftEdge,
+        interactionWidth: 22,
         markerEnd: {
           type: MarkerType.ArrowClosed,
           width: 16,
@@ -743,7 +784,10 @@
           color: col,
         },
         style,
-        data: { laneStagger },
+        data: {
+          laneStagger,
+          onDelete: disabled || activePreview ? undefined : () => removeEdge(eid),
+        },
       };
     });
 
@@ -871,6 +915,9 @@
     const effectiveDelNodes = hasSelectedEdge ? [] : delNodes;
     const rmNodeIds = new Set(effectiveDelNodes.map((n) => n.id));
     const rmEdgeIds = new Set(delEdges.map((e) => e.id));
+    if (hasSelectedEdge && selectedEdgeId) {
+      rmEdgeIds.add(selectedEdgeId);
+    }
     if (rmNodeIds.size === 0 && rmEdgeIds.size === 0) return;
     const nextNodes = graph.nodes.filter((n) => !rmNodeIds.has(n.id));
     const nextEdges = graph.edges.filter((e) => {
@@ -881,6 +928,16 @@
     if (rmNodeIds.has(selectedNodeId)) {
       onSelectNode(nextNodes[0]?.id ?? '');
     }
+  }
+
+  function removeEdge(edgeId: string) {
+    if (disabled) return;
+    clearProposals();
+    const nextEdges = graph.edges.filter(
+      (e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort) !== edgeId,
+    );
+    if (nextEdges.length === graph.edges.length) return;
+    onGraphChange({ ...graph, edges: nextEdges });
   }
 
   function removeNode(nodeId: string) {
@@ -1252,7 +1309,7 @@
       nodesConnectable={!disabled && !draftPreview}
       zoomOnDoubleClick={false}
       multiSelectionKey={['Meta', 'Control', 'Shift']}
-      deleteKey={disabled || draftPreview ? null : ['Backspace', 'Delete']}
+      deleteKey={null}
       minZoom={0.2}
       fitView
       fitViewOptions={{ padding: { top: 0.12, left: 0.1, right: 0.1, bottom: 0.28 }, maxZoom: 1 }}

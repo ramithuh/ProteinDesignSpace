@@ -1161,6 +1161,11 @@
       selectedPresetId = 'custom-workflow';
     }
 
+    if (selectedEdgeId && !nextEdgeKeys.has(selectedEdgeId)) {
+      selectedEdgeId = null;
+      selectedPeekSlotId = null;
+    }
+
     graph = normalizedNext;
     scheduler.invalidateEditedGraph(prevSnapshot, normalizedNext);
 
