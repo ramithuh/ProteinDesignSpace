@@ -8,7 +8,7 @@ import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 
 export type GeneratorId = 'rfd4-proteina' | 'genie3';
-export type SequenceDesignerId = 'web-protein-mpnn' | 'ligandmpnn' | 'lasermpnn';
+export type SequenceDesignerId = 'native' | 'web-protein-mpnn' | 'ligandmpnn' | 'lasermpnn';
 export type FoldOracleId =
   | 'monomer'
   | 'multimer'
@@ -195,7 +195,7 @@ export const PLANNER_TIMEOUT_MS = 15_000;
 
 const CROP_ALLOWLIST_RE = /^[A-Za-z0-9,:;+\s._-]{1,80}$/;
 const MAX_GENERATORS = 2;
-const MAX_SEQUENCE_DESIGNERS = 3;
+const MAX_SEQUENCE_DESIGNERS = 4;
 const MAX_FOLD_MODELS = 4;
 const MAX_PDB_TASKS = 4;
 const MAX_EDIT_OPERATIONS = 4;
@@ -533,14 +533,24 @@ function attachGeneratorBranch(opts: {
   }
 
   // Decide sequence design branch(es):
-  // - If user explicitly requested 1+ sequenceDesigners (e.g. compare ProteinMPNN vs LigandMPNN), fan out!
+  // - If user explicitly requested 1+ sequenceDesigners (e.g. compare RFD4 native seq vs ProteinMPNN, or ProteinMPNN vs LigandMPNN), fan out!
+  // - 'native' on RFD4 uses its built-in co-designed `sequences` port directly; on Genie 3 (Cα-only), falls back to Cα-ProteinMPNN.
   // - Otherwise Genie 3 gets Cα-ProteinMPNN, and RFD4 uses its native `sequences` port directly.
-  const effectiveDesigners: Array<SequenceDesignerId | null> =
+  const mappedDesigners: Array<SequenceDesignerId | null> =
     sequenceDesigners.length > 0
-      ? sequenceDesigners
+      ? sequenceDesigners.map((d) =>
+          d === 'native' ? (genId === 'genie3' ? 'web-protein-mpnn' : null) : d,
+        )
       : genId === 'genie3'
         ? ['web-protein-mpnn']
         : [null];
+
+  // Deduplicate in case Genie 3 mapped ['native', 'web-protein-mpnn'] to duplicate 'web-protein-mpnn'
+  const effectiveDesigners: Array<Exclude<SequenceDesignerId, 'native'> | null> = [];
+  for (const d of mappedDesigners) {
+    const val = d === 'native' ? null : d;
+    if (!effectiveDesigners.includes(val)) effectiveDesigners.push(val);
+  }
 
   const multiDesigner = effectiveDesigners.length > 1;
   for (const designerAdapter of effectiveDesigners) {
@@ -579,6 +589,8 @@ function attachGeneratorBranch(opts: {
       if (multiDesigner) {
         subTag = branchTag ? `${branchTag} · ${designerLabel}` : designerLabel;
       }
+    } else if (multiDesigner) {
+      subTag = branchTag ? `${branchTag} · RFD4 seq` : 'RFD4 seq';
     }
 
     attachDownstreamEval({

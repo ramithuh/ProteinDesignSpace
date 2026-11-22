@@ -321,4 +321,33 @@ describe('WorkflowPlan deterministic compiler', () => {
     expect(parseRetryAfterSec('0')).toBeNull();
     expect(parseRetryAfterSec(null)).toBeNull();
   });
+
+  it('compiles RFD4 native seq vs ProteinMPNN side-by-side refolding off the same RFD4 backbone', () => {
+    const { graph, notes } = compileWorkflowPlanToGraph({
+      kind: 'de_novo',
+      generators: ['rfd4-proteina'],
+      length: 100,
+      numDesigns: 1,
+      sequenceDesigners: ['native', 'web-protein-mpnn'],
+      numSequences: 2,
+      topK: null,
+      refold: true,
+      foldModels: ['monomer'],
+      score: true,
+      stabilityScan: false,
+      summary: '100aa RFD4-Proteina: compare RFD4 native seq vs ProteinMPNN → AF2 refold',
+    });
+
+    expect(notes).toEqual([]);
+    expect(validateGraph(graph)).toEqual([]);
+    // 1 RFD4 + 1 ProteinMPNN + 2 AF2 folds + 2 scRMSD scorers = 6 nodes
+    expect(graph.nodes).toHaveLength(6);
+    const rfd4 = graph.nodes.find((n) => n.adapterId === 'rfd4-proteina')!;
+    const mpnn = graph.nodes.find((n) => n.adapterId === 'web-protein-mpnn')!;
+    const folds = graph.nodes.filter((n) => n.adapterId === 'localfold-af2');
+    expect(folds).toHaveLength(2);
+    // One fold directly wired to rfd4.sequences, one wired to ProteinMPNN.sequences
+    expect(graph.edges.some((e) => e.fromNode === rfd4.id && e.fromPort === 'sequences')).toBe(true);
+    expect(graph.edges.some((e) => e.fromNode === mpnn.id && e.fromPort === 'sequences')).toBe(true);
+  });
 });
