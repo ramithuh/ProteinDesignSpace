@@ -505,11 +505,19 @@
     if (disabled || ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (isEditableElement(ev.target) || isEditableElement(document.activeElement)) return;
 
-    // Enter or Tab while reviewing a live canvas draft applies it immediately
-    if (draftPreview && plannerBarRef && (ev.key === 'Enter' || ev.key === 'Tab')) {
-      ev.preventDefault();
-      plannerBarRef.handleConfirmShortcut();
-      return;
+    // Enter while reviewing a live canvas draft applies it immediately,
+    // unless focus is on a review-bar button (e.g. Tab -> Refine / × -> Enter)
+    if (draftPreview && plannerBarRef && ev.key === 'Enter') {
+      const active = document.activeElement;
+      const onInteractiveControl =
+        active instanceof HTMLButtonElement ||
+        active instanceof HTMLAnchorElement ||
+        (active instanceof HTMLElement && Boolean(active.closest('button, a, [role="button"]')));
+      if (!onInteractiveControl) {
+        ev.preventDefault();
+        plannerBarRef.handleConfirmShortcut();
+        return;
+      }
     }
 
     if (
@@ -1124,6 +1132,12 @@
             onGraphChange(nextGraph);
           }
           scheduleFitView(260);
+        }}
+        onOpenCatalog={() => {
+          closeInlinePlanner();
+          clearProposals();
+          wireLegendOpen = false;
+          catalogOpen = true;
         }}
         onClose={closeInlinePlanner}
       />

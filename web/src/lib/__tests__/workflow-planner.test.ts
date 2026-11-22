@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  compileLocalStarterPlan,
   compileWorkflowPlanToGraph,
+  DEFAULT_PLANNER_ENDPOINT,
+  LOCAL_EXAMPLE_PLANS,
+  parseRetryAfterSec,
   type ConditionedDesignWorkflowPlan,
   type DeNovoWorkflowPlan,
   type EditCurrentWorkflowPlan,
   type PdbWorkflowPlan,
+  type WorkflowPlan,
 } from '$lib/engine/workflow-planner';
 import { validateGraph } from '$lib/engine/graph-utils';
 import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
@@ -270,5 +275,50 @@ describe('WorkflowPlan deterministic compiler', () => {
         summary: 'BindCraft and Chai-1 are not in denovo.run',
       }),
     ).toThrow(/BindCraft and Chai-1/);
+  });
+
+  it('points DEFAULT_PLANNER_ENDPOINT to the custom domain planner.denovo.run and compiles all 4 local starter chips at 0 Neurons', () => {
+    expect(DEFAULT_PLANNER_ENDPOINT).toBe('https://planner.denovo.run/api/plan');
+
+    const base = compileLocalStarterPlan(
+      LOCAL_EXAMPLE_PLANS.find((e) => e.id === 'denovo-100aa')!.plan,
+    );
+    expect(base.model).toBe('local-preset');
+    expect(base.latencyMs).toBe(0);
+    expect(validateGraph(base.graph)).toEqual([]);
+
+    for (const ex of LOCAL_EXAMPLE_PLANS) {
+      const compiled = compileLocalStarterPlan(ex.plan, ex.requiresExisting ? base.graph : undefined);
+      expect(compiled.model).toBe('local-preset');
+      expect(compiled.latencyMs).toBe(0);
+      expect(validateGraph(compiled.graph)).toEqual([]);
+    }
+  });
+
+  it('rejects unknown plan.kind and invalid PDB crop syntax, and parses Retry-After headers', () => {
+    expect(() =>
+      compileWorkflowPlanToGraph({ kind: 'mystery_plan' } as unknown as WorkflowPlan),
+    ).toThrow(/Unsupported workflow plan kind/);
+
+    expect(() =>
+      compileWorkflowPlanToGraph({
+        kind: 'pdb',
+        pdbId: '3PTB',
+        crop: 'A; <script>alert(1)</script>',
+        task: 'ligandmpnn',
+        targetChain: null,
+        regions: null,
+        numSequences: 2,
+        topK: null,
+        refold: false,
+        foldModels: [],
+        stabilityScan: false,
+        summary: 'Invalid crop test',
+      }),
+    ).toThrow(/invalid PDB crop/i);
+
+    expect(parseRetryAfterSec('42')).toBe(42);
+    expect(parseRetryAfterSec('0')).toBeNull();
+    expect(parseRetryAfterSec(null)).toBeNull();
   });
 });

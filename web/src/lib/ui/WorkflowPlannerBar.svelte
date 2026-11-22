@@ -1,17 +1,16 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import {
+    compileLocalStarterPlan,
+    LOCAL_EXAMPLE_PLANS,
+    PLANNER_MIN_PROMPT_LENGTH,
+    PlannerHttpError,
     requestWorkflowPlan,
     UnsupportedWorkflowError,
+    type LocalStarterExample,
     type PlannedWorkflowResult,
   } from '$lib/engine/workflow-planner';
   import type { WorkflowGraph } from '$lib/engine/types';
-
-  interface ExampleChip {
-    label: string;
-    prompt: string;
-    requiresExisting?: boolean;
-  }
 
   interface Props {
     graph: WorkflowGraph;
@@ -21,6 +20,7 @@
     onDraftChange: (draft: PlannedWorkflowResult | null) => void;
     onPromptStateChange?: (hasText: boolean, loading: boolean) => void;
     onApply: (graph: WorkflowGraph, summary: string) => void;
+    onOpenCatalog?: () => void;
     onClose: () => void;
   }
 
@@ -32,33 +32,13 @@
     onDraftChange,
     onPromptStateChange = undefined,
     onApply,
+    onOpenCatalog = undefined,
     onClose,
   }: Props = $props();
 
-  const ALL_EXAMPLES: ExampleChip[] = [
-    {
-      label: '+ ThermoMPNN & RF3',
-      prompt: 'Add ThermoMPNN and a RoseTTAFold 3 refolding branch to my current graph',
-      requiresExisting: true,
-    },
-    {
-      label: 'Di-iron motif: Genie 3 vs RFD4',
-      prompt:
-        'Evaluate Genie 3 and RFD4 on the di-iron 4-helix bundle motif using AF2, RF3, and Protenix',
-    },
-    {
-      label: 'LigandMPNN vs LASErMPNN (3PTB)',
-      prompt: 'Compare LigandMPNN vs LASErMPNN on 3PTB keeping BEN and CA',
-    },
-    {
-      label: '100aa de novo: RFD4 + Genie 3',
-      prompt: 'Try RFD4 and Genie 3 for 100 length protein design and check refolding',
-    },
-  ];
-
   let examples = $derived.by(() => {
     const hasNodes = graph.nodes.length > 0;
-    return ALL_EXAMPLES.filter((ex) => !ex.requiresExisting || hasNodes).slice(0, 3);
+    return LOCAL_EXAMPLE_PLANS.filter((ex) => !ex.requiresExisting || hasNodes).slice(0, 3);
   });
 
   interface UnsupportedNotice {
@@ -70,6 +50,8 @@
   let prompt = $state('');
   let loading = $state(false);
   let errorMsg = $state<string | null>(null);
+  let errorShowCatalog = $state(false);
+  let cooldownSec = $state(0);
   let unsupportedNotice = $state<UnsupportedNotice | null>(null);
   let infoOpen = $state(false);
   let notesExpanded = $state(false);
@@ -77,8 +59,15 @@
   let textareaEl: HTMLTextAreaElement | null = $state(null);
   let infoWrapEl: HTMLDivElement | null = $state(null);
   let abortCtrl: AbortController | null = null;
+  let cooldownTimer: ReturnType<typeof setInterval> | null = null;
 
   let trimmedPrompt = $derived(prompt.trim());
+  let canSubmit = $derived(
+    !disabled &&
+      !loading &&
+      cooldownSec === 0 &&
+      trimmedPrompt.length >= PLANNER_MIN_PROMPT_LENGTH,
+  );
   let showExamples = $derived(
     trimmedPrompt.length === 0 &&
       !loading &&
@@ -93,6 +82,27 @@
     onPromptStateChange?.(trimmedPrompt.length > 0, loading);
   });
 
+  function clearCooldown() {
+    if (cooldownTimer) {
+      clearInterval(cooldownTimer);
+      cooldownTimer = null;
+    }
+    cooldownSec = 0;
+  }
+
+  function startCooldown(seconds: number) {
+    clearCooldown();
+    const clamped = Math.max(1, Math.min(120, Math.ceil(seconds)));
+    cooldownSec = clamped;
+    cooldownTimer = setInterval(() => {
+      if (cooldownSec <= 1) {
+        clearCooldown();
+      } else {
+        cooldownSec -= 1;
+      }
+    }, 1000);
+  }
+
   function resizeTextarea() {
     const el = textareaEl;
     if (!el) return;
@@ -105,6 +115,17 @@
     const nextH = Math.min(el.scrollHeight, 84);
     el.style.height = `${Math.max(24, nextH)}px`;
     isMultiline = nextH > 32;
+  }
+
+  function handleTextareaInput() {
+    resizeTextarea();
+    if (errorMsg) {
+      errorMsg = null;
+      errorShowCatalog = false;
+    }
+    if (unsupportedNotice) {
+      unsupportedNotice = null;
+    }
   }
 
   export function focusInput() {
@@ -166,13 +187,43 @@
     window.addEventListener('pointerdown', onDocPointerDown, true);
     return () => {
       abortCtrl?.abort();
+      clearCooldown();
       window.removeEventListener('pointerdown', onDocPointerDown, true);
     };
   });
 
+  async function applyLocalExample(example: LocalStarterExample) {
+    if (loading || disabled) return;
+    prompt = example.prompt;
+    await tick();
+    resizeTextarea();
+    errorMsg = null;
+    errorShowCatalog = false;
+    unsupportedNotice = null;
+    infoOpen = false;
+    notesExpanded = false;
+
+    try {
+      const planned = compileLocalStarterPlan(
+        example.plan,
+        graph.nodes.length > 0 ? graph : undefined,
+      );
+      onDraftChange(planned);
+    } catch (err) {
+      errorMsg = err instanceof Error ? err.message : 'Failed to compile starter workflow.';
+      errorShowCatalog = Boolean(onOpenCatalog);
+      focusInput();
+    }
+  }
+
   async function submitPrompt(overrideText?: string) {
     const text = (overrideText ?? prompt).trim();
-    if (!text || loading || disabled) return;
+    if (!text || loading || disabled || cooldownSec > 0) return;
+    if (text.length < PLANNER_MIN_PROMPT_LENGTH) {
+      errorMsg = `Please enter at least ${PLANNER_MIN_PROMPT_LENGTH} characters to describe a workflow.`;
+      errorShowCatalog = false;
+      return;
+    }
     if (overrideText !== undefined) {
       prompt = overrideText;
       await tick();
@@ -183,6 +234,7 @@
     abortCtrl = new AbortController();
     loading = true;
     errorMsg = null;
+    errorShowCatalog = false;
     unsupportedNotice = null;
     infoOpen = false;
     notesExpanded = false;
@@ -202,8 +254,22 @@
           unsupported: err.unsupported,
           suggestions: err.suggestions,
         };
+      } else if (err instanceof PlannerHttpError) {
+        errorMsg = err.message;
+        errorShowCatalog =
+          Boolean(onOpenCatalog) &&
+          (err.status === 429 ||
+            err.status === 403 ||
+            err.status === 503 ||
+            err.status === 504 ||
+            err.status === 0 ||
+            err.code === 'quota_exhausted');
+        if (err.status === 429 && err.code !== 'quota_exhausted' && err.retryAfterSec) {
+          startCooldown(err.retryAfterSec);
+        }
       } else {
         errorMsg = err instanceof Error ? err.message : 'Failed to plan workflow.';
+        errorShowCatalog = Boolean(onOpenCatalog);
       }
       focusInput();
     } finally {
@@ -249,11 +315,25 @@
   {#if errorMsg}
     <div class="above-strip err-pill" role="alert">
       <span class="err-msg">{errorMsg}</span>
+      {#if errorShowCatalog && onOpenCatalog}
+        <button
+          type="button"
+          class="err-fallback-btn"
+          onclick={() => {
+            errorMsg = null;
+            errorShowCatalog = false;
+            onOpenCatalog();
+          }}
+        >
+          + Add Block (/)
+        </button>
+      {/if}
       <button
         type="button"
         class="strip-x"
         onclick={() => {
           errorMsg = null;
+          errorShowCatalog = false;
           focusInput();
         }}
         aria-label="Dismiss error"
@@ -294,12 +374,12 @@
     </div>
   {:else if showExamples}
     <div class="above-strip chip-row" role="list" aria-label="Example workflow prompts">
-      {#each examples as ex (ex.label)}
+      {#each examples as ex (ex.id)}
         <button
           type="button"
           class="ex-pill"
-          title={ex.prompt}
-          onclick={() => void submitPrompt(ex.prompt)}
+          title={`${ex.prompt} (instant local preview)`}
+          onclick={() => void applyLocalExample(ex)}
           {disabled}
         >
           <span class="ex-spark" aria-hidden="true">✦</span>
@@ -373,7 +453,7 @@
           class="btn-apply"
           onclick={applyDraft}
           {disabled}
-          title="Apply drafted workflow to canvas (Enter or Tab)"
+          title="Apply drafted workflow to canvas (Enter)"
         >
           ✓ Apply <kbd>↵</kbd>
         </button>
@@ -411,7 +491,7 @@
           ? 'Describe a workflow or edit this graph…'
           : 'Describe your protein design workflow…'}
         disabled={disabled || loading}
-        oninput={resizeTextarea}
+        oninput={handleTextareaInput}
         onkeydown={onTextareaKeydown}
         aria-label="Describe your protein design workflow"
       ></textarea>
@@ -437,13 +517,21 @@
         <button
           type="button"
           class="btn-send"
-          disabled={disabled || trimmedPrompt.length === 0}
+          disabled={!canSubmit}
           onclick={() => void submitPrompt()}
-          title="Draft workflow on canvas (Enter)"
+          title={cooldownSec > 0
+            ? `Rate limit cooldown (${cooldownSec}s remaining)`
+            : trimmedPrompt.length > 0 && trimmedPrompt.length < PLANNER_MIN_PROMPT_LENGTH
+              ? `Enter at least ${PLANNER_MIN_PROMPT_LENGTH} characters`
+              : 'Draft workflow on canvas (Enter)'}
           aria-label="Draft workflow"
         >
-          <span class="send-label">Draft</span>
-          <kbd>↵</kbd>
+          {#if cooldownSec > 0}
+            <span class="send-label">Wait {cooldownSec}s</span>
+          {:else}
+            <span class="send-label">Draft</span>
+            <kbd>↵</kbd>
+          {/if}
         </button>
         <button
           type="button"
@@ -593,6 +681,23 @@
   }
   .err-msg {
     max-width: 480px;
+  }
+  .err-fallback-btn {
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--err-border) 80%, transparent);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .err-fallback-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent-bright);
   }
   .strip-x {
     background: none;
