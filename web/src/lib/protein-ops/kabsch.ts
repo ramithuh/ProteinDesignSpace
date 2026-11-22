@@ -332,8 +332,13 @@ export interface SubstructureKabschResult extends KabschResult {
 export interface SubstructureAlignOptions {
   shortChainIds?: readonly string[] | null;
   longChainIds?: readonly string[] | null;
-  /** Known 0-based indices in `longCoords` matching `shortCoords` 1-to-1. */
+  /** Known 0-based indices in `longCoords` matching `shortCoords` (possibly permuted for unindexed motifs). */
   knownIndices?: readonly number[] | null;
+  /** Native template Cα [x, y, z] coordinates corresponding 1-to-1 with `knownIndices` (resolves arbitrary unindexed permutations). */
+  knownNativeCoords?: readonly (readonly number[])[] | null;
+  /** Optional 1-letter amino acid sequences for `shortCoords` and `longCoords` to break geometric symmetries. */
+  shortSeq?: string | null;
+  longSeq?: string | null;
 }
 
 interface MotifIsland {
@@ -360,32 +365,176 @@ export function kabschAlignSubstructure(
     return { ...kabschAlign(shortCoords, longCoords), alignedResidues: Math.min(m, n), isSubstructure: true };
   }
 
-  // 1. Direct alignment when known motif indices in longCoords are explicitly provided
+  // 1. Direct alignment when known motif indices in longCoords are explicitly provided.
+  // Note: Unindexed motif scaffolding (e.g. RFD4 `unindexedMotif: true`) places motif residues at
+  // arbitrary scaffold indices whose ascending `knownIndices` order is a PERMUTATION of `shortCoords`.
+  // Resolve the exact bijection via `knownNativeCoords` (and/or sequence-guided permutation search for
+  // small sparse motifs) before running Kabsch so motifs & co-folded ligands superimpose accurately.
   const knownIndices = options?.knownIndices;
   if (knownIndices && knownIndices.length > 0) {
-    const validPairs: Array<[number, number]> = [];
-    const limit = Math.min(m, knownIndices.length);
-    for (let i = 0; i < limit; i++) {
-      const li = knownIndices[i];
+    const validKnown: number[] = [];
+    const validNative: Array<readonly number[]> = [];
+    const rawNative = options?.knownNativeCoords;
+    const hasNative = Array.isArray(rawNative) && rawNative.length === knownIndices.length;
+    for (let k = 0; k < knownIndices.length; k++) {
+      const li = knownIndices[k];
       if (Number.isInteger(li) && li >= 0 && li < n) {
-        validPairs.push([i, li]);
+        validKnown.push(li);
+        if (hasNative && Array.isArray(rawNative[k]) && rawNative[k].length === 3) {
+          validNative.push(rawNative[k]);
+        }
       }
     }
-    if (validPairs.length >= 3) {
-      const subMob = new Float32Array(validPairs.length * 3);
-      const subTgt = new Float32Array(validPairs.length * 3);
-      for (let i = 0; i < validPairs.length; i++) {
-        const si = validPairs[i][0] * 3;
-        const li = validPairs[i][1] * 3;
-        subMob[i * 3 + 0] = shortCoords[si + 0];
-        subMob[i * 3 + 1] = shortCoords[si + 1];
-        subMob[i * 3 + 2] = shortCoords[si + 2];
-        subTgt[i * 3 + 0] = longCoords[li + 0];
-        subTgt[i * 3 + 1] = longCoords[li + 1];
-        subTgt[i * 3 + 2] = longCoords[li + 2];
+    const validNativeAligned = hasNative && validNative.length === validKnown.length;
+
+    const evalKabschRmsd = (mob: Float32Array, tgt: Float32Array, count: number): number => {
+      const { R, t } = weightedKabsch(mob, tgt);
+      let sq = 0;
+      for (let i = 0; i < count; i++) {
+        const x = mob[i * 3 + 0];
+        const y = mob[i * 3 + 1];
+        const z = mob[i * 3 + 2];
+        const dx = R[0] * x + R[1] * y + R[2] * z + t[0] - tgt[i * 3 + 0];
+        const dy = R[3] * x + R[4] * y + R[5] * z + t[1] - tgt[i * 3 + 1];
+        const dz = R[6] * x + R[7] * y + R[8] * z + t[2] - tgt[i * 3 + 2];
+        sq += dx * dx + dy * dy + dz * dz;
       }
-      const joint = kabschAlign(subMob, subTgt);
-      return { ...joint, alignedResidues: validPairs.length, isSubstructure: true };
+      return Math.sqrt(sq / count);
+    };
+
+    if (validKnown.length >= 3) {
+      let orderedKnown: number[] | null = null;
+
+      // 1a. Exact native crystal coordinate matching (handles arbitrary unindexed permutations of ANY size!)
+      if (validNativeAligned && validKnown.length === m) {
+        const usedK = new Uint8Array(m);
+        const mapped = new Array<number>(m).fill(-1);
+        let maxMatchedDist = 0;
+        let allMatched = true;
+        for (let i = 0; i < m; i++) {
+          const sx = shortCoords[i * 3 + 0];
+          const sy = shortCoords[i * 3 + 1];
+          const sz = shortCoords[i * 3 + 2];
+          let bestK = -1;
+          let bestD2 = Infinity;
+          for (let k = 0; k < m; k++) {
+            if (usedK[k]) continue;
+            const dx = sx - validNative[k][0];
+            const dy = sy - validNative[k][1];
+            const dz = sz - validNative[k][2];
+            const d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < bestD2) {
+              bestD2 = d2;
+              bestK = k;
+            }
+          }
+          if (bestK < 0) {
+            allMatched = false;
+            break;
+          }
+          usedK[bestK] = 1;
+          mapped[i] = validKnown[bestK];
+          maxMatchedDist = Math.max(maxMatchedDist, Math.sqrt(bestD2));
+        }
+        // Same coordinate frame (e.g. direct crystal coords `crd`): exact < 0.5 Å bijection
+        if (allMatched && maxMatchedDist < 0.5) {
+          orderedKnown = mapped;
+        }
+      }
+
+      // 1b. For small sparse motifs (m <= 7, e.g. catalytic triads/tetrads or centered `intCrd`),
+      // find the globally optimal permutation of `validKnown` matching `shortCoords` (preferring
+      // `validNative` rigid-body match when present, and amino-acid sequence identity when available).
+      if (!orderedKnown && validKnown.length === m && m <= 7) {
+        const sSeq = options?.shortSeq?.trim().toUpperCase() ?? '';
+        const lSeq = options?.longSeq?.trim().toUpperCase() ?? '';
+        const hasSeq = sSeq.length === m && lSeq.length === n;
+
+        const targetRefCoords = new Float32Array(m * 3);
+        const sourceCoordBuf = validNativeAligned
+          ? (() => {
+              const buf = new Float32Array(m * 3);
+              for (let k = 0; k < m; k++) {
+                buf[k * 3 + 0] = validNative[k][0];
+                buf[k * 3 + 1] = validNative[k][1];
+                buf[k * 3 + 2] = validNative[k][2];
+              }
+              return buf;
+            })()
+          : null;
+
+        const perm = Array.from({ length: m }, (_, i) => i);
+        const used = new Uint8Array(m);
+        let bestPerm: number[] | null = null;
+        let bestSeqMatches = -1;
+        let bestRmsd = Infinity;
+
+        const dfs = (depth: number, seqMatches: number) => {
+          if (depth === m) {
+            // If we already found a permutation with strictly more sequence matches (and good geometry),
+            // prefer higher sequence identity first (avoiding mirror/symmetry confusion on 4-point motifs).
+            if (hasSeq && seqMatches < bestSeqMatches) return;
+            for (let i = 0; i < m; i++) {
+              const k = perm[i];
+              if (sourceCoordBuf) {
+                targetRefCoords[i * 3 + 0] = sourceCoordBuf[k * 3 + 0];
+                targetRefCoords[i * 3 + 1] = sourceCoordBuf[k * 3 + 1];
+                targetRefCoords[i * 3 + 2] = sourceCoordBuf[k * 3 + 2];
+              } else {
+                const li = validKnown[k] * 3;
+                targetRefCoords[i * 3 + 0] = longCoords[li + 0];
+                targetRefCoords[i * 3 + 1] = longCoords[li + 1];
+                targetRefCoords[i * 3 + 2] = longCoords[li + 2];
+              }
+            }
+            const rmsd = evalKabschRmsd(shortCoords, targetRefCoords, m);
+            const betterSeq = bestPerm === null || (hasSeq && seqMatches > bestSeqMatches);
+            if (betterSeq || ((!hasSeq || seqMatches === bestSeqMatches) && rmsd < bestRmsd - 1e-6)) {
+              bestSeqMatches = seqMatches;
+              bestRmsd = rmsd;
+              bestPerm = perm.slice();
+            }
+            return;
+          }
+          // Prune branches that cannot beat bestSeqMatches when sequence matching is active
+          if (hasSeq && seqMatches + (m - depth) < bestSeqMatches) return;
+          for (let k = 0; k < m; k++) {
+            if (used[k]) continue;
+            used[k] = 1;
+            perm[depth] = k;
+            const aaMatch =
+              hasSeq && sSeq[depth] !== 'X' && lSeq[validKnown[k]] !== 'X' && sSeq[depth] === lSeq[validKnown[k]]
+                ? 1
+                : 0;
+            dfs(depth + 1, seqMatches + aaMatch);
+            used[k] = 0;
+          }
+        };
+
+        dfs(0, 0);
+        if (bestPerm) {
+          orderedKnown = (bestPerm as number[]).map((k) => validKnown[k]);
+        }
+      }
+
+      const finalKnown = orderedKnown ?? validKnown;
+      const pairCount = Math.min(m, finalKnown.length);
+      if (pairCount >= 3) {
+        const subMob = new Float32Array(pairCount * 3);
+        const subTgt = new Float32Array(pairCount * 3);
+        for (let i = 0; i < pairCount; i++) {
+          const si = i * 3;
+          const li = finalKnown[i] * 3;
+          subMob[i * 3 + 0] = shortCoords[si + 0];
+          subMob[i * 3 + 1] = shortCoords[si + 1];
+          subMob[i * 3 + 2] = shortCoords[si + 2];
+          subTgt[i * 3 + 0] = longCoords[li + 0];
+          subTgt[i * 3 + 1] = longCoords[li + 1];
+          subTgt[i * 3 + 2] = longCoords[li + 2];
+        }
+        const joint = kabschAlign(subMob, subTgt);
+        return { ...joint, alignedResidues: pairCount, isSubstructure: true };
+      }
     }
   }
 

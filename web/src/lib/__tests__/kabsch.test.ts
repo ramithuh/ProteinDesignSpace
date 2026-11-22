@@ -471,12 +471,45 @@ describe('protein-ops/kabsch', () => {
     expect(symRes.alignedResidues).toBe(24);
     expect(symRes.rmsd).toBeLessThan(1e-3);
 
-    // 5. Known motif indices option aligns directly
+    // 5. Known motif indices option aligns directly AND resolves arbitrary unindexed motif permutations
     const directRes = kabschAlignSubstructure(sparseMob, sampleCa, null, {
       knownIndices: sparseIdx,
     });
     expect(directRes.alignedResidues).toBe(4);
     expect(directRes.rmsd).toBeLessThan(1e-4);
+
+    // 5b. Unindexed motif permutation (like RFD4 `unindexedMotif: true` on 1CTT A102,A104,A129,A132):
+    // `motifIndices` arrives in ascending scaffold order [3, 17, 31, 47], while native motif residues
+    // were placed in permuted order [31, 3, 47, 17]. Both with `knownNativeCoords` and via
+    // sequence-guided permutation search, Kabsch must recover < 1e-4 Å instead of ~4 Å!
+    const permOrder = [2, 0, 3, 1]; // native[0]->idx 31, native[1]->idx 3, native[2]->idx 47, native[3]->idx 17
+    const permutedNativeSubset = extractSubset(
+      sampleCa,
+      permOrder.map((p) => sparseIdx[p]),
+    );
+    const permutedMob = transformCoords(permutedNativeSubset, Rtrue, tTrue);
+    // `nativeMotifCoords` stored in scaffold order `sparseIdx` (matching RFD4 `extractRfd4DesignMetadata`)
+    const nativeInScaffoldOrder: number[][] = [0, 1, 2, 3].map((scaffoldSlot) => {
+      const nativeSlot = permOrder.indexOf(scaffoldSlot);
+      return [
+        permutedMob[nativeSlot * 3 + 0],
+        permutedMob[nativeSlot * 3 + 1],
+        permutedMob[nativeSlot * 3 + 2],
+      ];
+    });
+    const unidxWithNative = kabschAlignSubstructure(permutedMob, sampleCa, null, {
+      knownIndices: sparseIdx,
+      knownNativeCoords: nativeInScaffoldOrder,
+    });
+    expect(unidxWithNative.alignedResidues).toBe(4);
+    expect(unidxWithNative.rmsd).toBeLessThan(1e-4);
+
+    // Even without `knownNativeCoords` (e.g. centered/legacy), small-motif permutation search recovers exact alignment
+    const unidxNoNative = kabschAlignSubstructure(permutedMob, sampleCa, null, {
+      knownIndices: sparseIdx,
+    });
+    expect(unidxNoNative.alignedResidues).toBe(4);
+    expect(unidxNoNative.rmsd).toBeLessThan(1e-4);
 
     // 6. shortChainIds splits discontinuous chains even if resNums are consecutive (e.g. 1OS7 B/C)
     const multiChainMob = transformCoords(extractSubset(sampleCa, [5, 6, 7, 35, 36, 37]), Rtrue, tTrue);

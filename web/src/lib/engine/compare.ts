@@ -141,6 +141,7 @@ export interface CompareBranchSummary {
   chainRoles?: Record<string, 'target' | 'binder' | 'scaffold'> | null;
   sequence?: string | null;
   motifIndices?: number[] | null;
+  nativeMotifCoords?: number[][] | null;
   benchmarkId?: string | null;
   hasNonProtein3D?: boolean;
   length: number | null;
@@ -1063,6 +1064,7 @@ function extractBranch(
     chainRoles: null,
     sequence: null,
     motifIndices: null,
+    nativeMotifCoords: null,
     benchmarkId: null,
     hasNonProtein3D: false,
     length: null,
@@ -1148,6 +1150,7 @@ function extractBranch(
       chainRoles: upstreamStruct?.chainRoles ?? null,
       sequence: row.sequence || parsed.sequence,
       motifIndices: upstreamStruct?.motifIndices ?? null,
+      nativeMotifCoords: upstreamStruct?.nativeMotifCoords ?? null,
       benchmarkId: upstreamStruct?.benchmarkId ?? null,
       length: parsed.nResidues,
       sequenceId: row.sequenceId,
@@ -1256,6 +1259,7 @@ function extractBranch(
       chainRoles: upstreamStruct?.chainRoles ?? null,
       sequence: f.sequence || parsed.sequence,
       motifIndices: upstreamStruct?.motifIndices ?? null,
+      nativeMotifCoords: upstreamStruct?.nativeMotifCoords ?? null,
       benchmarkId: upstreamStruct?.benchmarkId ?? null,
       length: parsed.nResidues,
       sequenceId: f.sequenceId,
@@ -1389,6 +1393,7 @@ function extractBranch(
       chainRoles: struct.chainRoles ?? null,
       sequence: struct.sequence || null,
       motifIndices: struct.motifIndices ?? null,
+      nativeMotifCoords: struct.nativeMotifCoords ?? null,
       benchmarkId: struct.benchmarkId ?? null,
       hasNonProtein3D,
       length: struct.length,
@@ -1747,10 +1752,17 @@ function alignBranchPair(
       hasSharedTemplate && anchor.motifIndices && anchor.motifIndices.length === mLen
         ? anchor.motifIndices
         : null;
+    const knownNativeCoords =
+      knownIndices && anchor.nativeMotifCoords && anchor.nativeMotifCoords.length === mLen
+        ? anchor.nativeMotifCoords
+        : null;
     const sub = kabschAlignSubstructure(mobileCoords, anchorCoords, mobile.resNums, {
       shortChainIds: mobile.chainIds,
       longChainIds: anchor.chainIds,
       knownIndices,
+      knownNativeCoords,
+      shortSeq: mobile.sequence,
+      longSeq: anchor.sequence,
     });
     return { result: sub, alignedResidues: sub.alignedResidues, isSubstructure: true };
   }
@@ -1760,10 +1772,17 @@ function alignBranchPair(
     hasSharedTemplate && mobile.motifIndices && mobile.motifIndices.length === aLen
       ? mobile.motifIndices
       : null;
+  const knownNativeCoords =
+    knownIndices && mobile.nativeMotifCoords && mobile.nativeMotifCoords.length === aLen
+      ? mobile.nativeMotifCoords
+      : null;
   const rev = kabschAlignSubstructure(anchorCoords, mobileCoords, anchor.resNums, {
     shortChainIds: anchor.chainIds,
     longChainIds: mobile.chainIds,
     knownIndices,
+    knownNativeCoords,
+    shortSeq: anchor.sequence,
+    longSeq: mobile.sequence,
   });
   const R = rev.rotation;
   const t = rev.translation;
