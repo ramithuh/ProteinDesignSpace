@@ -14,6 +14,12 @@ import ProtPardelleWorker from '$lib/workers/protpardelle.worker?worker';
 import RfdiffusionWorker from '$lib/workers/rfdiffusion.worker?worker';
 import BoltzGenWorker from '$lib/workers/boltzgen.worker?worker';
 import EvoDiffWorker from '$lib/workers/evodiff.worker?worker';
+import LaProteinaWorker from '$lib/workers/laproteina.worker?worker';
+import ProteinaWorker from '$lib/workers/proteina.worker?worker';
+import Genie2Worker from '$lib/workers/genie2.worker?worker';
+import FrameFlowWorker from '$lib/workers/frameflow.worker?worker';
+import FoldFlow2Worker from '$lib/workers/foldflow2.worker?worker';
+import SidProteinWorker from '$lib/workers/sidprotein.worker?worker';
 import EsmcWorker from '$lib/workers/esmc.worker?worker';
 import Dyna1Worker from '$lib/workers/dyna1.worker?worker';
 import {
@@ -1298,6 +1304,18 @@ export class ExecutionScheduler {
         return new BoltzGenWorker();
       case 'evodiff':
         return new EvoDiffWorker();
+      case 'la-proteina':
+        return new LaProteinaWorker();
+      case 'proteina':
+        return new ProteinaWorker();
+      case 'genie2':
+        return new Genie2Worker();
+      case 'frameflow':
+        return new FrameFlowWorker();
+      case 'foldflow2':
+        return new FoldFlow2Worker();
+      case 'sid-protein':
+        return new SidProteinWorker();
       case 'esmc':
         return new EsmcWorker();
       case 'dyna1':

@@ -863,6 +863,12 @@ export function validateBioCapabilities(
             src.adapterId === 'protpardelle' ||
             src.adapterId === 'rfdiffusion' ||
             src.adapterId === 'boltzgen' ||
+            src.adapterId === 'la-proteina' ||
+            src.adapterId === 'proteina' ||
+            src.adapterId === 'sid-protein' ||
+            src.adapterId === 'genie2' ||
+            src.adapterId === 'frameflow' ||
+            src.adapterId === 'foldflow2' ||
             src.adapterId === 'genie3';
           const isDemoBundle =
             src.adapterId === 'pdb-input' &&

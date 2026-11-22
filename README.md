@@ -17,8 +17,8 @@ Run state-of-the-art generative, inverse-folding, folding, and scoring models **
 ## Highlights
 
 - **Visual DAG Workflow Canvas** (`@xyflow/svelte`): Compose linear or branched protein design pipelines (e.g., comparing **AlphaFold 3 vs AlphaFold 2 vs RoseTTAFold 3**, or **SolubleMPNN vs LigandMPNN vs AntiFold** on a shared backbone), with typed color-coded ports, smart auto-wiring (`+ Add Block` / `/`), resizable split panes, and automatic layout.
-- **19 Composable Blocks Across 5 Stages** — all neural inference executes in sequential, VRAM-isolated Dedicated Web Workers with OPFS / CacheStorage weight persistence:
-  - **Structure Generation**: **RFD4-Proteina**, **Genie 3**, **RFdiffusion (Base)**, **BoltzGen-1**, and **ProtPardelle-1c**.
+- **25 Composable Blocks Across 5 Stages** — all neural inference executes in sequential, VRAM-isolated Dedicated Web Workers with OPFS / CacheStorage weight persistence:
+  - **Structure Generation**: **RFD4-Proteina**, **La-Proteina (LD1 + AE1)**, **Proteina v1.2 (200M)**, **SiD-Protein (16-Step)**, **Genie 3**, **Genie 2**, **RFdiffusion (Base)**, **FrameFlow**, **FoldFlow 2 (ReFT + ESM-2)**, **BoltzGen-1**, and **ProtPardelle-1c**.
   - **Sequence Design**: **ProteinMPNN / SolubleMPNN / Cα-MPNN**, **LigandMPNN**, **LASErMPNN**, **AntiFold & ESM-IF1**, and **EvoDiff-Seq (OA-DM 38M)**.
   - **Structure Prediction** (via LocalFold): **AlphaFold 2** (Monomer & Multimer v3), **AlphaFold 3**, **Boltz-2**, **RoseTTAFold 3**, **Protenix v2**, **OpenFold 3**, **IntelliFold 2**, **OpenDDE**, **Mol1**, and **ESMFold2** (300M & 600M fast single-sequence).
   - **Biophysical Evaluation & 3D Comparison**: **ThermoMPNN** (full L×20 site-saturation ΔΔG stability scan & B-factor painting), **ESM-C 300M** (zero-shot L×20 LLR fitness & naturalness), **Dyna-1** (millisecond conformational exchange), **Top-K Filter**, **Designability Scorer** (exact Kabsch SVD `scRMSD`, `scTM`, Motif RMSD, pLDDT, ipSAE), and **3D Superpose / Compare** (multi-model up to 6-way Kabsch & motif overlay).
@@ -27,7 +27,7 @@ Run state-of-the-art generative, inverse-folding, folding, and scoring models **
 
 ![ProteinDesignSpace + Add Block catalog](assets/block-catalog.png)
 
-*Browse all 19 blocks and model presets by stage from `+ Add Block` or `/`.*
+*Browse all 25 blocks and model presets by stage from `+ Add Block` or `/`.*
 
 ---
 
@@ -36,8 +36,14 @@ Run state-of-the-art generative, inverse-folding, folding, and scoring models **
 | Stage | Model | Capabilities | Weights / Port | Upstream License |
 | --- | --- | --- | --- | --- |
 | **Generation** | **RFD4-Proteina** | All-atom sequence-structure co-design, motif, binder, partial diffusion | [`sokrypton/rfd4-proteina-webgpu`](https://github.com/sokrypton/rfd4-proteina-webgpu) · [`nvidia/RFD4-Proteina`](https://huggingface.co/nvidia/RFD4-Proteina) | NVIDIA Open / MIT |
+| **Generation** | **La-Proteina (LD1 + AE1)** | All-atom latent diffusion (LD1) + atom37/sequence decoder (AE1) | [`ramithuh/la-proteina-webgpu`](https://huggingface.co/ramithuh/la-proteina-webgpu) | Apache-2.0 / NVIDIA Open |
+| **Generation** | **Proteina v1.2 (200M)** | Scalable 200M pair-biased transformer flow matching (Cα backbones) | [`ramithuh/proteina-webgpu`](https://huggingface.co/ramithuh/proteina-webgpu) | NVIDIA Research (NC) |
+| **Generation** | **SiD-Protein (16-Step)** | Score-identity distilled 200M Proteina generator (16-step Cα sampling) | [`ramithuh/sid-protein-webgpu`](https://huggingface.co/ramithuh/sid-protein-webgpu) | SiD-Protein / Proteina |
 | **Generation** | **Genie 3** | Fast 23.3M SE(3) DDIM backbone diffusion + SequenceNet | [`ramithuh/genie3-webgpu`](https://huggingface.co/ramithuh/genie3-webgpu) | Apache-2.0 |
+| **Generation** | **Genie 2** | Compact 15.7M Cα diffusion & soft motif scaffolding | [`ramithuh/genie2-webgpu`](https://huggingface.co/ramithuh/genie2-webgpu) | Apache-2.0 |
 | **Generation** | **RFdiffusion (Base)** | Original SE(3) backbone diffusion, motif contigs, Cn/Dn symmetry | [`ramithuh/rfdiffusion-webgpu`](https://huggingface.co/ramithuh/rfdiffusion-webgpu) | BSD |
+| **Generation** | **FrameFlow** | Fast 16.8M SE(3) rigid-frame flow matching (5-atom N/CA/C/O/CB) | [`ramithuh/frameflow-webgpu`](https://huggingface.co/ramithuh/frameflow-webgpu) | MIT / Apache-2.0 |
+| **Generation** | **FoldFlow 2 (ReFT)** | SE(3) flow matching + frozen ESM-2 650M (unconditional & seq-conditioned) | [`ramithuh/foldflow2-webgpu`](https://huggingface.co/ramithuh/foldflow2-webgpu) | CC BY-NC 4.0 / MIT |
 | **Generation** | **BoltzGen-1** | All-atom unconditional, binder & motif diffusion (`diverse`, `adherence`) | [`ramithuh/boltzgen-webgpu`](https://huggingface.co/ramithuh/boltzgen-webgpu) | MIT |
 | **Generation** | **ProtPardelle-1c** | All-atom & backbone EDM diffusion, tip-atom motif, MiniMPNN co-design | [`ramithuh/protpardelle-webgpu`](https://huggingface.co/ramithuh/protpardelle-webgpu) | MIT / CC-BY-4.0 |
 | **Sequence** | **ProteinMPNN / SolubleMPNN / Cα** | Backbone-conditioned inverse folding (ONNX WebGPU / WASM) | [`MurrellGroup/webProteinMPNN`](https://github.com/MurrellGroup/webProteinMPNN) | MIT |
@@ -99,7 +105,11 @@ Model weights are **never** bundled in `web/build/` — sharded safetensors stre
 
 ### Generative, Inverse-Folding, Folding & Evaluation Models
 - **RFdiffusion** — Watson et al. (2023), *De novo design of protein structure and function with RFdiffusion*, Nature 620, 1089–1100 · [`RosettaCommons/RFdiffusion`](https://github.com/RosettaCommons/RFdiffusion)
-- **Genie 3** — Lin et al. (2026), *Fast and Ultra-Capable Protein Design: Advancing the Frontier Through Atomistic SE(3)-Equivariance with Genie 3*, bioRxiv · [`aqlaboratory/genie3`](https://github.com/aqlaboratory/genie3)
+- **La-Proteina & Proteina** — Geffner et al. (2025), *Proteina: Scaling Flow-based Protein Structure Generative Models* & *La-Proteina: Atomistic Protein Generation via Partially Latent Flow Matching* · [`NVIDIA-BioNeMo/la-proteina`](https://github.com/NVIDIA-BioNeMo/la-proteina) · [`NVIDIA-BioNeMo/proteina`](https://github.com/NVIDIA-BioNeMo/proteina)
+- **SiD-Protein (SPID)** — Xie et al. (2025), *SPID: Distilled Protein Backbone Generation*, arXiv:2510.03095 · [`LY-Xie/SiD_Protein`](https://github.com/LY-Xie/SiD_Protein)
+- **Genie 2 & Genie 3** — Lin et al. (2024, 2026), *Genie 2* (arXiv:2405.15489) & *Genie 3* (bioRxiv) · [`aqlaboratory/genie2`](https://github.com/aqlaboratory/genie2) · [`aqlaboratory/genie3`](https://github.com/aqlaboratory/genie3)
+- **FrameFlow** — Yim et al. (2023), *Fast protein backbone generation with SE(3) flow matching*, arXiv:2310.05297 · [`microsoft/protein-frame-flow`](https://github.com/microsoft/protein-frame-flow)
+- **FoldFlow 2** — Huguet et al. (2024), *Sequence-Augmented SE(3)-Flow Matching For Conditional Protein Generation*, NeurIPS 2024 · [`DreamFold/FoldFlow`](https://github.com/DreamFold/FoldFlow)
 - **BoltzGen** — Stärk et al. (2025), *BoltzGen: Toward Universal Binder Design* · [`HannesStark/boltzgen`](https://github.com/HannesStark/boltzgen)
 - **ProtPardelle-1c** — Chu et al. (2024), *An all-atom protein generative model*, PNAS · [`ProteinDesignLab/protpardelle-1c`](https://github.com/ProteinDesignLab/protpardelle-1c)
 - **EvoDiff** — Alamdari et al. (2023), *Protein generation with evolutionary diffusion: sequence is all you need*, bioRxiv · [`microsoft/evodiff`](https://github.com/microsoft/evodiff)

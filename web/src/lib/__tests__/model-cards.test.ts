@@ -51,6 +51,30 @@ const EXPECTED_HOSTED_REVISIONS: Record<(typeof HOSTED_PORT_CARD_IDS)[number], {
     repo: 'https://huggingface.co/ramithuh/evodiff-webgpu',
     rev: '682460d4262d',
   },
+  'la-proteina-webgpu': {
+    repo: 'https://huggingface.co/ramithuh/la-proteina-webgpu',
+    rev: 'ab1fcedcd05b',
+  },
+  'proteina-webgpu': {
+    repo: 'https://huggingface.co/ramithuh/proteina-webgpu',
+    rev: '0f8cef02cec6',
+  },
+  'sid-protein-webgpu': {
+    repo: 'https://huggingface.co/ramithuh/sid-protein-webgpu',
+    rev: 'd70503f83396',
+  },
+  'genie2-webgpu': {
+    repo: 'https://huggingface.co/ramithuh/genie2-webgpu',
+    rev: 'a0417d6d5d71',
+  },
+  'frameflow-webgpu': {
+    repo: 'https://huggingface.co/ramithuh/frameflow-webgpu',
+    rev: '33f69a3d1e66',
+  },
+  'foldflow2-webgpu': {
+    repo: 'https://huggingface.co/ramithuh/foldflow2-webgpu',
+    rev: '59cd75ae7a8a',
+  },
 };
 
 describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
@@ -79,7 +103,7 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
 
   it('ensures every card in MODEL_CARDS has a valid activePrecisionId and complete provenance', () => {
     const cards = Object.values(MODEL_CARDS);
-    expect(cards.length).toBe(14); // All 14 GPU/ONNX adapters are live!
+    expect(cards.length).toBe(20); // All 20 GPU/ONNX adapters are live!
 
     for (const card of cards) {
       expect(card.precisions.length).toBeGreaterThan(0);
@@ -97,8 +121,8 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
     }
   });
 
-  it('includes all 10 HF-hosted WebGPU ports with exact measured parity metrics, pinned HF URLs, live promotion, and honest limitations', () => {
-    expect(HOSTED_PORT_CARD_IDS).toHaveLength(10);
+  it('includes all 16 HF-hosted WebGPU ports with exact measured parity metrics, pinned HF URLs, live promotion, and honest limitations', () => {
+    expect(HOSTED_PORT_CARD_IDS).toHaveLength(16);
     const liveWave7Cards: Record<string, { adapterId: string; defaultPrecision: string }> = {
       'thermompnn-webgpu': { adapterId: 'thermompnn', defaultPrecision: 'fp16' },
       'ligandmpnn-webgpu': { adapterId: 'ligandmpnn', defaultPrecision: 'fp16' },
@@ -110,6 +134,12 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
       'boltzgen-webgpu': { adapterId: 'boltzgen', defaultPrecision: 'int8' },
       'evodiff-webgpu': { adapterId: 'evodiff', defaultPrecision: 'int8' },
       'dyna1-webgpu': { adapterId: 'dyna1', defaultPrecision: 'int8' },
+      'la-proteina-webgpu': { adapterId: 'la-proteina', defaultPrecision: 'int8' },
+      'proteina-webgpu': { adapterId: 'proteina', defaultPrecision: 'int8' },
+      'sid-protein-webgpu': { adapterId: 'sid-protein', defaultPrecision: 'int8' },
+      'genie2-webgpu': { adapterId: 'genie2', defaultPrecision: 'fp16' },
+      'frameflow-webgpu': { adapterId: 'frameflow', defaultPrecision: 'fp16' },
+      'foldflow2-webgpu': { adapterId: 'foldflow2', defaultPrecision: 'int8' },
     };
 
     for (const id of HOSTED_PORT_CARD_IDS) {

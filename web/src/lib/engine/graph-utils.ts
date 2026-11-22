@@ -193,6 +193,66 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         maskPositions: '',
         seed: 42,
       };
+    case 'la-proteina':
+      return {
+        precision: 'int8',
+        length: 80,
+        steps: 100,
+        mode: 'sde',
+        numDesigns: 1,
+        seed: 42,
+      };
+    case 'proteina':
+      return {
+        precision: 'int8',
+        length: 80,
+        steps: 100,
+        mode: 'sc',
+        noiseScale: 0.45,
+        selfCondition: true,
+        numDesigns: 1,
+        seed: 42,
+      };
+    case 'sid-protein':
+      return {
+        precision: 'int8',
+        length: 80,
+        steps: 16,
+        noiseScale: 0.45,
+        numDesigns: 1,
+        seed: 5,
+      };
+    case 'genie2':
+      return {
+        precision: 'fp16',
+        length: 80,
+        steps: 200,
+        scale: 0.6,
+        motifRange: '',
+        numDesigns: 1,
+        seed: 42,
+      };
+    case 'frameflow':
+      return {
+        precision: 'fp16',
+        length: 80,
+        steps: 100,
+        schedule: 'exp',
+        expRate: 10,
+        selfCondition: true,
+        numDesigns: 1,
+        seed: 42,
+      };
+    case 'foldflow2':
+      return {
+        precision: 'int8',
+        length: 80,
+        steps: 50,
+        rotationScaling: 10,
+        selfConditioning: true,
+        numDesigns: 1,
+        seed: 42,
+      };
     case 'esmc':
       return {
         mode: 'wildtype',

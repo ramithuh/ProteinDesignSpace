@@ -54,6 +54,12 @@ export const HOSTED_PORT_CARD_IDS = [
   'boltzgen-webgpu',
   'evodiff-webgpu',
   'dyna1-webgpu',
+  'la-proteina-webgpu',
+  'proteina-webgpu',
+  'sid-protein-webgpu',
+  'genie2-webgpu',
+  'frameflow-webgpu',
+  'foldflow2-webgpu',
 ] as const;
 
 interface LocalFoldCheckpointMeta {
@@ -1011,6 +1017,360 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     limitations: [
       'Pure sequence-space generator (OA-DM 38M); wire into LocalFold (AF2 / Boltz-2 / ESMFold2) downstream to inspect 3D foldability.',
       'Automatically falls back to the pure-JS CPU backend when hardware WebGPU is unavailable.',
+    ],
+  },
+
+  'la-proteina-webgpu': {
+    id: 'la-proteina-webgpu',
+    adapterId: 'la-proteina',
+    displayName: 'La-Proteina (LD1 + AE1)',
+    status: 'live',
+    activePrecisionId: 'int8',
+    precisions: [
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Packed 4×I8 LD1 (153 MB) + AE1 decoder (124 MB) matrices with colocated F32 per-row scales (total ~277 MB; ≤25 MB shards)',
+        approxSizeMB: 277,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU atom37 & sequence logit relRMS vs matching-precision PyTorch',
+          value: '2.18e-5 (max across 34 GPU tests incl. 400-step sampling)',
+          scope: 'LD1 velocity network + AE1 all-atom decoder on hardware WebGPU (462/462 Naga shaders)',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'Packed 2×F16 LD1 (303 MB) + AE1 decoder (245 MB) matrices unpacked in WGSL with F32 accumulation (~548 MB)',
+        approxSizeMB: 548,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU atom37 & sequence logit relRMS vs matching-precision PyTorch',
+          value: '1.80e-5 (LD1 + AE1 end-to-end sampling)',
+          scope: 'LD1 + AE1 dynamic lengths and multi-step SDE/ODE trajectories',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Reference F32 tensors (~1,095 MB LD1 + AE1); exact upstream La-Proteina parity baseline',
+        approxSizeMB: 1095,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU atom37 & sequence logit relRMS vs PyTorch FP32',
+          value: '2.18e-5 (max across 34 GPU tests incl. 400-step sampling)',
+          scope: 'LD1 velocity network + AE1 all-atom decoder on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+    ],
+    upstreamRepo: 'https://github.com/NVIDIA-BioNeMo/la-proteina',
+    upstreamCommit: 'cde5de3ead6e4d76f367da6dc5174be9913ef6ca',
+    weightsRepo: 'https://huggingface.co/ramithuh/la-proteina-webgpu',
+    weightsRevision: 'ab1fcedcd05b',
+    license: 'Apache-2.0 (code) · NVIDIA Open Model License (weights)',
+    citation: 'Geffner et al. (2025) La-Proteina: Atomistic Protein Generation via Partially Latent Flow Matching (NVIDIA BioNeMo).',
+    limitations: [
+      'Unconditional single-chain all-atom co-design (LD1 + AE1 decoder); motif and triangular checkpoints are outside this package.',
+      'Default browser schedule uses 100 steps for responsiveness; increase to 400 steps to match the full upstream schedule.',
+    ],
+  },
+
+  'proteina-webgpu': {
+    id: 'proteina-webgpu',
+    adapterId: 'proteina',
+    displayName: 'Proteina v1.2 (200M)',
+    status: 'live',
+    activePrecisionId: 'int8',
+    precisions: [
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Packed 4×I8 matrices + colocated F32 per-row scales (186 MB; 490 tensors, 191.1M params, 15 transformer blocks)',
+        approxSizeMB: 186,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Cα trajectory relRMS vs matching-precision PyTorch',
+          value: '3.16e-5 (max across FP32/FP16/INT8, L=32/64 ODE & SDE)',
+          scope: 'Full 15-block transformer flow matching with register tokens and self-conditioning',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'Packed 2×F16 matrices decoded in WGSL with F32 accumulation (366 MB)',
+        approxSizeMB: 366,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Cα trajectory relRMS vs matching-precision PyTorch',
+          value: '2.40e-5 (L=32/64 ODE & SDE trajectories)',
+          scope: 'Proteina v1.2 200M no-triangle checkpoint on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Reference F32 tensors (730 MB; 490 tensors, 191.1M params)',
+        approxSizeMB: 730,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Cα trajectory relRMS vs PyTorch FP32',
+          value: '3.16e-5 (max across L=32/64 ODE & SDE trajectories)',
+          scope: 'Proteina v1.2 200M no-triangle checkpoint on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+    ],
+    upstreamRepo: 'https://github.com/NVIDIA-BioNeMo/proteina',
+    upstreamCommit: 'a44b407daf6a5358e43cd68907f3e3f1cbc65fdc',
+    weightsRepo: 'https://huggingface.co/ramithuh/proteina-webgpu',
+    weightsRevision: '0f8cef02cec6',
+    license: 'NVIDIA Source Code License (Non-Commercial Research / Evaluation)',
+    citation: 'Geffner et al. (2025) Proteina: Scaling Flow-based Protein Structure Generative Models (NVIDIA BioNeMo).',
+    limitations: [
+      'Non-commercial research/evaluation license per NVIDIA Source Code License section 3.3.',
+      'Generates Cα-only backbones; pair with Cα-ProteinMPNN (family="ca") downstream for sequence design.',
+    ],
+  },
+
+  'sid-protein-webgpu': {
+    id: 'sid-protein-webgpu',
+    adapterId: 'sid-protein',
+    displayName: 'SiD-Protein (16-Step Distilled)',
+    status: 'live',
+    activePrecisionId: 'int8',
+    precisions: [
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Packed 4×I8 matrices + colocated F32 scales (185 MB; 490 tensors, 191.1M params, 16-step distilled checkpoint)',
+        approxSizeMB: 185,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU 16-step Cα coordinate relRMS vs matching-precision PyTorch',
+          value: '1.80e-5 (GPU) · 2.44e-5 (CPU)',
+          scope: 'L=32/64 distilled 16-step sampling across FP32/FP16/INT8 on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'Packed 2×F16 matrices decoded in WGSL with F32 accumulation (366 MB)',
+        approxSizeMB: 366,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU 16-step Cα coordinate relRMS vs matching-precision PyTorch',
+          value: '1.60e-5 (L=32/64 distilled 16-step trajectories)',
+          scope: 'Distilled 16-step checkpoint on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Reference F32 tensors (730 MB; 490 tensors, 191.1M params)',
+        approxSizeMB: 730,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU 16-step Cα coordinate relRMS vs PyTorch FP32',
+          value: '1.80e-5 (GPU) · 2.44e-5 (CPU)',
+          scope: 'L=32/64 distilled 16-step trajectories on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+    ],
+    upstreamRepo: 'https://github.com/LY-Xie/SiD_Protein',
+    upstreamCommit: 'dfef6a29d975451144e8b0449c12cbea28b4ae15',
+    weightsRepo: 'https://huggingface.co/ramithuh/sid-protein-webgpu',
+    weightsRevision: 'd70503f83396',
+    license: 'SiD-Protein / Proteina License (see LICENSE_SID and LICENSE_PROTEINA)',
+    citation: 'Xie et al. (2025) SPID / SiD-Protein: Distilled Protein Backbone Generation, arXiv:2510.03095.',
+    limitations: [
+      'Generates Cα-only backbones; pair with Cα-ProteinMPNN (family="ca") downstream for sequence design.',
+      'Trained for fast 16-step distilled sampling rather than multi-hundred-step ODE integration.',
+    ],
+  },
+
+  'genie2-webgpu': {
+    id: 'genie2-webgpu',
+    adapterId: 'genie2',
+    displayName: 'Genie 2',
+    status: 'live',
+    activePrecisionId: 'fp16',
+    precisions: [
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'Packed 2×F16 2D linear matrices + F32 norms/biases/IPA heads (31 MB; 396 tensors, 15.73M params, epoch-40)',
+        approxSizeMB: 31,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Cα coordinate relRMS vs canonical-quaternion PyTorch',
+          value: '6.36e-7 (max across all 6 FP16 unconditional/single/multi-motif trajectories)',
+          scope: 'L=24/48 unconditional, single-motif & multi-motif trajectories (canonical rot_to_quat sign)',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Symmetric per-row 4×I8 matrices + F32 scales (16 MB; single shard)',
+        approxSizeMB: 16,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Cα coordinate relRMS vs canonical-quaternion PyTorch',
+          value: '7.07e-7 (max across all 6 INT8 trajectories)',
+          scope: 'L=24/48 unconditional, single-motif & multi-motif trajectories',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Reference F32 tensors (61 MB; 396 tensors, 15.73M params, epoch-40)',
+        approxSizeMB: 61,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Cα coordinate relRMS vs canonical-quaternion PyTorch FP32',
+          value: '6.79e-7 (max across all 6 FP32 trajectories)',
+          scope: 'L=24/48 unconditional, single-motif & multi-motif trajectories',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+    ],
+    upstreamRepo: 'https://github.com/aqlaboratory/genie2',
+    upstreamCommit: '9a954578f7b5a39552545eebc6d4794447794c87',
+    weightsRepo: 'https://huggingface.co/ramithuh/genie2-webgpu',
+    weightsRevision: 'a0417d6d5d71',
+    license: 'Apache-2.0 (AlQuraishi Lab / Genie 2)',
+    citation: 'Lin et al. (2024) Out of Many, One: Designing and Scaffolding Proteins at the Scale of the Structural Universe with Genie 2, arXiv:2405.15489.',
+    limitations: [
+      'Generates Cα-only backbones; pair with Cα-ProteinMPNN (family="ca") downstream for sequence design.',
+      'Uses deterministic quaternion sign canonicalization (matching genie3-webgpu) to eliminate LAPACK eigh sign flips.',
+    ],
+  },
+
+  'frameflow-webgpu': {
+    id: 'frameflow-webgpu',
+    adapterId: 'frameflow',
+    displayName: 'FrameFlow',
+    status: 'live',
+    activePrecisionId: 'fp16',
+    precisions: [
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'Packed 2×F16 matrices + F32 norms/biases (33 MB; 382 tensors, 16.78M params, published PDB checkpoint)',
+        approxSizeMB: 33,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU SE(3) frame & backbone coordinate relRMS vs matching-precision PyTorch',
+          value: '5.61e-5 (max across L=32/64, T=2/20, FP32/FP16/INT8 & fixed-frame motif)',
+          scope: '8/8 CPU+GPU tests & 22/22 Naga-validated shaders on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Symmetric per-row 4×I8 matrices + colocated F32 scales (17 MB; single shard)',
+        approxSizeMB: 17,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU SE(3) backbone coordinate relRMS vs matching-precision PyTorch',
+          value: '4.90e-5 (L=32/64 SE(3) flow trajectories)',
+          scope: 'Published FrameFlow PDB checkpoint on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Reference F32 tensors (64 MB; 382 tensors, 16.78M params)',
+        approxSizeMB: 64,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU SE(3) backbone coordinate relRMS vs PyTorch FP32',
+          value: '5.61e-5 (max across L=32/64, T=2/20 & motif trajectories)',
+          scope: 'Published FrameFlow PDB checkpoint on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+    ],
+    upstreamRepo: 'https://github.com/microsoft/protein-frame-flow',
+    upstreamCommit: 'f50d8dbbdae827be291e9f73d732b61b195f8816',
+    weightsRepo: 'https://huggingface.co/ramithuh/frameflow-webgpu',
+    weightsRevision: '33f69a3d1e66',
+    license: 'MIT (Microsoft FrameFlow) · Apache-2.0 (OpenFold utilities)',
+    citation: 'Yim et al. (2023) Fast protein backbone generation with SE(3) flow matching, arXiv:2310.05297.',
+    limitations: [
+      'Outputs 5-atom alanine backbones (N, CA, C, O, CB); wire ProteinMPNN / SolubleMPNN downstream to design sequences.',
+      'Unconditional PDB checkpoint; amortized motif scaffolding requires a separate upstream checkpoint.',
+    ],
+  },
+
+  'foldflow2-webgpu': {
+    id: 'foldflow2-webgpu',
+    adapterId: 'foldflow2',
+    displayName: 'FoldFlow 2 (ReFT + ESM-2)',
+    status: 'live',
+    activePrecisionId: 'int8',
+    precisions: [
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Packed 4×I8 FoldFlow 2 ReFT + frozen ESM-2 650M matrices with F32 scales (644 MB; 1,065 tensors, 670.5M params)',
+        approxSizeMB: 644,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU 5-atom backbone & ESM-2 representation relRMS vs matching-precision PyTorch',
+          value: '8.91e-5 (GPU across 149 checks) · 7.06e-5 (CPU across 48 checks)',
+          scope: 'Full ESM-2 650M + multimodal triangular trunk + SE(3) structure decoder on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'Packed 2×F16 FoldFlow 2 ReFT + frozen ESM-2 650M matrices (1,340 MB; 68 shards)',
+        approxSizeMB: 1340,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU 5-atom backbone relRMS vs matching-precision PyTorch',
+          value: '7.40e-5 (unconditional & sequence-conditioned trajectories)',
+          scope: 'Full FoldFlow 2 ReFT + ESM-2 650M on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Reference F32 tensors (2,558 MB; 1,065 tensors, 670.5M params)',
+        approxSizeMB: 2558,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU 5-atom backbone & ESM-2 representation relRMS vs PyTorch FP32',
+          value: '8.91e-5 (GPU across 149 checks) · 7.06e-5 (CPU across 48 checks)',
+          scope: 'Full FoldFlow 2 ReFT + ESM-2 650M on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+    ],
+    upstreamRepo: 'https://github.com/DreamFold/FoldFlow',
+    upstreamCommit: '9d2c260813da3c9a2bc944973953f63ea6d71203',
+    weightsRepo: 'https://huggingface.co/ramithuh/foldflow2-webgpu',
+    weightsRevision: '59cd75ae7a8a',
+    license: 'CC BY-NC 4.0 (DreamFold FoldFlow 2 weights) · MIT (ESM-2 650M)',
+    citation: 'Huguet et al. (2024) Sequence-Augmented SE(3)-Flow Matching For Conditional Protein Generation, NeurIPS 2024.',
+    limitations: [
+      'Non-commercial CC BY-NC 4.0 license per DreamFold/FoldFlow.',
+      'Includes frozen ESM-2 650M (~644 MB INT8 download); runs ESM-2 once per generation before the 50-step SE(3) flow loop.',
     ],
   },
 };

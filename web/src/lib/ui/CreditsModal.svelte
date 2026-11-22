@@ -129,6 +129,87 @@
       url: 'https://github.com/WaymentSteeleLab/Dyna-1',
       linkLabel: 'WaymentSteeleLab/Dyna-1',
     },
+    {
+      name: 'RFdiffusion (Base)',
+      role: 'SE(3) Rigid-Frame Backbone Diffusion',
+      detail:
+        'Original RFdiffusion Base checkpoint (Watson et al., Nature 2023; Baker Lab, IPD) for unconditional, motif-contig, and Cn/Dn symmetric design, ported to native WebGPU.',
+      license: 'BSD',
+      url: 'https://github.com/RosettaCommons/RFdiffusion',
+      linkLabel: 'RosettaCommons/RFdiffusion',
+    },
+    {
+      name: 'BoltzGen-1',
+      role: 'All-Atom Binder & Motif Diffusion',
+      detail:
+        'Universal all-atom generative binder and motif scaffolding model (Stärk et al., 2025), ported to native WebGPU with diverse and adherence checkpoints.',
+      license: 'MIT',
+      url: 'https://github.com/HannesStark/boltzgen',
+      linkLabel: 'HannesStark/boltzgen',
+    },
+    {
+      name: 'EvoDiff-Seq (38M)',
+      role: 'Order-Agnostic Discrete Sequence Diffusion',
+      detail:
+        'MSA-free evolutionary sequence diffusion and masked motif inpainting (Alamdari et al., Microsoft Research), ported to native WebGPU.',
+      license: 'MIT (code) · CC-BY-4.0 (weights)',
+      url: 'https://github.com/microsoft/evodiff',
+      linkLabel: 'microsoft/evodiff',
+    },
+    {
+      name: 'La-Proteina (LD1 + AE1)',
+      role: 'All-Atom Latent Protein Diffusion & Co-Design',
+      detail:
+        'Partially latent all-atom protein diffusion (LD1 + AE1 decoder) by NVIDIA BioNeMo co-designing full atom37 structures and sequences in native WebGPU.',
+      license: 'Apache-2.0 (code) · NVIDIA Open Model License (weights)',
+      url: 'https://github.com/NVIDIA-BioNeMo/la-proteina',
+      linkLabel: 'NVIDIA-BioNeMo/la-proteina',
+    },
+    {
+      name: 'Proteina v1.2 (200M)',
+      role: 'Scalable Transformer Backbone Flow Matching',
+      detail:
+        '200M-parameter non-triangular pair-biased transformer flow-matching backbone generator by NVIDIA BioNeMo, ported to native WebGPU.',
+      license: 'NVIDIA Source Code License (Non-Commercial Research)',
+      url: 'https://github.com/NVIDIA-BioNeMo/proteina',
+      linkLabel: 'NVIDIA-BioNeMo/proteina',
+    },
+    {
+      name: 'SiD-Protein (SPID)',
+      role: 'Distilled 16-Step Backbone Generator',
+      detail:
+        'Score-identity distilled 200M Proteina generator producing de novo Cα backbones in 16 steps (arXiv:2510.03095), ported to native WebGPU.',
+      license: 'SiD-Protein / Proteina License',
+      url: 'https://github.com/LY-Xie/SiD_Protein',
+      linkLabel: 'LY-Xie/SiD_Protein',
+    },
+    {
+      name: 'Genie 2',
+      role: 'Cα Backbone Diffusion & Soft Motif Scaffolding',
+      detail:
+        '15.7M-parameter Cα diffusion and multi-motif scaffolding model (Lin et al., AlQuraishi Lab), ported to native WebGPU.',
+      license: 'Apache-2.0',
+      url: 'https://github.com/aqlaboratory/genie2',
+      linkLabel: 'aqlaboratory/genie2',
+    },
+    {
+      name: 'FrameFlow',
+      role: 'SE(3) Rigid-Frame Flow Matching',
+      detail:
+        'Fast 16.8M-parameter SE(3) flow-matching backbone generator (Yim et al., Microsoft Research) with exponential rotation annealing, ported to native WebGPU.',
+      license: 'MIT (FrameFlow) · Apache-2.0 (OpenFold utilities)',
+      url: 'https://github.com/microsoft/protein-frame-flow',
+      linkLabel: 'microsoft/protein-frame-flow',
+    },
+    {
+      name: 'FoldFlow 2',
+      role: 'ReFT SE(3) Flow Matching + ESM-2 650M',
+      detail:
+        'Reinforcement-fine-tuned multimodal SE(3) flow matching with frozen ESM-2 650M encoder (Huguet et al., DreamFold), ported to native WebGPU.',
+      license: 'CC BY-NC 4.0 (weights) · MIT (ESM-2)',
+      url: 'https://github.com/DreamFold/FoldFlow',
+      linkLabel: 'DreamFold/FoldFlow',
+    },
   ];
 
   const TOOL_CREDITS: CreditItem[] = [

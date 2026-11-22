@@ -63,4 +63,16 @@ web/static/vendor/rfdiffusion/weights/
 web/static/vendor/boltzgen/weights/
 !web/static/vendor/evodiff/
 web/static/vendor/evodiff/weights/
+!web/static/vendor/la-proteina/
+web/static/vendor/la-proteina/weights/
+!web/static/vendor/proteina/
+web/static/vendor/proteina/weights/
+!web/static/vendor/genie2/
+web/static/vendor/genie2/weights/
+!web/static/vendor/frameflow/
+web/static/vendor/frameflow/weights/
+!web/static/vendor/foldflow2/
+web/static/vendor/foldflow2/weights/
+!web/static/vendor/sid-protein/
+web/static/vendor/sid-protein/weights/
 .upstream-tmp/

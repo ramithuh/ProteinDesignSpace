@@ -57,7 +57,22 @@ export interface FilteredCatalogEntry {
 
 export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
   { title: 'Inputs', ids: ['pdb-input', 'sequence-input'] },
-  { title: 'Structure Generation', ids: ['rfd4-proteina', 'genie3', 'rfdiffusion', 'boltzgen', 'protpardelle'] },
+  {
+    title: 'Structure Generation',
+    ids: [
+      'rfd4-proteina',
+      'la-proteina',
+      'proteina',
+      'sid-protein',
+      'genie3',
+      'genie2',
+      'rfdiffusion',
+      'frameflow',
+      'foldflow2',
+      'boltzgen',
+      'protpardelle',
+    ],
+  },
   {
     title: 'Sequence Design',
     ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1', 'evodiff'],
@@ -70,8 +85,14 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   'pdb-input': 'Fetch by PDB ID, upload/paste PDB & mmCIF, or 3-helix demo',
   'sequence-input': 'Paste amino acid sequences (plain text or FASTA)',
   'rfd4-proteina': 'All-atom backbone and sequence co-design',
+  'la-proteina': 'All-atom latent diffusion (LD1 + AE1) co-designing structure and sequence',
+  proteina: 'Scalable 200M transformer flow matching for de novo Cα backbones',
+  'sid-protein': 'Distilled 16-step Proteina sampler for rapid Cα backbone generation',
   genie3: 'Fast de novo backbone diffusion (23.3M parameters)',
+  genie2: 'Compact 15.7M Cα diffusion with optional soft motif scaffolding',
   rfdiffusion: 'Original RFdiffusion backbone diffusion, motif contigs & Cn/Dn symmetry',
+  frameflow: 'Compact 16.8M rigid-frame flow matching for 5-atom backbones',
+  foldflow2: 'ReFT rigid-frame flow matching with frozen ESM-2 650M encoder',
   boltzgen: 'BoltzGen-1 all-atom unconditional, binder & motif diffusion',
   protpardelle: 'All-atom & backbone EDM diffusion, motif scaffolding & MiniMPNN co-design',
   'web-protein-mpnn': 'Inverse folding (SolubleMPNN, ProteinMPNN, Cα-only)',
@@ -673,8 +694,14 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
   })(),
   (() => {
     const rfd4 = ADAPTER_REGISTRY['rfd4-proteina'];
+    const lap = ADAPTER_REGISTRY['la-proteina'];
+    const pro = ADAPTER_REGISTRY.proteina;
+    const sid = ADAPTER_REGISTRY['sid-protein'];
     const g3 = ADAPTER_REGISTRY.genie3;
+    const g2 = ADAPTER_REGISTRY.genie2;
     const rfd = ADAPTER_REGISTRY.rfdiffusion;
+    const ff = ADAPTER_REGISTRY.frameflow;
+    const ff2 = ADAPTER_REGISTRY.foldflow2;
     const bg = ADAPTER_REGISTRY.boltzgen;
     const pp = ADAPTER_REGISTRY.protpardelle;
     const items: CatalogSubItem[] = [
@@ -687,6 +714,32 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         searchBlob: `${rfd4.id} ${rfd4.shortName} ${rfd4.displayName} ${CONCISE_BLOCK_ROLES['rfd4-proteina']} rfdiffusion4 rfd4 proteina generate de novo backbone co-design`.toLowerCase(),
       },
       {
+        key: 'la-proteina',
+        label: lap.shortName,
+        subtitle: CONCISE_BLOCK_ROLES['la-proteina'],
+        meta: `~${lap.approxWeightsMB} MB · Apache-2.0 / NVIDIA`,
+        insert: { adapterId: 'la-proteina', label: 'La-Proteina' },
+        searchBlob: `${lap.id} ${lap.shortName} ${lap.displayName} ${CONCISE_BLOCK_ROLES['la-proteina']} laproteina ld1 ae1 latent all-atom co-design diffusion nvidia`.toLowerCase(),
+      },
+      {
+        key: 'proteina',
+        label: pro.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.proteina,
+        meta: `~${pro.approxWeightsMB} MB · NVIDIA Research`,
+        badge: 'Non-Commercial',
+        nonCommercial: true,
+        insert: { adapterId: 'proteina', label: 'Proteina 200M' },
+        searchBlob: `${pro.id} ${pro.shortName} ${pro.displayName} ${CONCISE_BLOCK_ROLES.proteina} proteina 200m v1.2 flow matching backbone nvidia non-commercial`.toLowerCase(),
+      },
+      {
+        key: 'sid-protein',
+        label: sid.shortName,
+        subtitle: CONCISE_BLOCK_ROLES['sid-protein'],
+        meta: `~${sid.approxWeightsMB} MB · 16-step distilled`,
+        insert: { adapterId: 'sid-protein', label: 'SiD-Protein' },
+        searchBlob: `${sid.id} ${sid.shortName} ${sid.displayName} ${CONCISE_BLOCK_ROLES['sid-protein']} sid spid distilled 16-step fast proteina backbone`.toLowerCase(),
+      },
+      {
         key: 'genie3',
         label: g3.shortName,
         subtitle: CONCISE_BLOCK_ROLES.genie3,
@@ -695,12 +748,38 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         searchBlob: `${g3.id} ${g3.shortName} ${g3.displayName} ${CONCISE_BLOCK_ROLES.genie3} genie genie3 diffusion generate de novo backbone`.toLowerCase(),
       },
       {
+        key: 'genie2',
+        label: g2.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.genie2,
+        meta: `~${g2.approxWeightsMB} MB · Apache-2.0`,
+        insert: { adapterId: 'genie2', label: 'Genie 2' },
+        searchBlob: `${g2.id} ${g2.shortName} ${g2.displayName} ${CONCISE_BLOCK_ROLES.genie2} genie genie2 motif scaffolding diffusion de novo backbone apache`.toLowerCase(),
+      },
+      {
         key: 'rfdiffusion',
         label: rfd.shortName,
         subtitle: CONCISE_BLOCK_ROLES.rfdiffusion,
         meta: `~${rfd.approxWeightsMB} MB · BSD`,
         insert: { adapterId: 'rfdiffusion', label: 'RFdiffusion' },
         searchBlob: `${rfd.id} ${rfd.shortName} ${rfd.displayName} ${CONCISE_BLOCK_ROLES.rfdiffusion} rfdiffusion rfd base motif contig symmetry cyclic dihedral backbone diffusion bsd`.toLowerCase(),
+      },
+      {
+        key: 'frameflow',
+        label: ff.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.frameflow,
+        meta: `~${ff.approxWeightsMB} MB · MIT`,
+        insert: { adapterId: 'frameflow', label: 'FrameFlow' },
+        searchBlob: `${ff.id} ${ff.shortName} ${ff.displayName} ${CONCISE_BLOCK_ROLES.frameflow} frameflow flow matching rigid frame backbone microsoft mit`.toLowerCase(),
+      },
+      {
+        key: 'foldflow2',
+        label: ff2.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.foldflow2,
+        meta: `~${ff2.approxWeightsMB} MB · CC BY-NC 4.0`,
+        badge: 'Non-Commercial',
+        nonCommercial: true,
+        insert: { adapterId: 'foldflow2', label: 'FoldFlow 2' },
+        searchBlob: `${ff2.id} ${ff2.shortName} ${ff2.displayName} ${CONCISE_BLOCK_ROLES.foldflow2} foldflow foldflow2 reft esm2 flow matching sequence conditioned dreamfold non-commercial`.toLowerCase(),
       },
       {
         key: 'boltzgen',
@@ -720,13 +799,13 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
       },
     ];
     const subGroups: CatalogSubGroup[] = [{ title: 'De Novo Generators', items }];
-    const identityBlob = 'structure generation generate generator de novo backbone diffusion';
+    const identityBlob = 'structure generation generate generator de novo backbone diffusion flow matching';
     const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
     return {
       id: 'generation',
       title: 'Structure Generation',
       stage: 'generate',
-      subtitle: 'RFD4-Proteina, Genie 3, RFdiffusion, BoltzGen-1 & ProtPardelle-1c',
+      subtitle: 'RFD4-Proteina, La-Proteina, Proteina, SiD-Protein, Genie 2/3, RFdiffusion, FrameFlow, FoldFlow 2, BoltzGen-1 & ProtPardelle-1c',
       countLabel: `${items.length}`,
       subGroups,
       identityBlob,

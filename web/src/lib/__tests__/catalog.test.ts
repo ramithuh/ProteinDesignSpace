@@ -56,15 +56,21 @@ describe('engine/catalog & biologist terminology', () => {
     }
   });
 
-  it('organizes all 19 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, AntiFold/ESM-IF1, ProtPardelle-1c, RFdiffusion, BoltzGen-1, EvoDiff-38M, ESM-C 300M, Dyna-1, and 3D Superpose / Compare', () => {
+  it('organizes all 25 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, AntiFold/ESM-IF1, ProtPardelle-1c, RFdiffusion, BoltzGen-1, EvoDiff-38M, La-Proteina, Proteina, SiD-Protein, Genie 2, FrameFlow, FoldFlow 2, ESM-C 300M, Dyna-1, and 3D Superpose / Compare', () => {
     const groupedIds = CATALOG_STAGE_GROUPS.flatMap((g) => g.ids);
     expect(new Set(groupedIds)).toEqual(new Set(Object.keys(ADAPTER_REGISTRY)));
     expect(CATALOG_ITEMS).toHaveLength(Object.keys(ADAPTER_REGISTRY).length);
-    expect(CATALOG_ITEMS).toHaveLength(19);
+    expect(CATALOG_ITEMS).toHaveLength(25);
     expect(ADAPTER_REGISTRY['structure-compare']).toBeDefined();
     expect(ADAPTER_REGISTRY.rfdiffusion).toBeDefined();
     expect(ADAPTER_REGISTRY.boltzgen).toBeDefined();
     expect(ADAPTER_REGISTRY.evodiff).toBeDefined();
+    expect(ADAPTER_REGISTRY['la-proteina']).toBeDefined();
+    expect(ADAPTER_REGISTRY.proteina).toBeDefined();
+    expect(ADAPTER_REGISTRY['sid-protein']).toBeDefined();
+    expect(ADAPTER_REGISTRY.genie2).toBeDefined();
+    expect(ADAPTER_REGISTRY.frameflow).toBeDefined();
+    expect(ADAPTER_REGISTRY.foldflow2).toBeDefined();
     expect(ADAPTER_REGISTRY['top-k-filter']).toBeDefined();
     expect(ADAPTER_REGISTRY.thermompnn).toBeDefined();
     expect(ADAPTER_REGISTRY.ligandmpnn).toBeDefined();
@@ -192,7 +198,7 @@ describe('engine/catalog & biologist terminology', () => {
     const genie = filterCatalogCategories('genie');
     expect(genie).toHaveLength(1);
     expect(genie[0].category.id).toBe('generation');
-    expect(genie[0].matchingSubItems.map((s) => s.key)).toEqual(['genie3']);
+    expect(genie[0].matchingSubItems.map((s) => s.key)).toEqual(['genie3', 'genie2']);
 
     const seqCat = CATALOG_CATEGORIES.find((c) => c.id === 'sequence-design')!;
     expect(seqCat.subGroups.flatMap((g) => g.items).map((i) => i.key)).toEqual([
