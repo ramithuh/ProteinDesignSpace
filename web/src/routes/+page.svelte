@@ -56,7 +56,9 @@
   import ArtifactPeekPanel from '$lib/ui/ArtifactPeekPanel.svelte';
   import ComparePeekPanel, { type CompareBranchMeta } from '$lib/ui/ComparePeekPanel.svelte';
   import CreditsModal from '$lib/ui/CreditsModal.svelte';
+  import ExamplesGalleryModal from '$lib/ui/ExamplesGalleryModal.svelte';
   import FirstRunModal from '$lib/ui/FirstRunModal.svelte';
+  import { type PaperInsightExample } from '$lib/engine/paper-gallery';
   import ModelCardPopover from '$lib/ui/ModelCardPopover.svelte';
   import OnboardingModal from '$lib/ui/OnboardingModal.svelte';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
@@ -133,6 +135,8 @@
   let importFileInput: HTMLInputElement | null = $state(null);
   let firstRunAck = $state(false);
   let showOnboarding = $state(false);
+  let showExamplesGallery = $state(false);
+  let activePaperInsight = $state<PaperInsightExample | null>(null);
   let onboardingInteractive = $state(false);
   let canvasFitViewTrigger = $state(0);
   let showSeqParentBackbone = $state(false);
@@ -816,6 +820,8 @@
     if (isRunning) return;
     const preset = WORKFLOW_PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
+    showExamplesGallery = false;
+    activePaperInsight = null;
     graphUndoStack = [];
     graphRedoStack = [];
     lastParamUndo = null;
@@ -841,6 +847,24 @@
     selectedFoldIdx = 0;
     showTrajectory = false;
     lastPickedResidue = null;
+  }
+
+  async function selectPaperInsight(example: PaperInsightExample) {
+    if (isRunning) return;
+    const decoded = await decodeHashToGraph(example.hash);
+    if (!decoded) {
+      showToastMessage('Could not load example workflow.', 3200, 'error');
+      return;
+    }
+    showExamplesGallery = false;
+    activePaperInsight = example;
+    selectedPresetId = example.id;
+    loadFullWorkflowGraph(
+      { ...decoded, id: example.id, name: example.title },
+      { clearOutputs: true },
+    );
+    canvasFitViewTrigger += 1;
+    showToastMessage(`Loaded example: ${example.title}`, 2600, 'ok');
   }
 
   function dismissOnboarding() {
@@ -2845,27 +2869,30 @@
       </button>
     </h1>
 
-    <label class="example-picker" class:disabled={isRunning} data-tour="preset-select">
-      <span class="example-lbl">Example Workflow</span>
-      <select
-        class="preset-select"
-        name="workflow-preset"
-        aria-label="Select an example workflow"
-        disabled={isRunning}
-        value={selectedPresetId}
-        title={activePreset?.summary ?? graph.name}
-        onchange={(e) => selectPreset(e.currentTarget.value)}
-      >
-        {#if !activePreset}
-          <option value={selectedPresetId}>Custom: {graph.name}</option>
-        {/if}
-        <optgroup label="Select an example workflow">
-          {#each WORKFLOW_PRESETS as p (p.id)}
-            <option value={p.id} title={p.summary}>{p.name} — {p.badge}</option>
-          {/each}
-        </optgroup>
-      </select>
-    </label>
+    <button
+      type="button"
+      class="gallery-trigger"
+      class:disabled={isRunning}
+      data-tour="preset-select"
+      disabled={isRunning}
+      onclick={() => {
+        sysMenuOpen = false;
+        moreMenuOpen = false;
+        shareMenuOpen = false;
+        showExamplesGallery = true;
+      }}
+      title="Browse Examples & Starter Pipelines"
+    >
+      <span class="gallery-trigger-lbl">Examples</span>
+      <span class="gallery-trigger-val">
+        {activePaperInsight
+          ? activePaperInsight.title
+          : activePreset
+            ? activePreset.name
+            : graph.name || 'Browse examples'}
+      </span>
+      <span class="gallery-trigger-chev" aria-hidden="true">▾</span>
+    </button>
   </div>
 
   <div class="hdr-right">
@@ -3259,6 +3286,20 @@
   >
     <!-- Graph Canvas Pane (Left in Horizontal Split, Top in Vertical Split) -->
     <section class="flow-panel">
+      {#if activePaperInsight}
+        <div class="paper-banner" role="note">
+          <span class="pb-body">{activePaperInsight.canvasNote}</span>
+          <button
+            type="button"
+            class="pb-close"
+            aria-label="Dismiss note"
+            onclick={() => (activePaperInsight = null)}
+          >
+            ✕
+          </button>
+        </div>
+      {/if}
+
       <SvelteFlowProvider>
         <WorkflowCanvas
           {graph}
@@ -3991,6 +4032,15 @@
   />
 {/if}
 
+  <ExamplesGalleryModal
+    open={showExamplesGallery}
+    activeId={selectedPresetId}
+    {isRunning}
+    onClose={() => (showExamplesGallery = false)}
+    onSelectPaper={selectPaperInsight}
+    onSelectPreset={selectPreset}
+  />
+
 {#if showOnboarding}
   <OnboardingModal
     {graph}
@@ -4068,24 +4118,30 @@
     color: var(--accent-bright);
   }
 
-  .example-picker {
+  .gallery-trigger {
     display: inline-flex;
     align-items: center;
     background: var(--bg-surface);
     border: 1px solid var(--border-strong);
-    border-radius: 6px;
+    border-radius: 7px;
     overflow: hidden;
     min-width: 0;
-    max-width: 100%;
+    max-width: min(390px, 100%);
+    padding: 0;
+    cursor: pointer;
+    color: var(--text-body);
+    font-family: inherit;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
   }
-  .example-picker:hover:not(.disabled),
-  .example-picker:focus-within:not(.disabled) {
+  .gallery-trigger:hover:not(:disabled) {
     border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.14);
   }
-  .example-picker.disabled {
+  .gallery-trigger:disabled {
     opacity: 0.6;
+    cursor: not-allowed;
   }
-  .example-lbl {
+  .gallery-trigger-lbl {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10.5px;
     font-weight: 600;
@@ -4097,26 +4153,52 @@
     padding: 6px 9px;
     white-space: nowrap;
     flex-shrink: 0;
-    user-select: none;
   }
-  .preset-select {
-    background: var(--bg-surface);
-    color: var(--text-body);
-    border: none;
-    outline: none;
-    padding: 5px 10px;
+  .gallery-trigger-val {
+    padding: 5px 8px 5px 10px;
     font-size: 12px;
-    font-family: inherit;
-    min-width: 0;
-    flex: 1;
-    width: 100%;
-    max-width: min(340px, 100%);
+    font-weight: 500;
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    cursor: pointer;
+    min-width: 0;
   }
-  .preset-select:disabled {
-    cursor: not-allowed;
+  .gallery-trigger-chev {
+    padding-right: 9px;
+    font-size: 11px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+
+  .paper-banner {
+    flex-shrink: 0;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 10px 7px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .pb-body {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-muted);
+  }
+  .pb-close {
+    background: transparent;
+    color: var(--text-dim);
+    border: none;
+    border-radius: 5px;
+    padding: 2px 6px;
+    font-size: 12px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .pb-close:hover {
+    background: var(--bg-surface-2);
+    color: var(--text-primary);
   }
 
   .pop-wrap {
@@ -4402,22 +4484,19 @@
     .hdr-left {
       width: 100%;
     }
-    .example-picker {
+    .gallery-trigger {
       display: flex;
       flex: 1 1 100%;
       width: 100%;
       min-width: 0;
       max-width: 100%;
     }
-    .example-lbl {
+    .gallery-trigger-lbl {
       padding: 6px 7px;
       font-size: 9.5px;
     }
-    .preset-select {
-      min-width: 0;
+    .gallery-trigger-val {
       flex: 1;
-      width: 100%;
-      max-width: 100%;
     }
   }
   .pop-row {
