@@ -2558,9 +2558,7 @@
         return `Parent backbone (${contextStructure.label}) · peeking ${dirTag}`;
       }
     }
-    return selectedNode
-      ? `${selectedNode.label ?? selectedNode.adapterId} · denovo.run viewport`
-      : 'denovo.run viewport';
+    return '';
   });
 
   // Active run step counter for Run button ("Running 2/4…")
