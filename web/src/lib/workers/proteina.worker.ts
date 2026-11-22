@@ -243,7 +243,7 @@ self.onmessage = async (ev: MessageEvent) => {
         const runHash = fnv1a(
           JSON.stringify({ length, steps, mode, noiseScale, selfCondition, seed: designSeed, precision }),
         );
-        const uniqueChains = [...new Set(parsed.chainIds)];
+        const resolvedLen = parsed.nResidues || length;
         items.push({
           kind: 'StructureArtifact',
           id: `proteina-${length}aa-s${designSeed}-${runHash}`,
@@ -253,12 +253,17 @@ self.onmessage = async (ev: MessageEvent) => {
               : `Proteina v1.2 (${length} aa, ${steps} steps)`,
           sourceModelId: `proteina-v1.2-200m/${precision}`,
           pdbText,
-          length: parsed.nResidues || length,
-          chainIds: uniqueChains.length > 0 ? uniqueChains : ['A'],
+          length: resolvedLen,
+          chainIds:
+            parsed.chainIds.length === resolvedLen
+              ? parsed.chainIds
+              : Array<string>(resolvedLen).fill('A'),
+          chainLengths: parsed.diagnostics.chainLengths,
           sequence: parsed.sequence,
           caCoords: parsed.caCoords,
           backbone4Coords: parsed.backbone4Coords,
           atomGranularity: 'ca-only',
+          bfactorSemantics: 'none',
           atomPresence: parsed.atomPresence,
           diagnostics: parsed.diagnostics,
           geometry: geom,

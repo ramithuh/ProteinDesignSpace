@@ -199,9 +199,21 @@ async function ensureEngine(id: number, precision: Precision) {
     }
   };
 
-  engine = await loadOnce(false);
-  loadedPrecision = precision;
-  return engine;
+  try {
+    engine = await loadOnce(false);
+    loadedPrecision = precision;
+    return engine;
+  } catch (err) {
+    if (ownedDevice) {
+      try {
+        ownedDevice.destroy();
+      } catch {
+        /* ignore */
+      }
+      ownedDevice = null;
+    }
+    throw err;
+  }
 }
 
 self.onmessage = async (ev: MessageEvent) => {
@@ -275,6 +287,11 @@ self.onmessage = async (ev: MessageEvent) => {
         );
       }
 
+      if (requestedInputMode === 'struct-only' && backbone3 && (backbone3.length < 1 || backbone3.length > 1024)) {
+        throw new Error(
+          `Dyna-1 supports 1–1024 residues (structure "${struct?.label ?? 'input'}" has ${backbone3.length}).`,
+        );
+      }
       const cleanedSeqs = sourceCandidates.map((c) =>
         requestedInputMode === 'struct-only'
           ? c.sequence.replace(/[\s:/,-]+/g, '').toUpperCase() || 'X'.repeat(backbone3?.length ?? 0)
@@ -297,7 +314,40 @@ self.onmessage = async (ev: MessageEvent) => {
       let primaryMax = 0;
       let primaryFlexFrac = 0;
 
+      const needsStructEncoding =
+        backbone3 !== null &&
+        resolvedModes.some((m) => m === 'seq+struct' || m === 'struct-only');
+      let cachedStructureTokens: Int32Array | null = null;
+
       try {
+        if (needsStructEncoding && backbone3 && typeof activeEngine.encodeStructure === 'function') {
+          const encRes = await activeEngine.encodeStructure(backbone3.coords, {
+            residueIndex: backbone3.residueIndex,
+            signal: controller.signal,
+            onProgress: (prog: { phase?: string; loaded?: number; total?: number }) => {
+              if (prog.phase !== 'structure-encoder') return;
+              const loaded = prog.loaded ?? 0;
+              const total = prog.total ?? 0;
+              const frac = total > 0 ? loaded / total : 0.4;
+              const mb = (loaded / 1024 / 1024).toFixed(1);
+              const totMb = total > 0 ? (total / 1024 / 1024).toFixed(1) : '?';
+              self.postMessage({
+                id: msg.id,
+                type: 'progress',
+                phase: 'weights',
+                progress: Math.min(0.84, 0.72 + frac * 0.12),
+                detail: `Dyna-1 ESM-3 structure encoder: ${mb} / ${totMb} MB`,
+              });
+            },
+          });
+          cachedStructureTokens =
+            encRes?.structureTokens instanceof Int32Array
+              ? encRes.structureTokens
+              : encRes instanceof Int32Array
+                ? encRes
+                : null;
+        }
+
         for (let i = 0; i < sourceCandidates.length; i++) {
           const cand = sourceCandidates[i];
           const seq = cleanedSeqs[i];
@@ -316,7 +366,11 @@ self.onmessage = async (ev: MessageEvent) => {
             mode === 'struct-only' ? null : seq,
             {
               mode,
-              ...(useStruct ? { structureCoords: backbone3!.coords } : {}),
+              ...(useStruct
+                ? cachedStructureTokens
+                  ? { structureTokens: cachedStructureTokens }
+                  : { structureCoords: backbone3!.coords, residueIndex: backbone3!.residueIndex }
+                : {}),
               signal: controller.signal,
               onProgress: (prog: { phase?: string; loaded?: number; total?: number }) => {
                 if (prog.phase !== 'structure-encoder') return;
@@ -432,8 +486,8 @@ self.onmessage = async (ev: MessageEvent) => {
       const outputs: Record<string, unknown> = { track, sequences };
       const transferableViews: Array<ArrayBufferView | undefined> = [track.values];
 
-      // When an upstream 3D structure is connected, paint dynamics probabilities onto its B-factors
-      if (struct && (struct.pdbText || struct.cifText)) {
+      // When an upstream 3D structure is connected and length-matched, paint dynamics probabilities onto its B-factors
+      if (struct && (struct.pdbText || struct.cifText) && struct.length === L) {
         const structText = struct.cifText || struct.pdbText;
         const sourceResidues =
           struct.sourceResidues && struct.sourceResidues.length > 0

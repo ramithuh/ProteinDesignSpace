@@ -181,7 +181,12 @@
 
   function isSelfGeneratorId(id?: string): boolean {
     if (!id) return false;
-    return id.startsWith('rfd4-proteina') || id.startsWith('genie3');
+    return (
+      id.startsWith('rfd4-proteina') ||
+      id.startsWith('genie3') ||
+      id.startsWith('la-proteina') ||
+      id.startsWith('protpardelle')
+    );
   }
 
   function formatMsaBadge(msaMode?: MsaMode, msaDepth?: number): string {

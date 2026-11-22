@@ -5,6 +5,7 @@
 import {
   computeChainLengths,
   parseFixedPositionsAndChains,
+  parseTiedPositions,
 } from '$lib/engine/mpnn-spec';
 import {
   computeStructurePayloadDigest,
@@ -42,6 +43,7 @@ interface LigandEngine {
       temperature?: number;
       seed?: number;
       fixedPositions?: string[];
+      tiedPositions?: string[][];
       omitAAs?: string;
       useAtomContext?: boolean;
     },
@@ -83,8 +85,9 @@ function buildLigandConstraints(
   backbone: StructureArtifact,
   structureText: string,
   fixedPositionsSpec: string,
+  tiedPositionsSpec: string,
   unlockInherited: boolean,
-): { fixedTokens: string[]; propagatedLockedChains: string[] } {
+): { fixedTokens: string[]; tiedGroups: string[][]; propagatedLockedChains: string[] } {
   const useCif = Boolean(backbone.cifText);
   const sourceResidues =
     backbone.sourceResidues && backbone.sourceResidues.length > 0
@@ -161,8 +164,30 @@ function buildLigandConstraints(
     }
   }
 
+  const rawTiedGroups = parseTiedPositions(tiedPositionsSpec);
+  const tiedGroups: string[][] = [];
+  for (const grp of rawTiedGroups) {
+    const tokens: string[] = [];
+    for (const ref of grp) {
+      if (typeof ref === 'number') {
+        const sr = sourceResidues[ref];
+        if (sr) {
+          const ch = useCif ? sr.authChainId : sr.projectedChainId;
+          tokens.push(`${ch}${sr.resNum}${sr.insCode ?? ''}`);
+        }
+      } else {
+        const ch = presentChains.has(ref.chain)
+          ? ref.chain
+          : upperToChain.get(ref.chain.toUpperCase()) ?? ref.chain;
+        tokens.push(`${ch}${ref.number}${ref.insertionCode ?? ''}`);
+      }
+    }
+    if (tokens.length >= 2) tiedGroups.push(tokens);
+  }
+
   return {
     fixedTokens: [...fixedSet],
+    tiedGroups,
     propagatedLockedChains: [...lockedChainSet],
   };
 }
@@ -322,6 +347,7 @@ self.onmessage = async (ev: MessageEvent) => {
         ? Math.max(0.01, Math.min(1.5, rawTemp))
         : 0.1;
       const fixedPositionsSpec = String(p.fixedPositions ?? '').trim();
+      const tiedPositionsSpec = String(p.tiedPositions ?? '').trim();
       const omitAAs = sanitizeOmitAAs(p.omitAminoAcids);
       const useLigandContext = p.useLigandContext !== false;
       const unlockInherited = Boolean(p.unlockInherited);
@@ -352,10 +378,11 @@ self.onmessage = async (ev: MessageEvent) => {
 
       if (!collectionItems) {
         const structureText = structure.cifText ?? structure.pdbText;
-        const { fixedTokens, propagatedLockedChains } = buildLigandConstraints(
+        const { fixedTokens, tiedGroups, propagatedLockedChains } = buildLigandConstraints(
           structure,
           structureText,
           fixedPositionsSpec,
+          tiedPositionsSpec,
           unlockInherited,
         );
 
@@ -387,6 +414,7 @@ self.onmessage = async (ev: MessageEvent) => {
             seed: seed + i,
             useAtomContext: useLigandContext,
             ...(fixedTokens.length > 0 ? { fixedPositions: fixedTokens } : {}),
+            ...(tiedGroups.length > 0 ? { tiedPositions: tiedGroups } : {}),
             ...(omitAAs ? { omitAAs } : {}),
           });
 
@@ -404,7 +432,7 @@ self.onmessage = async (ev: MessageEvent) => {
             sourceStructureId: structure.id,
             sampleIndex: i,
             sequence: seq,
-            score: Number.isFinite(sc?.global) ? sc.global : null,
+            score: Number.isFinite(sc?.ligand) ? sc.ligand : Number.isFinite(sc?.global) ? sc.global : null,
             globalScore: Number.isFinite(sc?.global) ? sc.global : null,
             sourceModelId: modelLabel,
             temperature,
@@ -423,6 +451,7 @@ self.onmessage = async (ev: MessageEvent) => {
             numSequences,
             temperature,
             fixedTokens,
+            tiedGroups,
             omitAAs: omitAAs ?? null,
             useLigandContext,
             unlockInherited,
@@ -495,6 +524,7 @@ self.onmessage = async (ev: MessageEvent) => {
 
       const backboneById = new Map(collectionItems.map((b) => [b.id, b]));
       const allCandidates: SequenceCandidate[] = [];
+      const allPropagatedLocked = new Set<string>();
       const totalPlanned = Math.max(1, fanoutPlan.totalPlannedSequences);
       let completedSeqs = 0;
 
@@ -506,12 +536,14 @@ self.onmessage = async (ev: MessageEvent) => {
           throw new Error(`Backbone "${subplan.sourceStructure.artifactId}" is missing structure text for LigandMPNN.`);
         }
 
-        const { fixedTokens } = buildLigandConstraints(
+        const { fixedTokens, tiedGroups, propagatedLockedChains } = buildLigandConstraints(
           backbone,
           text,
           fixedPositionsSpec,
+          tiedPositionsSpec,
           unlockInherited,
         );
+        for (const ch of propagatedLockedChains) allPropagatedLocked.add(ch);
         const backboneCandidates: SequenceCandidate[] = [];
 
         for (let q = 0; q < subplan.items.length; q++) {
@@ -531,6 +563,7 @@ self.onmessage = async (ev: MessageEvent) => {
             seed: itemSeed,
             useAtomContext: useLigandContext,
             ...(fixedTokens.length > 0 ? { fixedPositions: fixedTokens } : {}),
+            ...(tiedGroups.length > 0 ? { tiedPositions: tiedGroups } : {}),
             ...(omitAAs ? { omitAAs } : {}),
           });
           completedSeqs++;
@@ -553,7 +586,7 @@ self.onmessage = async (ev: MessageEvent) => {
             sourceStructureId: backbone.id,
             sampleIndex: item.sequenceIndex,
             sequence: seq,
-            score: Number.isFinite(sc?.global) ? sc.global : null,
+            score: Number.isFinite(sc?.ligand) ? sc.ligand : Number.isFinite(sc?.global) ? sc.global : null,
             globalScore: Number.isFinite(sc?.global) ? sc.global : null,
             sourceModelId: modelLabel,
             temperature,
@@ -577,9 +610,7 @@ self.onmessage = async (ev: MessageEvent) => {
         sourceStructureIds: collectionItems.map((b) => b.id),
         sourceModelId: modelLabel,
         collectionKind: 'independent-candidates',
-        ...(!unlockInherited && structure.lockedChains && structure.lockedChains.length > 0
-          ? { lockedChains: [...structure.lockedChains] }
-          : {}),
+        ...(allPropagatedLocked.size > 0 ? { lockedChains: [...allPropagatedLocked] } : {}),
         ...(structure.chainRoles ? { chainRoles: { ...structure.chainRoles } } : {}),
         candidates: allCandidates,
       };

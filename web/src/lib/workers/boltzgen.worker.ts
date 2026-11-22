@@ -374,19 +374,20 @@ self.onmessage = async (ev: MessageEvent) => {
             ...(motifIndices ? { motifIndices } : {}),
             signal: controller.signal,
             onProgress: (prog: { phase?: string; step?: number; total?: number; block?: number }) => {
-              const step = prog.step ?? 0;
-              const tot = prog.total ?? numSteps;
+              const isTrunk = prog.phase === 'trunk';
+              const step = isTrunk ? (prog.block ?? prog.step ?? 0) : (prog.step ?? 0);
+              const tot = prog.total ?? (isTrunk ? 64 : numSteps);
               const frac = tot > 0 ? Math.min(1, step / tot) : 0.2;
-              const overall = 0.48 + ((d + frac) / numDesigns) * 0.5;
+              const scaledFrac = isTrunk ? frac * 0.35 : 0.35 + frac * 0.65;
+              const overall = 0.48 + ((d + scaledFrac) / numDesigns) * 0.5;
               self.postMessage({
                 id: msg.id,
                 type: 'progress',
-                phase: prog.phase === 'trunk' ? 'trunk' : 'diffuse',
+                phase: isTrunk ? 'trunk' : 'diffuse',
                 progress: Math.min(0.98, overall),
-                detail:
-                  prog.phase === 'trunk'
-                    ? `BoltzGen design ${d + 1}/${numDesigns}: pairformer trunk (${step}/${tot})`
-                    : `BoltzGen design ${d + 1}/${numDesigns}: step ${step}/${tot}`,
+                detail: isTrunk
+                  ? `BoltzGen design ${d + 1}/${numDesigns}: pairformer trunk (${step}/${tot})`
+                  : `BoltzGen design ${d + 1}/${numDesigns}: step ${step}/${tot}`,
               });
             },
           });

@@ -829,7 +829,7 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     citation:
       'Wayment-Steele et al. (2026) Learning millisecond protein dynamics from what is missing in NMR spectra, Nature, doi:10.1038/s41586-026-10989-4.',
     limitations: [
-      'Sequence-only inference (1–1,024 canonical amino acids); structure-conditioned ESM-3 tracks are fixed to missing-coordinate embeddings.',
+      'Supports full sequence + 3D structure conditioning via ESM-3 VQ-VAE structure tokens (~88 MB cached once), plus sequence-only and structure-only modes (1–1,024 residues).',
       'Outputs prior-corrected conformational exchange probabilities and classifier logits, not calibrated physical exchange rates (s⁻¹).',
       'FP16 mixed keeps classifier blocks 0–1 in FP32 (+62.9 MB) because pure FP16 exceeded the 5e-4 logit/probability relRMS gate.',
       'Parity and latency were measured on Trp-cage (20 aa) and ubiquitin (76 aa), not across every accepted sequence length; INT8 GPU weight buffers require ~844 MB.',
@@ -1075,7 +1075,7 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     citation: 'Geffner et al. (2025) La-Proteina: Atomistic Protein Generation via Partially Latent Flow Matching (NVIDIA BioNeMo).',
     limitations: [
       'Unconditional single-chain all-atom co-design (LD1 + AE1 decoder); motif and triangular checkpoints are outside this package.',
-      'Default browser schedule uses 100 steps for responsiveness; increase to 400 steps to match the full upstream schedule.',
+      'Default browser schedule uses 400 steps matching the upstream LD1 flow-matching schedule; lower step counts trade quality for speed.',
     ],
   },
 
@@ -1441,7 +1441,7 @@ export function getModelCardForAdapter(
           parityVsPytorchFp32: null,
         }];
         resolved.limitations = [
-          'Folds one or more protein chains from sequence alone. MSA, DNA, RNA, and ligand inputs are unsupported by this adapter.',
+          'Folds single/multi-chain proteins and holo complexes (DNA, RNA, and CCD ligands) directly from sequence with no MSA; holo or >2,048-aa inputs automatically raise diffusion to >=64 scheduled steps.',
           'The bundled Synthyra head estimates pLDDT, PAE, and pTM, with ipTM for multichain predictions.',
         ];
         return resolved;

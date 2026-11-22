@@ -199,6 +199,11 @@ self.onmessage = async (ev: MessageEvent) => {
       return;
     }
 
+    if (msg.type === 'abort') {
+      activeAbort?.abort();
+      return;
+    }
+
     if (msg.type === 'run') {
       const t0 = performance.now();
       const p = msg.params ?? {};
@@ -262,8 +267,8 @@ self.onmessage = async (ev: MessageEvent) => {
               : { length }),
             seed: seed + s,
             signal: controller.signal,
-            onProgress: (prog: { step?: number; total?: number }) => {
-              const step = prog.step ?? 0;
+            onProgress: (prog: { completed?: number; step?: number; total?: number }) => {
+              const step = prog.completed ?? prog.step ?? 0;
               const tot = prog.total ?? (taskMode === 'infill' ? templateSeq.length : length);
               const frac = tot > 0 ? Math.min(1, step / tot) : 0;
               const overall = 0.48 + ((s + frac) / numSequences) * 0.5;

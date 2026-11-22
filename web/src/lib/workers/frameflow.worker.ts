@@ -91,6 +91,13 @@ async function ensureEngine(id: number, precision: Precision) {
     },
   });
   ownedDevice = device;
+  void device.lost.then(() => {
+    if (ownedDevice === device) {
+      engine = null;
+      ownedDevice = null;
+      loadedPrecision = null;
+    }
+  });
 
   const envBaseUrl = (import.meta.env.VITE_FRAMEFLOW_WEIGHTS_URL as string | undefined)?.trim();
   const baseUrl = envBaseUrl || DEFAULT_BASE_URL;
@@ -223,9 +230,9 @@ self.onmessage = async (ev: MessageEvent) => {
           random: makeMulberry32(designSeed),
           keepTrajectory: false,
           signal: abortCtrl.signal,
-          onProgress: (info: { step?: number; steps?: number }) => {
+          onProgress: (info: { step?: number; steps?: number; total?: number }) => {
             const step = info.step ?? 0;
-            const totalSteps = info.steps ?? steps;
+            const totalSteps = info.total ?? info.steps ?? steps;
             const frac = totalSteps > 0 ? Math.min(1, step / totalSteps) : 0.5;
             self.postMessage({
               id: msg.id,
@@ -246,7 +253,7 @@ self.onmessage = async (ev: MessageEvent) => {
         const runHash = fnv1a(
           JSON.stringify({ length, steps, schedule, expRate, selfCondition, seed: designSeed, precision }),
         );
-        const uniqueChains = [...new Set(parsed.chainIds)];
+        const resolvedLen = parsed.nResidues || length;
         items.push({
           kind: 'StructureArtifact',
           id: `frameflow-${length}aa-s${designSeed}-${runHash}`,
@@ -256,12 +263,17 @@ self.onmessage = async (ev: MessageEvent) => {
               : `FrameFlow (${length} aa, ${steps} steps)`,
           sourceModelId: `frameflow/${precision}`,
           pdbText,
-          length: parsed.nResidues || length,
-          chainIds: uniqueChains.length > 0 ? uniqueChains : ['A'],
+          length: resolvedLen,
+          chainIds:
+            parsed.chainIds.length === resolvedLen
+              ? parsed.chainIds
+              : Array<string>(resolvedLen).fill('A'),
+          chainLengths: parsed.diagnostics.chainLengths,
           sequence: parsed.sequence,
           caCoords: parsed.caCoords,
           backbone4Coords: parsed.backbone4Coords,
           atomGranularity: 'backbone4',
+          bfactorSemantics: 'none',
           atomPresence: parsed.atomPresence,
           diagnostics: parsed.diagnostics,
           geometry: geom,

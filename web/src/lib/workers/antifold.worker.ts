@@ -248,10 +248,13 @@ function resolveAntiFoldPlan(
   const unlockedLight =
     detectedLight && !lockedChainSet.has(detectedLight) ? detectedLight : undefined;
   const firstUnlocked = availableChains.find((c) => !lockedChainSet.has(c)) ?? availableChains[0];
-  const effectiveTargetChain =
+  // Only set `targetChain` when the user explicitly specified one: leaving it unset for
+  // H+L antibodies lets score() include both H & L CDRs and prevents AR mode from truncating at H.
+  const effectiveTargetChain = explicitTarget;
+  const resolvedTargetChain =
     explicitTarget ??
-    (variant === 'antifold' ? unlockedHeavy ?? unlockedLight ?? firstUnlocked : undefined);
-  const resolvedTargetChain = effectiveTargetChain ?? defaultChain;
+    (variant === 'antifold' ? unlockedHeavy ?? unlockedLight ?? firstUnlocked : undefined) ??
+    defaultChain;
 
   // Pass 2: parse chainless fixedPositions against resolvedTargetChain (matching input-preview.ts)
   const { fixedPositions: userRefs, lockedChains: userLockedChains } =
@@ -331,7 +334,11 @@ function resolveAntiFoldPlan(
   const fixed: Record<number, number> = {};
   for (let i = 0; i < sampleLength; i++) {
     const r = prepared.residues[i];
-    if (!r) continue;
+    if (!r) {
+      // Preserve null chain-break separator tokens (<cath>/<pad>) during multi-chain AR sampling
+      fixed[i] = prepared.tokens[i];
+      continue;
+    }
     const k = residueKey(r.chain, r.number, r.insertion);
     const fixedByTarget = Boolean(explicitTarget) && r.chain !== explicitTarget;
     if (lockedChainSet.has(r.chain) || fixedKeySet.has(k) || fixedByTarget) {
@@ -707,6 +714,7 @@ self.onmessage = async (ev: MessageEvent) => {
 
       const backboneById = new Map(collectionItems.map((b) => [b.id, b]));
       const allCandidates: SequenceCandidate[] = [];
+      const allPropagatedLocked = new Set<string>();
       const totalPlanned = Math.max(1, fanoutPlan.totalPlannedSequences);
       let completedSeqs = 0;
 
@@ -730,6 +738,7 @@ self.onmessage = async (ev: MessageEvent) => {
           fixedPositionsSpec,
           unlockInherited,
         );
+        for (const ch of plan.propagatedLockedChains) allPropagatedLocked.add(ch);
         const backboneCandidates: SequenceCandidate[] = [];
 
         for (let q = 0; q < subplan.items.length; q++) {
@@ -785,9 +794,7 @@ self.onmessage = async (ev: MessageEvent) => {
         sourceStructureIds: collectionItems.map((b) => b.id),
         sourceModelId: modelLabel,
         collectionKind: 'independent-candidates',
-        ...(!unlockInherited && structure.lockedChains && structure.lockedChains.length > 0
-          ? { lockedChains: [...structure.lockedChains] }
-          : {}),
+        ...(allPropagatedLocked.size > 0 ? { lockedChains: [...allPropagatedLocked] } : {}),
         ...(structure.chainRoles ? { chainRoles: { ...structure.chainRoles } } : {}),
         candidates: allCandidates,
       };

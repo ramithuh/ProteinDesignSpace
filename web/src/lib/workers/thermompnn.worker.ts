@@ -430,11 +430,14 @@ self.onmessage = async (ev: MessageEvent) => {
         const ins = sr.insCode ?? '';
         const authKey = `${sr.authChainId}:${sr.resNum}:${ins}`;
         const projKey = `${sr.projectedChainId}:${sr.resNum}:${ins}`;
+        const blankKey = `:${sr.resNum}:${ins}`;
         const val = aggByKey.has(authKey)
           ? aggByKey.get(authKey)!
           : aggByKey.has(projKey)
             ? aggByKey.get(projKey)!
-            : Number.NaN;
+            : aggByKey.has(blankKey)
+              ? aggByKey.get(blankKey)!
+              : Number.NaN;
         pdbBfactors[i] = val;
         cifBfactors[i] = val;
       }

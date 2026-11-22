@@ -98,6 +98,13 @@ async function ensureEngine(id: number, precision: Precision) {
     },
   });
   ownedDevice = device;
+  void device.lost.then(() => {
+    if (ownedDevice === device) {
+      engine = null;
+      ownedDevice = null;
+      loadedPrecision = null;
+    }
+  });
 
   const envBaseUrl = (import.meta.env.VITE_FOLDFLOW2_WEIGHTS_URL as string | undefined)?.trim();
   const rootUrl = (envBaseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
@@ -191,7 +198,8 @@ self.onmessage = async (ev: MessageEvent) => {
       const t0 = performance.now();
     const p = msg.params ?? {};
     const seqInput = msg.inputs?.sequences as SequenceSet | undefined;
-    const condSeq = seqInput?.candidates?.[0]?.sequence?.trim() || '';
+    const rawCondSeq = seqInput?.candidates?.[0]?.sequence?.trim() || '';
+    const condSeq = rawCondSeq.toUpperCase().replace(/[^A-Z]/g, '');
     const esmTokens = condSeq.length > 0 ? encodeEsmTokens(condSeq) : undefined;
     const length =
       condSeq.length > 0
@@ -235,26 +243,33 @@ self.onmessage = async (ev: MessageEvent) => {
           rotationScaling,
           ...(esmTokens ? { esmTokens } : {}),
           signal: abortCtrl.signal,
-          onProgress: (info: { step?: number; steps?: number; phase?: string }) => {
-            const step = info.step ?? 0;
-            const totalSteps = info.steps ?? steps;
+          onProgress: (info: {
+            step?: number;
+            steps?: number;
+            layer?: number;
+            total?: number;
+            phase?: string;
+          }) => {
+            const isEsm = info.phase === 'esm';
+            const step = isEsm ? (info.layer ?? 0) : (info.step ?? 0);
+            const totalSteps = isEsm ? (info.total ?? 33) : (info.steps ?? info.total ?? steps);
             const frac = totalSteps > 0 ? Math.min(1, step / totalSteps) : 0.5;
+            const scaledFrac = isEsm ? frac * 0.25 : 0.25 + frac * 0.75;
             self.postMessage({
               id: msg.id,
               type: 'progress',
               phase: 'sample',
-              progress: progressBase + frac * progressSpan,
-              detail:
-                info.phase === 'esm'
-                  ? `FoldFlow 2 · running frozen ESM-2 650M encoder...`
-                  : numDesigns > 1
-                    ? `FoldFlow 2 ${d + 1}/${numDesigns} · step ${step}/${totalSteps}`
-                    : `FoldFlow 2 · step ${step}/${totalSteps}`,
+              progress: progressBase + scaledFrac * progressSpan,
+              detail: isEsm
+                ? `FoldFlow 2 · ESM-2 650M layer ${step}/${totalSteps}`
+                : numDesigns > 1
+                  ? `FoldFlow 2 ${d + 1}/${numDesigns} · step ${step}/${totalSteps}`
+                  : `FoldFlow 2 · step ${step}/${totalSteps}`,
             });
           },
         });
 
-        const pdbText = String(pdbMod.toPDB(res));
+        const pdbText = String(pdbMod.toPDB(res, condSeq ? { sequence: condSeq } : undefined));
         const parsed = parseStructureText(pdbText);
         const geom = computeGeometryStats(parsed.caCoords);
         const runHash = fnv1a(
@@ -268,7 +283,7 @@ self.onmessage = async (ev: MessageEvent) => {
             condSeqHash: condSeq ? fnv1a(condSeq) : null,
           }),
         );
-        const uniqueChains = [...new Set(parsed.chainIds)];
+        const resolvedLen = parsed.nResidues || length;
         items.push({
           kind: 'StructureArtifact',
           id: `foldflow2-${length}aa-s${designSeed}-${runHash}`,
@@ -278,12 +293,17 @@ self.onmessage = async (ev: MessageEvent) => {
               : `FoldFlow 2 (${length} aa, ${steps} steps)`,
           sourceModelId: `foldflow2/${precision}`,
           pdbText,
-          length: parsed.nResidues || length,
-          chainIds: uniqueChains.length > 0 ? uniqueChains : ['A'],
+          length: resolvedLen,
+          chainIds:
+            parsed.chainIds.length === resolvedLen
+              ? parsed.chainIds
+              : Array<string>(resolvedLen).fill('A'),
+          chainLengths: parsed.diagnostics.chainLengths,
           sequence: condSeq || parsed.sequence,
           caCoords: parsed.caCoords,
           backbone4Coords: parsed.backbone4Coords,
           atomGranularity: 'backbone4',
+          bfactorSemantics: 'none',
           atomPresence: parsed.atomPresence,
           diagnostics: parsed.diagnostics,
           geometry: geom,

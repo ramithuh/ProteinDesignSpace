@@ -94,9 +94,17 @@ async function ensureLoaded(id: number) {
         envWeightsUrl || 'https://huggingface.co/ramithuh/genie3-webgpu/resolve/main/fp16';
       weightBundle = await genie3Mod.fetchGenie3Weights(weightsUrl, {
         cache: true,
-        onProgress: (p: { loaded?: number; total?: number; shardIndex?: number; totalShards?: number; shard?: string }) => {
-          const loaded = p.loaded ?? 0;
-          const total = p.total ?? 45 * 1024 * 1024;
+        onProgress: (p: {
+          loaded?: number;
+          total?: number;
+          loadedBytes?: number;
+          totalBytes?: number;
+          shardIndex?: number;
+          totalShards?: number;
+          shard?: string;
+        }) => {
+          const loaded = p.loadedBytes ?? p.loaded ?? 0;
+          const total = p.totalBytes ?? p.total ?? 45 * 1024 * 1024;
           const frac = total > 0 ? loaded / total : 0.2;
           const mb = (loaded / 1024 / 1024).toFixed(1);
           const totMb = (total / 1024 / 1024).toFixed(1);

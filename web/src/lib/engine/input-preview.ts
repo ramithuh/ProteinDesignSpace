@@ -2362,7 +2362,8 @@ export function compileNodeInputPreview(
         }
 
         const nucleicChainIds: string[] = [];
-        if (meta.family === 'af3') {
+        const supportsHolo = meta.family === 'af3' || meta.family === 'esmfold2';
+        if (supportsHolo) {
           const used = new Set(tracks.map((t) => t.chainId));
           for (const dSeq of dnaSeqs) {
             const chId = nextChainLetter(used);
@@ -2412,7 +2413,7 @@ export function compileNodeInputPreview(
           0,
         );
         designedResidues = totalResidues - fixedResidues;
-        estimatedTokens = totalResidues + (meta.family === 'af3' ? ligandCcdCodes.length : 0);
+        estimatedTokens = totalResidues + (meta.family === 'af3' || meta.family === 'esmfold2' ? ligandCcdCodes.length : 0);
       }
 
       const ctxStruct = findContextStructure(graph, nodeId, mutableOutputs);
@@ -2452,7 +2453,7 @@ export function compileNodeInputPreview(
         rawSpecText: JSON.stringify(
           {
             ...foldSettings,
-            ...(meta.family === 'af3'
+            ...(meta.family === 'af3' || meta.family === 'esmfold2'
               ? { ligandCcdCodes, dnaSequences: dnaSeqs, rnaSequences: rnaSeqs }
               : { af2Budgets }),
             maxSequences: work.maxSequences,
@@ -2737,12 +2738,19 @@ export function compileNodeInputPreview(
       const entry = getOrParseCachedStructure(structure.id, rawText);
       const parsed = entry.parsed;
       const availableChains = [...new Set(parsed.sourceResidues.map((s) => s.authChainId))];
-      const upperFilter = chainFilter.toUpperCase();
-      if (upperFilter && !availableChains.some((c) => c.toUpperCase() === upperFilter)) {
+      const requestedChains = chainFilter
+        .split(/[,\s]+/)
+        .map((c) => c.trim().toUpperCase())
+        .filter(Boolean);
+      const requestedChainSet = new Set(requestedChains);
+      const missingChains = requestedChains.filter(
+        (rc) => !availableChains.some((c) => c.toUpperCase() === rc),
+      );
+      if (missingChains.length > 0) {
         pushIssue({
           severity: 'warning',
           source: 'compiler',
-          message: `Target chain "${chainFilter}" not found in structure (available: ${availableChains.join(', ')}).`,
+          message: `Target chain(s) "${missingChains.join(', ')}" not found in structure (available: ${availableChains.join(', ')}).`,
         });
       }
 
@@ -2773,7 +2781,8 @@ export function compileNodeInputPreview(
           if (delta > 0) gapBefore = delta;
         }
 
-        const inScope = !upperFilter || src.authChainId.toUpperCase() === upperFilter;
+        const inScope =
+          requestedChainSet.size === 0 || requestedChainSet.has(src.authChainId.toUpperCase());
         if (inScope) scannedCount++;
         const aa1 = parsed.sequence[i] ?? AA3_TO_AA1[src.resName] ?? 'X';
         const pr: PreviewResidue = {

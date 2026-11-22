@@ -355,6 +355,7 @@ self.onmessage = async (ev: MessageEvent) => {
 
         const backboneById = new Map(collectionItems.map((b) => [b.id, b]));
         const allCandidates: SequenceCandidate[] = [];
+        const allPropagatedLocked = new Set<string>();
         const totalPlanned = Math.max(1, fanoutPlan.totalPlannedSequences);
         let completedSeqs = 0;
 
@@ -406,7 +407,9 @@ self.onmessage = async (ev: MessageEvent) => {
             fixedPositions,
             omitAminoAcids,
             tiedPositions,
+            lockedChains: compiledLockedChains,
           } = compiled;
+          for (const ch of compiledLockedChains) allPropagatedLocked.add(ch);
 
           const chainLengths = computeChainLengths(prepared.structure.chainIds);
           const backboneCandidates: SequenceCandidate[] = [];
@@ -473,8 +476,8 @@ self.onmessage = async (ev: MessageEvent) => {
           sourceStructureIds: collectionItems.map((b) => b.id),
           sourceModelId: `${family}/${modelName}`,
           collectionKind: 'independent-candidates',
-          ...(structure.lockedChains && structure.lockedChains.length > 0
-            ? { lockedChains: [...structure.lockedChains] }
+          ...(allPropagatedLocked.size > 0
+            ? { lockedChains: [...allPropagatedLocked] }
             : {}),
           ...(structure.chainRoles ? { chainRoles: { ...structure.chainRoles } } : {}),
           candidates: allCandidates,

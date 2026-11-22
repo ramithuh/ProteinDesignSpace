@@ -828,7 +828,7 @@ self.onmessage = async (ev: MessageEvent) => {
           atomPresence: parsed.atomPresence,
           observedBackboneMask: parsed.observedBackboneMask,
           diagnostics: parsed.diagnostics,
-          bfactorSemantics: 'crystal-b',
+          bfactorSemantics: mode === 'partial' || mode === 'inverse-folding' ? 'crystal-b' : 'none',
           atomGranularity: 'all-atom',
           provenance: {
             quantization: 'int8',

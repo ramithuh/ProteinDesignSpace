@@ -42,6 +42,15 @@ export async function loadEsmfold2(
     const rnaSeqs = holo?.rnaSeqs ?? [];
     const parsedLigands = holo?.parsedLigands ?? [];
     const hasExtraContext = dnaSeqs.length > 0 || rnaSeqs.length > 0 || parsedLigands.length > 0;
+    const effectiveSteps =
+      typeof model.esmfold2StepsFor === 'function'
+        ? (model.esmfold2StepsFor(steps, {
+            atomised: hasExtraContext,
+            residues: sequence.length,
+          }) as number)
+        : hasExtraContext || sequence.length > 2048
+          ? Math.max(steps, 64)
+          : steps;
     const allPolymerSeqs = [...chains, ...dnaSeqs, ...rnaSeqs];
     const chainKinds: Array<'protein' | 'dna' | 'rna'> = [
       ...chains.map(() => 'protein' as const),
@@ -65,7 +74,7 @@ export async function loadEsmfold2(
       confidenceWeights: loaded.confidenceWeights,
       tower: model.languageModelRunner(device, undefined, loaded, loaded.shape.pairChannels),
       languageModelMiB: loaded.language.megabytes,
-      sampler: `diffusion-${steps}`,
+      sampler: `diffusion-${effectiveSteps}`,
       contacts: false,
       seed, signal,
       onStatus: (status: string) => { stage = status; },
@@ -118,7 +127,7 @@ export async function loadEsmfold2(
       provenance: {
         quantization: 'int5' as const, languageModelQuantization: 'int3' as const,
         confidenceHead: 'Synthyra', recyclesRun: loaded.shape.loops - 1,
-        diffusionStepsScheduled: steps, diffusionStepsRun: result.steps as number,
+        diffusionStepsScheduled: effectiveSteps, diffusionStepsRun: result.steps as number,
       },
     };
   };

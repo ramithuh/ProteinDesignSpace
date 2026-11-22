@@ -65,9 +65,23 @@ function readClampedInt(value: unknown, fallback: number, min: number, max: numb
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
+const MULTI_DESIGN_GENERATORS = new Set([
+  'genie3',
+  'rfd4-proteina',
+  'protpardelle',
+  'rfdiffusion',
+  'boltzgen',
+  'la-proteina',
+  'proteina',
+  'sid-protein',
+  'genie2',
+  'frameflow',
+  'foldflow2',
+]);
+
 function readNumDesigns(node: WorkflowNode, forceSingle = false): number {
   if (forceSingle) return 1;
-  if (node.adapterId !== 'genie3' && node.adapterId !== 'rfd4-proteina') return 1;
+  if (!MULTI_DESIGN_GENERATORS.has(node.adapterId)) return 1;
   return readClampedInt(node.params?.numDesigns, 1, 1, MAX_DESIGNS);
 }
 
@@ -114,7 +128,7 @@ function estimateGraphWorkload(
     visiting.add(node.id);
 
     let count = 1;
-    if (node.adapterId === 'genie3' || node.adapterId === 'rfd4-proteina') {
+    if (MULTI_DESIGN_GENERATORS.has(node.adapterId)) {
       count = readNumDesigns(node, forceSingleDesign);
     } else if (node.adapterId === 'pdb-input' || node.adapterId === 'localfold-af2') {
       count = 1;
@@ -137,7 +151,7 @@ function estimateGraphWorkload(
     visiting.add(node.id);
 
     let res: { backbones: number; sequences: number };
-    if (node.adapterId === 'genie3' || node.adapterId === 'rfd4-proteina') {
+    if (MULTI_DESIGN_GENERATORS.has(node.adapterId)) {
       const n = readNumDesigns(node, forceSingleDesign);
       res = { backbones: n, sequences: n };
     } else if (
@@ -198,7 +212,7 @@ function estimateGraphWorkload(
     const manifest = ADAPTER_REGISTRY[node.adapterId];
     const isGpu = Boolean(manifest && manifest.runtime !== 'cpu-ts');
 
-    if (node.adapterId === 'genie3' || node.adapterId === 'rfd4-proteina') {
+    if (MULTI_DESIGN_GENERATORS.has(node.adapterId)) {
       const n = readNumDesigns(node, forceSingleDesign);
       generatorCount++;
       generatorBackbones += n;
@@ -590,17 +604,58 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
 
     if (node.adapterId === 'dyna1') {
       const precision = String(node.params.precision ?? 'int8');
-      const approxMB = precision === 'fp32' ? 3362 : precision === 'fp16' ? 1745 : 844;
+      const inputMode = String(node.params.inputMode ?? 'auto');
+      const hasStructWire = graph.edges.some((e) => e.toNode === node.id && e.toPort === 'structure');
+      const needsStructEnc = hasStructWire && inputMode !== 'seq-only';
+      const baseMB = precision === 'fp32' ? 3362 : precision === 'fp16' ? 1745 : 844;
+      const approxMB = baseMB + (needsStructEnc ? 88 : 0);
       const estimatedVramMB =
-        precision === 'fp32' ? 3900 : precision === 'fp16' ? 2200 : manifest.estimatedVramMB;
-      const key = `dyna1:${precision}`;
+        (precision === 'fp32' ? 3900 : precision === 'fp16' ? 2200 : manifest.estimatedVramMB) +
+        (needsStructEnc ? 140 : 0);
+      const key = `dyna1:${precision}:${needsStructEnc ? 'struct' : 'seq'}`;
       if (!byKey.has(key)) {
         byKey.set(key, {
           key,
-          label: `Dyna-1 (${precision.toUpperCase()})`,
+          label: `Dyna-1 (${precision.toUpperCase()}${needsStructEnc ? ' + VQ-VAE' : ''})`,
           approxMB,
           estimatedVramMB,
           runtime: manifest.runtime,
+          plannedItems: 0,
+        });
+      }
+      addPlannedItems(key, nodeItems);
+      continue;
+    }
+
+    const PRECISION_WEIGHTS: Record<
+      string,
+      { int8: number; fp16: number; vramFp16?: number; nonCommercial?: boolean }
+    > = {
+      rfdiffusion: { int8: 69, fp16: 125, vramFp16: 650 },
+      boltzgen: { int8: 482, fp16: 950, vramFp16: 2200 },
+      'la-proteina': { int8: 295, fp16: 548, vramFp16: 1200 },
+      proteina: { int8: 193, fp16: 366, vramFp16: 900, nonCommercial: true },
+      'sid-protein': { int8: 193, fp16: 366, vramFp16: 900, nonCommercial: true },
+      genie2: { int8: 16, fp16: 31, vramFp16: 320 },
+      frameflow: { int8: 15, fp16: 26, vramFp16: 320 },
+      foldflow2: { int8: 644, fp16: 1340, vramFp16: 2400, nonCommercial: true },
+      evodiff: { int8: 40, fp16: 74, vramFp16: 380 },
+    };
+    const precSpec = PRECISION_WEIGHTS[node.adapterId];
+    if (precSpec) {
+      const precision = String(node.params.precision ?? (node.adapterId === 'genie2' ? 'fp16' : 'int8')).toLowerCase();
+      const isFp16 = precision === 'fp16';
+      const approxMB = isFp16 ? precSpec.fp16 : precSpec.int8;
+      const estimatedVramMB = isFp16 && precSpec.vramFp16 ? precSpec.vramFp16 : manifest.estimatedVramMB;
+      const key = `${manifest.id}:${isFp16 ? 'fp16' : 'int8'}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          key,
+          label: `${manifest.displayName} (${isFp16 ? 'FP16' : 'INT8'})`,
+          approxMB,
+          estimatedVramMB,
+          runtime: manifest.runtime,
+          ...(precSpec.nonCommercial ? { nonCommercial: true } : {}),
           plannedItems: 0,
         });
       }

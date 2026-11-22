@@ -85,6 +85,40 @@ function formatResidueId(chain: string, resNum: number, ins: string): string {
     : `${chain}${resNum}${ins}`;
 }
 
+function buildEsmcSequenceIds(
+  rawSeq: string,
+  chainLengths: readonly number[] | undefined,
+  cleanLen: number,
+): Int32Array | undefined {
+  // Derive per-chain lengths either from explicit ':'/'/' separators or from chainLengths metadata
+  const parts = rawSeq
+    .split(/[:/]+/)
+    .map((part) => part.replace(/[\s,-]+/g, '').toUpperCase())
+    .filter(Boolean);
+  let lens: number[] | null = null;
+  if (parts.length > 1 && parts.reduce((s, p) => s + p.length, 0) === cleanLen) {
+    lens = parts.map((p) => p.length);
+  } else if (
+    chainLengths &&
+    chainLengths.length > 1 &&
+    chainLengths.reduce((s, n) => s + n, 0) === cleanLen
+  ) {
+    lens = [...chainLengths];
+  }
+  if (!lens || lens.length <= 1) return undefined;
+  const ids = new Int32Array(cleanLen + 2);
+  ids[0] = 1; // BOS shares first chain ID
+  let offset = 1;
+  for (let c = 0; c < lens.length; c++) {
+    const cid = c + 1;
+    for (let k = 0; k < lens[c]; k++) {
+      ids[offset++] = cid;
+    }
+  }
+  ids[cleanLen + 1] = lens.length; // EOS shares last chain ID
+  return ids;
+}
+
 function cleanCanonicalSequence(raw: string, label: string): string {
   const seq = raw.replace(/[\s:/,-]+/g, '').toUpperCase();
   if (seq.length < 5 || seq.length > 1022) {
@@ -274,6 +308,7 @@ self.onmessage = async (ev: MessageEvent) => {
           const cand = sourceCandidates[i];
           const seq = cleanedSeqs[i];
           const positions = mode === 'fill' ? parseMaskPositions(maskPositionsRaw, seq.length) : undefined;
+          const sequenceIds = buildEsmcSequenceIds(cand.sequence, cand.chainLengths, seq.length);
 
           self.postMessage({
             id: msg.id,
@@ -286,6 +321,7 @@ self.onmessage = async (ev: MessageEvent) => {
           const res = await activeEngine.run(seq, {
             mode,
             ...(positions ? { positions } : {}),
+            ...(sequenceIds ? { sequenceIds } : {}),
             signal: controller.signal,
             onProgress: (prog: { loaded?: number; total?: number }) => {
               const frac = prog.total ? (prog.loaded ?? 0) / prog.total : 0.5;

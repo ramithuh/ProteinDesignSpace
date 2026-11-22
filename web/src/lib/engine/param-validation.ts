@@ -682,7 +682,10 @@ export function validateStructureText(raw: string): ValidationFeedback {
  * Validate node-level parameter values before running the workflow.
  * Returns human-readable error strings for hard blocking issues.
  */
-export function validateNodeParams(node: WorkflowNode): string[] {
+export function validateNodeParams(
+  node: WorkflowNode,
+  opts?: { connectedInputs?: Iterable<string> },
+): string[] {
   const errs: string[] = [];
   const label = node.label || node.adapterId;
   const p = node.params ?? {};
@@ -802,29 +805,11 @@ export function validateNodeParams(node: WorkflowNode): string[] {
     }
   }
 
-  if (node.adapterId === 'ligandmpnn' || node.adapterId === 'lasermpnn') {
+  if (node.adapterId === 'ligandmpnn') {
     if (typeof p.tiedPositions === 'string' && p.tiedPositions.trim()) {
       const tiedErr = validateTiedPositions(p.tiedPositions);
       if (tiedErr) {
         errs.push(`"${label}": ${tiedErr}`);
-      }
-    }
-    if (typeof p.omitAminoAcids === 'string' && p.omitAminoAcids.trim()) {
-      const compact = p.omitAminoAcids.trim().toUpperCase().replace(/[\s,;]+/g, '');
-      const badChars = new Set<string>();
-      const omittedCanonical = new Set<string>();
-      for (const ch of compact) {
-        if (VALID_AA_SET.has(ch)) omittedCanonical.add(ch);
-        else if (ch !== 'X') badChars.add(ch);
-      }
-      if (badChars.size > 0) {
-        errs.push(
-          `"${label}": omitAminoAcids contains invalid amino acid character(s): ${[...badChars].join(', ')} (use standard 1-letter AA codes e.g. C, M).`,
-        );
-      } else if (omittedCanonical.size >= VALID_AA_SET.size) {
-        errs.push(
-          `"${label}": omitAminoAcids excludes all 20 standard amino acids — leave at least 1 amino acid allowed for design.`,
-        );
       }
     }
   }
@@ -980,7 +965,12 @@ export function validateNodeParams(node: WorkflowNode): string[] {
       ? ADAPTER_REGISTRY[node.adapterId]
       : undefined;
     if (manifest && (manifest.paramSchema?.length || manifest.modes?.length)) {
-      errs.push(...validateParamsWithSchema(manifest, p, { label }));
+      errs.push(
+        ...validateParamsWithSchema(manifest, p, {
+          label,
+          ...(opts?.connectedInputs ? { connectedInputs: opts.connectedInputs } : {}),
+        }),
+      );
     }
   }
 

@@ -131,7 +131,10 @@ function buildLaserConstraints(
       insertionCode: sr.insCode ?? '',
     });
     const ap = atomPresence?.[i];
-    const complete = !hasAnyAtomPresence || !ap || (ap.hasN && ap.hasCA && ap.hasC && ap.hasO);
+    const complete =
+      !hasAnyAtomPresence ||
+      !ap ||
+      (ap.hasN && ap.hasCA && ap.hasC && (ap.hasO || ap.oReconstructed));
     if (complete) {
       completeBackboneKeys.add(`${ch}:${sr.resNum}${sr.insCode ?? ''}`);
       completeChainList.push(ch);
@@ -732,6 +735,7 @@ self.onmessage = async (ev: MessageEvent) => {
 
       const backboneById = new Map(collectionItems.map((b) => [b.id, b]));
       const allCandidates: SequenceCandidate[] = [];
+      const allPropagatedLocked = new Set<string>();
       const allPackedEntries: Array<{ score: number | null; structure: StructureArtifact }> = [];
       const totalPlanned = Math.max(1, fanoutPlan.totalPlannedSequences);
       let completedSeqs = 0;
@@ -753,6 +757,7 @@ self.onmessage = async (ev: MessageEvent) => {
           chainLengths,
           matchedUserFixedKeys,
         } = buildLaserConstraints(backbone, text, fixedPositionsSpec, unlockInherited);
+        for (const ch of propagatedLockedChains) allPropagatedLocked.add(ch);
         const backboneCandidates: SequenceCandidate[] = [];
         const backbonePacked: Array<{ score: number | null; structure: StructureArtifact }> = [];
 
@@ -892,9 +897,7 @@ self.onmessage = async (ev: MessageEvent) => {
         sourceStructureIds: collectionItems.map((b) => b.id),
         sourceModelId: 'lasermpnn',
         collectionKind: 'independent-candidates',
-        ...(!unlockInherited && structure.lockedChains && structure.lockedChains.length > 0
-          ? { lockedChains: [...structure.lockedChains] }
-          : {}),
+        ...(allPropagatedLocked.size > 0 ? { lockedChains: [...allPropagatedLocked] } : {}),
         ...(structure.chainRoles ? { chainRoles: { ...structure.chainRoles } } : {}),
         candidates: allCandidates,
       };

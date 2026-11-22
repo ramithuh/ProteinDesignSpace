@@ -51,6 +51,7 @@ const WAVE7A_SPECS = [
       'precision',
       'seed',
       'temperature',
+      'tiedPositions',
       'unlockInherited',
       'useLigandContext',
     ],

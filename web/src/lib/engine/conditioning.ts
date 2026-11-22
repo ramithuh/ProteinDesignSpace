@@ -2676,6 +2676,7 @@ export function resolveGenie3CompiledInput(
     );
   }
   if (
+    taskMode !== 'unconditional' &&
     (taskMode === 'motif' || taskMode === 'binder' || Boolean(inlineLock) || Boolean(inlineMotif)) &&
     !template?.cifText &&
     !template?.pdbText &&
@@ -2686,8 +2687,8 @@ export function resolveGenie3CompiledInput(
     );
   }
 
-  // Guard against non-protein/enzyme/DNA templates across ALL Genie 3 modes
-  if (template && (taskMode !== 'unconditional' || !condArtifact)) {
+  // Guard against non-protein/enzyme/DNA templates when conditioning on a template
+  if (template && taskMode !== 'unconditional') {
     if (template.benchmarkId) {
       const bench = getBenchmarkById(template.benchmarkId);
       if (bench && !bench.supportsGenie3) {
@@ -2707,8 +2708,13 @@ export function resolveGenie3CompiledInput(
     }
   }
 
-  let effectiveCond: ConditionSpecArtifact | undefined = condArtifact;
-  if (!effectiveCond && (taskMode === 'binder' || taskMode === 'motif' || inlineLock || inlineMotif)) {
+  let effectiveCond: ConditionSpecArtifact | undefined =
+    taskMode === 'unconditional' ? condArtifact : condArtifact;
+  if (
+    taskMode !== 'unconditional' &&
+    !effectiveCond &&
+    (taskMode === 'binder' || taskMode === 'motif' || inlineLock || inlineMotif)
+  ) {
     const isBinder = taskMode === 'binder' || Boolean(inlineLock);
     const defaultChain = (template?.chainIds?.[0] || 'A').toUpperCase();
     const resolvedLock = isBinder ? inlineLock || defaultChain : '';
@@ -2731,7 +2737,7 @@ export function resolveGenie3CompiledInput(
       specMode: true,
       summary: isBinder ? `binder vs ${resolvedLock}` : `motif ${inlineMotif}`,
     };
-  } else if (!effectiveCond && template) {
+  } else if (taskMode !== 'unconditional' && !effectiveCond && template) {
     effectiveCond = buildDefaultGenie3ConditionFromTemplate(template, length);
   }
 

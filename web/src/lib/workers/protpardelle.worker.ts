@@ -83,12 +83,42 @@ let ppInputsMod: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ppStructMod: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+let ppSamplerMod: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let engine: any = null;
 let loadedKey: string | null = null;
 let activeAbort: AbortController | null = null;
 
+function makeSeededReplay(seed: number) {
+  let state = (seed >>> 0) || 1;
+  const nextRand = () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const replay = new ppSamplerMod.Replay();
+  replay.take = (kind: string, size: number) => {
+    const out = new Float32Array(size);
+    if (kind === 'numpy_rand' || kind === 'categorical_uniform') {
+      for (let i = 0; i < size; i++) out[i] = nextRand();
+    } else {
+      for (let i = 0; i < size; i += 2) {
+        const u1 = Math.max(1e-15, nextRand());
+        const u2 = nextRand();
+        const radius = Math.sqrt(-2 * Math.log(u1));
+        const angle = 2 * Math.PI * u2;
+        out[i] = radius * Math.cos(angle);
+        if (i + 1 < size) out[i + 1] = radius * Math.sin(angle);
+      }
+    }
+    return out;
+  };
+  return replay;
+}
+
 async function ensureModules(id: number) {
-  if (ppWebgpuMod && ppInputsMod && ppStructMod) return;
+  if (ppWebgpuMod && ppInputsMod && ppStructMod && ppSamplerMod) return;
   self.postMessage({
     id,
     type: 'progress',
@@ -97,14 +127,16 @@ async function ensureModules(id: number) {
     detail: 'Loading ProtPardelle-1c WebGPU modules...',
   });
   const base = `${self.location.origin}/vendor/protpardelle`;
-  const [webgpuMod, inputsMod, structMod] = await Promise.all([
+  const [webgpuMod, inputsMod, structMod, samplerMod] = await Promise.all([
     import(/* @vite-ignore */ `${base}/webgpu/index.js`),
     import(/* @vite-ignore */ `${base}/shared/inputs.js`),
     import(/* @vite-ignore */ `${base}/shared/structure.js`),
+    import(/* @vite-ignore */ `${base}/shared/sampler.js`),
   ]);
   ppWebgpuMod = webgpuMod;
   ppInputsMod = inputsMod;
   ppStructMod = structMod;
+  ppSamplerMod = samplerMod;
 }
 
 async function ensureEngine(id: number, checkpoint: string, precision: Precision) {
@@ -295,6 +327,27 @@ self.onmessage = async (ev: MessageEvent) => {
         }),
       );
 
+      const effectiveStepsRun = taskMode === 'partial' ? Math.min(numSteps, rewindSteps) : numSteps;
+      const motifOneBased =
+        taskMode === 'motif' && targetIndices.length > 0
+          ? targetIndices.map((idx) => idx + 1)
+          : undefined;
+      let nativeMotifCoords: number[][] | undefined;
+      if (taskMode === 'motif' && upstreamStruct && sourceIndices.length > 0) {
+        const upCa = upstreamStruct.caCoords;
+        if (upCa && upCa.length >= upstreamStruct.length * 3) {
+          nativeMotifCoords = [];
+          for (let k = 0; k < sourceIndices.length; k++) {
+            const sIdx = sourceIndices[k];
+            nativeMotifCoords.push([
+              upCa[sIdx * 3] ?? 0,
+              upCa[sIdx * 3 + 1] ?? 0,
+              upCa[sIdx * 3 + 2] ?? 0,
+            ]);
+          }
+        }
+      }
+
       try {
         for (let d = 0; d < numDesigns; d++) {
           const sampleInput: Record<string, unknown> = {
@@ -303,6 +356,7 @@ self.onmessage = async (ev: MessageEvent) => {
             stepScale,
             temperature,
             sidechainMode,
+            replay: makeSeededReplay(seed + d),
             sChurn: taskMode === 'partial' ? 0 : Math.min(50, numSteps * 0.25),
             ...(sidechainMode ? { jumpSteps: true } : {}),
             ...(TIP_CHECKPOINTS.has(checkpoint) && taskMode === 'motif'
@@ -335,9 +389,28 @@ self.onmessage = async (ev: MessageEvent) => {
 
           const sampled = await activeEngine.sample(sampleInput, {
             signal: controller.signal,
-            onProgress: (prog: { step?: number; totalSteps?: number; loaded?: number; total?: number }) => {
-              const step = prog.step ?? 0;
-              const tot = prog.totalSteps ?? numSteps;
+            onProgress: (prog: {
+              phase?: string;
+              step?: number;
+              totalSteps?: number;
+              loaded?: number;
+              total?: number;
+            }) => {
+              const isWeights = prog.phase === 'weights';
+              if (isWeights) {
+                const mb = ((prog.loaded ?? 0) / 1024 / 1024).toFixed(1);
+                const totMb = prog.total ? ` / ${(prog.total / 1024 / 1024).toFixed(1)} MB` : ' MB';
+                self.postMessage({
+                  id: msg.id,
+                  type: 'progress',
+                  phase: 'weights',
+                  progress: 0.47,
+                  detail: `Loading MiniMPNN (${precision.toUpperCase()}): ${mb}${totMb}`,
+                });
+                return;
+              }
+              const step = prog.step ?? prog.loaded ?? 0;
+              const tot = prog.totalSteps ?? prog.total ?? effectiveStepsRun;
               const stepFrac = tot > 0 ? Math.min(1, step / tot) : 0;
               const overall = 0.48 + ((d + stepFrac) / numDesigns) * 0.5;
               self.postMessage({
@@ -345,14 +418,7 @@ self.onmessage = async (ev: MessageEvent) => {
                 type: 'progress',
                 phase: 'diffuse',
                 progress: Math.min(0.98, overall),
-                detail:
-                  prog.total && !prog.totalSteps
-                    ? `Loading MiniMPNN (${precision.toUpperCase()}): ${(
-                        (prog.loaded ?? 0) /
-                        1024 /
-                        1024
-                      ).toFixed(1)} MB`
-                    : `ProtPardelle design ${d + 1}/${numDesigns}: step ${step}/${tot}`,
+                detail: `ProtPardelle design ${d + 1}/${numDesigns}: step ${step}/${tot}`,
               });
             },
           });
@@ -390,6 +456,10 @@ self.onmessage = async (ev: MessageEvent) => {
             insCodes: parsed.insCodes,
             sourceResidues: parsed.sourceResidues,
             observedBackboneMask: parsed.observedBackboneMask,
+            atomGranularity: sidechainMode ? 'all-atom' : 'backbone4',
+            bfactorSemantics: 'none',
+            ...(motifOneBased ? { fixedResidueIndices: motifOneBased, motifIndices: motifOneBased } : {}),
+            ...(nativeMotifCoords ? { nativeMotifCoords: nativeMotifCoords.map((c) => [...c]) } : {}),
             diagnostics: parsed.diagnostics,
             geometry,
             designKey,
@@ -398,7 +468,7 @@ self.onmessage = async (ev: MessageEvent) => {
             provenance: {
               quantization: precision,
               diffusionStepsScheduled: numSteps,
-              diffusionStepsRun: numSteps,
+              diffusionStepsRun: effectiveStepsRun,
             },
           };
           items.push(artifact);

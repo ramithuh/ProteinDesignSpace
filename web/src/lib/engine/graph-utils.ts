@@ -479,7 +479,13 @@ export function validateGraph(graph: WorkflowGraph, { requireRunnable = true } =
         );
       }
     }
-    errors.push(...validateNodeParams(node));
+    const connectedInputs = new Set<string>();
+    for (const portName of Object.keys(manifest.inputs)) {
+      if (validConnectedTargets.has(`${node.id}:${portName}`)) {
+        connectedInputs.add(portName);
+      }
+    }
+    errors.push(...validateNodeParams(node, { connectedInputs }));
   }
 
   // Cycle detection via Kahn's topological sort

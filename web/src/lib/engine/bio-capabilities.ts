@@ -1076,7 +1076,7 @@ function inferNodeOutputProfile(
       ...(isBinderTask ? { hasLockedTarget: true } : {}),
     };
   } else if (node.adapterId === 'rfdiffusion') {
-    const mode = String(node.params.mode ?? 'unconditional');
+    const mode = String(node.params.taskMode ?? node.params.mode ?? 'unconditional');
     const contig = String(node.params.contig ?? '').trim();
     const rawLen = Number(node.params.length ?? 100);
     const baseLen = Number.isFinite(rawLen) && rawLen > 0 ? rawLen : 100;
@@ -1089,7 +1089,8 @@ function inferNodeOutputProfile(
       const dMatch = /^d(\d+)$/.exec(sym);
       const copies = cMatch ? Number(cMatch[1]) : dMatch ? Number(dMatch[1]) * 2 : 3;
       chainCount = Math.max(2, copies);
-      estimatedTokens = baseLen * chainCount;
+      // RFdiffusion's `length` parameter is total oligomer length across all symmetric subunits
+      estimatedTokens = baseLen;
     } else if (mode === 'motif' || mode === 'binder' || contig.length > 0) {
       const metrics = estimateContigProteinMetrics({
         contig,
@@ -1114,11 +1115,16 @@ function inferNodeOutputProfile(
     const rawLen = Number(node.params.length ?? 80);
     const baseLen = Number.isFinite(rawLen) && rawLen > 0 ? rawLen : 80;
     if (taskMode === 'partial' && tpl) {
+      const strippedNonProtein = new Set<BioEntityKind>(tpl.strippedNonProtein ?? []);
+      for (const e of tpl.entities) {
+        if (e !== 'protein') strippedNonProtein.add(e);
+      }
       profile = {
-        entities: new Set<BioEntityKind>(tpl.entities),
+        entities: new Set<BioEntityKind>(['protein']),
         stoichiometry: tpl.stoichiometry,
         chainCount: tpl.chainCount,
         estimatedTokens: tpl.estimatedTokens,
+        ...(strippedNonProtein.size > 0 ? { strippedNonProtein: [...strippedNonProtein] } : {}),
       };
     } else if (taskMode === 'motif') {
       const motifSelection = String(node.params.motifSelection ?? node.params.motifSpan ?? '').trim();
@@ -1154,18 +1160,14 @@ function inferNodeOutputProfile(
         hasLockedTarget: true,
       };
     } else if (taskMode === 'motif') {
-      const motifSpan = String(node.params.motifSpan ?? node.params.contig ?? '').trim();
-      const metrics = estimateContigProteinMetrics({
-        contig: '',
-        motifSpan,
-        unindexedMotif: false,
-        length: baseLen,
-      });
+      const rawOff = Number(node.params.motifOffset ?? 10);
+      const motifOffset = Number.isFinite(rawOff) && rawOff >= 0 ? rawOff : 10;
+      const estimatedTokens = tpl ? Math.max(baseLen, tpl.estimatedTokens + motifOffset + 4) : baseLen;
       profile = {
         entities: new Set<BioEntityKind>(['protein']),
-        stoichiometry: metrics.proteinChains > 1 ? 'multimer' : 'monomer',
-        chainCount: metrics.proteinChains,
-        estimatedTokens: metrics.proteinTokens,
+        stoichiometry: 'monomer',
+        chainCount: 1,
+        estimatedTokens,
       };
     } else {
       profile = {

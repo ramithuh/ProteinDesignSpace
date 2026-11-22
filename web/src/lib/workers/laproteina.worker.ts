@@ -210,21 +210,30 @@ self.onmessage = async (ev: MessageEvent) => {
           seed: designSeed,
           mode,
           signal: abortCtrl.signal,
-          onProgress: (info: { step?: number; steps?: number; phase?: string }) => {
-            const step = info.step ?? 0;
-            const totalSteps = info.steps ?? steps;
+          onProgress: (info: {
+            step?: number;
+            steps?: number;
+            layer?: number;
+            total?: number;
+            phase?: string;
+          }) => {
+            const isAe1 = info.phase === 'ae1' || info.phase === 'decode';
+            const step = isAe1 ? (info.layer ?? info.step ?? 0) : (info.step ?? 0);
+            const totalSteps = isAe1
+              ? (info.total ?? info.steps ?? 12)
+              : (info.steps ?? info.total ?? steps);
             const frac = totalSteps > 0 ? Math.min(1, step / totalSteps) : 0.5;
+            const scaledFrac = isAe1 ? 0.9 + frac * 0.1 : frac * 0.9;
             self.postMessage({
               id: msg.id,
               type: 'progress',
               phase: 'sample',
-              progress: progressBase + frac * progressSpan,
-              detail:
-                info.phase === 'decode'
-                  ? `La-Proteina AE1 all-atom decoding (${length} aa)...`
-                  : numDesigns > 1
-                    ? `La-Proteina ${d + 1}/${numDesigns} · step ${step}/${totalSteps}`
-                    : `La-Proteina LD1 · step ${step}/${totalSteps} (${mode.toUpperCase()})`,
+              progress: progressBase + scaledFrac * progressSpan,
+              detail: isAe1
+                ? `La-Proteina AE1 decode · layer ${step}/${totalSteps} (${length} aa)`
+                : numDesigns > 1
+                  ? `La-Proteina ${d + 1}/${numDesigns} · step ${step}/${totalSteps}`
+                  : `La-Proteina LD1 · step ${step}/${totalSteps} (${mode.toUpperCase()})`,
             });
           },
         });
@@ -236,7 +245,7 @@ self.onmessage = async (ev: MessageEvent) => {
         const sequence = String(res.sequence ?? parsed.sequence ?? '');
 
         const runHash = fnv1a(JSON.stringify({ length, steps, mode, seed: designSeed, precision }));
-        const uniqueChains = [...new Set(parsed.chainIds)];
+        const resolvedLen = parsed.nResidues || length;
         const artifact: StructureArtifact = {
           kind: 'StructureArtifact',
           id: `laproteina-${length}aa-s${designSeed}-${runHash}`,
@@ -246,12 +255,17 @@ self.onmessage = async (ev: MessageEvent) => {
               : `La-Proteina (${length} aa, ${steps} steps)`,
           sourceModelId: `la-proteina/${precision}`,
           pdbText,
-          length: parsed.nResidues || length,
-          chainIds: uniqueChains.length > 0 ? uniqueChains : ['A'],
+          length: resolvedLen,
+          chainIds:
+            parsed.chainIds.length === resolvedLen
+              ? parsed.chainIds
+              : Array<string>(resolvedLen).fill('A'),
+          chainLengths: parsed.diagnostics.chainLengths,
           sequence,
           caCoords: parsed.caCoords,
           backbone4Coords: parsed.backbone4Coords,
           atomGranularity: 'all-atom',
+          bfactorSemantics: 'none',
           atomPresence: parsed.atomPresence,
           diagnostics: parsed.diagnostics,
           geometry: geom,

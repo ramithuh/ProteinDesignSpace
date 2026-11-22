@@ -2099,6 +2099,16 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Residues or whole chains held fixed during ligand-aware sequence design.',
       },
       {
+        key: 'tiedPositions',
+        label: 'Tied positions',
+        kind: 'text',
+        tier: 'advanced',
+        studioRole: 'tied',
+        defaultValue: '',
+        placeholder: 'e.g. A10=B10, A12=B12',
+        description: 'Symmetry-tied residue groups decoded jointly to share the same amino acid.',
+      },
+      {
         key: 'omitAminoAcids',
         label: 'Omit amino acids',
         kind: 'aa-set',
@@ -2738,7 +2748,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     },
     outputs: {
       track: { type: 'ResidueTrack' },
-      structure: { type: 'StructureArtifact' },
+      structure: { type: 'StructureArtifact', required: false },
       sequences: { type: 'SequenceSet' },
     },
     paramSchema: [

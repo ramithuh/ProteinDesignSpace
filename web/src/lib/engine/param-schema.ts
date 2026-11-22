@@ -32,7 +32,7 @@ const VALID_AA_CHAR_RE = /^[ACDEFGHIKLMNPQRSTVWYX]$/i;
 function isValidSchemaResidueToken(token: string): boolean {
   const t = token.trim();
   if (!t) return false;
-  if (/^[A-Za-z_]$/.test(t)) return true;
+  if (/^[A-Za-z_][A-Za-z0-9_]{0,3}$/.test(t) && !/^\d+$/.test(t)) return true;
   const colonM = /^([A-Za-z0-9_]+):(-?\d+)([A-Z])?(?:-(-?\d+)([A-Z])?)?$/.exec(t);
   const bareM = !colonM
     ? /^([A-Za-z_])?(-?\d+)([A-Z])?(?:-([A-Za-z_])?(-?\d+)([A-Z])?)?$/.exec(t)
@@ -267,12 +267,18 @@ export function validateParamsWithSchema(
       const str = String(raw ?? '').trim();
       if (str) {
         const badChars = new Set<string>();
-        for (const ch of str.replace(/[\s,;]+/g, '')) {
+        const canonicalSeen = new Set<string>();
+        for (const ch of str.replace(/[\s,;]+/g, '').toUpperCase()) {
           if (!VALID_AA_CHAR_RE.test(ch)) badChars.add(ch);
+          else if (ch !== 'X') canonicalSeen.add(ch);
         }
         if (badChars.size > 0) {
           errs.push(
             `"${label}": ${field.key} contains invalid amino acid character(s): ${[...badChars].join(', ')} (use standard 1-letter AA codes e.g. C, M).`,
+          );
+        } else if (canonicalSeen.size >= 20) {
+          errs.push(
+            `"${label}": ${field.key} excludes all 20 standard amino acids — leave at least 1 amino acid allowed for design.`,
           );
         }
       }

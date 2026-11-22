@@ -232,7 +232,8 @@ function buildOptionalMotifs(
     coords[k * 3] = parsed.caCoords[idx * 3] - cx;
     coords[k * 3 + 1] = parsed.caCoords[idx * 3 + 1] - cy;
     coords[k * 3 + 2] = parsed.caCoords[idx * 3 + 2] - cz;
-    seq += parsed.sequence[idx] || 'A';
+    const rawAa = (parsed.sequence[idx] || 'A').toUpperCase();
+    seq += /^[ACDEFGHIKLMNPQRSTVWY]$/.test(rawAa) ? rawAa : 'A';
     motifIndices.push(startOffset + k);
     fixedResidueIndices.push(startOffset + k + 1);
   }
@@ -327,7 +328,7 @@ self.onmessage = async (ev: MessageEvent) => {
         const runHash = fnv1a(
           JSON.stringify({ length, steps, scale, seed: designSeed, precision, motifRange }),
         );
-        const uniqueChains = [...new Set(parsed.chainIds)];
+        const resolvedLen = parsed.nResidues || length;
         items.push({
           kind: 'StructureArtifact',
           id: `genie2-${length}aa-s${designSeed}-${runHash}`,
@@ -337,8 +338,12 @@ self.onmessage = async (ev: MessageEvent) => {
               : `Genie 2 (${length} aa, ${steps} steps)`,
           sourceModelId: `genie2/${precision}`,
           pdbText,
-          length: parsed.nResidues || length,
-          chainIds: uniqueChains.length > 0 ? uniqueChains : ['A'],
+          length: resolvedLen,
+          chainIds:
+            parsed.chainIds.length === resolvedLen
+              ? parsed.chainIds
+              : Array<string>(resolvedLen).fill('A'),
+          chainLengths: parsed.diagnostics.chainLengths,
           sequence: parsed.sequence,
           caCoords: parsed.caCoords,
           backbone4Coords: parsed.backbone4Coords,

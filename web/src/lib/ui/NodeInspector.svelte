@@ -1593,7 +1593,21 @@
         <select
           {disabled}
           value={g3Mode}
-          onchange={(e) => setParam('taskMode', e.currentTarget.value)}
+          onchange={(e) => {
+            const nextMode = e.currentTarget.value;
+            if (nextMode === 'unconditional') {
+              onUpdate(node.id, {
+                ...node.params,
+                taskMode: nextMode,
+                lockChain: '',
+                motifSpan: '',
+                hotspots: '',
+                contig: '',
+              });
+              return;
+            }
+            setParam('taskMode', nextMode);
+          }}
         >
           <option value="unconditional">Unconditional Monomer</option>
           <option value="motif">Motif Scaffolding (fixed residues)</option>
@@ -1627,6 +1641,16 @@
           />
         </label>
       {:else if g3Mode === 'motif'}
+        <label>
+          Scaffold Length (aa)
+          <NumericInput
+            {disabled}
+            ariaLabel="Scaffold Length (aa)"
+            spec={NUMERIC_SPECS.genie3.length}
+            value={Number(node.params.length ?? 80)}
+            onChange={(v) => setParam('length', v)}
+          />
+        </label>
         <div class="chip-field full">
           <label>
             Fixed Motif Spans (click 3D residues or enter e.g. A16-35, A52-71)
@@ -1915,8 +1939,10 @@
         {#if fixedTokens.length > 0}
           <div class="res-chips">
             {#each fixedTokens as tok, i (`fix_${tok}_${i}`)}
-              {@const badTok = !isValidResidueToken(tok)}
-              <span class="res-chip" class:invalid-chip={badTok} title={badTok ? 'Expected format like A10 or A12-15' : undefined}>
+              {@const badTok =
+                !isValidResidueToken(tok) &&
+                !(/^[A-Za-z_][A-Za-z0-9_]{0,3}$/.test(tok) && !/^\d+$/.test(tok))}
+              <span class="res-chip" class:invalid-chip={badTok} title={badTok ? 'Expected format like A, A10, or A12-15' : undefined}>
                 {tok}
                 <button
                   type="button"

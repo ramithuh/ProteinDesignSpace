@@ -12,6 +12,8 @@ export function normalizeDyna1InputMode(raw: unknown): Dyna1InputModeParam {
 export interface ExtractedDyna1Backbone {
   /** Flat Float32Array(L * 9) in [N, CA, C] × [x, y, z] Å order; NaN for missing atoms. */
   coords: Float32Array;
+  /** Per-residue integer indices preserving gaps and chain-break jumps (+32 across chains). */
+  residueIndex: Int32Array;
   /** Number of residues where N, CA, and C are all observed and finite. */
   validResidueCount: number;
   length: number;
@@ -24,7 +26,12 @@ export interface ExtractedDyna1Backbone {
  * so ESM-3's local-frame mask handles them identically to upstream `ProteinChain`.
  */
 export function extractDyna1Backbone3Coords(
-  struct: Pick<StructureArtifact, 'length' | 'backbone4Coords' | 'atomPresence' | 'atomGranularity'> | undefined,
+  struct:
+    | Pick<
+        StructureArtifact,
+        'length' | 'backbone4Coords' | 'atomPresence' | 'atomGranularity' | 'sourceResidues' | 'chainIds'
+      >
+    | undefined,
 ): ExtractedDyna1Backbone | null {
   if (!struct || struct.length < 1) return null;
   if (struct.atomGranularity === 'ca-only') return null;
@@ -101,7 +108,30 @@ export function extractDyna1Backbone3Coords(
     }
   }
 
-  return { coords, validResidueCount, length: L };
+  const residueIndex = new Int32Array(L);
+  const srcRes = struct.sourceResidues && struct.sourceResidues.length === L ? struct.sourceResidues : null;
+  const chIds = struct.chainIds && struct.chainIds.length === L ? struct.chainIds : null;
+  let runningIdx = 0;
+  let prevChain: string | null = null;
+  let prevResNum: number | null = null;
+  for (let r = 0; r < L; r++) {
+    const curChain = srcRes ? srcRes[r].authChainId : chIds ? chIds[r] : 'A';
+    const curResNum = srcRes ? srcRes[r].resNum : r + 1;
+    if (r === 0) {
+      runningIdx = 0;
+    } else if (curChain !== prevChain) {
+      runningIdx += 32;
+    } else if (prevResNum !== null && curResNum > prevResNum) {
+      runningIdx += Math.min(32, curResNum - prevResNum);
+    } else {
+      runningIdx += 1;
+    }
+    residueIndex[r] = runningIdx;
+    prevChain = curChain;
+    prevResNum = curResNum;
+  }
+
+  return { coords, residueIndex, validResidueCount, length: L };
 }
 
 /**
