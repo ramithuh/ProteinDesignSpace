@@ -204,6 +204,8 @@ describe('engine/catalog & biologist terminology', () => {
     const evalCat = CATALOG_CATEGORIES.find((c) => c.id === 'evaluation')!;
     expect(evalCat.subGroups.flatMap((g) => g.items).map((i) => i.key)).toEqual([
       'thermompnn',
+      'esmc',
+      'dyna1',
       'top-k-filter',
       'designability-scorer',
     ]);

@@ -1028,11 +1028,13 @@ self.onmessage = async (ev: MessageEvent) => {
           }
           let sumPlddt = 0;
           for (let k = 0; k < plddt.length; k++) sumPlddt += plddt[k];
+          // Keep meanPlddt mathematically consistent with the per-residue protein plddt array
+          // (upstream AF3/RF3 result.meanPlddt averages over ligand atoms too, which caused mean < min(range)).
           const meanPlddt =
-            typeof result.meanPlddt === 'number' && Number.isFinite(result.meanPlddt)
-              ? result.meanPlddt
-              : plddt.length
-                ? sumPlddt / plddt.length
+            plddt.length > 0 && sumPlddt > 0
+              ? sumPlddt / plddt.length
+              : typeof result.meanPlddt === 'number' && Number.isFinite(result.meanPlddt)
+                ? result.meanPlddt
                 : 0;
 
           const paeRaw = result.scores?.pae as Float32Array | undefined;
@@ -1057,7 +1059,19 @@ self.onmessage = async (ev: MessageEvent) => {
             1,
           );
 
-          const ipsaeRes = computeCandidateIpsae(paeRaw, chainLengths, chainIds);
+          // For AF3/RF3 protein+ligand/nucleic complexes, PAE is (L_protein + N_nonpoly)^2;
+          // append the non-polymer token span so interface PAE & ipSAE compute across protein<->ligand.
+          let ipsaeChainLengths = chainLengths;
+          let ipsaeChainIds = chainIds;
+          if (paeRaw && paeRaw.length > cleanSeq.length * cleanSeq.length) {
+            const paeDim = Math.round(Math.sqrt(paeRaw.length));
+            if (paeDim * paeDim === paeRaw.length && paeDim > cleanSeq.length) {
+              const extraTokens = paeDim - cleanSeq.length;
+              ipsaeChainLengths = [...chainLengths, extraTokens];
+              ipsaeChainIds = [...chainIds, ...Array<string>(extraTokens).fill('LIG')];
+            }
+          }
+          const ipsaeRes = computeCandidateIpsae(paeRaw, ipsaeChainLengths, ipsaeChainIds);
 
           folds.push({
             sequenceId: cand.id,

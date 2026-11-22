@@ -4,6 +4,7 @@
 // and paints per-residue stability aggregates onto the 3D structure B-factors.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { isWebGpuDeviceLostError } from '$lib/engine/webgpu-device';
 import { paintStructureBfactors } from '$lib/protein-ops/bfactor-paint';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type { MutationMatrixArtifact, StructureArtifact } from '$lib/engine/types';
@@ -148,11 +149,20 @@ function aggregateRow(
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let thermoMod: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let thermoCpuMod: any = null;
 let engine: ThermoEngine | null = null;
 let loadedPrecision: Precision | null = null;
+let loadedBackend: 'webgpu' | 'cpu' | null = null;
 
-async function ensureEngine(id: number, precision: Precision): Promise<ThermoEngine> {
-  if (engine && loadedPrecision === precision) return engine;
+async function ensureEngine(
+  id: number,
+  precision: Precision,
+  forceCpu = false,
+): Promise<{ engine: ThermoEngine; backend: 'webgpu' | 'cpu' }> {
+  if (engine && loadedPrecision === precision && (!forceCpu || loadedBackend === 'cpu')) {
+    return { engine, backend: loadedBackend ?? 'webgpu' };
+  }
 
   if (engine) {
     try {
@@ -162,24 +172,16 @@ async function ensureEngine(id: number, precision: Precision): Promise<ThermoEng
     }
     engine = null;
     loadedPrecision = null;
-  }
-
-  if (!thermoMod) {
-    self.postMessage({
-      id,
-      type: 'progress',
-      phase: 'init',
-      progress: 0.02,
-      detail: 'Loading ThermoMPNN WebGPU modules...',
-    });
-    const moduleUrl = new URL('/vendor/thermompnn/webgpu/index.js?v=2', self.location.origin).href;
-    thermoMod = await import(/* @vite-ignore */ moduleUrl);
+    loadedBackend = null;
   }
 
   const envBaseUrl = (import.meta.env.VITE_THERMOMPNN_WEIGHTS_URL as string | undefined)?.trim();
   const baseUrl = envBaseUrl || DEFAULT_BASE_URL;
 
-  const loadOnce = async (retried: boolean): Promise<ThermoEngine> => {
+  const loadWithBackend = async (
+    backend: 'webgpu' | 'cpu',
+    retried: boolean,
+  ): Promise<ThermoEngine> => {
     const fetchedUrls: string[] = [];
     let anyFromCache = false;
     const cachedFetch = makeCachedFetch((u, fromCache) => {
@@ -187,19 +189,49 @@ async function ensureEngine(id: number, precision: Precision): Promise<ThermoEng
       if (fromCache) anyFromCache = true;
     });
 
+    if (backend === 'webgpu') {
+      if (!thermoMod) {
+        self.postMessage({
+          id,
+          type: 'progress',
+          phase: 'init',
+          progress: 0.02,
+          detail: 'Loading ThermoMPNN WebGPU modules...',
+        });
+        const moduleUrl = new URL('/vendor/thermompnn/webgpu/index.js?v=3', self.location.origin).href;
+        thermoMod = await import(/* @vite-ignore */ moduleUrl);
+      }
+    } else if (!thermoCpuMod) {
+      self.postMessage({
+        id,
+        type: 'progress',
+        phase: 'init',
+        progress: 0.02,
+        detail: 'WebGPU unavailable — loading ThermoMPNN CPU fallback...',
+      });
+      const cpuUrl = new URL('/vendor/thermompnn/cpu/index.js?v=1', self.location.origin).href;
+      thermoCpuMod = await import(/* @vite-ignore */ cpuUrl);
+    }
+
+    const backendTag = backend === 'cpu' ? ' · CPU fallback' : '';
     self.postMessage({
       id,
       type: 'progress',
       phase: 'weights',
       progress: 0.06,
-      detail: `Fetching ThermoMPNN (${precision.toUpperCase()}) weights...`,
+      detail: `Fetching ThermoMPNN (${precision.toUpperCase()}${backendTag}) weights...`,
     });
 
     try {
-      return (await thermoMod.createThermoMPNNEngine({
+      const factory =
+        backend === 'webgpu'
+          ? thermoMod.createThermoMPNNEngine
+          : thermoCpuMod.createThermoMPNNCPU;
+      return (await factory({
         baseUrl,
         precision,
         cache: 'none',
+        allowSoftwareFallback: true,
         read: async (url: string): Promise<ArrayBuffer> => {
           const resp = await cachedFetch(url);
           if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${url}`);
@@ -216,7 +248,7 @@ async function ensureEngine(id: number, precision: Precision): Promise<ThermoEng
             type: 'progress',
             phase: 'weights',
             progress: Math.min(0.92, 0.08 + frac * 0.84),
-            detail: `ThermoMPNN weights (${precision.toUpperCase()}): ${mb} / ${totMb} MB`,
+            detail: `ThermoMPNN weights (${precision.toUpperCase()}${backendTag}): ${mb} / ${totMb} MB`,
           });
         },
       })) as ThermoEngine;
@@ -229,15 +261,31 @@ async function ensureEngine(id: number, precision: Precision): Promise<ThermoEng
         /integrity|sha-?256|manifest|mismatch/i.test(errMsg)
       ) {
         await evictCachedUrls(fetchedUrls);
-        return await loadOnce(true);
+        return await loadWithBackend(backend, true);
       }
       throw err;
     }
   };
 
-  engine = await loadOnce(false);
+  if (!forceCpu && typeof navigator !== 'undefined' && 'gpu' in navigator && navigator.gpu) {
+    try {
+      engine = await loadWithBackend('webgpu', false);
+      loadedPrecision = precision;
+      loadedBackend = 'webgpu';
+      return { engine, backend: 'webgpu' };
+    } catch (gpuErr) {
+      const msg = gpuErr instanceof Error ? gpuErr.message : String(gpuErr);
+      if (/HTTP \d+|fetch|network|integrity|sha-?256|manifest/i.test(msg)) {
+        throw gpuErr;
+      }
+      // Fall through cleanly to pure-JS CPU fallback when WebGPU adapter/device fails
+    }
+  }
+
+  engine = await loadWithBackend('cpu', false);
   loadedPrecision = precision;
-  return engine;
+  loadedBackend = 'cpu';
+  return { engine, backend: 'cpu' };
 }
 
 self.onmessage = async (ev: MessageEvent) => {
@@ -251,6 +299,7 @@ self.onmessage = async (ev: MessageEvent) => {
       }
       engine = null;
       loadedPrecision = null;
+      loadedBackend = null;
       self.postMessage({ id: msg.id, type: 'disposed' });
       return;
     }
@@ -275,19 +324,32 @@ self.onmessage = async (ev: MessageEvent) => {
           : undefined;
       const chains = parseChainFilter(chainSpec, availableChains);
 
-      const activeEngine = await ensureEngine(msg.id, precision);
+      let { engine: activeEngine, backend } = await ensureEngine(msg.id, precision);
 
-      self.postMessage({
-        id: msg.id,
-        type: 'progress',
-        phase: 'score',
-        progress: 0.94,
-        detail: `Running ThermoMPNN ΔΔG scan (${precision.toUpperCase()}${chains ? `, chain ${chains.join(',')}` : ''})...`,
-      });
+      const runPredict = async (eng: ThermoEngine, bk: 'webgpu' | 'cpu') => {
+        self.postMessage({
+          id: msg.id,
+          type: 'progress',
+          phase: 'score',
+          progress: 0.94,
+          detail: `Running ThermoMPNN ΔΔG scan (${precision.toUpperCase()}${bk === 'cpu' ? ', CPU fallback' : ''}${chains ? `, chain ${chains.join(',')}` : ''})...`,
+        });
+        return await eng.predict(structureText, {
+          ...(chains ? { chains } : {}),
+        });
+      };
 
-      const res = await activeEngine.predict(structureText, {
-        ...(chains ? { chains } : {}),
-      });
+      let res: ThermoPredictResult;
+      try {
+        res = await runPredict(activeEngine, backend);
+      } catch (predictErr) {
+        if (backend === 'webgpu' && isWebGpuDeviceLostError(predictErr)) {
+          ({ engine: activeEngine, backend } = await ensureEngine(msg.id, precision, true));
+          res = await runPredict(activeEngine, backend);
+        } else {
+          throw predictErr;
+        }
+      }
 
       const alphabet = (res.alphabet || 'ACDEFGHIKLMNPQRSTVWY').slice(0, 20).toUpperCase();
       const K = alphabet.length;

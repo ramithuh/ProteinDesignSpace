@@ -552,6 +552,7 @@
     const polymerResidues = sData?.polymerResidueCount ?? 0;
     const isSparseTheozyme = polymerResidues > 0 && polymerResidues <= 15;
     if (opts.includeLigands) {
+      let renderedAnyLigand = false;
       try {
         const ligComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ligand');
         if (ligComp) {
@@ -561,9 +562,50 @@
           });
           if (ligRepr?.ref) refs.push(ligRepr.ref);
           else if (ligComp.ref) refs.push(ligComp.ref);
+          renderedAnyLigand = true;
         }
       } catch {
         /* ignore if no ligand component */
+      }
+      // Also render non-standard / branched / amino-acid-like non-polymer HETATM cofactors
+      // (e.g. SAM from RF3/Boltz-2/AF3) that Mol*'s static 'ligand' preset can omit.
+      try {
+        const nonStdComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'non-standard');
+        if (nonStdComp) {
+          const nonStdRepr = await ctx.builders.structure.representation.addRepresentation(nonStdComp, {
+            type: 'ball-and-stick',
+            color: 'element-symbol',
+          });
+          if (nonStdRepr?.ref) refs.push(nonStdRepr.ref);
+          else if (nonStdComp.ref) refs.push(nonStdComp.ref);
+          renderedAnyLigand = true;
+        }
+      } catch {
+        /* ignore if no non-standard component */
+      }
+      if (!renderedAnyLigand) {
+        try {
+          const { MolScriptBuilder: MS } = await import('molstar/lib/mol-script/language/builder');
+          const nonPolyExpr = MS.struct.generator.atomGroups({
+            'entity-test': MS.core.rel.eq([MS.ammp('entityType'), 'non-polymer']),
+          });
+          const nonPolyComp = await ctx.builders.structure.tryCreateComponentFromExpression(
+            struct,
+            nonPolyExpr,
+            'non-polymer-ligands',
+            { label: 'Non-Polymer Ligands' },
+          );
+          if (nonPolyComp) {
+            const npRepr = await ctx.builders.structure.representation.addRepresentation(nonPolyComp, {
+              type: 'ball-and-stick',
+              color: 'element-symbol',
+            });
+            if (npRepr?.ref) refs.push(npRepr.ref);
+            else if (nonPolyComp.ref) refs.push(nonPolyComp.ref);
+          }
+        } catch {
+          /* ignore if MolScript non-polymer query unavailable */
+        }
       }
       try {
         const ionComp = await ctx.builders.structure.tryCreateComponentStatic(struct, 'ion');

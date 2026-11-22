@@ -3,16 +3,16 @@ import { parseStructure } from "../shared/structure.js";
 import { prepareInput, resultFrom } from "../shared/results.js";
 import { executeGraph } from "../shared/graph.js";
 import { GPUOps } from "./ops.js?v=2";
-export function assertHardware(adapter) {
+export function assertHardware(adapter, allowSoftwareFallback = true) {
   if (!adapter) throw new Error("Hardware WebGPU adapter is required");
   const info = adapter.info ?? adapter.adapterInfo ?? {};
-  if (
+  const isSoftware =
     adapter.isFallbackAdapter ||
     info.isFallbackAdapter ||
     /swiftshader|llvmpipe|lavapipe|software|\bwarp\b|basic render/i.test(
       [info.vendor, info.architecture, info.device, info.description].join(" "),
-    )
-  )
+    );
+  if (isSoftware && !allowSoftwareFallback)
     throw new Error("Software WebGPU adapters are not supported");
   return info;
 }
@@ -24,6 +24,7 @@ export async function createThermoMPNNEngine(options = {}) {
     signal,
     onProgress,
     read,
+    allowSoftwareFallback = true,
   } = options;
   checkAbort(signal);
   let device = options.device,
@@ -31,10 +32,11 @@ export async function createThermoMPNNEngine(options = {}) {
   if (!device) {
     if (!globalThis.navigator?.gpu)
       throw new Error("Hardware WebGPU is unavailable");
-    const adapter = await navigator.gpu.requestAdapter({
-      powerPreference: "high-performance",
-    });
-    assertHardware(adapter);
+    const adapter =
+      (await navigator.gpu.requestAdapter({
+        powerPreference: "high-performance",
+      })) ?? (await navigator.gpu.requestAdapter());
+    assertHardware(adapter, allowSoftwareFallback);
     const features =
       options.useF16 && adapter.features.has("shader-f16")
         ? ["shader-f16"]
@@ -46,7 +48,7 @@ export async function createThermoMPNNEngine(options = {}) {
         maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
       },
     });
-  } else assertHardware(device);
+  } else assertHardware(device, allowSoftwareFallback);
   const owned = new Map(),
     pipelines = new Map(),
     modules = new Map(),

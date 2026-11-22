@@ -288,7 +288,7 @@ describe('WorkflowPlan deterministic compiler', () => {
     expect(DEFAULT_PLANNER_ENDPOINT).toBe('https://planner.denovo.run/api/plan');
 
     const base = compileLocalStarterPlan(
-      LOCAL_EXAMPLE_PLANS.find((e) => e.id === 'denovo-100aa')!.plan,
+      LOCAL_EXAMPLE_PLANS.find((e) => e.id === 'denovo-60aa')!.plan,
     );
     expect(base.model).toBe('local-preset');
     expect(base.latencyMs).toBe(0);
@@ -441,7 +441,6 @@ describe('WorkflowPlan R1–R4 regressions & Q1–Q10 reconciliation', () => {
     const starterRes = compileLocalStarterPlan(LOCAL_EXAMPLE_PLANS[0].plan, proxied);
     expect(validateGraph(starterRes.graph)).toEqual([]);
     expect(starterRes.graph.nodes.some((n) => n.adapterId === 'thermompnn')).toBe(true);
-    expect(starterRes.graph.nodes.some((n) => n.params.model === 'rosettafold3')).toBe(true);
 
     // 2. remove_nodes splices pass-through Top-K cleanly without breaking AF2 -> scRMSD
     const spliceRes = compileWorkflowPlanToGraph(

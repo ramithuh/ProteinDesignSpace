@@ -16,21 +16,22 @@ import {
   summarySource,
 } from "./shaders.js";
 
-export async function requestWebGpuDevice({ useF16 = true } = {}) {
+export async function requestWebGpuDevice({ useF16 = true, allowSoftwareFallback = true } = {}) {
   if (!globalThis.navigator?.gpu)
     throw new Error(
       "WebGPU requires a supported browser and HTTPS or localhost",
     );
-  const adapter = await navigator.gpu.requestAdapter({
-    powerPreference: "high-performance",
-  });
+  const adapter =
+    (await navigator.gpu.requestAdapter({
+      powerPreference: "high-performance",
+    })) ?? (await navigator.gpu.requestAdapter());
   if (!adapter) throw new Error("No WebGPU adapter");
   const info = adapter.info ?? (await adapter.requestAdapterInfo?.());
-  if (
+  const isSoftware =
     adapter.isFallbackAdapter ||
     info?.isFallbackAdapter ||
-    /swiftshader|llvmpipe|lavapipe|software/i.test(JSON.stringify(info))
-  )
+    /swiftshader|llvmpipe|lavapipe|software|\bwarp\b|basic render/i.test(JSON.stringify(info ?? {}));
+  if (isSoftware && !allowSoftwareFallback)
     throw new Error("Hardware WebGPU is required; software adapter rejected");
   const hasF16 = adapter.features.has("shader-f16");
   const device = await adapter.requestDevice({

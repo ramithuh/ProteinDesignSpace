@@ -11,6 +11,7 @@ import {
   type CollectionMember,
 } from '$lib/engine/collections';
 import { deriveStableItemSeed, planMpnnFanout } from '$lib/engine/work-plan';
+import { isWebGpuDeviceLostError } from '$lib/engine/webgpu-device';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type { SequenceCandidate, SequenceSet, StructureArtifact } from '$lib/engine/types';
 
@@ -162,16 +163,22 @@ function buildLigandConstraints(
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ligandMod: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let ligandCpuMod: any = null;
 let engine: LigandEngine | null = null;
 let loadedKey: string | null = null;
+let loadedBackend: 'webgpu' | 'cpu' | null = null;
 
 async function ensureEngine(
   id: number,
   checkpoint: Checkpoint,
   precision: Precision,
-): Promise<LigandEngine> {
+  forceCpu = false,
+): Promise<{ engine: LigandEngine; backend: 'webgpu' | 'cpu' }> {
   const key = `${checkpoint}:${precision}`;
-  if (engine && loadedKey === key) return engine;
+  if (engine && loadedKey === key && (!forceCpu || loadedBackend === 'cpu')) {
+    return { engine, backend: loadedBackend ?? 'webgpu' };
+  }
 
   if (engine) {
     try {
@@ -181,53 +188,97 @@ async function ensureEngine(
     }
     engine = null;
     loadedKey = null;
+    loadedBackend = null;
   }
 
-  if (!ligandMod) {
+  const envBaseUrl = (import.meta.env.VITE_LIGANDMPNN_WEIGHTS_URL as string | undefined)?.trim();
+  const baseUrl = envBaseUrl || DEFAULT_BASE_URL;
+
+  const makeProgressCb = (backendTag: string) => (prog: { loaded?: number; total?: number }) => {
+    const loaded = prog.loaded ?? 0;
+    const total = prog.total ?? 0;
+    const frac = total > 0 ? loaded / total : 0.5;
+    const mb = (loaded / 1024 / 1024).toFixed(1);
+    const totMb = total > 0 ? (total / 1024 / 1024).toFixed(1) : '?';
+    self.postMessage({
+      id,
+      type: 'progress',
+      phase: 'weights',
+      progress: Math.min(0.92, 0.08 + frac * 0.84),
+      detail: `LigandMPNN weights (${precision.toUpperCase()}${backendTag}): ${mb} / ${totMb} MB`,
+    });
+  };
+
+  if (!forceCpu && typeof navigator !== 'undefined' && 'gpu' in navigator && navigator.gpu) {
+    try {
+      if (!ligandMod) {
+        self.postMessage({
+          id,
+          type: 'progress',
+          phase: 'init',
+          progress: 0.02,
+          detail: 'Loading LigandMPNN WebGPU modules...',
+        });
+        const moduleUrl = new URL('/vendor/ligandmpnn/webgpu/index.js?v=2', self.location.origin).href;
+        ligandMod = await import(/* @vite-ignore */ moduleUrl);
+      }
+
+      self.postMessage({
+        id,
+        type: 'progress',
+        phase: 'weights',
+        progress: 0.06,
+        detail: `Fetching LigandMPNN (${checkpoint} · ${precision.toUpperCase()}) weights...`,
+      });
+
+      engine = (await ligandMod.createLigandMpnnEngine({
+        baseUrl,
+        variant: checkpoint,
+        precision,
+        cache: true,
+        onProgress: makeProgressCb(''),
+      })) as LigandEngine;
+      loadedKey = key;
+      loadedBackend = 'webgpu';
+      return { engine, backend: 'webgpu' };
+    } catch (gpuErr) {
+      const msg = gpuErr instanceof Error ? gpuErr.message : String(gpuErr);
+      if (/HTTP \d+|fetch|network|integrity|sha-?256|manifest/i.test(msg)) {
+        throw gpuErr;
+      }
+      // Fall through cleanly to pure-JS CPU fallback when WebGPU adapter/device fails
+    }
+  }
+
+  if (!ligandCpuMod) {
     self.postMessage({
       id,
       type: 'progress',
       phase: 'init',
       progress: 0.02,
-      detail: 'Loading LigandMPNN WebGPU modules...',
+      detail: 'WebGPU unavailable — loading LigandMPNN CPU fallback...',
     });
-    const moduleUrl = new URL('/vendor/ligandmpnn/webgpu/index.js?v=2', self.location.origin).href;
-    ligandMod = await import(/* @vite-ignore */ moduleUrl);
+    const cpuUrl = new URL('/vendor/ligandmpnn/cpu/index.js?v=1', self.location.origin).href;
+    ligandCpuMod = await import(/* @vite-ignore */ cpuUrl);
   }
-
-  const envBaseUrl = (import.meta.env.VITE_LIGANDMPNN_WEIGHTS_URL as string | undefined)?.trim();
-  const baseUrl = envBaseUrl || DEFAULT_BASE_URL;
 
   self.postMessage({
     id,
     type: 'progress',
     phase: 'weights',
     progress: 0.06,
-    detail: `Fetching LigandMPNN (${checkpoint} · ${precision.toUpperCase()}) weights...`,
+    detail: `Fetching LigandMPNN (${checkpoint} · ${precision.toUpperCase()} · CPU fallback) weights...`,
   });
 
-  engine = (await ligandMod.createLigandMpnnEngine({
+  engine = (await ligandCpuMod.createLigandMpnnCpuEngine({
     baseUrl,
     variant: checkpoint,
     precision,
-    cache: true,
-    onProgress: (prog: { loaded?: number; total?: number }) => {
-      const loaded = prog.loaded ?? 0;
-      const total = prog.total ?? 0;
-      const frac = total > 0 ? loaded / total : 0.5;
-      const mb = (loaded / 1024 / 1024).toFixed(1);
-      const totMb = total > 0 ? (total / 1024 / 1024).toFixed(1) : '?';
-      self.postMessage({
-        id,
-        type: 'progress',
-        phase: 'weights',
-        progress: Math.min(0.92, 0.08 + frac * 0.84),
-        detail: `LigandMPNN weights (${precision.toUpperCase()}): ${mb} / ${totMb} MB`,
-      });
-    },
+    onProgress: makeProgressCb(' · CPU fallback'),
   })) as LigandEngine;
   loadedKey = key;
-  return engine;
+  loadedBackend = 'cpu';
+  return { engine, backend: 'cpu' };
 }
 
 self.onmessage = async (ev: MessageEvent) => {
@@ -241,6 +292,7 @@ self.onmessage = async (ev: MessageEvent) => {
       }
       engine = null;
       loadedKey = null;
+      loadedBackend = null;
       self.postMessage({ id: msg.id, type: 'disposed' });
       return;
     }
@@ -270,7 +322,21 @@ self.onmessage = async (ev: MessageEvent) => {
       const rawSeed = Number(p.seed ?? 42);
       const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
 
-      const activeEngine = await ensureEngine(msg.id, checkpoint, precision);
+      let { engine: activeEngine, backend } = await ensureEngine(msg.id, checkpoint, precision);
+      const designWithFallback = async (
+        structureText: string,
+        opts: Parameters<LigandEngine['design']>[1],
+      ): Promise<LigandDesignResult> => {
+        try {
+          return await activeEngine.design(structureText, opts);
+        } catch (designErr) {
+          if (backend === 'webgpu' && isWebGpuDeviceLostError(designErr)) {
+            ({ engine: activeEngine, backend } = await ensureEngine(msg.id, checkpoint, precision, true));
+            return await activeEngine.design(structureText, opts);
+          }
+          throw designErr;
+        }
+      };
       const modelLabel = `ligandmpnn/${checkpoint}`;
 
       const collectionItems =
@@ -306,10 +372,10 @@ self.onmessage = async (ev: MessageEvent) => {
             type: 'progress',
             phase: 'sample',
             progress: i / numSequences,
-            detail: `LigandMPNN designing seq ${i + 1}/${numSequences}${contextTag}...`,
+            detail: `LigandMPNN designing seq ${i + 1}/${numSequences}${contextTag}${backend === 'cpu' ? ' · CPU fallback' : ''}...`,
           });
 
-          const res = await activeEngine.design(structureText, {
+          const res = await designWithFallback(structureText, {
             numSequences: 1,
             temperature,
             seed: seed + i,
@@ -450,10 +516,10 @@ self.onmessage = async (ev: MessageEvent) => {
             type: 'progress',
             phase: 'sample',
             progress: completedSeqs / totalPlanned,
-            detail: `Backbone ${bIdx + 1}/${fanoutPlan.backboneCount} · LigandMPNN seq ${q + 1}/${subplan.items.length}`,
+            detail: `Backbone ${bIdx + 1}/${fanoutPlan.backboneCount} · LigandMPNN seq ${q + 1}/${subplan.items.length}${backend === 'cpu' ? ' · CPU fallback' : ''}`,
           });
 
-          const res = await activeEngine.design(text, {
+          const res = await designWithFallback(text, {
             numSequences: 1,
             temperature,
             seed: itemSeed,

@@ -2144,6 +2144,21 @@
             (≤{lfPerBackboneCap}/backbone, cap {lfCampaignCap})
           </span>
         </div>
+      {:else if upstreamSequences && upstreamSequences.candidates.length > Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}
+        {@const lfCapNow = Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}
+        {@const lfUpCount = upstreamSequences.candidates.length}
+        {@const lfTargetBump = Math.min(8, lfUpCount)}
+        <div class="full" role="status" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 10.5px; color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-border); padding: 6px 8px; border-radius: 5px;">
+          <span>Folding <b>{lfCapNow} of {lfUpCount}</b> upstream sequences</span>
+          <button
+            type="button"
+            class="mini-btn"
+            {disabled}
+            onclick={() => setParam('maxSequences', lfTargetBump)}
+          >
+            Fold all {lfTargetBump}
+          </button>
+        </div>
       {/if}
       {#if lfMeta.nonCommercial}
         <div class="full" style="font-size: 10.5px; color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-border); padding: 6px 8px; border-radius: 5px;">

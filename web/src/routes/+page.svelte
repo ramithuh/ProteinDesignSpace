@@ -77,6 +77,11 @@
     type ParamUndoMarker,
   } from '$lib/ui/page-state-helpers';
   import { compileNodeInputPreview } from '$lib/engine/input-preview';
+  import {
+    formatWebGpuAdapterSummary,
+    requestResilientWebGpuAdapter,
+    type WebGpuAdapterInfoSnapshot,
+  } from '$lib/engine/webgpu-device';
 
   const scheduler = new ExecutionScheduler({
     checkpointStore: createIndexedDbCheckpointStore(),
@@ -92,13 +97,17 @@
   let multiDesignHiddenIds = $state<string[]>([]);
   let splitMode = $state<'horizontal' | 'vertical'>('horizontal');
   let splitPct = $state<number>(65);
+  let verticalSplitPct = $state<number>(48);
   let draggingSplit = $state(false);
   let splitWrapEl: HTMLDivElement | null = $state(null);
   let splitMoveRafId: number | null = null;
   let pendingSplitClientX: number | null = null;
+  let pendingSplitClientY: number | null = null;
   let theme = $state<'dark' | 'light'>('dark');
   let webgpuSupported = $state<boolean | null>(null);
   let webgpuDetail = $state<string>('checking…');
+  let webgpuIsFallback = $state<boolean>(false);
+  let webgpuAdapterInfo = $state<WebGpuAdapterInfoSnapshot | null>(null);
   let webMcpReady = $state(false);
   let activeGpuWorker = $state<string | null>(null);
   let activeGpuWorkerLabel = $derived(
@@ -346,22 +355,38 @@
   }
 
   function startSplitDrag(ev: PointerEvent) {
-    if (splitMode !== 'horizontal') return;
+    if (splitMode !== 'horizontal' && splitMode !== 'vertical') return;
     ev.preventDefault();
     draggingSplit = true;
+  }
+
+  function persistSplitSizes() {
+    try {
+      localStorage.setItem('denovo-split-h-pct', String(splitPct));
+      localStorage.setItem('denovo-split-v-pct', String(verticalSplitPct));
+    } catch {
+      /* ignore */
+    }
   }
 
   function handleWindowPointerMove(ev: PointerEvent) {
     if (!draggingSplit || !splitWrapEl) return;
     pendingSplitClientX = ev.clientX;
+    pendingSplitClientY = ev.clientY;
     if (splitMoveRafId !== null) return;
     splitMoveRafId = requestAnimationFrame(() => {
       splitMoveRafId = null;
-      if (!draggingSplit || !splitWrapEl || pendingSplitClientX === null) return;
+      if (!draggingSplit || !splitWrapEl) return;
       const rect = splitWrapEl.getBoundingClientRect();
-      if (rect.width <= 0) return;
-      const rawPct = ((pendingSplitClientX - rect.left) / rect.width) * 100;
-      splitPct = Math.min(78, Math.max(32, Math.round(rawPct * 10) / 10));
+      if (splitMode === 'horizontal') {
+        if (pendingSplitClientX === null || rect.width <= 0) return;
+        const rawPct = ((pendingSplitClientX - rect.left) / rect.width) * 100;
+        splitPct = Math.min(78, Math.max(32, Math.round(rawPct * 10) / 10));
+      } else {
+        if (pendingSplitClientY === null || rect.height <= 0) return;
+        const rawPct = ((pendingSplitClientY - rect.top) / rect.height) * 100;
+        verticalSplitPct = Math.min(76, Math.max(24, Math.round(rawPct * 10) / 10));
+      }
     });
   }
 
@@ -371,7 +396,39 @@
       splitMoveRafId = null;
     }
     pendingSplitClientX = null;
-    if (draggingSplit) draggingSplit = false;
+    pendingSplitClientY = null;
+    if (draggingSplit) {
+      draggingSplit = false;
+      persistSplitSizes();
+    }
+  }
+
+  function resetToHomeCanvas() {
+    if (isRunning) return;
+    sysMenuOpen = false;
+    moreMenuOpen = false;
+    showRecipe = false;
+    expandedPane = 'none';
+    hashError = null;
+    if (typeof window !== 'undefined' && window.location.hash) {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+    }
+    if (graph.nodes.length === 0 && graph.edges.length === 0) {
+      selectedPresetId = 'custom-workflow';
+      setSingleSelection('');
+      return;
+    }
+    handleGraphChange({
+      id: 'custom-workflow',
+      name: 'Custom Workflow',
+      description: '',
+      nodes: [],
+      edges: [],
+    });
+    selectedPresetId = 'custom-workflow';
+    setSingleSelection('');
+    rightPanelTab = 'params';
+    showToastMessage('Cleared canvas (⌘Z to undo)', 2200);
   }
 
   function handleWindowPointerDown(ev: PointerEvent) {
@@ -573,6 +630,14 @@
       if (savedSplit === 'horizontal' || savedSplit === 'vertical') {
         splitMode = savedSplit;
       }
+      const savedHPct = Number(localStorage.getItem('denovo-split-h-pct'));
+      if (Number.isFinite(savedHPct) && savedHPct >= 32 && savedHPct <= 78) {
+        splitPct = savedHPct;
+      }
+      const savedVPct = Number(localStorage.getItem('denovo-split-v-pct'));
+      if (Number.isFinite(savedVPct) && savedVPct >= 24 && savedVPct <= 76) {
+        verticalSplitPct = savedVPct;
+      }
       firstRunAck = localStorage.getItem('denovo-first-run-ack') === '1';
     } catch {
       applyTheme('dark');
@@ -580,38 +645,30 @@
 
     if (!window.isSecureContext) {
       webgpuSupported = false;
+      webgpuIsFallback = false;
+      webgpuAdapterInfo = null;
       webgpuDetail = 'needs HTTPS/localhost';
     } else if (!('gpu' in navigator) || !navigator.gpu) {
       webgpuSupported = false;
+      webgpuIsFallback = false;
+      webgpuAdapterInfo = null;
       webgpuDetail = 'unavailable in browser';
     } else {
       try {
-        let adapter: GPUAdapter | null = null;
-        for (let attempt = 0; attempt < 3 && !adapter; attempt++) {
-          if (attempt > 0) {
-            await new Promise((r) => setTimeout(r, attempt * 250));
-          }
-          adapter =
-            (await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })) ??
-            (await navigator.gpu.requestAdapter());
-        }
-        if (!adapter) {
-          webgpuSupported = false;
-          webgpuDetail = 'no GPU adapter';
-        } else {
-          webgpuSupported = true;
-          const info = (
-            adapter as unknown as {
-              info?: { vendor?: string; architecture?: string; description?: string };
-            }
-          ).info;
-          const f16 = adapter.features.has('shader-f16') ? 'f16' : 'f32';
-          const tag = info?.description || info?.vendor || info?.architecture || 'ready';
-          webgpuDetail = `${tag} (${f16})`;
-        }
+        const res = await requestResilientWebGpuAdapter({
+          retries: 3,
+          retryDelayMs: 250,
+          allowSoftwareFallback: true,
+        });
+        webgpuSupported = true;
+        webgpuIsFallback = res.isSoftwareFallback;
+        webgpuAdapterInfo = res.info;
+        webgpuDetail = formatWebGpuAdapterSummary(res.info, res.hasF16);
       } catch {
         webgpuSupported = false;
-        webgpuDetail = 'adapter error';
+        webgpuIsFallback = false;
+        webgpuAdapterInfo = null;
+        webgpuDetail = 'no GPU adapter';
       }
     }
     const { webMcpRegistered } = attachProgrammaticApi(scheduler, handleProgress);
@@ -620,9 +677,23 @@
     // Load shared workflow from URL hash (#p=... or #g=...) if present
     const { loadedFromHash, attemptedSharedHash } = await applySharedHash(window.location.hash, true);
 
-    // Show welcome onboarding once on first direct visit (never interrupt shared links)
+    // Returning visitors without a shared link land on a clean blank canvas;
+    // first-time visitors see the starter workflow + quick tour.
     try {
-      if (
+      const isReturning = localStorage.getItem('denovo-visited') === '1';
+      localStorage.setItem('denovo-visited', '1');
+      if (isReturning && !loadedFromHash && !attemptedSharedHash) {
+        loadFullWorkflowGraph(
+          {
+            id: 'custom-workflow',
+            name: 'Custom Workflow',
+            description: '',
+            nodes: [],
+            edges: [],
+          },
+          { clearOutputs: true },
+        );
+      } else if (
         !shouldSuppressOnboardingForHash(loadedFromHash, attemptedSharedHash) &&
         localStorage.getItem('denovo-onboarding-seen') !== '1'
       ) {
@@ -2621,7 +2692,17 @@
 <!-- Single Compact Top Header Bar (~48px) -->
 <header class="app-header">
   <div class="hdr-left">
-    <h1 class="brand-logo"><span class="accent">denovo</span>.run</h1>
+    <h1 class="brand-logo">
+      <button
+        type="button"
+        class="brand-logo-btn"
+        disabled={isRunning}
+        onclick={resetToHomeCanvas}
+        title="Start a clean empty canvas"
+      >
+        <span class="accent">denovo</span>.run
+      </button>
+    </h1>
 
     <label class="example-picker" class:disabled={isRunning} data-tour="preset-select">
       <span class="example-lbl">Example Workflow</span>
@@ -2652,7 +2733,8 @@
       <button
         type="button"
         class="hdr-pill"
-        class:ok={webgpuSupported && !activeGpuWorker}
+        class:ok={webgpuSupported && !webgpuIsFallback && !activeGpuWorker}
+        class:warn={webgpuSupported && webgpuIsFallback && !activeGpuWorker}
         class:bad={webgpuSupported === false}
         class:gpu={Boolean(activeGpuWorker)}
         aria-expanded={sysMenuOpen}
@@ -2668,7 +2750,11 @@
         title="WebGPU status, VRAM & weight cache"
       >
         <span class="status-dot"></span>
-        {activeGpuWorkerLabel ? `GPU: ${activeGpuWorkerLabel}` : 'WebGPU'}
+        {activeGpuWorkerLabel
+          ? `GPU: ${activeGpuWorkerLabel}`
+          : webgpuIsFallback
+            ? 'WebGPU (SW)'
+            : 'WebGPU'}
       </button>
 
       {#if sysMenuOpen}
@@ -2680,10 +2766,30 @@
         >
           <div class="pop-row">
             <span class="pop-k">WebGPU</span>
-            <span class="pop-v" class:ok-t={webgpuSupported} class:bad-t={webgpuSupported === false}>
+            <span
+              class="pop-v"
+              class:ok-t={webgpuSupported && !webgpuIsFallback}
+              class:warn-t={webgpuSupported && webgpuIsFallback}
+              class:bad-t={webgpuSupported === false}
+            >
               {webgpuDetail}
             </span>
           </div>
+          {#if webgpuAdapterInfo && (webgpuAdapterInfo.vendor || webgpuAdapterInfo.architecture)}
+            <div class="pop-row">
+              <span class="pop-k">Adapter</span>
+              <span class="pop-v">
+                {[webgpuAdapterInfo.vendor, webgpuAdapterInfo.architecture].filter(Boolean).join(' · ')}
+              </span>
+            </div>
+          {/if}
+          {#if webgpuIsFallback}
+            <div class="pop-warn-note">
+              Software WebGPU fallback detected. Heavy GPU models will be slower (ThermoMPNN,
+              LigandMPNN &amp; ProteinMPNN fall back to CPU automatically). On Linux Chrome with
+              NVIDIA/AMD, try launching with <code>--enable-features=Vulkan</code>.
+            </div>
+          {/if}
           {#if webMcpReady}
             <div class="pop-row">
               <span class="pop-k">Agent API</span>
@@ -2872,9 +2978,12 @@
 <div
   class="workbench-split"
     class:horizontal={splitMode === 'horizontal'}
+    class:vertical={splitMode === 'vertical'}
     class:dragging={draggingSplit}
     bind:this={splitWrapEl}
-    style={splitMode === 'horizontal' ? `--left-pane: ${splitPct}%;` : undefined}
+    style={splitMode === 'horizontal'
+      ? `--left-pane: ${splitPct}%;`
+      : `--top-pane: ${verticalSplitPct}%;`}
   >
     <!-- Graph Canvas Pane (Left in Horizontal Split, Top in Vertical Split) -->
     <section class="flow-panel">
@@ -2895,7 +3004,7 @@
           {theme}
           disabled={isRunning}
           {isRunning}
-          fillHeight={splitMode === 'horizontal'}
+          fillHeight={true}
           autoCommitProposed={showOnboarding && onboardingInteractive}
           fitViewTrigger={canvasFitViewTrigger}
           onGraphChange={handleGraphChange}
@@ -2990,7 +3099,26 @@
         aria-label="Resize graph and output panes"
         title="Drag to resize · Double-click to reset"
         onpointerdown={startSplitDrag}
-        ondblclick={() => (splitPct = 65)}
+        ondblclick={() => {
+          splitPct = 65;
+          persistSplitSizes();
+        }}
+      >
+        <div class="split-bar"></div>
+      </div>
+    {:else}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="split-handle is-vertical"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize graph and output panes vertically"
+        title="Drag to resize · Double-click to reset"
+        onpointerdown={startSplitDrag}
+        ondblclick={() => {
+          verticalSplitPct = 48;
+          persistSplitSizes();
+        }}
       >
         <div class="split-bar"></div>
       </div>
@@ -3630,6 +3758,29 @@
     color: var(--text-primary);
     white-space: nowrap;
   }
+  .brand-logo-btn {
+    margin: 0;
+    padding: 2px 4px;
+    margin-left: -4px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    cursor: pointer;
+    transition: opacity 0.12s ease, background 0.12s ease;
+  }
+  .brand-logo-btn:hover:not(:disabled) {
+    background: var(--bg-surface-hover);
+  }
+  .brand-logo-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .brand-logo-btn:disabled {
+    cursor: default;
+  }
   .accent {
     color: var(--accent-bright);
   }
@@ -3710,6 +3861,11 @@
     color: var(--ok-text);
     border-color: var(--ok-border);
     background: var(--ok-bg);
+  }
+  .hdr-pill.warn {
+    color: var(--warn-text);
+    border-color: var(--warn-border);
+    background: var(--warn-bg);
   }
   .hdr-pill.bad {
     color: var(--err-strong);
@@ -3822,8 +3978,24 @@
   .pop-v.ok-t {
     color: var(--ok-text);
   }
+  .pop-v.warn-t {
+    color: var(--warn-text);
+  }
   .pop-v.bad-t {
     color: var(--err-strong);
+  }
+  .pop-warn-note {
+    font-size: 10.5px;
+    line-height: 1.4;
+    color: var(--warn-text);
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    border-radius: 6px;
+    padding: 6px 8px;
+  }
+  .pop-warn-note code {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
   }
   .badge-ok {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -3989,9 +4161,19 @@
     height: calc(100dvh - 76px);
     min-height: 620px;
   }
+  .workbench-split.vertical {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    height: calc(100dvh - 76px);
+    min-height: 640px;
+  }
   .workbench-split.dragging {
     user-select: none;
     cursor: col-resize;
+  }
+  .workbench-split.vertical.dragging {
+    cursor: row-resize;
   }
   .workbench-split.horizontal > .flow-panel {
     width: var(--left-pane, 65%);
@@ -3999,6 +4181,19 @@
     min-width: 0;
     margin-bottom: 0;
     height: 100%;
+  }
+  .workbench-split.vertical > .flow-panel {
+    height: var(--top-pane, 48%);
+    flex-shrink: 0;
+    min-height: 220px;
+    margin-bottom: 0;
+  }
+  .workbench-split.vertical > .results-grid {
+    flex: 1;
+    min-height: 220px;
+    overflow-y: auto;
+    align-content: start;
+    padding-top: 2px;
   }
   .drawer-scroll {
     max-height: 240px;
@@ -4013,17 +4208,32 @@
     justify-content: center;
     touch-action: none;
   }
+  .split-handle.is-vertical {
+    width: 100%;
+    height: 12px;
+    cursor: row-resize;
+  }
   .split-bar {
     width: 3px;
     height: 44px;
     border-radius: 999px;
     background: var(--border-strong);
-    transition: background 0.15s ease, height 0.15s ease;
+    transition: background 0.15s ease, height 0.15s ease, width 0.15s ease;
+  }
+  .split-handle.is-vertical .split-bar {
+    width: 56px;
+    height: 3px;
   }
   .split-handle:hover .split-bar,
   .workbench-split.dragging .split-bar {
     background: var(--accent);
     height: 72px;
+  }
+  .split-handle.is-vertical:hover .split-bar,
+  .workbench-split.vertical.dragging .split-handle.is-vertical .split-bar {
+    background: var(--accent);
+    width: 88px;
+    height: 3px;
   }
 
   .flow-panel {
@@ -4187,15 +4397,22 @@
     overflow-y: auto;
   }
   @media (max-width: 1024px) {
-    .workbench-split.horizontal {
+    .workbench-split.horizontal,
+    .workbench-split.vertical {
       flex-direction: column;
       height: auto;
       min-height: 0;
       gap: 12px;
     }
-    .workbench-split.horizontal > .flow-panel {
+    .workbench-split.horizontal > .flow-panel,
+    .workbench-split.vertical > .flow-panel {
       width: 100%;
-      height: auto;
+      height: 360px;
+      min-height: 300px;
+    }
+    .workbench-split.vertical > .results-grid {
+      overflow: visible;
+      min-height: 0;
     }
     .split-handle {
       display: none;

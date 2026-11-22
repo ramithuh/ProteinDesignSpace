@@ -241,14 +241,14 @@
     const bottomPad = autoCommitProposed
       ? compact
         ? 0.42
-        : 0.34
+        : 0.36
       : compact
-        ? 0.38
-        : 0.26;
+        ? 0.40
+        : 0.30;
     return {
       padding: {
         top: 0.12,
-        left: 0.1,
+        left: compact ? 0.12 : 0.14,
         right: 0.1,
         bottom: bottomPad,
       },
@@ -1320,7 +1320,7 @@
   }
   .flow-wrap.fill-height {
     height: 100%;
-    min-height: 440px;
+    min-height: 220px;
     flex: 1;
   }
   .flow-wrap.is-running :global(.svelte-flow__node) {

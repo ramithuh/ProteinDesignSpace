@@ -2,11 +2,12 @@ import {loadWeights,prepareInput,regionMask,VOCAB,CANONICAL_TOKENS} from '../sha
 import {encode,decode} from '../shared/model.js';
 import {independentPlan,finishIndependent} from '../shared/sampling.js';
 import {GPUOps} from './ops.js';
-export async function requestWebGPU({useF16=false}={}){
+export async function requestWebGPU({useF16=false,allowSoftwareFallback=true}={}){
  if(!globalThis.navigator?.gpu)throw new Error('Hardware WebGPU is required (HTTPS or localhost)');
- const adapter=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});if(!adapter)throw new Error('No hardware WebGPU adapter');
+ const adapter=(await navigator.gpu.requestAdapter({powerPreference:'high-performance'}))??(await navigator.gpu.requestAdapter());if(!adapter)throw new Error('No WebGPU adapter');
  const raw=adapter.info??await adapter.requestAdapterInfo?.();const info={vendor:raw?.vendor,architecture:raw?.architecture,device:raw?.device,description:raw?.description,isFallbackAdapter:raw?.isFallbackAdapter??adapter.isFallbackAdapter};
- if(info.isFallbackAdapter||/swiftshader|llvmpipe|lavapipe|software|microsoft basic/i.test(JSON.stringify(info)))throw new Error('Software WebGPU adapters are rejected');
+ const isSoftware=info.isFallbackAdapter||/swiftshader|llvmpipe|lavapipe|software|microsoft basic|\bwarp\b/i.test(JSON.stringify(info));
+ if(isSoftware&&!allowSoftwareFallback)throw new Error('Software WebGPU adapters are rejected');
  const device=await adapter.requestDevice({requiredFeatures:useF16&&adapter.features.has('shader-f16')?['shader-f16']:[],requiredLimits:{maxBufferSize:adapter.limits.maxBufferSize,maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize}});
  return {device,adapter,info};
 }

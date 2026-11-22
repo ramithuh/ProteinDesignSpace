@@ -628,31 +628,31 @@
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
     pointer-events: none;
   }
-  /* Selected / peeking focus ring stays bold & unmistakable in both light and dark themes */
+  /* Selected / peeking focus ring matches the node's stage color (top stripe) */
   .p-node.selected {
     opacity: 1;
     filter: none;
     --node-border-w: 2.5px;
-    --node-border-color: var(--accent);
+    --node-border-color: var(--stage-color);
     box-shadow:
-      0 0 0 4px rgba(37, 99, 235, 0.28),
-      0 10px 24px rgba(37, 99, 235, 0.2),
+      0 0 0 4px color-mix(in srgb, var(--stage-color) 28%, transparent),
+      0 10px 24px color-mix(in srgb, var(--stage-color) 20%, transparent),
       var(--node-shadow);
   }
   .p-node.selected.running {
     --node-border-w: 2.5px;
     --node-border-color: #f59e0b;
     box-shadow:
-      0 0 0 3px var(--accent),
+      0 0 0 3px var(--stage-color),
       0 0 0 6px rgba(245, 158, 11, 0.28),
       var(--node-shadow);
   }
   .p-node.selected.done {
     --node-border-w: 2.5px;
-    --node-border-color: var(--accent);
+    --node-border-color: var(--stage-color);
     box-shadow:
-      0 0 0 4px rgba(37, 99, 235, 0.28),
-      0 10px 24px rgba(37, 99, 235, 0.2),
+      0 0 0 4px color-mix(in srgb, var(--stage-color) 28%, transparent),
+      0 10px 24px color-mix(in srgb, var(--stage-color) 20%, transparent),
       var(--node-shadow);
   }
   .p-node.selected.comparing {

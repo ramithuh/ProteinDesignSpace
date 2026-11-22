@@ -547,6 +547,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
   (() => {
     const rfd4 = ADAPTER_REGISTRY['rfd4-proteina'];
     const g3 = ADAPTER_REGISTRY.genie3;
+    const pp = ADAPTER_REGISTRY.protpardelle;
     const items: CatalogSubItem[] = [
       {
         key: 'rfd4-proteina',
@@ -564,6 +565,14 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         insert: { adapterId: 'genie3' },
         searchBlob: `${g3.id} ${g3.shortName} ${g3.displayName} ${CONCISE_BLOCK_ROLES.genie3} genie genie3 diffusion generate de novo backbone`.toLowerCase(),
       },
+      {
+        key: 'protpardelle',
+        label: pp.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.protpardelle,
+        meta: `~${pp.approxWeightsMB} MB · MIT`,
+        insert: { adapterId: 'protpardelle', label: 'ProtPardelle-1c' },
+        searchBlob: `${pp.id} ${pp.shortName} ${pp.displayName} ${CONCISE_BLOCK_ROLES.protpardelle} protpardelle edm all-atom motif partial minimpnn diffusion mit`.toLowerCase(),
+      },
     ];
     const subGroups: CatalogSubGroup[] = [{ title: 'De Novo Generators', items }];
     const identityBlob = 'structure generation generate generator de novo backbone diffusion';
@@ -572,7 +581,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
       id: 'generation',
       title: 'Structure Generation',
       stage: 'generate',
-      subtitle: 'RFD4-Proteina & Genie 3 de novo design',
+      subtitle: 'RFD4-Proteina, Genie 3 & ProtPardelle-1c',
       countLabel: `${items.length}`,
       subGroups,
       identityBlob,
@@ -645,6 +654,8 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
     const sc = ADAPTER_REGISTRY['designability-scorer'];
     const tk = ADAPTER_REGISTRY['top-k-filter'];
     const th = ADAPTER_REGISTRY.thermompnn;
+    const ec = ADAPTER_REGISTRY.esmc;
+    const dy = ADAPTER_REGISTRY.dyna1;
     const items: CatalogSubItem[] = [
       {
         key: 'thermompnn',
@@ -654,6 +665,24 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         insert: { adapterId: 'thermompnn', label: 'ThermoMPNN' },
         searchBlob:
           `${th.id} ${th.shortName} ${th.displayName} ${CONCISE_BLOCK_ROLES.thermompnn} thermompnn ddg stability mutation ssm site saturation heatmap bfactor kuhlman mit`.toLowerCase(),
+      },
+      {
+        key: 'esmc',
+        label: ec.displayName,
+        subtitle: CONCISE_BLOCK_ROLES.esmc,
+        meta: `~${ec.approxWeightsMB} MB · Apache-2.0`,
+        insert: { adapterId: 'esmc', label: 'ESM-C 300M' },
+        searchBlob:
+          `${ec.id} ${ec.shortName} ${ec.displayName} ${CONCISE_BLOCK_ROLES.esmc} esmc esm-c llr naturalness fitness mutation plm masked fill`.toLowerCase(),
+      },
+      {
+        key: 'dyna1',
+        label: dy.displayName,
+        subtitle: CONCISE_BLOCK_ROLES.dyna1,
+        meta: `~${dy.approxWeightsMB} MB · MIT`,
+        insert: { adapterId: 'dyna1', label: 'Dyna-1' },
+        searchBlob:
+          `${dy.id} ${dy.shortName} ${dy.displayName} ${CONCISE_BLOCK_ROLES.dyna1} dyna1 dyna-1 dynamics flexibility exchange nmr conformational`.toLowerCase(),
       },
       {
         key: 'top-k-filter',
@@ -670,14 +699,14 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         searchBlob: `${sc.id} ${sc.shortName} ${sc.displayName} ${CONCISE_BLOCK_ROLES['designability-scorer']} score evaluation designability kabsch scrmsd sctm plddt`.toLowerCase(),
       },
     ];
-    const subGroups: CatalogSubGroup[] = [{ title: 'Stability, Filtering & Designability Metrics', items }];
+    const subGroups: CatalogSubGroup[] = [{ title: 'Stability, Fitness, Dynamics & Designability', items }];
     const identityBlob = 'evaluation score scoring metrics';
     const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
     return {
       id: 'evaluation',
       title: 'Evaluation',
       stage: 'score',
-      subtitle: 'ThermoMPNN ΔΔG stability, Top-K filter, scRMSD & scTM',
+      subtitle: 'ThermoMPNN, ESM-C 300M, Dyna-1, Top-K & scRMSD',
       countLabel: `${items.length}`,
       subGroups,
       identityBlob,
