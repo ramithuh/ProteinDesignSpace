@@ -105,8 +105,14 @@ function buildLigandConstraints(
       : sourceResidues[0].projectedChainId
     : 'A';
 
+  const orderedResidues = sourceResidues.map((sr) => ({
+    chain: useCif ? sr.authChainId : sr.projectedChainId,
+    number: sr.resNum,
+    insertionCode: sr.insCode ?? '',
+  }));
+
   const { fixedPositions: userRefs, lockedChains: userLockedChains } =
-    parseFixedPositionsAndChains(fixedPositionsSpec, defaultChain);
+    parseFixedPositionsAndChains(fixedPositionsSpec, defaultChain, orderedResidues);
 
   const fixedSet = new Set<string>();
   const lockedChainSet = new Set<string>();

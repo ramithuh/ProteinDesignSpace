@@ -202,7 +202,7 @@ self.onmessage = async (ev: MessageEvent) => {
       const precision = normalizePrecision(p.precision);
       const rawLength = Math.max(16, Math.min(256, Math.round(Number(p.length ?? 80))));
       const numDesigns = Math.max(1, Math.min(8, Math.round(Number(p.numDesigns ?? 1))));
-      const numSteps = Math.max(5, Math.min(50, Math.round(Number(p.numSteps ?? 25))));
+      const numSteps = Math.max(5, Math.min(50, Math.round(Number(p.numSteps ?? 50))));
       const contig = String(p.contig ?? '').trim();
       const symmetry = taskMode === 'symmetry' ? normalizeSymmetry(p.symmetry) : undefined;
       const seed = Math.max(0, Math.round(Number(p.seed ?? 42)));
@@ -264,10 +264,21 @@ self.onmessage = async (ev: MessageEvent) => {
             numSteps,
             seed: seed + d,
             signal: controller.signal,
-            onProgress: (prog: { step?: number; total?: number; t?: number }) => {
+            onProgress: (prog: {
+              step?: number;
+              numSteps?: number;
+              total?: number;
+              block?: number;
+              blockTotal?: number;
+              t?: number;
+            }) => {
               const step = prog.step ?? 0;
-              const tot = prog.total ?? numSteps;
-              const frac = tot > 0 ? Math.min(1, step / tot) : 0;
+              const tot = prog.numSteps ?? (prog.block !== undefined ? numSteps : (prog.total ?? numSteps));
+              const blockFrac =
+                prog.block !== undefined && (prog.blockTotal ?? 0) > 0
+                  ? Math.min(1, prog.block / prog.blockTotal!)
+                  : 1;
+              const frac = tot > 0 ? Math.min(1, (Math.max(0, step - 1) + blockFrac) / tot) : 0;
               const overall = 0.48 + ((d + frac) / numDesigns) * 0.5;
               self.postMessage({
                 id: msg.id,
@@ -290,6 +301,46 @@ self.onmessage = async (ev: MessageEvent) => {
           const designKey = `design-${d + 1}`;
           const structId = `rfd-${taskMode}-${parsed.nResidues}aa-d${d + 1}-${runHash}`;
 
+          const fixedResidueIndices: number[] = [];
+          const maskArr = sampled.diffusionMask as ArrayLike<number> | undefined;
+          if (maskArr) {
+            for (let i = 0; i < Math.min(maskArr.length, parsed.nResidues); i++) {
+              if (Number(maskArr[i]) === 1) fixedResidueIndices.push(i + 1);
+            }
+          }
+          const motifIndicesRaw = Array.isArray(sampled.motifIndices)
+            ? (sampled.motifIndices as number[])
+            : undefined;
+          const nativeMotifCoordsRaw = Array.isArray(sampled.nativeMotifCoords)
+            ? (sampled.nativeMotifCoords as number[][])
+            : undefined;
+          const hasValidMotif =
+            Boolean(motifIndicesRaw?.length) &&
+            Boolean(nativeMotifCoordsRaw?.length) &&
+            motifIndicesRaw!.length === nativeMotifCoordsRaw!.length;
+
+          const uniqueChains = [...new Set(parsed.chainIds)];
+          const chainRoles: Record<string, 'target' | 'binder' | 'scaffold'> = {};
+          for (const ch of uniqueChains) chainRoles[ch] = 'scaffold';
+
+          let tiedPositions: string | undefined;
+          if (symmetry) {
+            const copies = SYMMETRY_COPIES[symmetry] ?? 0;
+            if (copies >= 2 && parsed.nResidues > 0 && parsed.nResidues % copies === 0) {
+              const unit = parsed.nResidues / copies;
+              const groups: string[] = [];
+              for (let u = 0; u < unit; u++) {
+                const tokens: string[] = [];
+                for (let c = 0; c < copies; c++) {
+                  const idx = c * unit + u;
+                  tokens.push(`${parsed.chainIds[idx]}${parsed.resNums[idx]}`);
+                }
+                groups.push(tokens.join('='));
+              }
+              tiedPositions = groups.join('; ');
+            }
+          }
+
           const artifact: StructureArtifact = {
             kind: 'StructureArtifact',
             id: structId,
@@ -308,6 +359,14 @@ self.onmessage = async (ev: MessageEvent) => {
             observedBackboneMask: parsed.observedBackboneMask,
             diagnostics: parsed.diagnostics,
             geometry,
+            atomGranularity: 'backbone4',
+            bfactorSemantics: 'none',
+            chainRoles,
+            ...(fixedResidueIndices.length > 0 ? { fixedResidueIndices } : {}),
+            ...(hasValidMotif
+              ? { motifIndices: motifIndicesRaw, nativeMotifCoords: nativeMotifCoordsRaw }
+              : {}),
+            ...(tiedPositions ? { tiedPositions } : {}),
             designKey,
             designIndex: d,
             seed: seed + d,

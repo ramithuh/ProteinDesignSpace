@@ -80,6 +80,7 @@ const WAVE7A_SPECS = [
     expectedParamKeys: [
       'fixedPositions',
       'numSequences',
+      'numbering',
       'precision',
       'regions',
       'samplingMode',
@@ -141,7 +142,7 @@ const WAVE7A_SPECS = [
     workerFile: 'src/lib/workers/boltzgen.worker.ts',
     factoryExport: 'createBoltzGenEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/boltzgen-webgpu/resolve/main',
-    expectedParamKeys: ['length', 'motifOffset', 'numDesigns', 'numSteps', 'precision', 'recyclingSteps', 'seed', 'taskMode', 'variant'],
+    expectedParamKeys: ['hotspots', 'length', 'motifOffset', 'numDesigns', 'numSteps', 'precision', 'recyclingSteps', 'seed', 'taskMode', 'variant'],
   },
   {
     name: 'EvoDiff-Seq (38M)',

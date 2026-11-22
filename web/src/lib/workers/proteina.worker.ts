@@ -179,7 +179,7 @@ self.onmessage = async (ev: MessageEvent) => {
       const t0 = performance.now();
     const p = msg.params ?? {};
     const length = Math.max(20, Math.min(300, Math.round(Number(p.length ?? 80))));
-    const steps = Math.max(10, Math.min(400, Math.round(Number(p.steps ?? 100))));
+    const steps = Math.max(10, Math.min(400, Math.round(Number(p.steps ?? 400))));
     const mode = normalizeMode(p.mode);
     const noiseScale = Math.max(0.05, Math.min(1.0, Number(p.noiseScale ?? 0.45)));
     const selfCondition = p.selfCondition !== false;

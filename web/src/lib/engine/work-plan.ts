@@ -286,6 +286,7 @@ export interface PlannedMpnnItem {
   lockedChains: readonly string[];
   fixedResidueIndices: readonly number[];
   motifIndices: readonly number[];
+  tiedPositions?: string;
   chainRoles?: Readonly<Record<string, 'target' | 'binder' | 'scaffold'>>;
   backboneLength: number;
   cached: boolean;
@@ -298,6 +299,7 @@ export interface BackboneMpnnSubplan {
   lockedChains: readonly string[];
   fixedResidueIndices: readonly number[];
   motifIndices: readonly number[];
+  tiedPositions?: string;
   chainRoles?: Readonly<Record<string, 'target' | 'binder' | 'scaffold'>>;
   backboneLength: number;
   items: readonly PlannedMpnnItem[];
@@ -415,6 +417,10 @@ export function planMpnnFanout(
     const lockedChains = Object.freeze([...(struct.lockedChains ?? [])]);
     const fixedResidueIndices = Object.freeze([...(struct.fixedResidueIndices ?? [])]);
     const motifIndices = Object.freeze([...(struct.motifIndices ?? [])]);
+    const tiedPositions =
+      typeof struct.tiedPositions === 'string' && struct.tiedPositions.trim()
+        ? struct.tiedPositions
+        : undefined;
     const chainRoles = struct.chainRoles ? Object.freeze({ ...struct.chainRoles }) : undefined;
 
     // Bind design-specific constraints into the per-backbone family anchor so changing
@@ -427,6 +433,7 @@ export function planMpnnFanout(
         lockedChains,
         fixedResidueIndices,
         motifIndices,
+        ...(tiedPositions ? { tiedPositions } : {}),
       }),
     );
 
@@ -457,6 +464,7 @@ export function planMpnnFanout(
         lockedChains,
         fixedResidueIndices,
         motifIndices,
+        ...(tiedPositions ? { tiedPositions } : {}),
         ...(chainRoles ? { chainRoles } : {}),
         backboneLength: struct.length,
         cached,
@@ -472,6 +480,7 @@ export function planMpnnFanout(
       lockedChains,
       fixedResidueIndices,
       motifIndices,
+      ...(tiedPositions ? { tiedPositions } : {}),
       ...(chainRoles ? { chainRoles } : {}),
       backboneLength: struct.length,
       items: subItems,

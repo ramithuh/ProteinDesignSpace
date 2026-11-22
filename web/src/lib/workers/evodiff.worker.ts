@@ -4,6 +4,7 @@
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
 import { makeSequenceKey } from '$lib/engine/collections';
+import { sanitizeEvoDiffFixedSequence } from '$lib/engine/param-validation';
 import { requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
 import type { SequenceCandidate, SequenceSet } from '$lib/engine/types';
 
@@ -205,14 +206,17 @@ self.onmessage = async (ev: MessageEvent) => {
       const precision = normalizePrecision(p.precision);
       const length = Math.max(12, Math.min(512, Math.round(Number(p.length ?? 64))));
       const numSequences = Math.max(1, Math.min(8, Math.round(Number(p.numSequences ?? 2))));
-      const rawFixedSeq = String(p.fixedSequence ?? '').replace(/\s+/g, '').toUpperCase();
+      const rawFixedSeq = sanitizeEvoDiffFixedSequence(p.fixedSequence);
       const rawMaskPositions = String(p.maskPositions ?? '').trim();
       const seed = Math.max(0, Math.round(Number(p.seed ?? 42)));
 
       const upstreamSeqs = msg.inputs?.sequences as SequenceSet | undefined;
       let templateSeq = rawFixedSeq;
       if (taskMode === 'infill' && !templateSeq && upstreamSeqs?.candidates?.length) {
-        templateSeq = upstreamSeqs.candidates[0].sequence.replace(/[:/,\s-]+/g, '').toUpperCase();
+        templateSeq = sanitizeEvoDiffFixedSequence(upstreamSeqs.candidates[0].sequence).replace(
+          /[:/,-]+/g,
+          '',
+        );
       }
 
       let maskPositions: number[] | undefined;

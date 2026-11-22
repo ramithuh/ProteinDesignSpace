@@ -38,7 +38,16 @@ import {
   validateAndParseA3mText,
 } from './localfold-msa';
 import { esmfold2Chains } from './localfold-esmfold2';
-import { compileMpnnInputSpec, parseFixedPositionsAndChains } from './mpnn-spec';
+import {
+  ANTIBODY_CDR_BOUNDS,
+  compileMpnnInputSpec,
+  detectAntibodyHeavyLightChains,
+  normalizeAntiFoldNumberingParam,
+  parseFixedPositionsAndChains,
+  resolveAntibodyNumbering,
+  type NumberedChainInfo,
+  type OrderedStructureResidue,
+} from './mpnn-spec';
 import { validateParamsWithSchema } from './param-schema';
 import { extractSubgraphUpTo, findContextStructure } from './peek';
 import {
@@ -2913,8 +2922,13 @@ export function compileNodeInputPreview(
 
         const allChains = [...new Set(parsed.sourceResidues.map((s) => s.authChainId))];
         const defaultChain = allChains[0] ?? 'A';
+        const orderedResidues: OrderedStructureResidue[] = parsed.sourceResidues.map((sr) => ({
+          chain: sr.authChainId,
+          number: sr.resNum,
+          insertionCode: sr.insCode ?? '',
+        }));
         const { fixedPositions: userFixed, lockedChains: userLockedRaw } =
-          parseFixedPositionsAndChains(fixedSpec, defaultChain);
+          parseFixedPositionsAndChains(fixedSpec, defaultChain, orderedResidues);
         const userLockedChainSet = new Set(userLockedRaw.map((c) => c.toUpperCase()));
         const inheritedLockedChainSet = new Set(
           !unlockInherited && Array.isArray(structure.lockedChains)
@@ -3098,6 +3112,7 @@ export function compileNodeInputPreview(
         ? 'autoregressive'
         : 'independent';
     const targetChainParam = String(node.params.targetChain ?? '').trim();
+    const numberingParam = normalizeAntiFoldNumberingParam(node.params.numbering);
     const regions = variant === 'antifold' ? String(node.params.regions ?? 'CDR1 CDR2 CDR3').trim() : '';
     const fixedSpec = String(node.params.fixedPositions ?? '').trim();
     const unlockInherited = Boolean(node.params.unlockInherited);
@@ -3148,23 +3163,64 @@ export function compileNodeInputPreview(
           });
         }
 
-        const chainTypes = structure.molecularContext?.chainTypes ?? {};
-        const detectedHeavy =
-          allChains.find((id) => chainTypes[id] === 'antibody-H' || chainTypes[id] === 'nanobody') ??
-          resolveChain('H');
-        const detectedLight =
-          allChains.find(
-            (id) => chainTypes[id] === 'antibody-L' && id !== (explicitTarget ?? detectedHeavy),
-          ) ?? (resolveChain('L') !== (explicitTarget ?? detectedHeavy) ? resolveChain('L') : undefined);
+        const orderedResidues: OrderedStructureResidue[] = [];
+        const chainInfoMap = new Map<string, NumberedChainInfo>();
+        for (let i = 0; i < parsed.nResidues; i++) {
+          const sr = parsed.sourceResidues[i];
+          const aa1 = parsed.sequence[i] ?? AA3_TO_AA1[sr.resName] ?? 'X';
+          orderedResidues.push({
+            chain: sr.authChainId,
+            number: sr.resNum,
+            insertionCode: sr.insCode ?? '',
+          });
+          let info = chainInfoMap.get(sr.authChainId);
+          if (!info) {
+            info = { id: sr.authChainId, residues: [] };
+            chainInfoMap.set(sr.authChainId, info);
+          }
+          (info.residues as Array<{ number: number; insertion: string; aa1: string }>).push({
+            number: sr.resNum,
+            insertion: sr.insCode ?? '',
+            aa1,
+          });
+        }
+        const chainInfos = [...chainInfoMap.values()];
 
-        const resolvedTargetChain =
+        const { lockedChains: preUserLockedRaw } = parseFixedPositionsAndChains(
+          fixedSpec,
+          allChains[0] ?? 'A',
+          orderedResidues,
+        );
+        const lockedChainSet = new Set<string>();
+        for (const ch of preUserLockedRaw) {
+          const resolved = resolveChain(ch);
+          if (resolved) lockedChainSet.add(resolved);
+        }
+        if (!unlockInherited && Array.isArray(structure.lockedChains)) {
+          for (const rawCh of structure.lockedChains) {
+            const resolved = resolveChain(String(rawCh).trim());
+            if (resolved) lockedChainSet.add(resolved);
+          }
+        }
+
+        const chainTypes = structure.molecularContext?.chainTypes ?? {};
+        const { heavyChain: detectedHeavy, lightChain: detectedLight } =
+          detectAntibodyHeavyLightChains(chainInfos, chainTypes, lockedChainSet, explicitTarget);
+
+        const unlockedHeavy =
+          detectedHeavy && !lockedChainSet.has(detectedHeavy) ? detectedHeavy : undefined;
+        const unlockedLight =
+          detectedLight && !lockedChainSet.has(detectedLight) ? detectedLight : undefined;
+        const firstUnlocked =
+          allChains.find((c) => !lockedChainSet.has(c)) ?? allChains[0] ?? 'A';
+        const effectiveTargetChain =
           explicitTarget ??
-          (targetChainParam ||
-            (variant === 'antifold' ? detectedHeavy ?? allChains[0] ?? 'A' : allChains[0] ?? 'A'));
+          (variant === 'antifold' ? unlockedHeavy ?? unlockedLight ?? firstUnlocked : undefined);
+        const resolvedTargetChain = effectiveTargetChain ?? allChains[0] ?? 'A';
 
         const heavyChain =
           variant === 'antifold'
-            ? detectedHeavy ?? explicitTarget ?? allChains[0]
+            ? detectedHeavy ?? explicitTarget ?? firstUnlocked
             : undefined;
         const lightChain =
           variant === 'antifold'
@@ -3175,7 +3231,12 @@ export function compileNodeInputPreview(
                 : undefined
             : undefined;
 
-        // Exact IMGT regionMask matching web/static/vendor/antifold-esmif1/shared/structure.js
+        const resolvedNumbering =
+          variant === 'antifold'
+            ? resolveAntibodyNumbering(numberingParam, chainInfos, heavyChain, lightChain)
+            : 'imgt';
+
+        // Exact IMGT/Kabat regionMask matching web/static/vendor/antifold-esmif1/shared/structure.js
         const regionList =
           variant === 'antifold'
             ? regions
@@ -3185,20 +3246,9 @@ export function compileNodeInputPreview(
             : [];
         const regionSelectors: Array<(r: { chain: string; number: number; insertion: string }) => boolean> = [];
         if (regionList.length > 0 && heavyChain) {
-          const imgtBounds = {
-            H: [
-              [27, 38],
-              [56, 65],
-              [105, 117],
-            ],
-            L: [
-              [27, 38],
-              [56, 65],
-              [105, 117],
-            ],
-          } as const;
+          const schemeBounds = ANTIBODY_CDR_BOUNDS[resolvedNumbering];
           for (const region of regionList) {
-            const explicitSpan = /^([^:]+):(-?\d+[A-Za-z]?(?:--?\d+)?(?:,-?\d+[A-Za-z]?(?:--?\d+)?)*)$/.exec(region);
+            const explicitSpan = /^([^:]+):(-?\d+[A-Za-z]?(?:--?\d+[A-Za-z]?)?(?:,-?\d+[A-Za-z]?(?:--?\d+[A-Za-z]?)?)*)$/.exec(region);
             if (explicitSpan) {
               const chainId =
                 explicitSpan[1] === 'H'
@@ -3206,27 +3256,37 @@ export function compileNodeInputPreview(
                   : explicitSpan[1] === 'L'
                     ? lightChain
                     : resolveChain(explicitSpan[1]) ?? explicitSpan[1];
-              const ranges: Array<{ a: number; b: number; ins: string }> = [];
+              const ranges: Array<{ a: number; b: number; startIns: string; endIns: string }> = [];
               let valid = true;
               for (const part of explicitSpan[2].split(',')) {
-                const rm = /^(-?\d+)([A-Za-z]?)(?:-(-?\d+))?$/.exec(part);
+                const rm = /^(-?\d+)([A-Za-z]?)(?:-(-?\d+)([A-Za-z]?))?$/.exec(part);
                 if (!rm) {
                   valid = false;
                   break;
                 }
                 const a = Number(rm[1]);
-                const b = rm[3] === undefined ? a : Number(rm[3]);
-                if (b < a) {
+                const startIns = (rm[2] ?? '').toUpperCase();
+                const isRange = rm[3] !== undefined;
+                const b = isRange ? Number(rm[3]) : a;
+                const endIns = isRange ? (rm[4] ?? '').toUpperCase() : startIns;
+                if (b < a || (b === a && startIns > endIns)) {
                   valid = false;
                   break;
                 }
-                ranges.push({ a, b, ins: rm[2] ?? '' });
+                ranges.push({ a, b, startIns, endIns });
               }
               if (valid && chainId) {
                 regionSelectors.push(
                   (r) =>
                     r.chain === chainId &&
-                    ranges.some((x) => r.number >= x.a && r.number <= x.b && (!x.ins || r.insertion === x.ins)),
+                    ranges.some((x) => {
+                      const ins = (r.insertion ?? '').toUpperCase();
+                      const afterStart =
+                        r.number > x.a || (r.number === x.a && (!x.startIns || ins >= x.startIns));
+                      const beforeEnd =
+                        r.number < x.b || (r.number === x.b && (!x.endIns || ins <= x.endIns));
+                      return afterStart && beforeEnd;
+                    }),
                 );
               } else {
                 pushIssue({
@@ -3250,9 +3310,10 @@ export function compileNodeInputPreview(
             regionSelectors.push((r) => {
               const roleHere = r.chain === heavyChain ? 'H' : r.chain === lightChain ? 'L' : null;
               if (!roleHere || (role && role !== roleHere)) return false;
-              if (r.number < 1 || r.number > 128) return false;
+              const maxPos = roleHere === 'H' ? schemeBounds.maxH : schemeBounds.maxL;
+              if (r.number < 1 || r.number > maxPos) return false;
               if (type === 'all') return true;
-              const b = imgtBounds[roleHere];
+              const b = schemeBounds[roleHere];
               const regionsHere: ReadonlyArray<readonly [number, number]> =
                 type === 'CDR'
                   ? b
@@ -3260,7 +3321,7 @@ export function compileNodeInputPreview(
                       [1, b[0][0] - 1],
                       [b[0][1] + 1, b[1][0] - 1],
                       [b[1][1] + 1, b[2][0] - 1],
-                      [b[2][1] + 1, 128],
+                      [b[2][1] + 1, maxPos],
                     ];
               return regionsHere.some(
                 ([lo, hi], idx) => (!num || idx === Number(num) - 1) && r.number >= lo && r.number <= hi,
@@ -3271,7 +3332,7 @@ export function compileNodeInputPreview(
         const useRegionMask = regionList.length > 0;
 
         const { fixedPositions: userFixed, lockedChains: userLockedRaw } =
-          parseFixedPositionsAndChains(fixedSpec, resolvedTargetChain);
+          parseFixedPositionsAndChains(fixedSpec, resolvedTargetChain, orderedResidues);
         const userLockedChainSet = new Set(userLockedRaw.map((c) => c.toUpperCase()));
         const inheritedLockedChainSet = new Set(
           !unlockInherited && Array.isArray(structure.lockedChains)
@@ -3325,7 +3386,9 @@ export function compileNodeInputPreview(
           // - When regions are set (AntiFold), only residues matching regionMask are designable.
           const lockedByTargetChain =
             (Boolean(explicitTarget) && src.authChainId !== explicitTarget) ||
-            (samplingMode === 'autoregressive' && chUpper !== resolvedTargetChain.toUpperCase());
+            (samplingMode === 'autoregressive' &&
+              effectiveTargetChain !== undefined &&
+              chUpper !== effectiveTargetChain.toUpperCase());
           const inRegion =
             !useRegionMask ||
             regionSelectors.some((sel) =>
@@ -3408,6 +3471,7 @@ export function compileNodeInputPreview(
             precision,
             samplingMode,
             targetChain: resolvedTargetChain,
+            ...(variant === 'antifold' ? { numbering: resolvedNumbering } : {}),
             ...(regions ? { regions } : {}),
             numSequences,
             temperature,
@@ -3420,7 +3484,7 @@ export function compileNodeInputPreview(
               precision,
               samplingMode,
               targetChain: resolvedTargetChain,
-              ...(variant === 'antifold' ? { regions: regions || null } : {}),
+              ...(variant === 'antifold' ? { numbering: resolvedNumbering, regions: regions || null } : {}),
               numSequences,
               temperature,
               fixedPositions: fixedSpec || null,

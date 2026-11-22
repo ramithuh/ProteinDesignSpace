@@ -35,6 +35,7 @@ export type BfactorSemantics =
   | 'plddt-0-1'
   | 'dynamics-prob'
   | 'ddg-stability'
+  | 'llr-fitness'
   | 'crystal-b';
 
 export type AtomGranularity = 'ca-only' | 'backbone4' | 'all-atom';
@@ -268,6 +269,8 @@ export interface StructureArtifact {
   lockedChains?: string[];
   /** 1-based flat residue indices in the output structure to keep fixed in ProteinMPNN (e.g. scaffolded motifs). */
   fixedResidueIndices?: number[];
+  /** Optional symmetric tied-residue specification (e.g. `"A1=B25=C49; ..."`). */
+  tiedPositions?: string;
   /** Semantic role per output protein chain ID (e.g. target vs binder vs scaffold). */
   chainRoles?: Record<string, 'target' | 'binder' | 'scaffold'>;
   /** 0-based residue indices into `caCoords` corresponding to `nativeMotifCoords`. */

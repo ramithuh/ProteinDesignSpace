@@ -67,21 +67,41 @@ export function computeChainLengths(chainIds: readonly string[]): number[] {
   return lengths;
 }
 
+export interface OrderedStructureResidue {
+  chain: string;
+  number: number;
+  insertionCode?: string;
+}
+
 /**
  * Parse human-friendly fixed-position strings into `{ fixedPositions, lockedChains }`.
  * Supports: whole-chain locking ("A", "B"), single residues ("A10", "A100A", "100A"),
- * ranges ("A10-15", "A10-A15", reversed "A15-10"), negative resids ("A-2", "A-2-5", "A-5--2"),
+ * ranges ("A10-15", "A10-A15", "H100A-100C", reversed "A15-10"), negative resids ("A-2", "A-2-5", "A-5--2"),
  * lowercase chain normalization ("a10" -> "A"), and default chain resolution ("_" for blank-chain PDBs).
+ *
+ * When `orderedResidues` is provided, ranges expand against actual structure residues in order
+ * (capturing Kabat/IMGT insertion codes such as `H82A`, `H82B` inside `H39-94`).
+ * When `orderedResidues` is omitted, preserves exact integer expansion for backward compatibility.
  */
 export function parseFixedPositionsAndChains(
   spec: string,
   defaultChain = 'A',
+  orderedResidues?: readonly OrderedStructureResidue[],
 ): { fixedPositions: ResidueRef[]; lockedChains: string[] } {
   const fixedPositions: ResidueRef[] = [];
   const lockedChains: string[] = [];
   const seenChains = new Set<string>();
   const trimmed = spec.trim();
   if (!trimmed) return { fixedPositions, lockedChains };
+
+  const resolveStructureChain = (requested: string): string => {
+    if (!orderedResidues || orderedResidues.length === 0) return requested;
+    if (orderedResidues.some((r) => r.chain === requested)) return requested;
+    const upper = requested.toUpperCase();
+    const hit = orderedResidues.find((r) => r.chain.toUpperCase() === upper);
+    return hit ? hit.chain : requested;
+  };
+
   for (const raw of trimmed.split(/[,\s]+/)) {
     if (!raw) continue;
     // Whole-chain token e.g. "A", "B", "_"
@@ -95,35 +115,117 @@ export function parseFixedPositionsAndChains(
       continue;
     }
 
-    const rangeMatch = /^([A-Za-z_])?:?(-?\d+)-([A-Za-z_])?:?(-?\d+)$/.exec(raw);
+    const rangeMatch =
+      /^(?:([A-Za-z0-9_]+):|([A-Za-z_]))?(-?\d+)([A-Za-z])?-(?:([A-Za-z0-9_]+):|([A-Za-z_]))?(-?\d+)([A-Za-z])?$/.exec(raw);
     if (rangeMatch) {
-      const startChain = rangeMatch[1] ? rangeMatch[1].toUpperCase() : null;
-      const endChain = rangeMatch[3] ? rangeMatch[3].toUpperCase() : null;
+      const rawStartChain = rangeMatch[1] ?? rangeMatch[2];
+      const rawEndChain = rangeMatch[5] ?? rangeMatch[6];
+      const startChain = rawStartChain ? rawStartChain.toUpperCase() : null;
+      const endChain = rawEndChain ? rawEndChain.toUpperCase() : null;
       if (startChain && endChain && startChain !== endChain) {
         throw new Error(
           `Invalid fixed position "${raw}": range must stay within a single chain (${startChain} vs ${endChain})`,
         );
       }
-      const chain = startChain ?? endChain ?? defaultChain;
-      const a = Number(rangeMatch[2]);
-      const b = Number(rangeMatch[4]);
-      const start = Math.min(a, b);
-      const end = Math.max(a, b);
+      const chain = resolveStructureChain(startChain ?? endChain ?? defaultChain);
+      const a = Number(rangeMatch[3]);
+      const aIns = (rangeMatch[4] ?? '').toUpperCase();
+      const b = Number(rangeMatch[7]);
+      const bIns = (rangeMatch[8] ?? '').toUpperCase();
+      const forward = a < b || (a === b && aIns <= bIns);
+      const start = forward ? a : b;
+      const startIns = forward ? aIns : bIns;
+      const end = forward ? b : a;
+      const endIns = forward ? bIns : aIns;
       if (end - start > 100000) {
         throw new Error(`Invalid fixed position "${raw}": residue range too large`);
       }
+
+      if (orderedResidues && orderedResidues.length > 0) {
+        const hits = orderedResidues.filter((r) => {
+          if (r.chain !== chain && r.chain.toUpperCase() !== chain.toUpperCase()) return false;
+          const rIns = (r.insertionCode ?? '').toUpperCase();
+          if (start === end && !startIns && !endIns) {
+            return r.number === start && rIns === '';
+          }
+          const afterStart =
+            r.number > start || (r.number === start && (!startIns || rIns >= startIns));
+          const beforeEnd =
+            r.number < end || (r.number === end && (!endIns || rIns <= endIns));
+          return afterStart && beforeEnd;
+        });
+        if (hits.length > 0) {
+          for (const h of hits) {
+            fixedPositions.push(
+              h.insertionCode
+                ? { chain: h.chain, number: h.number, insertionCode: h.insertionCode }
+                : { chain: h.chain, number: h.number },
+            );
+          }
+          continue;
+        }
+        // Fallback when range matches 0 residues so downstream resolution reports missing residues
+        if (startIns || endIns) {
+          fixedPositions.push(
+            startIns ? { chain, number: start, insertionCode: startIns } : { chain, number: start },
+          );
+          if (start !== end || startIns !== endIns) {
+            fixedPositions.push(
+              endIns ? { chain, number: end, insertionCode: endIns } : { chain, number: end },
+            );
+          }
+          continue;
+        }
+      }
+
+      if (startIns || endIns) {
+        if (start === end) {
+          const loChar = startIns ? startIns.charCodeAt(0) : 64;
+          const hiChar = endIns ? endIns.charCodeAt(0) : 90;
+          if (!startIns) fixedPositions.push({ chain, number: start });
+          for (let code = Math.max(65, loChar); code <= Math.min(90, hiChar); code++) {
+            fixedPositions.push({ chain, number: start, insertionCode: String.fromCharCode(code) });
+          }
+        } else {
+          fixedPositions.push(
+            startIns ? { chain, number: start, insertionCode: startIns } : { chain, number: start },
+          );
+          for (let pos = start + 1; pos < end; pos++) {
+            fixedPositions.push({ chain, number: pos });
+          }
+          fixedPositions.push(
+            endIns ? { chain, number: end, insertionCode: endIns } : { chain, number: end },
+          );
+        }
+        continue;
+      }
+
       for (let pos = start; pos <= end; pos++) {
         fixedPositions.push({ chain, number: pos });
       }
       continue;
     }
 
-    const singleMatch = /^([A-Za-z_])?:?(-?\d+)([A-Za-z])?$/.exec(raw);
+    const singleMatch = /^(?:([A-Za-z0-9_]+):|([A-Za-z_]))?(-?\d+)([A-Za-z])?$/.exec(raw);
     if (singleMatch) {
-      const chain = singleMatch[1] ? singleMatch[1].toUpperCase() : defaultChain;
-      const number = Number(singleMatch[2]);
-      const insertionCode = singleMatch[3];
+      const rawChain = singleMatch[1] ?? singleMatch[2];
+      const chain = resolveStructureChain(rawChain ? rawChain.toUpperCase() : defaultChain);
+      const number = Number(singleMatch[3]);
+      const insertionCode = singleMatch[4]?.toUpperCase();
       fixedPositions.push(insertionCode ? { chain, number, insertionCode } : { chain, number });
+      continue;
+    }
+
+    const matchedMultiChain =
+      orderedResidues &&
+      /^[A-Za-z0-9_]+$/.test(raw) &&
+      orderedResidues.find((r) => r.chain.toUpperCase() === raw.toUpperCase());
+    if (matchedMultiChain) {
+      const ch = matchedMultiChain.chain;
+      if (!seenChains.has(ch)) {
+        seenChains.add(ch);
+        lockedChains.push(ch);
+      }
       continue;
     }
 
@@ -290,7 +392,10 @@ function formatRefLabel(ref: ResidueRef): string {
  * identical to `mpnn.worker.ts` + `proteinmpnn-web/src/constraints.ts`.
  */
 export function compileMpnnInputSpec(
-  structure: Pick<StructureArtifact, 'pdbText' | 'lockedChains' | 'fixedResidueIndices' | 'chainRoles'>,
+  structure: Pick<
+    StructureArtifact,
+    'pdbText' | 'lockedChains' | 'fixedResidueIndices' | 'tiedPositions' | 'chainRoles'
+  >,
   params: Record<string, unknown> = {},
   parsedOverride?: MpnnStructure,
 ): CompiledMpnnInputSpec {
@@ -336,9 +441,27 @@ export function compileMpnnInputSpec(
   const warnings: string[] = [];
   const errors: string[] = [];
 
+  const orderedResidues: OrderedStructureResidue[] = [];
+  for (let i = 0; i < mpnnStructure.length; i++) {
+    orderedResidues.push({
+      chain: mpnnStructure.chainIds[i],
+      number: mpnnStructure.residueNumbers[i],
+      insertionCode: mpnnStructure.insertionCodes[i] ?? '',
+    });
+  }
+
   const { fixedPositions: userFixed, lockedChains: userLockedChainsRaw } =
-    parseFixedPositionsAndChains(fixedPositionsSpec, defaultChain);
-  const tiedPositions = parseTiedPositions(params.tiedPositions, defaultChain);
+    parseFixedPositionsAndChains(fixedPositionsSpec, defaultChain, orderedResidues);
+  const rawTiedSpec = Array.isArray(params.tiedPositions)
+    ? params.tiedPositions
+    : typeof params.tiedPositions === 'string' && params.tiedPositions.trim()
+      ? params.tiedPositions
+      : !ignoreInheritedLocks &&
+          typeof structure.tiedPositions === 'string' &&
+          structure.tiedPositions.trim()
+        ? structure.tiedPositions
+        : '';
+  const tiedPositions = parseTiedPositions(rawTiedSpec, defaultChain);
 
   const lockedChainSet = new Set<string>();
   const userLockedChainSet = new Set<string>();
@@ -553,4 +676,171 @@ export function compileMpnnInputSpec(
     warnings,
     errors,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Shared AntiFold / ESM-IF1 Antibody Numbering & VH/VL Chain Detection
+// ---------------------------------------------------------------------------
+
+export type AntiFoldNumberingParam = 'auto' | 'imgt' | 'kabat';
+export type ResolvedAntiFoldNumbering = 'imgt' | 'kabat';
+
+export const ANTIBODY_CDR_BOUNDS: Record<
+  ResolvedAntiFoldNumbering,
+  {
+    H: readonly [readonly [number, number], readonly [number, number], readonly [number, number]];
+    L: readonly [readonly [number, number], readonly [number, number], readonly [number, number]];
+    maxH: number;
+    maxL: number;
+  }
+> = {
+  imgt: {
+    H: [
+      [27, 38],
+      [56, 65],
+      [105, 117],
+    ],
+    L: [
+      [27, 38],
+      [56, 65],
+      [105, 117],
+    ],
+    maxH: 128,
+    maxL: 128,
+  },
+  kabat: {
+    H: [
+      [31, 35],
+      [50, 65],
+      [95, 102],
+    ],
+    L: [
+      [24, 34],
+      [50, 56],
+      [89, 97],
+    ],
+    maxH: 113,
+    maxL: 107,
+  },
+};
+
+export interface NumberedChainInfo {
+  id: string;
+  residues: ReadonlyArray<{ number: number; insertion: string; aa1: string }>;
+}
+
+export function normalizeAntiFoldNumberingParam(raw: unknown): AntiFoldNumberingParam {
+  const v = String(raw ?? 'auto')
+    .trim()
+    .toLowerCase();
+  if (v === 'imgt' || v === 'kabat') return v;
+  return 'auto';
+}
+
+function scoreChainAntibodyHallmarks(chain: NumberedChainInfo) {
+  const byNum = new Map<number, string>();
+  let hasKabatHIns = false; // 82A/B/C or 52A or 100A
+  let hasKabatLIns = false; // 27A or 95A
+  let hasImgtIns = false; // 111A / 112A
+  for (const r of chain.residues) {
+    const ins = r.insertion.toUpperCase();
+    if (!ins && !byNum.has(r.number)) byNum.set(r.number, r.aa1.toUpperCase());
+    if (ins) {
+      if ((r.number === 82 || r.number === 52 || r.number === 100) && ins >= 'A' && ins <= 'Z') {
+        hasKabatHIns = true;
+      }
+      if ((r.number === 27 || r.number === 95) && ins >= 'A' && ins <= 'Z') {
+        hasKabatLIns = true;
+      }
+      if ((r.number === 111 || r.number === 112) && ins >= 'A' && ins <= 'Z') {
+        hasImgtIns = true;
+      }
+    }
+  }
+  const kabatVH =
+    (byNum.get(22) === 'C' ? 1 : 0) +
+    (byNum.get(36) === 'W' ? 1 : 0) +
+    (byNum.get(92) === 'C' ? 1 : 0) +
+    (byNum.get(103) === 'W' ? 1 : 0) +
+    (hasKabatHIns ? 2 : 0);
+  const kabatVL =
+    (byNum.get(23) === 'C' ? 1 : 0) +
+    (byNum.get(35) === 'W' ? 1 : 0) +
+    (byNum.get(88) === 'C' ? 1 : 0) +
+    (byNum.get(98) === 'F' || byNum.get(98) === 'W' ? 1 : 0) +
+    (hasKabatLIns ? 2 : 0);
+  const imgt =
+    (byNum.get(23) === 'C' ? 1 : 0) +
+    (byNum.get(41) === 'W' ? 1 : 0) +
+    (byNum.get(104) === 'C' ? 1 : 0) +
+    (byNum.get(118) === 'W' || byNum.get(118) === 'F' ? 1 : 0) +
+    (hasImgtIns ? 2 : 0);
+  return { kabatVH, kabatVL, imgt };
+}
+
+export function detectAntibodyHeavyLightChains(
+  chains: readonly NumberedChainInfo[],
+  chainTypes: Readonly<Record<string, string>>,
+  lockedChainSet: ReadonlySet<string>,
+  explicitTarget?: string,
+): { heavyChain?: string; lightChain?: string } {
+  const byId = new Map(chains.map((c) => [c.id, c]));
+  const upperToId = new Map<string, string>();
+  for (const c of chains) if (!upperToId.has(c.id.toUpperCase())) upperToId.set(c.id.toUpperCase(), c.id);
+  const resolve = (k: string) => (byId.has(k) ? k : upperToId.get(k.toUpperCase()));
+
+  let heavyChain =
+    chains.find((c) => chainTypes[c.id] === 'antibody-H' || chainTypes[c.id] === 'nanobody')?.id ??
+    resolve('H');
+  let lightChain = chains.find(
+    (c) => chainTypes[c.id] === 'antibody-L' && c.id !== (explicitTarget ?? heavyChain),
+  )?.id;
+  if (!lightChain) {
+    const l = resolve('L');
+    if (l && l !== (explicitTarget ?? heavyChain)) lightChain = l;
+  }
+
+  // Fallback for Fab complexes like 1N8Z (A=VL, B=VH, C=antigen) lacking H/L chain IDs:
+  if (!heavyChain) {
+    let bestHScore = 2; // require >= 3 points so non-antibodies never trigger
+    for (const c of chains) {
+      if (lockedChainSet.has(c.id)) continue;
+      const s = scoreChainAntibodyHallmarks(c);
+      const vhScore = Math.max(s.kabatVH, s.imgt);
+      if (vhScore > bestHScore && s.kabatVH >= s.kabatVL) {
+        bestHScore = vhScore;
+        heavyChain = c.id;
+      }
+    }
+  }
+  if (!lightChain) {
+    let bestLScore = 2;
+    for (const c of chains) {
+      if (c.id === (explicitTarget ?? heavyChain) || lockedChainSet.has(c.id)) continue;
+      const s = scoreChainAntibodyHallmarks(c);
+      if (s.kabatVL > bestLScore && s.kabatVL > s.kabatVH) {
+        bestLScore = s.kabatVL;
+        lightChain = c.id;
+      }
+    }
+  }
+  return { heavyChain, lightChain };
+}
+
+export function resolveAntibodyNumbering(
+  param: AntiFoldNumberingParam,
+  chains: readonly NumberedChainInfo[],
+  heavyChain?: string,
+  lightChain?: string,
+): ResolvedAntiFoldNumbering {
+  if (param === 'imgt' || param === 'kabat') return param;
+  const targets = chains.filter((c) => c.id === heavyChain || c.id === lightChain);
+  let kabatTotal = 0;
+  let imgtTotal = 0;
+  for (const c of targets.length > 0 ? targets : chains) {
+    const s = scoreChainAntibodyHallmarks(c);
+    kabatTotal += c.id === lightChain ? s.kabatVL : Math.max(s.kabatVH, s.kabatVL);
+    imgtTotal += s.imgt;
+  }
+  return kabatTotal >= 2 && kabatTotal > imgtTotal ? 'kabat' : 'imgt';
 }

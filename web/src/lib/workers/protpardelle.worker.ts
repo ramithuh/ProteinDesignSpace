@@ -303,6 +303,7 @@ self.onmessage = async (ev: MessageEvent) => {
             stepScale,
             temperature,
             sidechainMode,
+            sChurn: taskMode === 'partial' ? 0 : Math.min(50, numSteps * 0.25),
             ...(sidechainMode ? { jumpSteps: true } : {}),
             ...(TIP_CHECKPOINTS.has(checkpoint) && taskMode === 'motif'
               ? { tipAtomConditioning: true }
@@ -313,7 +314,11 @@ self.onmessage = async (ev: MessageEvent) => {
                     structure: parsedTemplate,
                     sourceIndices,
                     targetIndices,
-                    strategy: sidechainMode ? 'allatom' : 'backbone',
+                    strategy: TIP_CHECKPOINTS.has(checkpoint)
+                      ? 'sidechain-tip'
+                      : sidechainMode
+                        ? 'backbone-sidechain'
+                        : 'backbone',
                   },
                 }
               : {}),

@@ -3,6 +3,10 @@
 // Runs dynamic BoltzGen-1 all-atom diffusion for unconditional, binder, and motif design.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import {
+  parseFixedPositionsAndChains,
+  type OrderedStructureResidue,
+} from '$lib/engine/mpnn-spec';
 import { requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
@@ -271,12 +275,55 @@ self.onmessage = async (ev: MessageEvent) => {
       const numDesigns = Math.max(1, Math.min(4, Math.round(Number(p.numDesigns ?? 1))));
       const numSteps = Math.max(3, Math.min(100, Math.round(Number(p.numSteps ?? 20))));
       const recyclingSteps = Math.max(0, Math.min(3, Math.round(Number(p.recyclingSteps ?? 0))));
+      const hotspotsSpec = String(p.hotspots ?? '').trim();
       const motifOffset = Math.max(0, Math.round(Number(p.motifOffset ?? 10)));
       const seed = Math.max(0, Math.round(Number(p.seed ?? 42)));
 
       const upstreamStruct = msg.inputs?.structure as StructureArtifact | undefined;
       if ((taskMode === 'binder' || taskMode === 'motif') && !upstreamStruct) {
         throw new Error(`BoltzGen-1 in "${taskMode}" mode requires a connected target structure.`);
+      }
+
+      let resolvedHotspots: string[] = [];
+      if (taskMode === 'binder' && upstreamStruct && hotspotsSpec) {
+        const targetResidues =
+          upstreamStruct.sourceResidues && upstreamStruct.sourceResidues.length > 0
+            ? upstreamStruct.sourceResidues
+            : parseStructureText(upstreamStruct.pdbText).sourceResidues;
+        const orderedTargetResidues: OrderedStructureResidue[] = targetResidues.map((sr) => ({
+          chain: sr.authChainId,
+          number: sr.resNum,
+          insertionCode: sr.insCode ?? '',
+        }));
+        const authToProjected = new Map<string, string>();
+        for (const sr of targetResidues) {
+          if (!authToProjected.has(sr.authChainId)) authToProjected.set(sr.authChainId, sr.projectedChainId);
+          if (!authToProjected.has(sr.authChainId.toUpperCase())) {
+            authToProjected.set(sr.authChainId.toUpperCase(), sr.projectedChainId);
+          }
+        }
+        const defaultTargetChain = orderedTargetResidues[0]?.chain ?? 'A';
+        const { fixedPositions: hotspotRefs, lockedChains: hotspotChains } =
+          parseFixedPositionsAndChains(hotspotsSpec, defaultTargetChain, orderedTargetResidues);
+        const keySet = new Set<string>();
+        for (const ch of hotspotChains) {
+          const proj = authToProjected.get(ch) ?? authToProjected.get(ch.toUpperCase()) ?? ch;
+          for (const sr of targetResidues) {
+            if (sr.projectedChainId.toUpperCase() === proj.toUpperCase()) {
+              keySet.add(`${sr.projectedChainId}:${sr.resNum}${sr.insCode ?? ''}`);
+            }
+          }
+        }
+        for (const ref of hotspotRefs) {
+          if (typeof ref === 'number') continue;
+          const proj =
+            authToProjected.get(ref.chain) ?? authToProjected.get(ref.chain.toUpperCase()) ?? ref.chain;
+          keySet.add(`${proj}:${ref.number}${ref.insertionCode ?? ''}`);
+        }
+        resolvedHotspots = [...keySet];
+        if (resolvedHotspots.length === 0) {
+          throw new Error(`BoltzGen hotspots "${hotspotsSpec}" matched 0 target residues.`);
+        }
       }
 
       let effectiveLength = length;
@@ -305,6 +352,7 @@ self.onmessage = async (ev: MessageEvent) => {
           numDesigns,
           numSteps,
           recyclingSteps,
+          hotspots: taskMode === 'binder' ? hotspotsSpec : '',
           motifOffset,
           seed,
           upstreamId: upstreamStruct?.id ?? null,
@@ -322,6 +370,7 @@ self.onmessage = async (ev: MessageEvent) => {
             ...(taskMode !== 'unconditional' && upstreamStruct
               ? { targetPDB: upstreamStruct.pdbText }
               : {}),
+            ...(resolvedHotspots.length > 0 ? { hotspots: resolvedHotspots } : {}),
             ...(motifIndices ? { motifIndices } : {}),
             signal: controller.signal,
             onProgress: (prog: { phase?: string; step?: number; total?: number; block?: number }) => {
@@ -354,6 +403,51 @@ self.onmessage = async (ev: MessageEvent) => {
           const designKey = `design-${d + 1}`;
           const structId = `bg-${variant}-${taskMode}-${parsed.nResidues}aa-d${d + 1}-${runHash}`;
 
+          let lockedChains: string[] | undefined;
+          let chainRoles: Record<string, 'target' | 'binder' | 'scaffold'> | undefined;
+          let fixedResidueIndices: number[] | undefined;
+          let outMotifIndices: number[] | undefined;
+          let nativeMotifCoords: number[][] | undefined;
+
+          if (taskMode === 'binder') {
+            const designedByChain = new Map<string, boolean>();
+            for (const a of atoms) {
+              const ch = (a.chain || 'A')[0];
+              designedByChain.set(ch, (designedByChain.get(ch) ?? false) || Boolean(a.designed));
+            }
+            const locked: string[] = [];
+            const roles: Record<string, 'target' | 'binder' | 'scaffold'> = {};
+            for (const ch of [...new Set(parsed.chainIds)]) {
+              if (designedByChain.get(ch)) {
+                roles[ch] = 'binder';
+              } else {
+                roles[ch] = 'target';
+                locked.push(ch);
+              }
+            }
+            if (locked.length > 0) lockedChains = locked;
+            chainRoles = roles;
+          } else if (taskMode === 'motif' && motifIndices && upstreamStruct) {
+            chainRoles = { A: 'scaffold' };
+            fixedResidueIndices = motifIndices.map((idx) => idx + 1);
+            outMotifIndices = [...motifIndices];
+            nativeMotifCoords = motifIndices.map((_, k) => {
+              const base = k * 3;
+              if (base + 2 < upstreamStruct.caCoords.length) {
+                return [
+                  upstreamStruct.caCoords[base],
+                  upstreamStruct.caCoords[base + 1],
+                  upstreamStruct.caCoords[base + 2],
+                ];
+              }
+              return [0, 0, 0];
+            });
+          } else {
+            const roles: Record<string, 'target' | 'binder' | 'scaffold'> = {};
+            for (const ch of [...new Set(parsed.chainIds)]) roles[ch] = 'scaffold';
+            chainRoles = roles;
+          }
+
           const artifact: StructureArtifact = {
             kind: 'StructureArtifact',
             id: structId,
@@ -372,6 +466,14 @@ self.onmessage = async (ev: MessageEvent) => {
             observedBackboneMask: parsed.observedBackboneMask,
             diagnostics: parsed.diagnostics,
             geometry,
+            atomGranularity: 'backbone4',
+            bfactorSemantics: 'none',
+            ...(lockedChains ? { lockedChains } : {}),
+            ...(fixedResidueIndices ? { fixedResidueIndices } : {}),
+            ...(chainRoles ? { chainRoles } : {}),
+            ...(outMotifIndices && nativeMotifCoords
+              ? { motifIndices: outMotifIndices, nativeMotifCoords }
+              : {}),
             designKey,
             designIndex: d,
             seed: seed + d,

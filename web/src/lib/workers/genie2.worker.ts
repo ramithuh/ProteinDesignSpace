@@ -156,38 +156,92 @@ async function ensureEngine(id: number, precision: Precision) {
   }
 }
 
+interface BuiltGenie2Motif {
+  motifs: Array<{ start: number; sequence: string; coordinates: Float32Array; group: number }>;
+  motifIndices: number[];
+  fixedResidueIndices: number[];
+  nativeMotifCoords: number[][];
+}
+
 function buildOptionalMotifs(
   template: StructureArtifact | undefined,
   motifRange: string,
   targetLength: number,
-) {
-  if (!template?.pdbText || !motifRange.trim()) return undefined;
+): BuiltGenie2Motif | undefined {
+  const trimmed = motifRange.trim();
+  if (!trimmed) return undefined;
+  if (!template?.pdbText) {
+    throw new Error('Genie 2 motifRange requires a connected template structure.');
+  }
   const parsed = parseStructureText(template.pdbText);
-  if (parsed.nResidues === 0) return undefined;
+  if (parsed.nResidues === 0) {
+    throw new Error('Genie 2 motif template contains no valid residues.');
+  }
   // Parse simple "A10-25" or "10-25" range against the template residues
-  const match = motifRange.trim().match(/^(?:([A-Za-z]):?)?(\d+)(?:-(\d+))?$/);
-  if (!match) return undefined;
+  const match = trimmed.match(/^(?:([A-Za-z]):?)?(-?\d+)(?:-(-?\d+))?$/);
+  if (!match) {
+    throw new Error(`Invalid Genie 2 motifRange "${trimmed}" (expected e.g. A10-25 or 10-25).`);
+  }
   const chainFilter = match[1]?.toUpperCase();
   const startRes = Number(match[2]);
   const endRes = match[3] ? Number(match[3]) : startRes;
+  const lo = Math.min(startRes, endRes);
+  const hi = Math.max(startRes, endRes);
   const picked: number[] = [];
   for (let i = 0; i < parsed.nResidues; i++) {
     if (chainFilter && parsed.chainIds[i]?.toUpperCase() !== chainFilter) continue;
     const r = parsed.resNums[i];
-    if (r >= startRes && r <= endRes) picked.push(i);
+    if (r >= lo && r <= hi) picked.push(i);
   }
-  if (picked.length < 3 || picked.length >= targetLength) return undefined;
-  const coords = new Float32Array(picked.length * 3);
-  let seq = '';
+  if (picked.length < 3) {
+    throw new Error(
+      `Genie 2 motifRange "${trimmed}" matched only ${picked.length} residue(s) (minimum 3 required).`,
+    );
+  }
+  if (picked.length >= targetLength) {
+    throw new Error(
+      `Genie 2 motif length (${picked.length} aa) must be smaller than target length (${targetLength} aa).`,
+    );
+  }
+
+  let cx = 0;
+  let cy = 0;
+  let cz = 0;
+  const nativeMotifCoords: number[][] = [];
   for (let k = 0; k < picked.length; k++) {
     const idx = picked[k];
-    coords[k * 3] = parsed.caCoords[idx * 3];
-    coords[k * 3 + 1] = parsed.caCoords[idx * 3 + 1];
-    coords[k * 3 + 2] = parsed.caCoords[idx * 3 + 2];
-    seq += parsed.sequence[idx] || 'A';
+    const x = parsed.caCoords[idx * 3];
+    const y = parsed.caCoords[idx * 3 + 1];
+    const z = parsed.caCoords[idx * 3 + 2];
+    cx += x;
+    cy += y;
+    cz += z;
+    nativeMotifCoords.push([x, y, z]);
   }
+  cx /= picked.length;
+  cy /= picked.length;
+  cz /= picked.length;
+
+  const coords = new Float32Array(picked.length * 3);
+  let seq = '';
   const startOffset = Math.max(0, Math.floor((targetLength - picked.length) / 2));
-  return [{ start: startOffset, sequence: seq, coordinates: coords, group: 1 }];
+  const motifIndices: number[] = [];
+  const fixedResidueIndices: number[] = [];
+  for (let k = 0; k < picked.length; k++) {
+    const idx = picked[k];
+    coords[k * 3] = parsed.caCoords[idx * 3] - cx;
+    coords[k * 3 + 1] = parsed.caCoords[idx * 3 + 1] - cy;
+    coords[k * 3 + 2] = parsed.caCoords[idx * 3 + 2] - cz;
+    seq += parsed.sequence[idx] || 'A';
+    motifIndices.push(startOffset + k);
+    fixedResidueIndices.push(startOffset + k + 1);
+  }
+  return {
+    motifs: [{ start: startOffset, sequence: seq, coordinates: coords, group: 1 }],
+    motifIndices,
+    fixedResidueIndices,
+    nativeMotifCoords,
+  };
 }
 
 self.onmessage = async (ev: MessageEvent) => {
@@ -208,14 +262,15 @@ self.onmessage = async (ev: MessageEvent) => {
     const p = msg.params ?? {};
     const template = msg.inputs?.template as StructureArtifact | undefined;
     const length = Math.max(20, Math.min(256, Math.round(Number(p.length ?? 80))));
-    const steps = Math.max(10, Math.min(1000, Math.round(Number(p.steps ?? 200))));
-    const scale = Math.max(0.1, Math.min(1.5, Number(p.scale ?? 0.6)));
+    const steps = Math.max(10, Math.min(1000, Math.round(Number(p.steps ?? 1000))));
+    const scale = Math.max(0.1, Math.min(1.0, Number(p.scale ?? 0.6)));
     const seed = Math.round(Number(p.seed ?? 42));
     const precision = normalizePrecision(p.precision);
     const motifRange = String(p.motifRange ?? '').trim();
     const numDesigns = Math.max(1, Math.min(8, Math.round(Number(p.numDesigns ?? 1))));
 
-    const motifs = buildOptionalMotifs(template, motifRange, length);
+    const motifMeta = buildOptionalMotifs(template, motifRange, length);
+    const motifs = motifMeta?.motifs;
     const eng = await ensureEngine(msg.id, precision);
     const abortCtrl = new AbortController();
     activeAbort = abortCtrl;
@@ -246,6 +301,7 @@ self.onmessage = async (ev: MessageEvent) => {
           scale,
           seed: designSeed,
           ...(motifs ? { motifs } : {}),
+          readStepCoordinates: false,
           signal: abortCtrl.signal,
           onStep: () => {
             completedSteps++;
@@ -287,11 +343,19 @@ self.onmessage = async (ev: MessageEvent) => {
           caCoords: parsed.caCoords,
           backbone4Coords: parsed.backbone4Coords,
           atomGranularity: 'ca-only',
+          bfactorSemantics: 'none',
           atomPresence: parsed.atomPresence,
           diagnostics: parsed.diagnostics,
           geometry: geom,
           designKey,
           designIndex: d,
+          ...(motifMeta
+            ? {
+                fixedResidueIndices: motifMeta.fixedResidueIndices,
+                motifIndices: motifMeta.motifIndices,
+                nativeMotifCoords: motifMeta.nativeMotifCoords,
+              }
+            : {}),
         });
       }
     } finally {

@@ -5,7 +5,13 @@
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
 import {
   computeChainLengths,
+  detectAntibodyHeavyLightChains,
+  normalizeAntiFoldNumberingParam,
   parseFixedPositionsAndChains,
+  resolveAntibodyNumbering,
+  type AntiFoldNumberingParam,
+  type NumberedChainInfo,
+  type OrderedStructureResidue,
 } from '$lib/engine/mpnn-spec';
 import {
   computeStructurePayloadDigest,
@@ -155,6 +161,7 @@ function resolveAntiFoldPlan(
   variant: Variant,
   samplingMode: SamplingMode,
   targetChainSpec: string,
+  numberingParam: AntiFoldNumberingParam,
   regionsSpec: string,
   fixedPositionsSpec: string,
   unlockInherited: boolean,
@@ -177,24 +184,39 @@ function resolveAntiFoldPlan(
   const originalOrderKeys: string[] = [];
   const originalChainList: string[] = [];
   const nativeAaByKey = new Map<string, string>();
+  const orderedResidues: OrderedStructureResidue[] = [];
+  const chainInfos: NumberedChainInfo[] = [];
   for (const ch of parsed.chains) {
+    const infoResidues: Array<{ number: number; insertion: string; aa1: string }> = [];
     for (let i = 0; i < ch.residues.length; i++) {
       const r = ch.residues[i];
       const k = residueKey(r.chain, r.number, r.insertion);
+      const aa1 = ch.sequence[i] ?? 'X';
       originalOrderKeys.push(k);
       originalChainList.push(r.chain);
-      nativeAaByKey.set(k, ch.sequence[i] ?? 'X');
+      nativeAaByKey.set(k, aa1);
+      orderedResidues.push({
+        chain: r.chain,
+        number: r.number,
+        insertionCode: r.insertion ?? '',
+      });
+      infoResidues.push({
+        number: r.number,
+        insertion: r.insertion ?? '',
+        aa1,
+      });
     }
+    chainInfos.push({ id: ch.id, residues: infoResidues });
   }
   const originalChainLengths = computeChainLengths(originalChainList);
 
-  // Resolve inherited & user locked chains
+  // Resolve inherited & user locked chains (pass 1: collect whole-chain locks before target resolution)
   const defaultChain = availableChains[0] ?? 'A';
-  const { fixedPositions: userRefs, lockedChains: userLockedChains } =
-    parseFixedPositionsAndChains(fixedPositionsSpec, defaultChain);
+  const { lockedChains: preUserLockedChains } =
+    parseFixedPositionsAndChains(fixedPositionsSpec, defaultChain, orderedResidues);
 
   const lockedChainSet = new Set<string>();
-  for (const ch of userLockedChains) {
+  for (const ch of preUserLockedChains) {
     const resolved = resolveChain(ch);
     if (resolved) lockedChainSet.add(resolved);
   }
@@ -214,16 +236,30 @@ function resolveAntiFoldPlan(
   }
 
   const chainTypes = backbone.molecularContext?.chainTypes ?? {};
-  const detectedHeavy =
-    availableChains.find((id) => chainTypes[id] === 'antibody-H' || chainTypes[id] === 'nanobody') ??
-    resolveChain('H');
-  const detectedLight = availableChains.find(
-    (id) => chainTypes[id] === 'antibody-L' && id !== (explicitTarget ?? detectedHeavy),
-  ) ?? (resolveChain('L') !== (explicitTarget ?? detectedHeavy) ? resolveChain('L') : undefined);
+  const { heavyChain: detectedHeavy, lightChain: detectedLight } = detectAntibodyHeavyLightChains(
+    chainInfos,
+    chainTypes,
+    lockedChainSet,
+    explicitTarget,
+  );
 
+  const unlockedHeavy =
+    detectedHeavy && !lockedChainSet.has(detectedHeavy) ? detectedHeavy : undefined;
+  const unlockedLight =
+    detectedLight && !lockedChainSet.has(detectedLight) ? detectedLight : undefined;
   const firstUnlocked = availableChains.find((c) => !lockedChainSet.has(c)) ?? availableChains[0];
   const effectiveTargetChain =
-    explicitTarget ?? (variant === 'antifold' ? detectedHeavy ?? firstUnlocked : undefined);
+    explicitTarget ??
+    (variant === 'antifold' ? unlockedHeavy ?? unlockedLight ?? firstUnlocked : undefined);
+  const resolvedTargetChain = effectiveTargetChain ?? defaultChain;
+
+  // Pass 2: parse chainless fixedPositions against resolvedTargetChain (matching input-preview.ts)
+  const { fixedPositions: userRefs, lockedChains: userLockedChains } =
+    parseFixedPositionsAndChains(fixedPositionsSpec, resolvedTargetChain, orderedResidues);
+  for (const ch of userLockedChains) {
+    const resolved = resolveChain(ch);
+    if (resolved) lockedChainSet.add(resolved);
+  }
 
   const regionList =
     variant === 'antifold'
@@ -246,10 +282,16 @@ function resolveAntiFoldPlan(
           : undefined
       : undefined;
 
+  const resolvedNumbering =
+    variant === 'antifold'
+      ? resolveAntibodyNumbering(numberingParam, chainInfos, heavyChain, lightChain)
+      : 'imgt';
+
   const combineOpts: Record<string, unknown> = {
     ...(effectiveTargetChain ? { targetChain: effectiveTargetChain } : {}),
     ...(heavyChain ? { heavyChain } : {}),
     ...(lightChain ? { lightChain } : {}),
+    ...(variant === 'antifold' ? { numbering: resolvedNumbering } : {}),
     ...(regionList.length > 0 ? { regions: regionList } : {}),
   };
 
@@ -480,6 +522,7 @@ self.onmessage = async (ev: MessageEvent) => {
         : 0.2;
       const samplingMode = normalizeSamplingMode(p.samplingMode);
       const targetChainSpec = String(p.targetChain ?? '').trim();
+      const numberingParam = normalizeAntiFoldNumberingParam(p.numbering);
       const regionsSpec = String(p.regions ?? 'CDR1 CDR2 CDR3').trim();
       const fixedPositionsSpec = String(p.fixedPositions ?? '').trim();
       const unlockInherited = Boolean(p.unlockInherited);
@@ -539,6 +582,7 @@ self.onmessage = async (ev: MessageEvent) => {
           variant,
           samplingMode,
           targetChainSpec,
+          numberingParam,
           regionsSpec,
           fixedPositionsSpec,
           unlockInherited,
@@ -586,6 +630,7 @@ self.onmessage = async (ev: MessageEvent) => {
             temperature,
             samplingMode,
             targetChainSpec,
+            numberingParam,
             regionsSpec,
             fixedPositionsSpec,
             unlockInherited,
@@ -653,6 +698,7 @@ self.onmessage = async (ev: MessageEvent) => {
           precision,
           samplingMode,
           targetChain: targetChainSpec,
+          numbering: numberingParam,
           regions: regionsSpec,
           fixedPositions: fixedPositionsSpec,
           unlockInherited,
@@ -679,6 +725,7 @@ self.onmessage = async (ev: MessageEvent) => {
           variant,
           samplingMode,
           targetChainSpec,
+          numberingParam,
           regionsSpec,
           fixedPositionsSpec,
           unlockInherited,

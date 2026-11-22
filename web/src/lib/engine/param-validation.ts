@@ -298,7 +298,19 @@ export interface SequenceValidationResult {
 
 const VALID_AA_SET = new Set('ACDEFGHIKLMNPQRSTVWY'.split(''));
 
-/** Validate plain or multi-FASTA amino acid sequence input (allowing `:` for multi-chain). */
+/**
+ * Normalize EvoDiff template / fixedSequence inputs by converting explicit
+ * `#MASK#`, `[MASK]`, or `<MASK>` tokens into `#` before stripping whitespace.
+ */
+export function sanitizeEvoDiffFixedSequence(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/#MASK#|\[MASK\]|<MASK>/gi, '#')
+    .replace(/\s+/g, '')
+    .toUpperCase();
+}
+
+/**
+ * Validate plain or multi-FASTA amino acid sequence input (allowing `:` for multi-chain). */
 export function validateSequenceText(raw: string): SequenceValidationResult {
   const text = raw.trim();
   if (!text) {

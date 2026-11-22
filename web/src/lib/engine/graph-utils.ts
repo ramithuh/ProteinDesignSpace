@@ -132,6 +132,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         temperature: 0.2,
         samplingMode: 'independent',
         targetChain: '',
+        numbering: 'auto',
         regions: 'CDR1 CDR2 CDR3',
         fixedPositions: '',
         unlockInherited: false,
@@ -168,7 +169,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         contig: '',
         symmetry: 'c3',
         numDesigns: 1,
-        numSteps: 25,
+        numSteps: 50,
         seed: 42,
       };
     case 'boltzgen':
@@ -177,6 +178,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
         variant: 'diverse',
         precision: 'int8',
         length: 48,
+        hotspots: '',
         numDesigns: 1,
         numSteps: 20,
         recyclingSteps: 0,
@@ -197,7 +199,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
       return {
         precision: 'int8',
         length: 80,
-        steps: 100,
+        steps: 400,
         mode: 'sde',
         numDesigns: 1,
         seed: 42,
@@ -206,7 +208,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
       return {
         precision: 'int8',
         length: 80,
-        steps: 100,
+        steps: 400,
         mode: 'sc',
         noiseScale: 0.45,
         selfCondition: true,
@@ -226,7 +228,7 @@ export function defaultParamsForAdapter(adapterId: string): Record<string, unkno
       return {
         precision: 'fp16',
         length: 80,
-        steps: 200,
+        steps: 1000,
         scale: 0.6,
         motifRange: '',
         numDesigns: 1,

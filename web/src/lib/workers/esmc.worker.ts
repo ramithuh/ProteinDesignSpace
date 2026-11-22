@@ -4,6 +4,8 @@
 // naturalness / pseudo-perplexity residue tracks, and masked-position sequence fill.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { paintStructureBfactors } from '$lib/protein-ops/bfactor-paint';
+import { parseStructureText } from '$lib/protein-ops/pdb';
 import type {
   MutationMatrixArtifact,
   ResidueTrackArtifact,
@@ -74,6 +76,13 @@ function parseMaskPositions(raw: unknown, seqLen: number): number[] {
     }
   }
   return [...positions].sort((a, b) => a - b);
+}
+
+function formatResidueId(chain: string, resNum: number, ins: string): string {
+  if (!chain) return `${resNum}${ins}`;
+  return chain.length > 1 || !/^[A-Za-z]$/.test(chain)
+    ? `${chain}:${resNum}${ins}`
+    : `${chain}${resNum}${ins}`;
 }
 
 function cleanCanonicalSequence(raw: string, label: string): string {
@@ -331,7 +340,32 @@ self.onmessage = async (ev: MessageEvent) => {
 
       const L = primarySeq.length;
       const K = CANONICAL_ALPHABET.length;
-      const residueIds = Array.from({ length: L }, (_, i) => `A${i + 1}`);
+      const structText = struct?.cifText || struct?.pdbText;
+      const sourceResidues =
+        struct?.sourceResidues && struct.sourceResidues.length > 0
+          ? struct.sourceResidues
+          : structText
+            ? parseStructureText(structText).sourceResidues
+            : [];
+      let residueIds: string[];
+      if (sourceResidues.length === L) {
+        residueIds = sourceResidues.map((r) =>
+          formatResidueId(r.authChainId, r.resNum, r.insCode ?? ''),
+        );
+      } else {
+        const cLens = sourceCandidates[0]?.chainLengths;
+        if (cLens && cLens.length > 1 && cLens.reduce((a, b) => a + b, 0) === L) {
+          residueIds = [];
+          for (let cIdx = 0; cIdx < cLens.length; cIdx++) {
+            const ch = String.fromCharCode(65 + cIdx);
+            for (let k = 0; k < cLens[cIdx]; k++) {
+              residueIds.push(`${ch}${k + 1}`);
+            }
+          }
+        } else {
+          residueIds = Array.from({ length: L }, (_, i) => `A${i + 1}`);
+        }
+      }
       const meanPerPosition = new Float32Array(L);
       for (let r = 0; r < L; r++) {
         let sum = 0;
@@ -363,6 +397,7 @@ self.onmessage = async (ev: MessageEvent) => {
           mode,
           precision,
           maskPositionsRaw,
+          structureId: struct?.id ?? null,
         }),
       );
 
@@ -413,17 +448,59 @@ self.onmessage = async (ev: MessageEvent) => {
         candidates: scoredCandidates,
       };
 
-      const transferables = collectOwnedTransferables([
+      const outputs: Record<string, unknown> = { mutations, track, sequences };
+      const transferableViews: Array<ArrayBufferView | undefined> = [
         mutations.values,
         mutations.meanPerPosition,
         track.values,
-      ]);
+      ];
+
+      if (struct && (struct.pdbText || struct.cifText) && sourceResidues.length === L) {
+        const paintValues = new Float32Array(L);
+        for (let i = 0; i < L; i++) {
+          paintValues[i] = Number.isFinite(meanPerPosition[i])
+            ? meanPerPosition[i]
+            : primaryWtLogProbs[i];
+        }
+        const paintedPdb = struct.pdbText
+          ? paintStructureBfactors(struct.pdbText, paintValues)
+          : struct.pdbText;
+        const paintedCif = struct.cifText
+          ? paintStructureBfactors(struct.cifText, paintValues)
+          : undefined;
+        const caCopy = new Float32Array(struct.caCoords);
+        const bbCopy = new Float32Array(struct.backbone4Coords);
+        const obsCopy = struct.observedBackboneMask
+          ? new Uint8Array(struct.observedBackboneMask)
+          : undefined;
+
+        const paintedStructure: StructureArtifact = {
+          ...struct,
+          id: `esmc-struct-${struct.id}-${mode}-${precision}-${runHash}`,
+          label: `${struct.label} (ESM-C ${mode === 'masked' ? 'Masked' : mode === 'fill' ? 'Fill' : 'WT'} LLR)`,
+          parentStructureId: struct.id,
+          caCoords: caCopy,
+          backbone4Coords: bbCopy,
+          ...(obsCopy ? { observedBackboneMask: obsCopy } : {}),
+          pdbText: paintedPdb,
+          ...(paintedCif !== undefined ? { cifText: paintedCif } : {}),
+          bfactorSemantics: 'llr-fitness',
+          provenance: {
+            ...struct.provenance,
+            quantization: precision,
+          },
+        };
+        outputs.structure = paintedStructure;
+        transferableViews.push(caCopy, bbCopy, obsCopy);
+      }
+
+      const transferables = collectOwnedTransferables(transferableViews);
 
       self.postMessage(
         {
           id: msg.id,
           type: 'result',
-          outputs: { mutations, track, sequences },
+          outputs,
           elapsedMs: performance.now() - t0,
         },
         transferables,
