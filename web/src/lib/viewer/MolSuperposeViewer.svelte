@@ -7,6 +7,7 @@
   import { expandResidueTokenList } from '$lib/engine/residue-tokens';
   import type { ResidueHighlightLayer } from '$lib/engine/studio-types';
   import type { AtomGranularity, BfactorSemantics } from '$lib/engine/types';
+  import { resolveUncertaintyColorArgFromValues } from './bfactor-domain';
 
   interface Props {
     designedPdb: string | null;
@@ -146,7 +147,9 @@
   let localSpinSpeed = $state<number | null>(null);
   let effectiveSpinSpeed = $derived(localSpinSpeed ?? spinSpeed);
   let isSemanticBfactor = $derived(
-    bfactorSemantics === 'dynamics-prob' || bfactorSemantics === 'ddg-stability',
+    bfactorSemantics === 'dynamics-prob' ||
+      bfactorSemantics === 'ddg-stability' ||
+      (bfactorSemantics as string) === 'llr-fitness',
   );
   let plddtAllowed = $derived(
     bfactorSemantics !== 'none' &&
@@ -168,16 +171,13 @@
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function resolveUncertaintyColorArg(
     struct: any,
-    semantics?: BfactorSemantics,
+    semantics?: BfactorSemantics | 'llr-fitness',
   ): Record<string, unknown> {
     try {
       const units = struct?.data?.units;
-      let caMin = Infinity;
-      let caMax = -Infinity;
-      let polyMin = Infinity;
-      let polyMax = -Infinity;
-      let allMin = Infinity;
-      let allMax = -Infinity;
+      const caValues: number[] = [];
+      const polyValues: number[] = [];
+      const allValues: number[] = [];
       if (Array.isArray(units)) {
         for (const u of units) {
           const bCol = u?.model?.atomicConformation?.B_iso_or_equiv;
@@ -193,49 +193,26 @@
               const el = polyElems[i];
               const v = bCol.value(el);
               if (typeof v !== 'number' || !Number.isFinite(v)) continue;
-              if (v < polyMin) polyMin = v;
-              if (v > polyMax) polyMax = v;
+              polyValues.push(v);
               if (atomIdCol && typeof atomIdCol.value === 'function' && atomIdCol.value(el) === 'CA') {
-                if (v < caMin) caMin = v;
-                if (v > caMax) caMax = v;
+                caValues.push(v);
               }
             }
           }
-          if (allElems && allElems.length > 0 && !Number.isFinite(caMin)) {
+          if (allElems && allElems.length > 0 && caValues.length === 0) {
             const na = allElems.length;
             for (let i = 0; i < na; i++) {
               const v = bCol.value(allElems[i]);
               if (typeof v === 'number' && Number.isFinite(v)) {
-                if (v < allMin) allMin = v;
-                if (v > allMax) allMax = v;
+                allValues.push(v);
               }
             }
           }
         }
       }
-      const min = Number.isFinite(caMin) ? caMin : Number.isFinite(polyMin) ? polyMin : allMin;
-      const max = Number.isFinite(caMax) ? caMax : Number.isFinite(polyMax) ? polyMax : allMax;
-
-      if (Number.isFinite(min) && Number.isFinite(max)) {
-        if (semantics === 'dynamics-prob') {
-          if (min >= -0.05 && max <= 1.05) {
-            return { color: 'uncertainty', colorParams: { domain: [0, 1] } };
-          }
-          return { color: 'uncertainty', colorParams: { domain: [0, 100] } };
-        }
-        if (semantics === 'ddg-stability') {
-          if (min < 0) {
-            const lim = Math.max(1.5, Math.min(4, Math.max(Math.abs(min), Math.abs(max))));
-            return { color: 'uncertainty', colorParams: { domain: [-lim, lim] } };
-          }
-          if (max <= 100.5 && min >= 0) {
-            return { color: 'uncertainty', colorParams: { domain: [0, 100] } };
-          }
-          if (max > min) {
-            return { color: 'uncertainty', colorParams: { domain: [min, max] } };
-          }
-        }
-      }
+      const chosen =
+        caValues.length > 0 ? caValues : polyValues.length > 0 ? polyValues : allValues;
+      return resolveUncertaintyColorArgFromValues(chosen, semantics);
     } catch {
       /* fallback to default Mol* uncertainty ramp */
     }
@@ -821,7 +798,8 @@
         const hasOverlay = Boolean(sDesigned && dPdb && sRefold && rPdb && !useTraj);
         const useSemanticUncertainty =
           styleOpts.bfactorSemantics === 'dynamics-prob' ||
-          styleOpts.bfactorSemantics === 'ddg-stability';
+          styleOpts.bfactorSemantics === 'ddg-stability' ||
+          (styleOpts.bfactorSemantics as string) === 'llr-fitness';
 
         // 1. Designed structure (or multi-model trajectory)
         if (sDesigned && (useTraj && tPdb ? tPdb : dPdb)) {
@@ -1123,7 +1101,8 @@
 
         const useSemanticUncertainty =
           styleOpts.bfactorSemantics === 'dynamics-prob' ||
-          styleOpts.bfactorSemantics === 'ddg-stability';
+          styleOpts.bfactorSemantics === 'ddg-stability' ||
+          (styleOpts.bfactorSemantics as string) === 'llr-fitness';
 
         const nextRefs = new Map<string, string[]>();
         for (const m of specs) {
@@ -1315,9 +1294,32 @@
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async function resolveTokenLoci(ctx: any, token: string): Promise<any | null> {
-    const parsed = expandResidueTokenList(token);
-    const first = parsed.tokens[0];
-    if (!first) return null;
+    const trimmed = token.trim();
+    let target: { chain: string; seqId: number; insCode: string } | null = null;
+    const colon = /^([A-Za-z0-9_]+):(-?\d+)([A-Za-z]?)$/.exec(trimmed);
+    if (colon) {
+      target = {
+        chain: colon[1],
+        seqId: Number.parseInt(colon[2], 10),
+        insCode: colon[3] ? colon[3].toUpperCase() : '',
+      };
+    } else {
+      const parsed = expandResidueTokenList(trimmed);
+      const first = parsed.tokens[0];
+      if (first) {
+        target = { chain: first.chain, seqId: first.seqId, insCode: first.insCode };
+      } else {
+        const multi = /^([A-Za-z0-9_]*[A-Za-z_])(-?\d+)([A-Za-z]?)$/.exec(trimmed);
+        if (multi) {
+          target = {
+            chain: multi[1],
+            seqId: Number.parseInt(multi[2], 10),
+            insCode: multi[3] ? multi[3].toUpperCase() : '',
+          };
+        }
+      }
+    }
+    if (!target || !Number.isFinite(target.seqId)) return null;
     const structs = ctx?.managers?.structure?.hierarchy?.current?.structures ?? [];
     if (structs.length === 0) return null;
 
@@ -1328,9 +1330,7 @@
         import('molstar/lib/mol-model/structure'),
         import('molstar/lib/mol-model/loci'),
       ]);
-    const expr = buildResiduesExpression(MS, [
-      { chain: first.chain, seqId: first.seqId, insCode: first.insCode },
-    ]);
+    const expr = buildResiduesExpression(MS, [target]);
     if (!expr) return null;
 
     for (const sRef of structs) {
@@ -1677,12 +1677,18 @@
           class="bfactor-pill"
           aria-label={bfactorSemantics === 'dynamics-prob'
             ? 'Dynamics probability B-factor scale: Rigid 0.0 to Flexible 1.0'
-            : 'Stability B-factor scale: Stabilizing to Destabilizing (ΔΔG)'}
+            : (bfactorSemantics as string) === 'llr-fitness'
+              ? 'LLR fitness scale: Deleterious to Beneficial'
+              : 'Stability B-factor scale: Stabilizing to Destabilizing (ΔΔG)'}
         >
           {#if bfactorSemantics === 'dynamics-prob'}
             <span>Rigid 0.0</span>
             <span class="bfactor-grad" aria-hidden="true"></span>
             <span>Flexible 1.0</span>
+          {:else if (bfactorSemantics as string) === 'llr-fitness'}
+            <span>Deleterious</span>
+            <span class="bfactor-grad" aria-hidden="true"></span>
+            <span>Beneficial (LLR)</span>
           {:else}
             <span>Stabilizing</span>
             <span class="bfactor-grad" aria-hidden="true"></span>
@@ -1830,12 +1836,18 @@
       class="legend bfactor-legend"
       aria-label={bfactorSemantics === 'dynamics-prob'
         ? 'Dynamics probability B-factor scale: Rigid 0.0 to Flexible 1.0'
-        : 'Stability B-factor scale: Stabilizing to Destabilizing (ΔΔG)'}
+        : (bfactorSemantics as string) === 'llr-fitness'
+          ? 'LLR fitness scale: Deleterious to Beneficial'
+          : 'Stability B-factor scale: Stabilizing to Destabilizing (ΔΔG)'}
     >
       {#if bfactorSemantics === 'dynamics-prob'}
         <span>Rigid 0.0</span>
         <span class="bfactor-grad" aria-hidden="true"></span>
         <span>Flexible 1.0</span>
+      {:else if (bfactorSemantics as string) === 'llr-fitness'}
+        <span>Deleterious</span>
+        <span class="bfactor-grad" aria-hidden="true"></span>
+        <span>Beneficial (LLR)</span>
       {:else}
         <span>Stabilizing</span>
         <span class="bfactor-grad" aria-hidden="true"></span>

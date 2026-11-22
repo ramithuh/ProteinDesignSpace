@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ADAPTER_REGISTRY } from '$lib/engine/registry';
   import { PORT_COLORS } from '$lib/engine/graph-utils';
+  import { mmcifToPdb } from '$lib/protein-ops/pdb';
   import {
     analyzeSequence,
     foldModelSlug,
@@ -71,6 +72,7 @@
     onRunUpToNode?: (nodeId: string) => void;
     onJumpToScorer?: () => void;
     onDownloadText: (text: string, filename: string) => void;
+    onSelectResidue?: (positionIndex: number, residueId: string) => void;
   }
 
   let {
@@ -96,6 +98,7 @@
     onRunUpToNode = undefined,
     onJumpToScorer = undefined,
     onDownloadText,
+    onSelectResidue = undefined,
   }: Props = $props();
 
   let copiedKey = $state<string | null>(null);
@@ -1726,7 +1729,12 @@
         activeStruct.pdbText.trim().length > 0 &&
         !activeStruct.pdbText.trimStart().startsWith('data_'),
     )}
-    {@const isCifPreview = Boolean(activeStruct.cifText) || rawStructText.trimStart().startsWith('data_')}
+    {@const cifSource = activeStruct.cifText?.trim()
+      ? activeStruct.cifText
+      : activeStruct.pdbText.trimStart().startsWith('data_')
+        ? activeStruct.pdbText
+        : null}
+    {@const isCifPreview = Boolean(cifSource) || rawStructText.trimStart().startsWith('data_')}
     {#if structMultiDesign && structCampaignSummary}
       <div class="campaign-bar">
         <div class="campaign-top">
@@ -1815,15 +1823,23 @@
     <div class="meta-bar">
       <span><b>{activeStruct.label}</b> · <span>{formatAdapterName(activeStruct.sourceModelId)}</span></span>
       <div class="dl-links">
-        {#if hasValidPdb}
-          <button class="link-btn" onclick={() => onDownloadText(activeStruct.pdbText, safeFilename(`${activeStruct.id}.pdb`))}>
+        {#if hasValidPdb || Boolean(cifSource)}
+          <button
+            class="link-btn"
+            onclick={() => {
+              const text = cifSource ? mmcifToPdb(cifSource) : activeStruct.pdbText;
+              if (text.trim()) {
+                onDownloadText(text, safeFilename(`${activeStruct.id}.pdb`));
+              }
+            }}
+          >
             ↓ PDB
           </button>
         {/if}
-        {#if activeStruct.cifText || (!hasValidPdb && activeStruct.pdbText.trimStart().startsWith('data_'))}
+        {#if cifSource}
           <button
             class="link-btn"
-            onclick={() => onDownloadText(activeStruct.cifText ?? activeStruct.pdbText, safeFilename(`${activeStruct.id}.cif`))}
+            onclick={() => onDownloadText(cifSource, safeFilename(`${activeStruct.id}.cif`))}
           >
             ↓ mmCIF
           </button>
@@ -1979,7 +1995,7 @@
         {/if}
       </div>
     {/if}
-    <MutationHeatmap matrix={mutArt} {onDownloadText} />
+    <MutationHeatmap matrix={mutArt} {onDownloadText} {onSelectResidue} />
   {:else if trackArt}
     <div class="meta-bar">
       <span>
@@ -1989,7 +2005,7 @@
         <span class="stat-chip">{trackArt.unit}</span>
       {/if}
     </div>
-    <ResidueTrackPlot track={trackArt} {onDownloadText} />
+    <ResidueTrackPlot track={trackArt} {onDownloadText} {onSelectResidue} />
   {:else if embArt}
     <div class="meta-bar">
       <span>

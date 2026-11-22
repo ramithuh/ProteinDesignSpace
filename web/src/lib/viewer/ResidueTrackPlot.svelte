@@ -2,6 +2,7 @@
   import type { ResidueTrackArtifact } from '$lib/engine/types';
   import { AA1_TO_AA3 } from '$lib/protein-ops/pdb';
   import { formatResidueTrackCsv } from '$lib/protein-ops/bfactor-paint';
+  import { computeTrackTooltipPosition } from './tooltip-position';
 
   interface Props {
     track: ResidueTrackArtifact;
@@ -24,7 +25,9 @@
   const PAD_B = 26;
 
   let svgEl: SVGSVGElement | null = $state(null);
+  let tooltipEl: HTMLDivElement | null = $state(null);
   let cachedRect: DOMRect | null = null;
+  let containerWidthPx = $state(0);
   let hoverIdx = $state<number | null>(null);
 
   const clipUid = `rt-clip-${Math.random().toString(36).slice(2, 9)}`;
@@ -232,6 +235,7 @@
 
   function refreshRect() {
     cachedRect = svgEl ? svgEl.getBoundingClientRect() : null;
+    containerWidthPx = cachedRect?.width ?? 0;
   }
 
   function invalidateRect() {
@@ -255,6 +259,9 @@
     if (!svgEl || L <= 0) return;
     const rect = cachedRect ?? (cachedRect = svgEl.getBoundingClientRect());
     if (rect.width <= 0) return;
+    if (containerWidthPx !== rect.width) {
+      containerWidthPx = rect.width;
+    }
     const svgX = ((ev.clientX - rect.left) / rect.width) * VB_W;
     if (svgX < PAD_L - 6 || svgX > VB_W - PAD_R + 6) {
       hoverIdx = null;
@@ -496,11 +503,18 @@
       </svg>
 
       {#if hoverDetail}
-        {@const pctX = Math.max(8, Math.min(92, (hoverDetail.x / VB_W) * 100))}
+        {@const tipPos = computeTrackTooltipPosition({
+          svgX: hoverDetail.x,
+          viewBoxWidth: VB_W,
+          containerWidthPx,
+          tooltipWidthPx: tooltipEl?.offsetWidth,
+          textLength: hoverDetail.text.length,
+        })}
         <div
+          bind:this={tooltipEl}
           class="rt-tooltip"
           class:above={hoverDetail.isAbove}
-          style="left: {pctX}%"
+          style="left: {tipPos.left}; right: {tipPos.right}; transform: {tipPos.transform}"
           aria-hidden="true"
         >
           {hoverDetail.text}
@@ -613,7 +627,9 @@
   .rt-tooltip {
     position: absolute;
     top: 6px;
-    transform: translateX(-50%);
+    max-width: calc(100% - 12px);
+    overflow: hidden;
+    text-overflow: ellipsis;
     pointer-events: none;
     white-space: nowrap;
     font-family: 'JetBrains Mono', ui-monospace, monospace;

@@ -596,11 +596,17 @@ export function joinKeyedCollections<T = unknown>(
   // Track which item indices in each branch have been matched so sequence fallback never double-binds.
   const consumedByBranch = new Map<string, Set<number>>();
   const keyIndexByBranch = new Map<string, Map<string, number>>();
+  const keyBranchCount = new Map<string, number>();
   for (const br of normalizedBranches) {
     consumedByBranch.set(br.branchId, new Set());
     const idxMap = new Map<string, number>();
+    const seenKeysInBr = new Set<string>();
     br.items.forEach((it, idx) => {
       if (!idxMap.has(it.key)) idxMap.set(it.key, idx);
+      if (!seenKeysInBr.has(it.key)) {
+        seenKeysInBr.add(it.key);
+        keyBranchCount.set(it.key, (keyBranchCount.get(it.key) ?? 0) + 1);
+      }
     });
     keyIndexByBranch.set(br.branchId, idxMap);
   }
@@ -611,83 +617,92 @@ export function joinKeyedCollections<T = unknown>(
   const keys: string[] = [];
   const seenKeys = new Set<string>();
 
-  for (const sourceBranch of normalizedBranches) {
-    const srcConsumed = consumedByBranch.get(sourceBranch.branchId)!;
-    for (let srcIdx = 0; srcIdx < sourceBranch.items.length; srcIdx++) {
-      if (srcConsumed.has(srcIdx)) continue;
-      const anchorItem = sourceBranch.items[srcIdx];
-      const key = anchorItem.key;
-      if (seenKeys.has(key)) continue;
-      seenKeys.add(key);
-      keys.push(key);
+  const anchorPasses: Array<(key: string) => boolean> = matchBySeq
+    ? [(key) => (keyBranchCount.get(key) ?? 0) >= 2, () => true]
+    : [() => true];
 
-      const normAnchorSeq = anchorItem.sequence?.trim().toUpperCase() || '';
-      const byBranch: Record<string, JoinedBranchEntry<T>> = {};
-      const missingBranchIds: string[] = [];
-      let presentCount = 0;
+  for (const allowAnchorKey of anchorPasses) {
+    for (const sourceBranch of normalizedBranches) {
+      const srcConsumed = consumedByBranch.get(sourceBranch.branchId)!;
+      for (let srcIdx = 0; srcIdx < sourceBranch.items.length; srcIdx++) {
+        if (srcConsumed.has(srcIdx)) continue;
+        const anchorItem = sourceBranch.items[srcIdx];
+        const key = anchorItem.key;
+        if (!allowAnchorKey(key)) continue;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        keys.push(key);
 
-      for (const br of normalizedBranches) {
-        const consumed = consumedByBranch.get(br.branchId)!;
-        let matchIdx: number | undefined = keyIndexByBranch.get(br.branchId)!.get(key);
-        if (matchIdx !== undefined && consumed.has(matchIdx)) {
-          matchIdx = undefined;
-        }
-        if (matchIdx === undefined && matchBySeq && normAnchorSeq.length > 0) {
-          // Only fallback-match by exact sequence when unique & unconsumed in this branch
-          const seqMatches: number[] = [];
-          for (let j = 0; j < br.items.length; j++) {
-            if (consumed.has(j)) continue;
-            const candSeq = br.items[j].sequence?.trim().toUpperCase() || '';
-            if (candSeq === normAnchorSeq) seqMatches.push(j);
+        const normAnchorSeq = anchorItem.sequence?.trim().toUpperCase() || '';
+        const byBranch: Record<string, JoinedBranchEntry<T>> = {};
+        const missingBranchIds: string[] = [];
+        let presentCount = 0;
+
+        for (const br of normalizedBranches) {
+          const consumed = consumedByBranch.get(br.branchId)!;
+          let matchIdx: number | undefined = keyIndexByBranch.get(br.branchId)!.get(key);
+          if (matchIdx !== undefined && consumed.has(matchIdx)) {
+            matchIdx = undefined;
           }
-          if (seqMatches.length === 1) {
-            matchIdx = seqMatches[0];
+          if (matchIdx === undefined && matchBySeq && normAnchorSeq.length > 0) {
+            // Only fallback-match by exact sequence when unique & unconsumed in this branch
+            // AND the candidate key does not already have an exact-key peer in another branch.
+            const seqMatches: number[] = [];
+            for (let j = 0; j < br.items.length; j++) {
+              if (consumed.has(j)) continue;
+              if ((keyBranchCount.get(br.items[j].key) ?? 0) >= 2) continue;
+              const candSeq = br.items[j].sequence?.trim().toUpperCase() || '';
+              if (candSeq === normAnchorSeq) seqMatches.push(j);
+            }
+            if (seqMatches.length === 1) {
+              matchIdx = seqMatches[0];
+            }
+          }
+
+          if (matchIdx !== undefined) {
+            consumed.add(matchIdx);
+            const item = br.items[matchIdx];
+            const hasConf =
+              item.confidenceAvailable !== false &&
+              typeof item.confidence === 'number' &&
+              Number.isFinite(item.confidence);
+            byBranch[br.branchId] = {
+              branchId: br.branchId,
+              present: true,
+              rank: item.rank ?? matchIdx + 1,
+              score: typeof item.score === 'number' && Number.isFinite(item.score) ? item.score : null,
+              confidence: hasConf ? (item.confidence as number) : null,
+              confidenceAvailable: hasConf,
+              ...(typeof item.ipsae === 'number' && Number.isFinite(item.ipsae)
+                ? { ipsae: item.ipsae }
+                : { ipsae: null }),
+              item,
+            };
+            presentCount++;
+          } else {
+            missingBranchIds.push(br.branchId);
+            byBranch[br.branchId] = {
+              branchId: br.branchId,
+              present: false,
+              missingReason: `Candidate "${key}" absent in branch "${br.label ?? br.branchId}"`,
+              rank: null,
+              score: null,
+              confidence: null,
+              confidenceAvailable: false,
+              ipsae: null,
+              item: null,
+            };
           }
         }
 
-        if (matchIdx !== undefined) {
-          consumed.add(matchIdx);
-          const item = br.items[matchIdx];
-          const hasConf =
-            item.confidenceAvailable !== false &&
-            typeof item.confidence === 'number' &&
-            Number.isFinite(item.confidence);
-          byBranch[br.branchId] = {
-            branchId: br.branchId,
-            present: true,
-            rank: item.rank ?? matchIdx + 1,
-            score: typeof item.score === 'number' && Number.isFinite(item.score) ? item.score : null,
-            confidence: hasConf ? (item.confidence as number) : null,
-            confidenceAvailable: hasConf,
-            ...(typeof item.ipsae === 'number' && Number.isFinite(item.ipsae)
-              ? { ipsae: item.ipsae }
-              : { ipsae: null }),
-            item,
-          };
-          presentCount++;
-        } else {
-          missingBranchIds.push(br.branchId);
-          byBranch[br.branchId] = {
-            branchId: br.branchId,
-            present: false,
-            missingReason: `Candidate "${key}" absent in branch "${br.label ?? br.branchId}"`,
-            rank: null,
-            score: null,
-            confidence: null,
-            confidenceAvailable: false,
-            ipsae: null,
-            item: null,
-          };
-        }
+        rows.push({
+          key,
+          ...(normAnchorSeq ? { sequence: normAnchorSeq } : {}),
+          presentCount,
+          missingBranchIds,
+          byBranch,
+        });
       }
-
-      rows.push({
-        key,
-        ...(normAnchorSeq ? { sequence: normAnchorSeq } : {}),
-        presentCount,
-        missingBranchIds,
-        byBranch,
-      });
     }
   }
 
@@ -1960,6 +1975,7 @@ export function buildComparisonState(
     hiddenModelIds?: ReadonlySet<string>;
     pairingMode?: ComparisonPairingMode;
     selectedCandidateKey?: string | null;
+    referenceNodeId?: string | null;
   },
 ): ComparisonState {
   const capped = selectedNodeIds.slice(0, COMPARE_PALETTE.length);
@@ -1968,24 +1984,111 @@ export function buildComparisonState(
   const wantKabsch = opts.alignKabsch !== false;
 
   const branchCollections = capped.map((id) => extractBranchCandidateItems(graph, id, outputsByNode));
-  const { hasSharedKey, hasSharedSequence } = branchesShareCandidateIdentity(branchCollections);
+  const branchById = new Map(branchCollections.map((b) => [b.branchId, b]));
+  const hasSingleStructOnly = (nid: string): boolean => {
+    const outs = outputsByNode[nid];
+    if (!outs) return false;
+    const vals = Object.values(outs);
+    const hasStruct = vals.some(
+      (a) => a.kind === 'StructureArtifact' && Boolean(a.cifText || a.pdbText),
+    );
+    const hasMulti = vals.some(
+      (a) =>
+        (a.kind === 'DesignabilityMetrics' && a.rows.length > 1) ||
+        (a.kind === 'FoldedStructure' && a.folds.length > 1) ||
+        (a.kind === 'TrajectoryFrames' && (a.frames?.length ?? a.frameCount) > 1),
+    );
+    return hasStruct && !hasMulti;
+  };
+  const hasPeerMultiOrNonStruct = branchCollections.some(
+    (b) => b.items.length > 1 || (b.items.length === 1 && b.items[0].value.kind !== 'structure'),
+  );
+  const pinnedRefSet = new Set<string>();
+  for (const br of branchCollections) {
+    if (opts.referenceNodeId && br.branchId === opts.referenceNodeId) {
+      if (br.items.length === 1 || hasSingleStructOnly(br.branchId)) {
+        pinnedRefSet.add(br.branchId);
+      }
+    } else if (
+      !opts.referenceNodeId &&
+      hasPeerMultiOrNonStruct &&
+      ((br.items.length === 1 && br.items[0].value.kind === 'structure') ||
+        hasSingleStructOnly(br.branchId))
+    ) {
+      pinnedRefSet.add(br.branchId);
+    }
+  }
+
+  const compareCollections = branchCollections.filter((b) => !pinnedRefSet.has(b.branchId));
+  const hasPopulatedCompare = compareCollections.some((b) => b.items.length > 0);
+  const joinInputCollections =
+    pinnedRefSet.size > 0 && hasPopulatedCompare ? compareCollections : branchCollections;
+
+  const { hasSharedKey, hasSharedSequence } = branchesShareCandidateIdentity(joinInputCollections);
   const hasSharedIdentity = hasSharedKey || hasSharedSequence;
 
-  // Use sequence fallback only when branches do not share explicit candidate keys
-  // (e.g., comparing branches with different per-branch auto-labels for the same sequence).
-  const joined = joinKeyedCollections(branchCollections, {
-    matchBySequenceFallback: !hasSharedKey && hasSharedSequence,
+  // Allow sequence fallback whenever sequences overlap; joinKeyedCollections guards against
+  // stealing items that already have exact-key peers across multiple branches.
+  const joined = joinKeyedCollections(joinInputCollections, {
+    matchBySequenceFallback: hasSharedSequence,
   });
+
+  if (pinnedRefSet.size > 0 && hasPopulatedCompare) {
+    for (const row of joined.rows) {
+      for (const refId of pinnedRefSet) {
+        const refCol = branchById.get(refId);
+        const refItem = refCol?.items[0];
+        if (refItem) {
+          row.byBranch[refId] = {
+            branchId: refId,
+            present: true,
+            rank: 1,
+            score: null,
+            confidence: null,
+            confidenceAvailable: false,
+            ipsae: null,
+            item: refItem,
+          };
+          row.presentCount++;
+        } else {
+          row.missingBranchIds.push(refId);
+          row.byBranch[refId] = {
+            branchId: refId,
+            present: false,
+            missingReason: `Reference "${refCol?.label ?? refId}" has no structure`,
+            rank: null,
+            score: null,
+            confidence: null,
+            confidenceAvailable: false,
+            ipsae: null,
+            item: null,
+          };
+        }
+      }
+    }
+    joined.branchIds = [...capped];
+    let completeRowCount = 0;
+    let partialRowCount = 0;
+    for (const r of joined.rows) {
+      if (r.missingBranchIds.length === 0) completeRowCount++;
+      else partialRowCount++;
+    }
+    joined.completeRowCount = completeRowCount;
+    joined.partialRowCount = partialRowCount;
+  }
 
   // Default to 'by-candidate' when branches share a genuine candidate identity — EXCEPT when
   // comparing mixed artifact kinds (e.g. generator `structure` + refold `fold` branches like
   // RFD4 + AF2(RFD4) + Genie3 + AF2(Genie3) wired into one 3D Compare) without a full-overlap
   // candidate, in which case default to 'branch-best' so every branch renders in 3D!
-  const populated = branchCollections.filter((b) => b.items.length > 0);
+  const populated = joinInputCollections.filter((b) => b.items.length > 0);
   const populatedKinds = new Set(populated.map((b) => b.items[0]?.value.kind));
   const hasMixedKinds = populatedKinds.size > 1;
   const hasFullOverlapRow =
-    populated.length >= 2 && joined.rows.some((r) => r.presentCount >= populated.length);
+    populated.length >= 2 &&
+    joined.rows.some(
+      (r) => populated.every((b) => r.byBranch[b.branchId]?.present),
+    );
 
   const pairingMode: ComparisonPairingMode =
     opts.pairingMode ??
@@ -2003,7 +2106,7 @@ export function buildComparisonState(
       // Caller explicitly requested a key (even if missing in some or all branches)
       selectedCandidateKey = opts.selectedCandidateKey;
     } else {
-      const firstBranch = branchCollections[0];
+      const firstBranch = joinInputCollections[0];
       const firstExplicitIdx = firstBranch ? candIdx[firstBranch.branchId] : undefined;
       if (
         firstBranch &&
@@ -2032,6 +2135,9 @@ export function buildComparisonState(
       : null;
 
   const branches = capped.map((id, idx) => {
+    if (pinnedRefSet.has(id)) {
+      return extractBranch(graph, id, idx, outputsByNode, candIdx);
+    }
     if (pairingMode === 'by-candidate' && selectedCandidateKey !== null) {
       const entry = selectedRow?.byBranch[id];
       if (entry?.present && entry.item) {
@@ -2066,11 +2172,13 @@ export function buildComparisonState(
   }
 
   // Check if 2+ scorer branches share the exact same upstream designed backbone
+  // (excluding any pinned single-structure reference branch so ref+scoreA+scoreB keeps shared frame)
+  const nonRefRenderable = renderable.filter((b) => !pinnedRefSet.has(b.nodeId));
   const metricBranches = alignable.filter((b) => b.kind === 'metrics' && b.structureId && b.designedPdb);
   const sharedStructIds = new Set(metricBranches.map((b) => b.structureId));
   const hasSharedDesigned =
     metricBranches.length >= 2 &&
-    metricBranches.length === renderable.length &&
+    metricBranches.length === nonRefRenderable.length &&
     sharedStructIds.size === 1;
 
   // Check if all alignable 3D models share the same residue count
@@ -2080,10 +2188,13 @@ export function buildComparisonState(
   const effectiveLayout: 'overlay' | 'side-by-side' =
     opts.layout === 'side-by-side' ? 'side-by-side' : 'overlay';
 
-  // Pick anchor frame: for same-length use model 0; for different-length use the longest model
+  // Pick anchor frame: when branches share a designed frame, anchor onto metricBranches[0];
+  // for same-length use model 0; for different-length use the longest model
   // so shorter motifs/targets snap onto the larger scaffold/complex cleanly.
-  let anchorBranch: CompareBranchSummary | null = alignable[0] ?? null;
-  if (!sameLength && alignable.length >= 2) {
+  let anchorBranch: CompareBranchSummary | null = hasSharedDesigned
+    ? (metricBranches[0] ?? alignable[0] ?? null)
+    : (alignable[0] ?? null);
+  if (!hasSharedDesigned && !sameLength && alignable.length >= 2) {
     let maxLen = alignable[0].length ?? 0;
     for (let i = 1; i < alignable.length; i++) {
       if ((alignable[i].length ?? 0) > maxLen) {
@@ -2179,21 +2290,28 @@ export function buildComparisonState(
     for (const b of renderable) {
       let structText = b.cifText || b.pdbText!;
       const canAlign = Boolean(b.caCoords && (b.length ?? 0) >= 3);
-      // If Kabsch align is enabled and NOT already in a shared pre-aligned frame, align non-anchor models onto anchor
+      const isExternalPinnedRef =
+        hasSharedDesigned &&
+        pinnedRefSet.has(b.nodeId) &&
+        Boolean(metricBranches[0]) &&
+        b.structureId !== metricBranches[0].structureId;
+      // If Kabsch align is enabled: align non-anchor models onto anchor when not in a shared
+      // pre-aligned frame, or align an external pinned reference onto the shared frame.
       if (
         wantKabsch &&
-        !hasSharedDesigned &&
         canAlign &&
         anchorBranch &&
-        b.nodeId !== anchorBranch.nodeId
+        b.nodeId !== anchorBranch.nodeId &&
+        (!hasSharedDesigned || isExternalPinnedRef)
       ) {
         try {
+          const targetBranch = isExternalPinnedRef ? metricBranches[0] : anchorBranch;
           const outcome =
-            cachedAlignToAnchor.get(b.nodeId) ??
+            (!isExternalPinnedRef ? cachedAlignToAnchor.get(b.nodeId) : undefined) ??
             alignBranchPair(
               b,
-              anchorBranch,
-              branchesShareUpstreamTemplate(b, anchorBranch, ancestorsByNode),
+              targetBranch,
+              branchesShareUpstreamTemplate(b, targetBranch, ancestorsByNode),
             );
           if (isValidKabschResult(outcome.result)) {
             structText = applyTransformToStructureText(

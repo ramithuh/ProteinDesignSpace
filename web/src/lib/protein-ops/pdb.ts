@@ -190,11 +190,22 @@ function formatPdbBFactor6(v: number): string {
   return pad(clamped.toFixed(2), 6);
 }
 
-/** AltLoc conformer priority: 0 = primary ('', ' ', 'A', '1'), 1 = fallback ('B', '2'), 2 = ignore. */
+/**
+ * AltLoc conformer priority (lower = preferred):
+ * 0 = primary ('', ' ', 'A', '1'), 1 = ('B', '2'), 2 = ('C', '3'), ...,
+ * with any other non-standard altLoc ranked deterministically after standard letters/digits.
+ */
 function altLocPriority(alt: string): number {
-  if (alt === '' || alt === ' ' || alt === 'A' || alt === '1') return 0;
-  if (alt === 'B' || alt === '2') return 1;
-  return 2;
+  const ch = alt.trim();
+  if (ch === '' || ch === 'A' || ch === '1') return 0;
+  if (ch === 'B' || ch === '2') return 1;
+  if (ch.length === 1) {
+    const code = ch.charCodeAt(0);
+    if (code >= 65 && code <= 90) return code - 65; // 'C' -> 2 .. 'Z' -> 25
+    if (code >= 49 && code <= 57) return code - 49; // '3' -> 2 .. '9' -> 8
+    if (code >= 97 && code <= 122) return 26 + (code - 97); // 'a' -> 26 .. 'z' -> 51
+  }
+  return 100;
 }
 
 /**
@@ -448,10 +459,17 @@ export function coordsToPolyGlyPdb(coords: Float32Array, nResidues: number): str
   return coordsToBackbonePdb(coords, nResidues, { atomsPerRes: 3 });
 }
 
-// Water + common X-ray crystallization buffers/salts/cryoprotectants that should not
-// trigger false "small-molecule ligand" warnings on pure-protein RCSB structures (e.g. 5O45).
+// Terminal peptide capping groups (e.g. ACE on 1LVM N-terminus, NME/NH2/FOR on C/N-termini).
+const PEPTIDE_CAP_RESNAMES = new Set(['ACE', 'NME', 'NH2', 'FOR']);
+
+// Pure solvent waters (stripped by default when converting mmCIF -> PDB unless includeWaters is true).
+const SOLVENT_WATER_RESNAMES = new Set(['HOH', 'WAT', 'DOD', 'H2O', 'TIP', 'TIP3']);
+
+// Water + common X-ray crystallization buffers/salts/cryoprotectants + terminal peptide caps
+// that should not trigger false "small-molecule ligand" warnings on protein RCSB structures.
 const WATER_RESNAMES = new Set([
   'HOH', 'WAT', 'DOD', 'H2O', 'TIP', 'TIP3',
+  'ACE', 'NME', 'NH2', 'FOR',
   'EDO', 'GOL', 'SO4', 'PO4', 'CL', 'NA', 'K', 'BR', 'IOD',
   'ACT', 'ACY', 'DMS', 'DMSO', 'PEG', 'PG4', 'PGE', '1PE', 'PE4', 'P6G',
   'MPD', 'TRS', 'CIT', 'FMT', 'MES', 'EPE', 'HEP', 'IPA', 'BME', 'UNX',
@@ -754,6 +772,7 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
   let maxSerial = 0;
   const ligandSet = new Set<string>();
   const nucleicChains = new Set<string>();
+  const hetSiteBest = new Map<string, { prio: number; comps: Set<string> }>();
   const reconstructedOKeys = new Set<string>();
   for (const line of lines) {
     if (line.startsWith('REMARK 250 RECONSTRUCTED_O ')) {
@@ -763,7 +782,7 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
     }
     if (
       line.startsWith('ENDMDL') &&
-      (residues.length > 0 || ligandSet.size > 0 || nucleicChains.size > 0)
+      (residues.length > 0 || hetSiteBest.size > 0 || nucleicChains.size > 0)
     ) {
       break;
     }
@@ -776,11 +795,21 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
     if (isHet && line.length >= 22) {
       const hetRes = line.slice(17, 20).trim().toUpperCase();
       if (hetRes !== 'MSE') {
-        if (altLocPriority(line[16]) === 0 && hetRes && !WATER_RESNAMES.has(hetRes) && !AA3_TO_AA1[hetRes]) {
+        if (hetRes && !PEPTIDE_CAP_RESNAMES.has(hetRes) && !WATER_RESNAMES.has(hetRes) && !AA3_TO_AA1[hetRes]) {
+          const chain = line[21]?.trim() || 'A';
           if (NUCLEIC_RESNAMES.has(hetRes)) {
-            nucleicChains.add(line[21]?.trim() || 'A');
+            nucleicChains.add(chain);
           } else {
-            ligandSet.add(hetRes);
+            const prio = altLocPriority(line[16] ?? ' ');
+            const resNumStr = line.slice(22, 26).trim();
+            const insCode = (line[26] ?? ' ').trim();
+            const siteKey = resNumStr ? `${chain}:${resNumStr}:${insCode}` : `${chain}::${insCode}:${hetRes}`;
+            const prev = hetSiteBest.get(siteKey);
+            if (!prev || prio < prev.prio) {
+              hetSiteBest.set(siteKey, { prio, comps: new Set([hetRes]) });
+            } else if (prio === prev.prio) {
+              prev.comps.add(hetRes);
+            }
           }
         }
         continue;
@@ -789,6 +818,9 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
     }
     if ((!isAtom && !isHet) || line.length < 54) continue;
     const rawResName = line.slice(17, 20).trim().toUpperCase();
+    if (PEPTIDE_CAP_RESNAMES.has(rawResName)) {
+      continue;
+    }
     if (NUCLEIC_RESNAMES.has(rawResName)) {
       nucleicChains.add(line[21]?.trim() || 'A');
       continue;
@@ -828,6 +860,10 @@ export function parsePdbBackbone(pdbText: string): ParsedStructure {
       entry.atoms[atomName] = [x, y, z];
       entry.atomAltPrio[atomName] = prio;
     }
+  }
+
+  for (const entry of hetSiteBest.values()) {
+    for (const comp of entry.comps) ligandSet.add(comp);
   }
 
   // Keep residues with at least CA
@@ -1005,15 +1041,17 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     atoms: Record<string, [number, number, number]>;
     atomAltPrio: Record<string, number>;
   }
-  const lines = cifText.split('\n');
+  const lines = cifText.split(/\r?\n/);
   const cols: string[] = [];
   let inAtomSite = false;
   let seenAtomSiteRow = false;
+  let inSemicolon = false;
   let firstModelNum: string | null = null;
   const residues: CifRes[] = [];
   const byKey = new Map<string, CifRes>();
   const ligandSet = new Set<string>();
   const nucleicChains = new Set<string>();
+  const hetSiteBest = new Map<string, { prio: number; comps: Set<string> }>();
 
   // Resolved _atom_site column indices (populated lazily once header finishes)
   let colMapReady = false;
@@ -1034,14 +1072,31 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
   let iZ = -1;
 
   for (const raw of lines) {
+    if (!inAtomSite) {
+      if (inSemicolon) {
+        if (raw.startsWith(';')) inSemicolon = false;
+        continue;
+      }
+      if (raw.startsWith(';')) {
+        inSemicolon = true;
+        continue;
+      }
+    }
     const line = raw.trim();
     if (line.startsWith('_atom_site.')) {
       inAtomSite = true;
       colMapReady = false;
-      cols.push(line.slice('_atom_site.'.length));
+      cols.push(line.slice('_atom_site.'.length).split(/\s+/)[0]);
       continue;
     }
-    if (inAtomSite && (line === '' || line.startsWith('#') || line.startsWith('loop_') || line.startsWith('_'))) {
+    if (
+      inAtomSite &&
+      (line === '' ||
+        line.startsWith('#') ||
+        line.startsWith('loop_') ||
+        line.startsWith('_') ||
+        /^(?:data_|save_|stop_|global_)/i.test(line))
+    ) {
       if (seenAtomSiteRow) break;
       continue;
     }
@@ -1082,10 +1137,8 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
       else if (modelNum !== firstModelNum) continue;
     }
 
-    // Filter to primary altLoc with B/2 fallback when primary is absent
     const altId = cifVal(iAlt);
     const prio = altLocPriority(altId);
-    if (prio > 1) continue;
 
     const group = (cifVal(iGroup) || 'ATOM').toUpperCase();
     const rawComp = cifVal(iLabelComp) || cifVal(iAuthComp) || 'UNK';
@@ -1093,23 +1146,40 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     const labelChain = cifVal(iLabelAsym) || undefined;
     const chain = cifVal(iAuthAsym) || labelChain || 'A';
 
-    // Detect nucleic acid chains (ATOM or HETATM) via resolved column indices (primary altLoc only)
-    if (NUCLEIC_RESNAMES.has(comp)) {
-      if (prio === 0) nucleicChains.add(chain);
+    // Skip terminal peptide caps (ACE, NME, NH2, FOR)
+    if (PEPTIDE_CAP_RESNAMES.has(comp)) {
       continue;
     }
 
-    // Detect HETATM ligands (primary altLoc only), while allowing HETATM MSE (selenomethionine) as protein residue M
+    // Detect nucleic acid chains (ATOM or HETATM) via resolved column indices
+    if (NUCLEIC_RESNAMES.has(comp)) {
+      nucleicChains.add(chain);
+      continue;
+    }
+
+    // Detect HETATM ligands (prioritizing primary altLoc per site, with fallback to B/C/non-standard),
+    // while allowing HETATM MSE (selenomethionine) as protein residue M
     if (group === 'HETATM') {
       if (comp !== 'MSE') {
-        if (prio === 0 && comp && !WATER_RESNAMES.has(comp) && !AA3_TO_AA1[comp]) {
-          ligandSet.add(comp);
+        if (comp && !WATER_RESNAMES.has(comp) && !AA3_TO_AA1[comp]) {
+          const hetSeqId = cifVal(iAuthSeq) || cifVal(iLabelSeq);
+          const hetInsCode = cifVal(iIns);
+          const siteKey = hetSeqId ? `${chain}:${hetSeqId}:${hetInsCode}` : `${chain}::${hetInsCode}:${comp}`;
+          const prev = hetSiteBest.get(siteKey);
+          if (!prev || prio < prev.prio) {
+            hetSiteBest.set(siteKey, { prio, comps: new Set([comp]) });
+          } else if (prio === prev.prio) {
+            prev.comps.add(comp);
+          }
         }
         continue;
       }
     } else if (group !== 'ATOM') {
       continue;
     }
+
+    // Filter protein backbone ATOM/MSE to primary altLoc with B/2 fallback when primary is absent
+    if (prio > 1) continue;
 
     const atomName = cifVal(iLabelAtom) || cifVal(iAuthAtom);
     if (atomName !== 'N' && atomName !== 'CA' && atomName !== 'C' && atomName !== 'O') continue;
@@ -1143,6 +1213,10 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
       entry.atoms[atomName] = [x, y, z];
       entry.atomAltPrio[atomName] = prio;
     }
+  }
+
+  for (const entry of hetSiteBest.values()) {
+    for (const comp of entry.comps) ligandSet.add(comp);
   }
 
   const valid = residues.filter((r) => r.atoms.CA !== undefined);
@@ -1203,7 +1277,16 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     }
   }
 
-  const { projectedChainIds, chainIdMap } = projectChainIdsToPdb(chainIds);
+  // Emit full all-atom PDB (sidechains, non-water HETATMs, B-factors, occupancies)
+  // and reuse the exact chain projection so chainIdMap & projectedChainIds always match pdbText.
+  const pdbConv = mmcifToPdbWithChainMap(cifText, { firstModelOnly: true });
+  const pdbText = pdbConv.pdbText;
+  const fallbackProj = projectChainIdsToPdb(chainIds);
+  const hasPdbMap = Object.keys(pdbConv.chainIdMap).length > 0;
+  const chainIdMap = hasPdbMap ? pdbConv.chainIdMap : fallbackProj.chainIdMap;
+  const projectedChainIds = hasPdbMap
+    ? chainIds.map((ch) => pdbConv.sourceToProjected[ch] ?? fallbackProj.sourceToProjected[ch] ?? ch)
+    : fallbackProj.projectedChainIds;
   const sourceResidues: SourceResidueId[] = valid.map((r, i) => ({
     index: i,
     authChainId: r.chain,
@@ -1214,16 +1297,6 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
     resName: r.resName,
     projectedChainId: projectedChainIds[i],
   }));
-
-  // Emit ONLY strictly observed atoms with bijectively projected 1-char chain IDs & insertion codes
-  const pdbText = coordsToBackbonePdb(backbone4Coords, L, {
-    atomsPerRes: 4,
-    sequence: seq,
-    chainIds: projectedChainIds,
-    resSeqs: resNums,
-    insCodes,
-    observedBackboneMask,
-  });
   const chainLengths = computeChainLengthsFromIds(chainIds);
   return {
     sequence: seq,
@@ -1249,6 +1322,399 @@ function parseMmcifBackbone(cifText: string): ParsedStructure {
       nucleicAcidChains: [...nucleicChains],
     },
   };
+}
+
+export interface MmcifToPdbOptions {
+  /** Emit only the first pdbx_PDB_model_num (default false; wraps multi-model in MODEL/ENDMDL when false). */
+  firstModelOnly?: boolean;
+  /** Retain pure solvent water HETATMs (HOH/WAT/DOD/H2O/TIP/TIP3) (default false). */
+  includeWaters?: boolean;
+}
+
+function inferPdbElement(
+  typeSymbol: string,
+  atomName: string,
+  isHetatm: boolean,
+  compName = '',
+): string {
+  const sym = typeSymbol.trim().toUpperCase().replace(/[^A-Z]/g, '');
+  if (sym.length > 0) return sym.slice(0, 2);
+  const clean = atomName.trim().toUpperCase();
+  if (!clean) return ' C';
+  if (isHetatm) {
+    const comp = compName.trim().toUpperCase();
+    const two = clean.slice(0, 2);
+    if (
+      two === 'ZN' || two === 'FE' || two === 'MG' || two === 'MN' ||
+      (two === 'CA' && comp === 'CA') || two === 'CU' || two === 'CO' || two === 'NI' ||
+      two === 'NA' || two === 'CL' || two === 'BR' || two === 'SE'
+    ) {
+      return two;
+    }
+  }
+  const ch = clean.replace(/^[^A-Z]+/, '')[0] ?? 'C';
+  return ch;
+}
+
+function formatPdbResSeqNum4(seqStr: string, fallbackNum: number): string {
+  const parsed = parseInt(seqStr, 10);
+  const n = Number.isFinite(parsed) ? parsed : fallbackNum;
+  let wrapped = n;
+  if (n > 9999) {
+    wrapped = ((n - 1) % 9999) + 1;
+  } else if (n < -999) {
+    wrapped = -(((-n - 1) % 999) + 1);
+  }
+  return pad(String(wrapped), 4);
+}
+
+/**
+ * Convert an mmCIF string directly to all-atom PDB format, preserving sidechains,
+ * non-water HETATMs (metals/ligands/cofactors), nucleic acids, B-factors, occupancies,
+ * insertion codes, TER records, and bijectively projected 1-char chain IDs.
+ */
+export function mmcifToPdb(cifText: string, opts: MmcifToPdbOptions = {}): string {
+  return mmcifToPdbWithChainMap(cifText, opts).pdbText;
+}
+
+function mmcifToPdbWithChainMap(
+  cifText: string,
+  opts: MmcifToPdbOptions = {},
+): { pdbText: string; chainIdMap: Record<string, string>; sourceToProjected: Record<string, string> } {
+  if (!cifText || !cifText.trim()) {
+    return { pdbText: '', chainIdMap: {}, sourceToProjected: {} };
+  }
+  const firstModelOnly = Boolean(opts.firstModelOnly);
+  const includeWaters = Boolean(opts.includeWaters);
+
+  interface CifAtomRow {
+    group: 'ATOM' | 'HETATM';
+    atomName: string;
+    comp: string;
+    chain: string;
+    seqStr: string;
+    insCode: string;
+    x: number;
+    y: number;
+    z: number;
+    occ: number;
+    bFactor: number;
+    elem: string;
+    isPolymer: boolean;
+  }
+
+  const lines = cifText.split(/\r?\n/);
+  const cols: string[] = [];
+  let inAtomSite = false;
+  let seenAtomSiteRow = false;
+  let inSemicolon = false;
+  let colMapReady = false;
+
+  let iGroup = -1;
+  let iModel = -1;
+  let iAlt = -1;
+  let iLabelAtom = -1;
+  let iAuthAtom = -1;
+  let iAuthAsym = -1;
+  let iLabelAsym = -1;
+  let iAuthSeq = -1;
+  let iLabelSeq = -1;
+  let iIns = -1;
+  let iLabelComp = -1;
+  let iAuthComp = -1;
+  let iX = -1;
+  let iY = -1;
+  let iZ = -1;
+  let iOcc = -1;
+  let iB = -1;
+  let iElem = -1;
+
+  let firstModelNum: string | null = null;
+  const modelOrder: string[] = [];
+  const rowsByModel = new Map<string, CifAtomRow[]>();
+  const seenAtomIndex = new Map<string, { modelNum: string; idx: number; prio: number }>();
+  const siteCompMinPrio = new Map<string, { minPrio: number; compPrios: Map<string, number> }>();
+
+  for (const raw of lines) {
+    if (!inAtomSite) {
+      if (inSemicolon) {
+        if (raw.startsWith(';')) inSemicolon = false;
+        continue;
+      }
+      if (raw.startsWith(';')) {
+        inSemicolon = true;
+        continue;
+      }
+    }
+
+    const tr = raw.trim();
+    if (tr.startsWith('_atom_site.')) {
+      inAtomSite = true;
+      colMapReady = false;
+      cols.push(tr.slice('_atom_site.'.length).split(/\s+/)[0]);
+      continue;
+    }
+
+    if (
+      inAtomSite &&
+      (tr === '' ||
+        tr.startsWith('#') ||
+        tr.startsWith('loop_') ||
+        tr.startsWith('_') ||
+        /^(?:data_|save_|stop_|global_)/i.test(tr))
+    ) {
+      if (seenAtomSiteRow) break;
+      continue;
+    }
+    if (!inAtomSite) continue;
+
+    const toks = tokenizeCifLine(tr);
+    if (toks.length < cols.length) continue;
+    seenAtomSiteRow = true;
+
+    if (!colMapReady) {
+      iGroup = cols.indexOf('group_PDB');
+      iModel = cols.indexOf('pdbx_PDB_model_num');
+      iAlt = cols.indexOf('label_alt_id');
+      iLabelAtom = cols.indexOf('label_atom_id');
+      iAuthAtom = cols.indexOf('auth_atom_id');
+      iAuthAsym = cols.indexOf('auth_asym_id');
+      iLabelAsym = cols.indexOf('label_asym_id');
+      iAuthSeq = cols.indexOf('auth_seq_id');
+      iLabelSeq = cols.indexOf('label_seq_id');
+      iIns = cols.indexOf('pdbx_PDB_ins_code');
+      iLabelComp = cols.indexOf('label_comp_id');
+      iAuthComp = cols.indexOf('auth_comp_id');
+      iX = cols.indexOf('Cartn_x');
+      iY = cols.indexOf('Cartn_y');
+      iZ = cols.indexOf('Cartn_z');
+      iOcc = cols.indexOf('occupancy');
+      iB = cols.indexOf('B_iso_or_equiv');
+      iElem = cols.indexOf('type_symbol');
+      colMapReady = true;
+    }
+
+    const get = (idx: number): string => (idx >= 0 ? toks[idx] : '');
+    const cifVal = (idx: number): string => {
+      const v = idx >= 0 ? toks[idx] : '';
+      return v === '.' || v === '?' ? '' : v;
+    };
+
+    const modelNum = cifVal(iModel) || '1';
+    if (firstModelNum === null) firstModelNum = modelNum;
+    if (firstModelOnly && modelNum !== firstModelNum) continue;
+
+    const prio = altLocPriority(cifVal(iAlt));
+
+    const rawGroup = (cifVal(iGroup) || 'ATOM').toUpperCase();
+    const group: 'ATOM' | 'HETATM' = rawGroup === 'HETATM' ? 'HETATM' : 'ATOM';
+    if (rawGroup !== 'ATOM' && rawGroup !== 'HETATM') continue;
+
+    const comp = (cifVal(iLabelComp) || cifVal(iAuthComp) || 'UNK').toUpperCase();
+    if (!includeWaters && group === 'HETATM' && SOLVENT_WATER_RESNAMES.has(comp)) {
+      continue;
+    }
+
+    const atomName = cifVal(iLabelAtom) || cifVal(iAuthAtom);
+    if (!atomName) continue;
+
+    const chain = cifVal(iAuthAsym) || cifVal(iLabelAsym) || 'A';
+    const seqStr = cifVal(iAuthSeq) || cifVal(iLabelSeq);
+    const insCode = cifVal(iIns).slice(0, 1);
+
+    const x = parseFloat(get(iX));
+    const y = parseFloat(get(iY));
+    const z = parseFloat(get(iZ));
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+
+    const occParsed = iOcc >= 0 ? parseFloat(get(iOcc)) : 1.0;
+    const occ = Number.isFinite(occParsed) ? Math.max(0, Math.min(999.99, occParsed)) : 1.0;
+    const bParsed = iB >= 0 ? parseFloat(get(iB)) : 0.0;
+    const bFactor = Number.isFinite(bParsed) ? bParsed : 0.0;
+    const elem = inferPdbElement(cifVal(iElem), atomName, group === 'HETATM', comp);
+    const isPolymer = group === 'ATOM' || comp === 'MSE';
+
+    const row: CifAtomRow = {
+      group,
+      atomName,
+      comp,
+      chain,
+      seqStr,
+      insCode,
+      x,
+      y,
+      z,
+      occ,
+      bFactor,
+      elem,
+      isPolymer,
+    };
+
+    const atomKey = `${modelNum}:${chain}:${seqStr}:${insCode}:${comp}:${atomName}`;
+    const existing = seenAtomIndex.get(atomKey);
+    if (!existing) {
+      let modelRows = rowsByModel.get(modelNum);
+      if (!modelRows) {
+        modelRows = [];
+        rowsByModel.set(modelNum, modelRows);
+        modelOrder.push(modelNum);
+      }
+      seenAtomIndex.set(atomKey, { modelNum, idx: modelRows.length, prio });
+      modelRows.push(row);
+    } else if (prio < existing.prio) {
+      rowsByModel.get(existing.modelNum)![existing.idx] = row;
+      existing.prio = prio;
+    }
+    if (seqStr !== '') {
+      const siteKey = `${modelNum}:${chain}:${seqStr}:${insCode}`;
+      let site = siteCompMinPrio.get(siteKey);
+      if (!site) {
+        site = { minPrio: prio, compPrios: new Map([[comp, prio]]) };
+        siteCompMinPrio.set(siteKey, site);
+      } else {
+        if (prio < site.minPrio) site.minPrio = prio;
+        const prevCompPrio = site.compPrios.get(comp);
+        if (prevCompPrio === undefined || prio < prevCompPrio) {
+          site.compPrios.set(comp, prio);
+        }
+      }
+    }
+  }
+
+  for (const mKey of modelOrder) {
+    const rows = rowsByModel.get(mKey);
+    if (!rows) continue;
+    rowsByModel.set(
+      mKey,
+      rows.filter((r) => {
+        if (r.seqStr === '') return true;
+        const site = siteCompMinPrio.get(`${mKey}:${r.chain}:${r.seqStr}:${r.insCode}`);
+        if (!site) return true;
+        return site.compPrios.get(r.comp) === site.minPrio;
+      }),
+    );
+  }
+
+  if (modelOrder.length === 0) {
+    return { pdbText: '', chainIdMap: {}, sourceToProjected: {} };
+  }
+
+  // Order protein polymer chains first, then nucleic/cap polymer chains, then non-polymer HETATMs
+  const proteinPolymerChains: string[] = [];
+  const nucleicPolymerChains: string[] = [];
+  const otherChains: string[] = [];
+  const seenProtPoly = new Set<string>();
+  const seenNucPoly = new Set<string>();
+  const seenOther = new Set<string>();
+  for (const mKey of modelOrder) {
+    for (const r of rowsByModel.get(mKey) ?? []) {
+      if (r.isPolymer && !NUCLEIC_RESNAMES.has(r.comp) && !PEPTIDE_CAP_RESNAMES.has(r.comp)) {
+        if (!seenProtPoly.has(r.chain)) {
+          seenProtPoly.add(r.chain);
+          proteinPolymerChains.push(r.chain);
+        }
+      }
+    }
+  }
+  for (const mKey of modelOrder) {
+    for (const r of rowsByModel.get(mKey) ?? []) {
+      if (r.isPolymer) {
+        if (!seenProtPoly.has(r.chain) && !seenNucPoly.has(r.chain)) {
+          seenNucPoly.add(r.chain);
+          nucleicPolymerChains.push(r.chain);
+        }
+      } else if (!seenProtPoly.has(r.chain) && !seenNucPoly.has(r.chain) && !seenOther.has(r.chain)) {
+        seenOther.add(r.chain);
+        otherChains.push(r.chain);
+      }
+    }
+  }
+  const { chainIdMap, sourceToProjected } = projectChainIdsToPdb([
+    ...proteinPolymerChains,
+    ...nucleicPolymerChains,
+    ...otherChains,
+  ]);
+
+  const outLines: string[] = [];
+  const multiModel = modelOrder.length > 1 && !firstModelOnly;
+
+  for (let mIdx = 0; mIdx < modelOrder.length; mIdx++) {
+    const rows = rowsByModel.get(modelOrder[mIdx]) ?? [];
+    if (rows.length === 0) continue;
+    if (multiModel) {
+      outLines.push(`MODEL     ${pad(String(mIdx + 1), 4)}`);
+    }
+
+    let serial = 1;
+    let fallbackResNum = 1;
+    let lastFallbackKey = '';
+    let prevPolymerChain: string | null = null;
+    let prevPolymerComp = 'GLY';
+    let prevPolymerResSeq4 = '   1';
+    let prevPolymerIns = ' ';
+
+    for (const r of rows) {
+      const projChain = sourceToProjected[r.chain] ?? 'A';
+      const resKey = `${r.chain}:${r.seqStr}:${r.insCode}`;
+      if (resKey !== lastFallbackKey) {
+        if (lastFallbackKey !== '') fallbackResNum++;
+        lastFallbackKey = resKey;
+      }
+
+      const resSeq4 = formatPdbResSeqNum4(r.seqStr, fallbackResNum);
+      const ins1 = r.insCode || ' ';
+
+      // Emit TER when leaving a polymer chain (either to a different chain or to non-polymer HETATM)
+      if (prevPolymerChain !== null && (!r.isPolymer || projChain !== prevPolymerChain)) {
+        const terSerial = ((serial - 1) % 99999) + 1;
+        outLines.push(
+          `TER   ${pad(String(terSerial), 5)}      ${pad(prevPolymerComp.slice(0, 3), 3)} ${prevPolymerChain}${prevPolymerResSeq4}${prevPolymerIns}`,
+        );
+        serial++;
+        prevPolymerChain = null;
+      }
+
+      const atomSerial = ((serial - 1) % 99999) + 1;
+      const atomField4 =
+        r.atomName.length >= 4 || r.elem.length === 2
+          ? padR(r.atomName.slice(0, 4), 4)
+          : ` ${padR(r.atomName, 3)}`;
+      const compField3 = pad(r.comp.slice(0, 3), 3);
+      const rec = r.group === 'HETATM' ? 'HETATM' : 'ATOM  ';
+      const elem2 = pad(r.elem.slice(0, 2).toUpperCase(), 2);
+
+      outLines.push(
+        `${rec}${pad(String(atomSerial), 5)} ${atomField4} ${compField3} ${projChain}${resSeq4}${ins1}   ` +
+          `${formatPdbCoord8(r.x)}${formatPdbCoord8(r.y)}${formatPdbCoord8(r.z)}` +
+          `${formatPdbBFactor6(r.occ)}${formatPdbBFactor6(r.bFactor)}          ${elem2}  `,
+      );
+      serial++;
+
+      if (r.isPolymer) {
+        prevPolymerChain = projChain;
+        prevPolymerComp = r.comp;
+        prevPolymerResSeq4 = resSeq4;
+        prevPolymerIns = ins1;
+      }
+    }
+
+    if (prevPolymerChain !== null) {
+      const terSerial = ((serial - 1) % 99999) + 1;
+      outLines.push(
+        `TER   ${pad(String(terSerial), 5)}      ${pad(prevPolymerComp.slice(0, 3), 3)} ${prevPolymerChain}${prevPolymerResSeq4}${prevPolymerIns}`,
+      );
+    }
+
+    if (multiModel) {
+      outLines.push('ENDMDL');
+    }
+  }
+
+  if (outLines.length === 0) {
+    return { pdbText: '', chainIdMap, sourceToProjected };
+  }
+  outLines.push('END');
+  return { pdbText: outLines.join('\n') + '\n', chainIdMap, sourceToProjected };
 }
 
 interface RawCropRule {
@@ -1419,6 +1885,35 @@ function isAssemblyCategoryTag(trimmedLine: string): boolean {
   return /^_pdbx_struct_(?:assembly|oper_list)(?:[._]|$)/i.test(trimmedLine);
 }
 
+function recordChainRange(
+  map: Map<string, { min: number | null; max: number | null }>,
+  chain: string,
+  resNum: number | null,
+): void {
+  let entry = map.get(chain);
+  if (!entry) {
+    entry = { min: null, max: null };
+    map.set(chain, entry);
+  }
+  if (resNum !== null && Number.isFinite(resNum)) {
+    if (entry.min === null || resNum < entry.min) entry.min = resNum;
+    if (entry.max === null || resNum > entry.max) entry.max = resNum;
+  }
+}
+
+function formatAvailableChainsHint(
+  map: Map<string, { min: number | null; max: number | null }>,
+): string {
+  if (map.size === 0) return '';
+  const entries = [...map.entries()];
+  const MAX = 16;
+  const shown = entries.slice(0, MAX).map(([ch, r]) =>
+    r.min !== null && r.max !== null ? `${ch} (${r.min}-${r.max})` : ch,
+  );
+  const suffix = entries.length > MAX ? ` (+${entries.length - MAX} more)` : '';
+  return ` Available chains: ${shown.join(', ')}${suffix}.`;
+}
+
 /**
  * All-atom mmCIF/PDB cropper: filters raw ATOM/HETATM lines directly so sidechain atoms,
  * catalytic metals (ZN, FE2), substrates/cofactors (DHZ, AKG, TAU, SAM), and dsDNA chains
@@ -1463,6 +1958,7 @@ export function cropRawAllAtomStructure(
     let kept = 0;
     const cifPending: Array<{ outIdx: number; prio: number; atomKey: string }> = [];
     const cifPrimaryAtomKeys = new Set<string>();
+    const availCifChains = new Map<string, { min: number | null; max: number | null }>();
 
     for (let i = 0; i < lines.length; i++) {
       const raw = lines[i];
@@ -1524,6 +2020,14 @@ export function cropRawAllAtomStructure(
         const insCode = cifVal(iIns);
         const comp = cifVal(iLabelComp) || cifVal(iAuthComp) || '';
         const atomName = cifVal(iLabelAtom) || cifVal(iAuthAtom) || '';
+        const upperComp = comp.toUpperCase();
+        if (!WATER_RESNAMES.has(upperComp)) {
+          recordChainRange(
+            availCifChains,
+            ch,
+            (grp === 'ATOM' || upperComp === 'MSE') && Number.isFinite(rn) ? rn : null,
+          );
+        }
         if (
           matchesRawCropRule(
             rules,
@@ -1637,13 +2141,13 @@ export function cropRawAllAtomStructure(
 
     if (kept === 0) {
       throw new Error(
-        `Segment crop "${segmentSpec}" matched 0 atoms in mmCIF structure. Clear the crop or check chain/residue/ligand codes.`,
+        `Segment crop "${segmentSpec}" matched 0 atoms in mmCIF structure.${formatAvailableChainsHint(availCifChains)} Clear the crop or check chain/residue/ligand codes.`,
       );
     }
     const unmatchedCif = tokens.filter((_, idx) => !matchedTokens.has(idx));
     if (unmatchedCif.length > 0) {
       throw new Error(
-        `Segment crop "${segmentSpec}" had unmatched span/token(s): ${unmatchedCif.join(', ')} (matched 0 atoms). Check chain IDs, residue numbers, or ligand codes.`,
+        `Segment crop "${segmentSpec}" had unmatched span/token(s): ${unmatchedCif.join(', ')} (matched 0 atoms).${formatAvailableChainsHint(availCifChains)} Check chain IDs, residue numbers, or ligand codes.`,
       );
     }
     return { text: out.join('\n'), format: 'mmcif', keptAtomLines: kept };
@@ -1658,6 +2162,7 @@ export function cropRawAllAtomStructure(
   const bodyOut: string[] = [];
   const pdbPrimaryAtomKeys = new Set<string>();
   const pdbPending: Array<{ outIdx: number; atomKey: string; rKey: string }> = [];
+  const availPdbChains = new Map<string, { min: number | null; max: number | null }>();
   let kept = 0;
   let seenAtom = false;
   for (const line of lines) {
@@ -1679,6 +2184,14 @@ export function cropRawAllAtomStructure(
       const rn = parseInt(rnStr, 10);
       const insCode = (line[26] ?? ' ').trim();
       const atomName = line.slice(12, 16).trim();
+      const upperComp = comp.toUpperCase();
+      if (!WATER_RESNAMES.has(upperComp)) {
+        recordChainRange(
+          availPdbChains,
+          ch,
+          (grp === 'ATOM' || upperComp === 'MSE') && Number.isFinite(rn) ? rn : null,
+        );
+      }
       if (
         matchesRawCropRule(
           rules,
@@ -1736,13 +2249,13 @@ export function cropRawAllAtomStructure(
   }
   if (kept === 0) {
     throw new Error(
-      `Segment crop "${segmentSpec}" matched 0 atoms in PDB structure. Clear the crop or check chain/residue/ligand codes.`,
+      `Segment crop "${segmentSpec}" matched 0 atoms in PDB structure.${formatAvailableChainsHint(availPdbChains)} Clear the crop or check chain/residue/ligand codes.`,
     );
   }
   const unmatchedPdb = tokens.filter((_, idx) => !matchedTokens.has(idx));
   if (unmatchedPdb.length > 0) {
     throw new Error(
-      `Segment crop "${segmentSpec}" had unmatched span/token(s): ${unmatchedPdb.join(', ')} (matched 0 atoms). Check chain IDs, residue numbers, or ligand codes.`,
+      `Segment crop "${segmentSpec}" had unmatched span/token(s): ${unmatchedPdb.join(', ')} (matched 0 atoms).${formatAvailableChainsHint(availPdbChains)} Check chain IDs, residue numbers, or ligand codes.`,
     );
   }
   const reconRemarks: string[] = [];
@@ -1800,10 +2313,12 @@ export function cropParsedStructure(parsed: ParsedStructure, segmentSpec: string
   }
 
   const keptIndices: number[] = [];
+  const availParsedChains = new Map<string, { min: number | null; max: number | null }>();
   for (let i = 0; i < parsed.nResidues; i++) {
     const ch = parsed.chainIds[i] || 'A';
     const rn = parsed.resNums[i] ?? i + 1;
     const ins = parsed.insCodes?.[i] ?? '';
+    recordChainRange(availParsedChains, ch, Number.isFinite(rn) ? rn : null);
     const match = rules.some(
       (r) =>
         r.chain === ch &&
@@ -1814,7 +2329,7 @@ export function cropParsedStructure(parsed: ParsedStructure, segmentSpec: string
 
   if (keptIndices.length < 3) {
     throw new Error(
-      `Segment crop "${segmentSpec}" matched only ${keptIndices.length} residue(s) (need at least 3). Clear the crop or check chain/residue numbers.`,
+      `Segment crop "${segmentSpec}" matched only ${keptIndices.length} residue(s) (need at least 3).${formatAvailableChainsHint(availParsedChains)} Clear the crop or check chain/residue numbers.`,
     );
   }
 

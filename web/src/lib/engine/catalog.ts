@@ -979,6 +979,175 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
   })(),
 ];
 
+function tokenizeCatalogText(s: string): string[] {
+  return s.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+function compactCatalogText(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function scoreCatalogSubItem(
+  sub: CatalogSubItem,
+  groupTitle: string,
+  q: string,
+  terms: string[],
+): number {
+  const qCompact = compactCatalogText(q);
+  const labelL = sub.label.toLowerCase();
+  const insertLabelL = (sub.insert.label ?? '').toLowerCase();
+  const keyL = sub.key.toLowerCase();
+  const adapterL = sub.insert.adapterId.toLowerCase();
+  const subtitleL = (sub.subtitle ?? '').toLowerCase();
+  const groupL = groupTitle.toLowerCase();
+
+  const labelWords = tokenizeCatalogText(labelL);
+  const insertWords = tokenizeCatalogText(insertLabelL);
+  const subtitleWords = tokenizeCatalogText(subtitleL);
+  const groupWords = tokenizeCatalogText(groupL);
+  const blobWords = tokenizeCatalogText(sub.searchBlob);
+
+  let score = 0;
+
+  if (labelL === q || (insertLabelL && insertLabelL === q)) {
+    score += 1200;
+  } else if (
+    compactCatalogText(labelL) === qCompact ||
+    keyL === q ||
+    adapterL === q ||
+    (insertLabelL && compactCatalogText(insertLabelL) === qCompact)
+  ) {
+    score += 1100;
+  } else if (labelL.startsWith(q) || (insertLabelL && insertLabelL.startsWith(q))) {
+    score += 850;
+  } else if (
+    (qCompact && compactCatalogText(labelL).startsWith(qCompact)) ||
+    keyL.startsWith(q) ||
+    adapterL.startsWith(q) ||
+    (insertLabelL && qCompact && compactCatalogText(insertLabelL).startsWith(qCompact))
+  ) {
+    score += 750;
+  } else if (labelL.includes(q) || (insertLabelL && insertLabelL.includes(q))) {
+    score += 600;
+  }
+
+  for (const t of terms) {
+    if (labelWords.includes(t) || insertWords.includes(t)) {
+      score += 200;
+    } else if (
+      labelWords.some((w) => w.startsWith(t)) ||
+      insertWords.some((w) => w.startsWith(t))
+    ) {
+      score += 140;
+    } else if (labelL.includes(t) || insertLabelL.includes(t) || keyL.includes(t)) {
+      score += 80;
+    } else if (subtitleWords.includes(t) || groupWords.includes(t)) {
+      score += 40;
+    } else if (
+      subtitleWords.some((w) => w.startsWith(t)) ||
+      groupWords.some((w) => w.startsWith(t))
+    ) {
+      score += 25;
+    } else if (blobWords.includes(t)) {
+      score += 15;
+    } else if (sub.searchBlob.includes(t)) {
+      score += 5;
+    }
+  }
+
+  return score;
+}
+
+function scoreCatalogCategory(
+  cat: CatalogCategory,
+  matchingSubGroups: CatalogSubGroup[],
+  q: string,
+  terms: string[],
+): number {
+  const catTitleL = cat.title.toLowerCase();
+  const catTitleWords = tokenizeCatalogText(catTitleL);
+  const identityWords = tokenizeCatalogText(cat.identityBlob);
+
+  let catOwnScore = 0;
+  if (catTitleL === q) {
+    catOwnScore = 1500;
+  } else if (catTitleL.startsWith(q)) {
+    catOwnScore = 1000;
+  } else if (terms.length > 0 && terms.every((t) => catTitleWords.includes(t))) {
+    catOwnScore = 700;
+  } else {
+    for (const t of terms) {
+      if (catTitleWords.includes(t)) catOwnScore += 120;
+      else if (catTitleWords.some((w) => w.startsWith(t))) catOwnScore += 70;
+      else if (identityWords.includes(t)) catOwnScore += 30;
+    }
+  }
+
+  let bestItemScore = 0;
+  for (const sg of matchingSubGroups) {
+    for (const sub of sg.items) {
+      const s = scoreCatalogSubItem(sub, sg.title, q, terms);
+      if (s > bestItemScore) bestItemScore = s;
+    }
+  }
+
+  return Math.max(catOwnScore, bestItemScore) + Math.min(catOwnScore, bestItemScore) * 0.01;
+}
+
+function scoreCatalogItem(
+  item: CatalogItem,
+  matchingSubGroups: CatalogSubGroup[],
+  q: string,
+  terms: string[],
+): number {
+  const qCompact = compactCatalogText(q);
+  const shortL = item.shortName.toLowerCase();
+  const dispL = item.displayName.toLowerCase();
+  const idL = item.id.toLowerCase();
+  const shortWords = tokenizeCatalogText(shortL);
+  const dispWords = tokenizeCatalogText(dispL);
+  const ownWords = tokenizeCatalogText(item.ownSearchBlob);
+
+  let ownScore = 0;
+  if (shortL === q || dispL === q) {
+    ownScore += 1200;
+  } else if (
+    compactCatalogText(shortL) === qCompact ||
+    compactCatalogText(dispL) === qCompact ||
+    idL === q
+  ) {
+    ownScore += 1100;
+  } else if (shortL.startsWith(q) || dispL.startsWith(q)) {
+    ownScore += 850;
+  } else if (
+    (qCompact && compactCatalogText(shortL).startsWith(qCompact)) ||
+    (qCompact && compactCatalogText(dispL).startsWith(qCompact)) ||
+    idL.startsWith(q)
+  ) {
+    ownScore += 750;
+  } else if (shortL.includes(q) || dispL.includes(q)) {
+    ownScore += 600;
+  }
+
+  for (const t of terms) {
+    if (shortWords.includes(t) || dispWords.includes(t)) ownScore += 200;
+    else if (shortWords.some((w) => w.startsWith(t)) || dispWords.some((w) => w.startsWith(t))) ownScore += 140;
+    else if (shortL.includes(t) || dispL.includes(t) || idL.includes(t)) ownScore += 80;
+    else if (ownWords.includes(t)) ownScore += 30;
+    else if (item.ownSearchBlob.includes(t)) ownScore += 10;
+  }
+
+  let bestSubScore = 0;
+  for (const sg of matchingSubGroups) {
+    for (const sub of sg.items) {
+      const s = scoreCatalogSubItem(sub, sg.title, q, terms);
+      if (s > bestSubScore) bestSubScore = s;
+    }
+  }
+
+  return Math.max(ownScore, bestSubScore) + Math.min(ownScore, bestSubScore) * 0.01;
+}
+
 export function filterCatalogCategories(
   query: string,
   categories: CatalogCategory[] = CATALOG_CATEGORIES,
@@ -994,19 +1163,25 @@ export function filterCatalogCategories(
   }
 
   const terms = q.split(/\s+/).filter(Boolean);
-  const results: FilteredCategoryEntry[] = [];
+  const scoredResults: Array<{ entry: FilteredCategoryEntry; score: number; origIdx: number }> = [];
 
-  for (const category of categories) {
+  for (let catIdx = 0; catIdx < categories.length; catIdx++) {
+    const category = categories[catIdx];
     if (!terms.every((t) => category.searchBlob.includes(t))) continue;
     const totalSubCount = category.subGroups.reduce((a, g) => a + g.items.length, 0);
 
     // Pure category-level match (e.g. "prediction", "localfold", "generation") -> show all sub-items
     if (terms.every((t) => category.identityBlob.includes(t))) {
-      results.push({
+      const entry: FilteredCategoryEntry = {
         category,
         matchingSubGroups: category.subGroups,
         matchingSubItems: category.subGroups.flatMap((g) => g.items),
         hasNarrowedSubMatch: false,
+      };
+      scoredResults.push({
+        entry,
+        score: scoreCatalogCategory(category, entry.matchingSubGroups, q, terms),
+        origIdx: catIdx,
       });
       continue;
     }
@@ -1021,38 +1196,63 @@ export function filterCatalogCategories(
     );
 
     if (subTargetTerms.length > 0) {
-      const narrowed: CatalogSubGroup[] = [];
-      for (const sg of category.subGroups) {
+      const narrowedWithScore: Array<{ sg: CatalogSubGroup; bestScore: number; origSgIdx: number }> = [];
+      for (let sgIdx = 0; sgIdx < category.subGroups.length; sgIdx++) {
+        const sg = category.subGroups[sgIdx];
         const titleL = sg.title.toLowerCase();
-        const matched = sg.items.filter((sub) => {
-          const hay = `${titleL} ${sub.searchBlob}`;
-          return subTargetTerms.every((t) => hay.includes(t));
-        });
+        const matched = sg.items
+          .map((sub, itemIdx) => ({
+            sub,
+            itemIdx,
+            score: scoreCatalogSubItem(sub, sg.title, q, terms),
+          }))
+          .filter(({ sub }) => {
+            const hay = `${titleL} ${sub.searchBlob}`;
+            return subTargetTerms.every((t) => hay.includes(t));
+          });
         if (matched.length > 0) {
-          narrowed.push({ title: sg.title, items: matched });
+          matched.sort((a, b) => b.score - a.score || a.itemIdx - b.itemIdx);
+          narrowedWithScore.push({
+            sg: { title: sg.title, items: matched.map((m) => m.sub) },
+            bestScore: matched[0].score,
+            origSgIdx: sgIdx,
+          });
         }
       }
-      if (narrowed.length > 0) {
+      if (narrowedWithScore.length > 0) {
+        narrowedWithScore.sort((a, b) => b.bestScore - a.bestScore || a.origSgIdx - b.origSgIdx);
+        const narrowed = narrowedWithScore.map((n) => n.sg);
         const matchingSubItems = narrowed.flatMap((g) => g.items);
-        results.push({
+        const entry: FilteredCategoryEntry = {
           category,
           matchingSubGroups: narrowed,
           matchingSubItems,
           hasNarrowedSubMatch: matchingSubItems.length < totalSubCount || totalSubCount === 1,
+        };
+        scoredResults.push({
+          entry,
+          score: scoreCatalogCategory(category, narrowed, q, terms),
+          origIdx: catIdx,
         });
         continue;
       }
     }
 
-    results.push({
+    const entry: FilteredCategoryEntry = {
       category,
       matchingSubGroups: category.subGroups,
       matchingSubItems: category.subGroups.flatMap((g) => g.items),
       hasNarrowedSubMatch: false,
+    };
+    scoredResults.push({
+      entry,
+      score: scoreCatalogCategory(category, entry.matchingSubGroups, q, terms),
+      origIdx: catIdx,
     });
   }
 
-  return results;
+  scoredResults.sort((a, b) => b.score - a.score || a.origIdx - b.origIdx);
+  return scoredResults.map((r) => r.entry);
 }
 
 export function filterCatalog(query: string, items: CatalogItem[] = CATALOG_ITEMS): FilteredCatalogEntry[] {
@@ -1071,21 +1271,27 @@ export function filterCatalog(query: string, items: CatalogItem[] = CATALOG_ITEM
   }
 
   const terms = q.split(/\s+/).filter(Boolean);
-  const results: FilteredCatalogEntry[] = [];
+  const scoredResults: Array<{ entry: FilteredCatalogEntry; score: number; origIdx: number }> = [];
 
-  for (const item of items) {
+  for (let itemIdx = 0; itemIdx < items.length; itemIdx++) {
+    const item = items[itemIdx];
     if (!terms.every((t) => item.searchBlob.includes(t))) continue;
 
     const directParentMatch = terms.every((t) => item.ownSearchBlob.includes(t));
     const totalSubCount = item.subGroups.reduce((acc, g) => acc + g.items.length, 0);
 
     if (item.subGroups.length === 0) {
-      results.push({
+      const entry: FilteredCatalogEntry = {
         item,
         directParentMatch,
         matchingSubGroups: [],
         matchingSubItems: [],
         hasNarrowedSubMatch: false,
+      };
+      scoredResults.push({
+        entry,
+        score: scoreCatalogItem(item, [], q, terms),
+        origIdx: itemIdx,
       });
       continue;
     }
@@ -1094,12 +1300,17 @@ export function filterCatalog(query: string, items: CatalogItem[] = CATALOG_ITEM
     // expose all sub-groups without mis-narrowing to a coincidental sub-item match.
     if (terms.every((t) => item.identityBlob.includes(t))) {
       const matchingSubItems = item.subGroups.flatMap((g) => g.items);
-      results.push({
+      const entry: FilteredCatalogEntry = {
         item,
         directParentMatch,
         matchingSubGroups: item.subGroups,
         matchingSubItems,
         hasNarrowedSubMatch: false,
+      };
+      scoredResults.push({
+        entry,
+        score: scoreCatalogItem(item, item.subGroups, q, terms),
+        origIdx: itemIdx,
       });
       continue;
     }
@@ -1117,25 +1328,44 @@ export function filterCatalog(query: string, items: CatalogItem[] = CATALOG_ITEM
     const parentOnlyTerms = terms.filter((t) => !subTargetTerms.includes(t));
 
     if (subTargetTerms.length > 0 && parentOnlyTerms.every((t) => item.ownSearchBlob.includes(t))) {
-      const narrowedGroups: CatalogSubGroup[] = [];
-      for (const sg of item.subGroups) {
+      const narrowedWithScore: Array<{ sg: CatalogSubGroup; bestScore: number; origSgIdx: number }> = [];
+      for (let sgIdx = 0; sgIdx < item.subGroups.length; sgIdx++) {
+        const sg = item.subGroups[sgIdx];
         const sgTitleLower = sg.title.toLowerCase();
-        const matched = sg.items.filter((sub) => {
-          const hay = `${sgTitleLower} ${sub.searchBlob}`;
-          return subTargetTerms.every((t) => hay.includes(t));
-        });
+        const matched = sg.items
+          .map((sub, subIdx) => ({
+            sub,
+            subIdx,
+            score: scoreCatalogSubItem(sub, sg.title, q, terms),
+          }))
+          .filter(({ sub }) => {
+            const hay = `${sgTitleLower} ${sub.searchBlob}`;
+            return subTargetTerms.every((t) => hay.includes(t));
+          });
         if (matched.length > 0) {
-          narrowedGroups.push({ title: sg.title, items: matched });
+          matched.sort((a, b) => b.score - a.score || a.subIdx - b.subIdx);
+          narrowedWithScore.push({
+            sg: { title: sg.title, items: matched.map((m) => m.sub) },
+            bestScore: matched[0].score,
+            origSgIdx: sgIdx,
+          });
         }
       }
-      if (narrowedGroups.length > 0) {
+      if (narrowedWithScore.length > 0) {
+        narrowedWithScore.sort((a, b) => b.bestScore - a.bestScore || a.origSgIdx - b.origSgIdx);
+        const narrowedGroups = narrowedWithScore.map((n) => n.sg);
         const matchingSubItems = narrowedGroups.flatMap((g) => g.items);
-        results.push({
+        const entry: FilteredCatalogEntry = {
           item,
           directParentMatch,
           matchingSubGroups: narrowedGroups,
           matchingSubItems,
           hasNarrowedSubMatch: matchingSubItems.length < totalSubCount,
+        };
+        scoredResults.push({
+          entry,
+          score: scoreCatalogItem(item, narrowedGroups, q, terms),
+          origIdx: itemIdx,
         });
         continue;
       }
@@ -1144,25 +1374,36 @@ export function filterCatalog(query: string, items: CatalogItem[] = CATALOG_ITEM
     // 3. Fallback: if parent matches directly (e.g. "prediction" or role keywords), expose all sub-groups
     if (directParentMatch) {
       const matchingSubItems = item.subGroups.flatMap((g) => g.items);
-      results.push({
+      const entry: FilteredCatalogEntry = {
         item,
         directParentMatch,
         matchingSubGroups: item.subGroups,
         matchingSubItems,
         hasNarrowedSubMatch: false,
+      };
+      scoredResults.push({
+        entry,
+        score: scoreCatalogItem(item, item.subGroups, q, terms),
+        origIdx: itemIdx,
       });
       continue;
     }
 
     // 4. Cross-boundary query matched multiple distinct sub-items without one unifying sub-item
-    results.push({
+    const entry: FilteredCatalogEntry = {
       item,
       directParentMatch,
       matchingSubGroups: [],
       matchingSubItems: [],
       hasNarrowedSubMatch: false,
+    };
+    scoredResults.push({
+      entry,
+      score: scoreCatalogItem(item, [], q, terms),
+      origIdx: itemIdx,
     });
   }
 
-  return results;
+  scoredResults.sort((a, b) => b.score - a.score || a.origIdx - b.origIdx);
+  return scoredResults.map((r) => r.entry);
 }

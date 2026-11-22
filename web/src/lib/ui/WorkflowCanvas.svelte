@@ -36,6 +36,7 @@
   import BlockCatalogPopover from './BlockCatalogPopover.svelte';
   import WorkflowPlannerBar from './WorkflowPlannerBar.svelte';
   import type { PlannedWorkflowResult } from '$lib/engine/workflow-planner';
+  import { computeUpstreamLockSummary } from './node-display-helpers';
 
   interface Props {
     graph: WorkflowGraph;
@@ -693,6 +694,11 @@
           }
         }
       }
+      const upstreamLockSummary = computeUpstreamLockSummary(
+        laid,
+        n.id,
+        isDraftNode ? {} : outputsByNode,
+      );
       return {
         ...(prevFlow?.measured ? { measured: prevFlow.measured } : {}),
         ...(prevFlow?.width !== undefined ? { width: prevFlow.width } : {}),
@@ -716,6 +722,7 @@
           activePeekSlotId:
             !activePreview && activePeekPort?.nodeId === n.id ? activePeekPort.slotId : undefined,
           autoModeHint,
+          upstreamLockSummary,
           isDraft: isDraftNode,
           onDelete: disabled || activePreview ? undefined : removeNode,
           onPeekPort: activePreview ? undefined : onPeekPort,

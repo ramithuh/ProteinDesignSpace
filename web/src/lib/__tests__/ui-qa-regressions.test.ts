@@ -64,8 +64,10 @@ describe('M3 UI & QA regressions (Svelte 5 AST parse, pure validation, and sourc
     expect(inspectorSrc).not.toContain("filename || 'custom.pdb'");
 
     const nodeSrc = readSrc('src/lib/ui/ProteinNode.svelte');
-    expect(nodeSrc).toContain("'No PDB loaded'");
-    expect(nodeSrc).toContain('demo_3helix_53aa.pdb');
+    const nodeHelpersSrc = readSrc('src/lib/ui/node-display-helpers.ts');
+    expect(nodeHelpersSrc).toContain("'No PDB loaded'");
+    expect(nodeHelpersSrc).toContain('demo_3helix_53aa.pdb');
+    expect(nodeSrc).toContain('formatNodeParamSummary');
     expect(nodeSrc).toContain('selectPrimaryOutputPort');
 
     const pageSrc = readSrc('src/routes/+page.svelte');

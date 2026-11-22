@@ -492,8 +492,8 @@ describe('protein-ops/pdb', () => {
       '5.500 2.600 0.000 ATOM C . ALA A 2 1',
       '10.000 10.000 10.000 HETATM ZN . ZN A 201 1',
       '12.000 12.000 12.000 HETATM C1 A DHZ A 202 1',
-      // Secondary altLoc B ligand must be ignored
-      '13.000 13.000 13.000 HETATM C1 B IGN A 203 1',
+      // Secondary altLoc B ligand at same site must be ignored in favor of A
+      '13.000 13.000 13.000 HETATM C1 B IGN A 202 1',
       // Model 2 ligand must be ignored
       '14.000 14.000 14.000 HETATM C1 . M2L A 204 2',
       // Nucleic acid chain D

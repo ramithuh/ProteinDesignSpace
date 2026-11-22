@@ -71,13 +71,16 @@
     computeBenchmarkAutoSeedPatches,
     computeChangedParamKeys,
     computePreviewChecks,
+    isCompareDisplayOnlyParamChange,
     isSharedWorkflowHash,
     parseLengthFromContig,
+    resolveResidueFocusToken,
     shouldAllowNativeTextUndo,
     shouldSuppressOnboardingForHash,
     type LabelUndoMarker,
     type ParamUndoMarker,
   } from '$lib/ui/page-state-helpers';
+  import { computeUpstreamLockSummary } from '$lib/ui/node-display-helpers';
   import { compileNodeInputPreview } from '$lib/engine/input-preview';
   import {
     formatWebGpuAdapterSummary,
@@ -94,6 +97,7 @@
   let studioTab = $state<'input' | 'controls' | 'output'>('input');
   let studioHoveredToken = $state<string | null>(null);
   let studioFocusToken = $state<string | null>(null);
+  let viewerFocusToken = $state<string | null>(null);
   let selectedDesignKey = $state<string>('all');
   let multiDesignViewMode = $state<'grid' | 'overlay' | 'single'>('grid');
   let multiDesignHiddenIds = $state<string[]>([]);
@@ -166,6 +170,14 @@
     const n = graph.nodes.find((node) => node.id === selectedNodeIds[0]);
     return n?.adapterId === 'structure-compare' ? n : null;
   });
+  let activeCompareRefNodeId = $derived.by((): string | null => {
+    if (!activeCompareNode) return null;
+    return (
+      graph.edges.find(
+        (e) => e.toNode === activeCompareNode.id && e.toPort === 'reference',
+      )?.fromNode ?? null
+    );
+  });
   let activeCompareInputIds = $derived.by((): string[] => {
     if (!activeCompareNode) return [];
     const ordered: string[] = [];
@@ -223,6 +235,7 @@
     comparePairingMode = undefined;
     compareSelectedCandidateKey = null;
     branchCandidateIdx = {};
+    viewerFocusToken = null;
   }
 
   function handleSelectNodes(ids: string[]) {
@@ -234,6 +247,7 @@
     branchCandidateIdx = {};
     selectedPeekSlotId = null;
     selectedEdgeId = null;
+    viewerFocusToken = null;
     if (selectedNodeIds.length >= 2) {
       rightPanelTab = 'peek';
     }
@@ -993,8 +1007,30 @@
   function handleSelectPeekSlot(slotId: string) {
     selectedPeekSlotId = slotId;
     showSeqParentBackbone = false;
+    viewerFocusToken = null;
     const slot = peekSlots.find((s) => s.id === slotId);
     selectedEdgeId = slot?.direction === 'in' ? (slot.edgeId ?? null) : null;
+  }
+
+  function handleSelectPerResidue(positionIndex: number, residueId: string) {
+    const tok = resolveResidueFocusToken(
+      positionIndex,
+      residueId,
+      peekPerResidue,
+      perResidueDisplayStructure,
+    );
+    if (!tok) return;
+    if (studioOpen) {
+      studioFocusToken = null;
+      queueMicrotask(() => {
+        studioFocusToken = tok;
+      });
+    } else {
+      viewerFocusToken = null;
+      queueMicrotask(() => {
+        viewerFocusToken = tok;
+      });
+    }
   }
 
   function getDownstreamNodeIds(g: WorkflowGraph, seedIds: Iterable<string>): Set<string> {
@@ -1125,7 +1161,13 @@
       if (!prev || cur.adapterId !== prev.adapterId) {
         dirtySeeds.add(id);
       } else if (!shallowParamsEqual(cur.params, prev.params)) {
-        dirtySeeds.add(id);
+        const displayOnlyCompare =
+          cur.adapterId === 'structure-compare' &&
+          prev.adapterId === 'structure-compare' &&
+          isCompareDisplayOnlyParamChange(prev, cur.params);
+        if (!displayOnlyCompare) {
+          dirtySeeds.add(id);
+        }
       }
     }
 
@@ -1191,7 +1233,13 @@
     }
 
     graph = normalizedNext;
-    scheduler.invalidateEditedGraph(prevSnapshot, normalizedNext);
+    if (
+      staleIds.size > 0 ||
+      prevSnapshot.nodes.length !== normalizedNext.nodes.length ||
+      prevSnapshot.edges.length !== normalizedNext.edges.length
+    ) {
+      scheduler.invalidateEditedGraph(prevSnapshot, normalizedNext);
+    }
 
     // Prune deleted node IDs from selection & hidden compare models (resetting if all remaining would be hidden)
     let nextSelected = selectedNodeIds;
@@ -1226,6 +1274,7 @@
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
     const prevNode = prevSnapshot.nodes.find((n) => n.id === nodeId);
     const paramsChanged = !prevNode || !shallowParamsEqual(prevNode.params, params);
+    const displayOnlyCompare = isCompareDisplayOnlyParamChange(prevNode, params);
     if (paramsChanged) {
       const changedKeys = computeChangedParamKeys(prevNode?.params, params);
       if (changedKeys.length > 0) {
@@ -1252,7 +1301,7 @@
       nodes: prevSnapshot.nodes.map((n) => (n.id === nodeId ? { ...n, params } : n)),
     };
     graph = nextGraph;
-    if (paramsChanged) {
+    if (paramsChanged && !displayOnlyCompare) {
       scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
       invalidateNodes(getDownstreamNodeIds(nextGraph, [nodeId]));
     }
@@ -2646,7 +2695,7 @@
       }
     }
     const map: Record<string, CompareBranchMeta> = {};
-    for (const id of selectedNodeIds) {
+    for (const id of effectiveCompareNodeIds) {
       const outs = outputsByNode[id];
       if (!outs) continue;
       const values = Object.values(outs);
@@ -2759,6 +2808,10 @@
     return map;
   });
 
+  let selectedUpstreamLockSummary = $derived(
+    selectedNode ? computeUpstreamLockSummary(graph, selectedNode.id, outputsByNode) : null,
+  );
+
   let comparisonState = $derived.by(() => {
     if (!isCompareMode || effectiveCompareNodeIds.length === 0) return null;
     return buildComparisonState(graph, effectiveCompareNodeIds, outputsByNode, {
@@ -2769,6 +2822,7 @@
       hiddenModelIds: new Set(hiddenCompareModelIds),
       pairingMode: comparePairingMode,
       selectedCandidateKey: compareSelectedCandidateKey,
+      referenceNodeId: activeCompareRefNodeId ?? undefined,
     });
   });
 
@@ -3504,23 +3558,23 @@
                 pLDDT
               </button>
             </div>
-            {@const sharedPreAligned = Boolean(comparisonState.sharedReferenceLabel) && comparisonState.effectiveLayout === 'overlay'}
+            {@const isSideBySide = comparisonState.effectiveLayout === 'side-by-side'}
+            {@const sharedPreAligned = Boolean(comparisonState.sharedReferenceLabel) && !isSideBySide}
+            {@const kabschDisabled = sharedPreAligned || isSideBySide}
             <label
-              class:disabled-opt={sharedPreAligned}
+              class:disabled-opt={kabschDisabled}
               title={sharedPreAligned
                 ? 'Branches share a designed backbone and are pre-aligned to it in Overlay mode'
-                : 'Superpose models with Kabsch alignment (supports motif/substructure alignment for different lengths)'}
+                : isSideBySide
+                  ? 'Kabsch alignment applies in Overlay layout'
+                  : 'Superpose models with Kabsch alignment (supports motif/substructure alignment for different lengths)'}
             >
               <input
                 type="checkbox"
-                disabled={sharedPreAligned}
-                checked={sharedPreAligned || (effectiveCompareAlignKabsch && comparisonState.effectiveLayout === 'overlay')}
+                disabled={kabschDisabled}
+                checked={effectiveCompareAlignKabsch}
                 onchange={(e) => {
-                  const checked = e.currentTarget.checked;
-                  setActiveCompareOption({
-                    alignKabsch: checked,
-                    ...(checked && effectiveCompareLayout === 'side-by-side' ? { layout: 'overlay' } : {}),
-                  });
+                  setActiveCompareOption({ alignKabsch: e.currentTarget.checked });
                 }}
               />
               {sharedPreAligned ? 'Kabsch align (shared)' : 'Kabsch align'}
@@ -3729,7 +3783,7 @@
               : viewerBfactorSemantics}
             highlightLayers={studioInputViewerActive ? studioPreview?.highlightLayers : undefined}
             hoveredToken={studioOpen ? studioHoveredToken : null}
-            focusToken={studioOpen ? studioFocusToken : null}
+            focusToken={studioOpen ? studioFocusToken : viewerFocusToken}
             emptyMessage={isCompareMode ? compareEmptyMessage : isMultiDesignAll3d ? undefined : viewerEmptyMessage}
             emptyActionLabel={!isCompareMode && !isMultiDesignAll3d && isPeekingSequenceSlot && !showSeqParentBackbone && contextStructure
               ? 'Preview parent backbone'
@@ -3801,6 +3855,7 @@
                 nodeState={nodeStates[selectedNode.id]}
                 upstreamStructure={selectedUpstreamStructure}
                 upstreamSequences={selectedUpstreamSequences}
+                upstreamLockSummary={selectedUpstreamLockSummary}
                 hasStructureInput={graph.edges.some(
                   (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
                 )}
@@ -3851,6 +3906,7 @@
                   }
                 }}
                 onDownloadText={downloadText}
+                onSelectResidue={handleSelectPerResidue}
               />
             {/snippet}
           </NodeStudioPopover>
@@ -3875,7 +3931,7 @@
               class:active={rightPanelTab === 'peek'}
               onclick={() => (rightPanelTab = 'peek')}
             >
-              {isCompareMode ? `Compare (${selectedNodeIds.length})` : 'Outputs'}
+              {isCompareMode ? `Compare (${effectiveCompareNodeIds.length})` : 'Outputs'}
               {#if hasPeekData || isCompareMode}
                 <span class="live-dot" title="Outputs or comparison ready"></span>
               {/if}
@@ -3932,6 +3988,7 @@
                 nodeState={nodeStates[selectedNode.id]}
                 upstreamStructure={selectedUpstreamStructure}
                 upstreamSequences={selectedUpstreamSequences}
+                upstreamLockSummary={selectedUpstreamLockSummary}
                 hasStructureInput={graph.edges.some(
                   (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
                 )}
@@ -4013,6 +4070,7 @@
                 }
               }}
               onDownloadText={downloadText}
+              onSelectResidue={handleSelectPerResidue}
             />
           {/if}
         </div>

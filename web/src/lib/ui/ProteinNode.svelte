@@ -6,9 +6,13 @@
     RFD4_BENCHMARK_OPTIONS,
   } from '$lib/engine/registry';
   import { PORT_COLORS, STAGE_COLORS, STAGE_LABELS } from '$lib/engine/graph-utils';
-  import { validateSequenceText } from '$lib/engine/param-validation';
   import { selectPrimaryOutputPort } from '$lib/engine/peek';
   import type { CanonicalArtifact, NodeProgressEvent } from '$lib/engine/types';
+  import {
+    formatMutationMatrixBadge,
+    formatNodeParamSummary,
+    type UpstreamLockSummary,
+  } from './node-display-helpers';
 
   export interface ProteinNodeData {
     adapterId: string;
@@ -24,6 +28,7 @@
     compareBadge?: string;
     activePeekSlotId?: string;
     autoModeHint?: string;
+    upstreamLockSummary?: UpstreamLockSummary | null;
     isDraft?: boolean;
     onDelete?: (nodeId: string) => void;
     onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
@@ -71,156 +76,11 @@
   let isNodeDone = $derived(st?.status === 'done' || st?.status === 'cached');
   let isNodeQueued = $derived(isPipelineRunning && (!st || st.status === 'idle'));
 
-  let paramSummary = $derived.by((): string => {
-    const p = data.params ?? {};
-    switch (data.adapterId) {
-      case 'pdb-input': {
-        const crop = String(p.cropSegments ?? '').trim();
-        const cropTag = crop ? ` · ${crop}` : '';
-        if (p.mode === 'pdb-id') {
-          const id = String(p.pdbId ?? '').trim().toUpperCase();
-          return id ? `RCSB ${id}${cropTag}` : 'Fetch by PDB ID';
-        }
-        if (p.mode === 'custom') {
-          const rawFn = String(p.filename ?? '').trim();
-          const fname = rawFn && rawFn !== 'demo_3helix_53aa.pdb' ? rawFn : '';
-          const hasText = String(p.pdbText ?? '').trim().length > 0;
-          if (!hasText) {
-            return fname ? `${fname} (empty)` : 'No PDB loaded';
-          }
-          return `${fname || 'custom PDB'}${cropTag}`;
-        }
-        return `53 aa 3-helix demo${cropTag}`;
-      }
-      case 'sequence-input': {
-        const raw = String(p.sequence ?? '');
-        const check = validateSequenceText(raw);
-        const emptyCount = check.emptyHeaders?.length ?? 0;
-        const emptyNote = emptyCount > 0 ? ` · ${emptyCount} empty` : '';
-        if (check.numSequences > 1) {
-          return `${check.numSequences} seqs · ${check.totalResidues} aa${emptyNote}`;
-        }
-        return `${check.totalResidues || 0} aa FASTA${emptyNote}`;
-      }
-      case 'rfd4-conditioner': {
-        const tp = String(p.taskPreset ?? 'custom');
-        if (tp !== 'custom') {
-          const opt = RFD4_BENCHMARK_OPTIONS.find((o) => o.id === tp);
-          return opt ? opt.label : tp;
-        }
-        const bits: string[] = [];
-        const contig = String(p.contig ?? '').trim();
-        if (contig) bits.push(contig);
-        const hotCount = String(p.hotspots ?? '')
-          .split(/[,\s]+/)
-          .filter(Boolean).length;
-        if (hotCount > 0) bits.push(`${hotCount} hotspot${hotCount === 1 ? '' : 's'}`);
-        const motif = String(p.motifSpan ?? '').trim();
-        if (motif) bits.push('motif');
-        const cath = String(p.cathCode ?? '').trim();
-        if (cath) bits.push(`CATH ${cath}`);
-        return bits.join(' · ') || 'custom constraints';
-      }
-      case 'rfd4-proteina': {
-        const mode = String(p.mode ?? 'unconditional');
-        const steps = Number(p.nsteps ?? 60);
-        if (mode === 'binder') {
-          const hotCount = String(p.hotspots ?? '').split(/[,\s]+/).filter(Boolean).length;
-          const hotTag = hotCount > 0 ? ` · ${hotCount} hotspots` : '';
-          return `Binder${hotTag} · ${steps} steps`;
-        }
-        if (mode === 'motif') {
-          const tag = p.unindexedMotif ? 'Unindexed Motif' : 'Motif';
-          const motif = String(p.motifSpan ?? '').trim();
-          return `${tag}${motif ? ` (${motif})` : ''} · ${steps} steps`;
-        }
-        if (mode === 'conditioned') {
-          const contig = String(p.contig ?? '').trim();
-          return `Conditioned${contig ? ` · ${contig}` : ''} · ${steps} steps`;
-        }
-        if (mode === 'preset') {
-          const opt = RFD4_BENCHMARK_OPTIONS.find((o) => o.id === String(p.presetId ?? ''));
-          return `${opt?.label ?? 'Preset task'} · ${steps} steps`;
-        }
-        if (mode === 'partial') return `Partial (${Number(p.partialFraction ?? 0.5)}) · ${steps} steps`;
-        if (mode === 'inverse-folding') return `Inverse folding · ${steps} steps`;
-        const cath = String(p.cathCode ?? '').trim();
-        return `${cath ? `CATH ${cath} · ` : ''}${Number(p.length ?? 70)} aa · ${steps} steps`;
-      }
-      case 'genie3': {
-        const len = Number(p.length ?? 80);
-        const steps = Number(p.nSampleStep ?? 100);
-        const tm = String(p.taskMode ?? 'unconditional');
-        if (tm === 'binder') {
-          const hotCount = String(p.hotspots ?? '').split(/[,\s]+/).filter(Boolean).length;
-          return `Binder · ${len} aa${hotCount > 0 ? ` · ${hotCount} hot` : ''} · ${steps} steps`;
-        }
-        if (tm === 'motif') {
-          const motif = String(p.motifSpan ?? '').trim();
-          return `Motif${motif ? ` (${motif})` : ''} · ${steps} steps`;
-        }
-        if (data.autoModeHint) return `${data.autoModeHint} · ${len} aa · ${steps} steps`;
-        return `${len} aa · ${steps} steps`;
-      }
-      case 'protpardelle': {
-        const ckpt = String(p.checkpoint ?? 'cc91_epoch383').split('_')[0];
-        const mode = String(p.taskMode ?? 'unconditional');
-        const steps = Number(p.numSteps ?? 100);
-        if (mode === 'motif') return `${ckpt} · Motif · ${steps} steps`;
-        if (mode === 'partial') return `${ckpt} · Partial (${Number(p.rewindSteps ?? 40)})`;
-        return `${ckpt} · ${Number(p.length ?? 80)} aa · ${steps} steps`;
-      }
-      case 'esmc': {
-        const mode = String(p.mode ?? 'wildtype');
-        const prec = String(p.precision ?? 'int8').toUpperCase();
-        const tag = mode === 'masked' ? 'Masked LLR' : mode === 'fill' ? 'Fill' : 'WT LLR';
-        return `${tag} · ${prec}`;
-      }
-      case 'dyna1': {
-        const prec = String(p.precision ?? 'int8').toUpperCase();
-        return `Exchange prob · ${prec}`;
-      }
-      case 'web-protein-mpnn': {
-        const fam =
-          p.family === 'proteinmpnn'
-            ? 'ProteinMPNN'
-            : p.family === 'ca'
-              ? 'Cα-ProteinMPNN'
-              : 'SolubleMPNN';
-        const ckpt = String(p.modelName ?? 'v_48_020');
-        const n = Number(p.numSequences ?? 2);
-        const t = Number(p.temperature ?? 0.1);
-        return `${fam} ${ckpt} · ${n} seq${n === 1 ? '' : 's'} · T=${t}`;
-      }
-      case 'localfold-af2': {
-        const modelId = String(p.model ?? 'monomer');
-        const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
-        const rec = Number(p.recycles ?? 1);
-        const msaMode = String(p.msaMode ?? 'single');
-        const msaTag =
-          msaMode === 'mmseqs2'
-            ? 'MMseqs2'
-            : msaMode === 'target-only'
-              ? 'target MSA'
-              : msaMode === 'a3m'
-                ? '.a3m'
-                : 'single-seq';
-        if (meta.family === 'esmfold2') {
-          return `${meta.shortLabel} · single-seq · ${Number(p.esmfold2Steps ?? 15)} scheduled steps`;
-        }
-        if (meta.family === 'af3') {
-          const steps = Number(p.diffusionSteps ?? 25);
-          return `LocalFold · ${msaTag} · ${steps} steps · ${rec} rec`;
-        }
-        return `LocalFold · ${msaTag} · ${rec} rec`;
-      }
-      case 'designability-scorer': {
-        return `scRMSD < ${Number(p.scRmsdThreshold ?? 2.0).toFixed(1)} Å · pLDDT ≥ ${Number(p.plddtThreshold ?? 70)}`;
-      }
-      default:
-        return '';
-    }
-  });
+  let paramSummary = $derived(
+    formatNodeParamSummary(data.adapterId, data.params, {
+      autoModeHint: data.autoModeHint,
+    }),
+  );
 
   let primaryOutput = $derived(selectPrimaryOutputPort(data.outputs));
   let primaryOutputInfo = $derived(
@@ -238,26 +98,7 @@
         return `scRMSD ${art.best.scRmsd.toFixed(2)} Å · pLDDT ${art.best.meanPlddt.toFixed(1)}`;
       }
       if (art.kind === 'MutationMatrix') {
-        const nPos = art.residueIds?.length ?? art.residues.length;
-        let bestVal: number | null = null;
-        for (let i = 0; i < art.values.length; i++) {
-          const v = art.values[i];
-          if (!Number.isFinite(v)) continue;
-          if (
-            bestVal === null ||
-            (art.direction === 'lower-is-better' ? v < bestVal : v > bestVal)
-          ) {
-            bestVal = v;
-          }
-        }
-        if (art.metric === 'ddg-kcal-mol') {
-          return bestVal !== null
-            ? `${nPos} pos · min ΔΔG ${bestVal.toFixed(2)}`
-            : `${nPos}×20 ΔΔG`;
-        }
-        return bestVal !== null
-          ? `${nPos} pos · max LLR ${bestVal.toFixed(2)}`
-          : `${nPos}×20 LLR`;
+        return formatMutationMatrixBadge(art);
       }
       if (art.kind === 'ResidueTrack') {
         const nPos = art.residueIds?.length ?? art.residues.length;
@@ -383,6 +224,16 @@
 
   {#if paramSummary}
     <div class="param-chip" title={paramSummary}>{paramSummary}</div>
+  {/if}
+  {#if data.upstreamLockSummary}
+    <div
+      class="lock-chip"
+      class:is-warn={data.upstreamLockSummary.status === 'warning'}
+      class:is-unlocked={data.upstreamLockSummary.status === 'unlocked'}
+      title={data.upstreamLockSummary.detailText}
+    >
+      {data.upstreamLockSummary.nodeBadge}
+    </div>
   {/if}
 
   <!-- Typed Input & Output Port Rows -->
@@ -839,6 +690,29 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .lock-chip {
+    margin: -2px 10px 6px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--bg-pill);
+    border: 1px solid var(--border-strong);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    color: var(--accent-soft);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .lock-chip.is-warn {
+    background: var(--warn-bg);
+    border-color: var(--warn-border);
+    color: var(--warn-text);
+  }
+  .lock-chip.is-unlocked {
+    background: var(--bg-surface-2);
+    border-color: var(--border-subtle);
+    color: var(--text-dim);
   }
   .ports {
     display: flex;

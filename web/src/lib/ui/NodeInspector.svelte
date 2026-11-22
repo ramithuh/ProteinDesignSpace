@@ -31,6 +31,7 @@
   import { MAX_DESIGNS } from '$lib/engine/work-plan';
   import NumericInput from './NumericInput.svelte';
   import SchemaParamFields from './SchemaParamFields.svelte';
+  import type { UpstreamLockSummary } from './node-display-helpers';
   import type {
     CanonicalArtifact,
     MsaMode,
@@ -48,6 +49,7 @@
     nodeState?: NodeProgressEvent;
     upstreamStructure?: StructureArtifact | null;
     upstreamSequences?: SequenceSet | null;
+    upstreamLockSummary?: UpstreamLockSummary | null;
     hasStructureInput?: boolean;
     siblingGeneratorIds?: string[];
     onUpdate: (nodeId: string, params: Record<string, unknown>) => void;
@@ -65,6 +67,7 @@
     nodeState = undefined,
     upstreamStructure = null,
     upstreamSequences = null,
+    upstreamLockSummary = null,
     hasStructureInput = false,
     siblingGeneratorIds = [],
     onUpdate,
@@ -1896,6 +1899,16 @@
         </div>
       {/if}
 
+      {#if upstreamLockSummary}
+        <div
+          class="source-res-badge full"
+          class:is-warn={upstreamLockSummary.status === 'warning'}
+          role="status"
+        >
+          {upstreamLockSummary.detailText}
+        </div>
+      {/if}
+
       <div class="chip-field full">
         <label>
           Fixed positions (click residues in 3D viewer or enter e.g. A10, A12-15)
@@ -2351,6 +2364,15 @@
             <span class="field-hint">{schemaActiveMode.description}</span>
           {/if}
         </label>
+      {/if}
+      {#if upstreamLockSummary}
+        <div
+          class="source-res-badge full"
+          class:is-warn={upstreamLockSummary.status === 'warning'}
+          role="status"
+        >
+          {upstreamLockSummary.detailText}
+        </div>
       {/if}
       {#if schemaPrimaryFields.length > 0}
         <SchemaParamFields
