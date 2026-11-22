@@ -3043,11 +3043,11 @@
     <!-- GitHub Repository Link -->
     <a
       class="hdr-gh-btn"
-      href="https://github.com/ramithuh/ProteinDesignSpace"
+      href="https://github.com/ramithuh/ProteinDesignSpace/blob/main/ADDING_A_METHOD.md"
       target="_blank"
       rel="noopener noreferrer"
-      title="Open source on GitHub — add a new method or open an issue"
-      aria-label="Add a new method on GitHub (ramithuh/ProteinDesignSpace)"
+      title="Add a new method to denovo.run (guide & coding-agent prompt)"
+      aria-label="Add a new method to denovo.run (guide on GitHub)"
     >
       <span class="hdr-gh-label">Add a method?</span>
       <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
