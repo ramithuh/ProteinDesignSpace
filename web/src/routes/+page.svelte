@@ -1883,6 +1883,29 @@
     await openSharePopover();
   }
 
+  function buildBugReportUrl(errorText?: string | null): string {
+    const blocks = graph.nodes.map((n) => `${n.label} (${n.adapterId})`).join(' -> ');
+    const title = errorText
+      ? `Bug: ${errorText.split('\n')[0].slice(0, 72)}`
+      : `Bug report: ${graph.name || 'Workflow'}`;
+    const lines = [
+      '### Summary',
+      errorText ? `Hit an error while running the workflow:` : 'Describe what happened and what you expected:',
+      '',
+      ...(errorText ? ['```', errorText.slice(0, 900), '```', ''] : []),
+      '### Environment',
+      `- **Workflow blocks**: ${blocks || 'None'}`,
+      `- **WebGPU**: ${webgpuDetail || 'unknown'}`,
+      `- **Browser**: ${typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown'}`,
+      `- **Page**: ${typeof window !== 'undefined' ? window.location.origin : 'https://denovo.run'}`,
+    ];
+    const params = new URLSearchParams({
+      title,
+      body: lines.join('\n').slice(0, 1800),
+    });
+    return `https://github.com/ramithuh/ProteinDesignSpace/issues/new?${params.toString()}`;
+  }
+
   function loadFullWorkflowGraph(next: WorkflowGraph, opts?: { clearOutputs?: boolean }) {
     const laid = next.nodes.some((n) => !n.position) ? autoLayoutGraph(next) : next;
     graphUndoStack = [];
@@ -2952,10 +2975,10 @@
         title="Share workflow pipeline as a zero-install link"
         onclick={() => void openSharePopover()}
       >
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M6.5 9.5l3-3" />
-          <path d="M8.5 4.5l1.3-1.3a2.6 2.6 0 013.7 3.7L12.2 8.2" />
-          <path d="M7.5 11.5l-1.3 1.3a2.6 2.6 0 01-3.7-3.7l1.3-1.3" />
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+          <polyline points="16 6 12 2 8 6" />
+          <line x1="12" y1="2" x2="12" y2="15" />
         </svg>
         <span class="hdr-share-label">Share</span>
       </button>
@@ -3045,7 +3068,17 @@
         : 'Switch to left/right horizontal split'}
       aria-label="Toggle horizontal or vertical split layout"
     >
-      {splitMode === 'horizontal' ? '⬓' : '◫'}
+      {#if splitMode === 'horizontal'}
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <line x1="3" y1="12" x2="21" y2="12" />
+        </svg>
+      {:else}
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <line x1="12" y1="3" x2="12" y2="21" />
+        </svg>
+      {/if}
     </button>
 
     <!-- Theme Toggle -->
@@ -3056,10 +3089,19 @@
       title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
       aria-label="Toggle color theme"
     >
-      {theme === 'dark' ? '☀' : '☾'}
+      {#if theme === 'dark'}
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+        </svg>
+      {:else}
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        </svg>
+      {/if}
     </button>
 
-    <!-- Overflow ⋯ Menu Popover -->
+    <!-- Overflow Menu Popover -->
     <div class="pop-wrap" bind:this={moreWrapEl}>
       <button
         type="button"
@@ -3067,14 +3109,18 @@
         class:active={moreMenuOpen}
         aria-expanded={moreMenuOpen}
         aria-label="Workflow actions menu"
-        title="Recipe, Share, Import/Export & Run options"
+        title="Recipe, Import/Export, Report a bug & Run options"
         onclick={() => {
           sysMenuOpen = false;
           shareMenuOpen = false;
           moreMenuOpen = !moreMenuOpen;
         }}
       >
-        ⋯
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <circle cx="5" cy="12" r="1.8" />
+          <circle cx="12" cy="12" r="1.8" />
+          <circle cx="19" cy="12" r="1.8" />
+        </svg>
       </button>
 
       {#if moreMenuOpen}
@@ -3091,7 +3137,7 @@
             <span>{showRecipe ? 'Hide Recipe' : '</> Recipe'}</span>
           </button>
           <button type="button" class="menu-item" role="menuitem" onclick={copyQuickShareLink}>
-            <span>🔗 Share Link</span>
+            <span>Share Link</span>
           </button>
           <button type="button" class="menu-item" role="menuitem" onclick={exportWorkflowJson}>
             <span>Export JSON</span>
@@ -3127,6 +3173,18 @@
           >
             <span>Credits &amp; Licenses</span>
           </button>
+          <a
+            class="menu-item menu-link"
+            role="menuitem"
+            href={buildBugReportUrl(runError)}
+            target="_blank"
+            rel="noopener noreferrer"
+            onclick={() => {
+              moreMenuOpen = false;
+            }}
+          >
+            <span>Report a bug</span>
+          </a>
           <div class="menu-sep"></div>
           <button
             type="button"
@@ -3281,8 +3339,19 @@
       {/if}
 
       {#if runError && !previewChecks.hideRunError}
-        <div class="error-banner">
-          <b>Pipeline error:</b> {runError}
+        <div class="error-banner error-banner-row" role="alert">
+          <div class="error-banner-text">
+            <b>Pipeline error:</b> {runError}
+          </div>
+          <a
+            class="error-report-btn"
+            href={buildBugReportUrl(runError)}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open a pre-filled GitHub issue with this error and workflow summary"
+          >
+            Report bug
+          </a>
         </div>
       {/if}
 
@@ -4264,6 +4333,36 @@
   .share-pop-link-btn:hover {
     color: var(--accent);
     text-decoration: underline;
+  }
+  .menu-link {
+    text-decoration: none;
+    box-sizing: border-box;
+  }
+  .error-banner-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .error-banner-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .error-report-btn {
+    flex-shrink: 0;
+    padding: 4px 10px;
+    border-radius: 5px;
+    border: 1px solid currentColor;
+    color: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+    opacity: 0.9;
+  }
+  .error-report-btn:hover {
+    opacity: 1;
+    background: rgba(239, 68, 68, 0.14);
   }
 
   .hdr-popover {
