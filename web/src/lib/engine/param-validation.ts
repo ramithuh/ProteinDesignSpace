@@ -4,16 +4,13 @@
 import type { WorkflowNode } from './types';
 import { isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
 import { parseStructureText } from '$lib/protein-ops/pdb';
+import { ADAPTER_REGISTRY } from './registry';
 import {
-  ADAPTER_REGISTRY,
-  LOCALFOLD_MODEL_OPTIONS,
-  MPNN_CHECKPOINTS_BY_FAMILY,
-  RFD4_BENCHMARK_OPTIONS,
-} from './registry';
-import { validateParamsWithSchema } from './param-schema';
-import { esmfold2ParamIssue } from './localfold-esmfold2';
+  fieldToNumericSpec,
+  isValidResidueSelectorToken,
+  validateParamsWithSchema,
+} from './param-schema';
 
-const VALID_PDB_INPUT_MODES = new Set(['demo-bundle', 'pdb-id', 'custom']);
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
 
 const SHA256_K = new Uint32Array([
@@ -106,32 +103,6 @@ export function isValidSha256Hex(raw: string): boolean {
   return SHA256_HEX_RE.test(raw.trim());
 }
 
-const VALID_RFD4_MODES = new Set([
-  'unconditional',
-  'binder',
-  'motif',
-  'conditioned',
-  'preset',
-  'partial',
-  'inverse-folding',
-]);
-const VALID_RFD4_PRESET_IDS = new Set([
-  ...RFD4_BENCHMARK_OPTIONS.map((b) => b.id),
-  'yaml_5o45_binder',
-]);
-const VALID_RFD4_RECYCLE_SCHEDULES = new Set(['none', 'low', 'medium', 'high']);
-const VALID_GENIE3_TASK_MODES = new Set(['unconditional', 'binder', 'motif']);
-const VALID_MSA_MODES = new Set(['single', 'mmseqs2', 'target-only', 'a3m']);
-const VALID_TOPK_MODES = new Set(['per-backbone', 'global']);
-const VALID_TOPK_METRICS = new Set(['score', 'globalScore']);
-const VALID_TOPK_DIRECTIONS = new Set(['min', 'max']);
-const VALID_MPNN_CATALOG: Record<string, ReadonlySet<string>> = Object.fromEntries(
-  Object.entries(MPNN_CHECKPOINTS_BY_FAMILY).map(([fam, opts]) => [
-    fam,
-    new Set(opts.map((o) => o.value)),
-  ]),
-);
-
 export interface NumericFieldSpec {
   min: number;
   max: number;
@@ -142,6 +113,7 @@ export interface NumericFieldSpec {
   warnBelow?: {
     threshold: number;
     message: string;
+    fixValue?: number;
   };
 }
 
@@ -151,59 +123,23 @@ export interface ValidationFeedback {
   value?: number;
 }
 
-export const NUMERIC_SPECS: Record<string, Record<string, NumericFieldSpec>> = {
-  'rfd4-proteina': {
-    length: { min: 30, max: 256, step: 1, integer: true, defaultValue: 70, unit: 'aa' },
-    numDesigns: { min: 1, max: 16, step: 1, integer: true, defaultValue: 1 },
-    partialFraction: { min: 0.05, max: 0.95, step: 0.05, integer: false, defaultValue: 0.5 },
-    nsteps: {
-      min: 10,
-      max: 120,
-      step: 1,
-      integer: true,
-      defaultValue: 60,
-      warnBelow: {
-        threshold: 58,
-        message: 'Fewer than 58 steps may reduce structure quality in RFD4-Proteina; set Recycle to None if you need faster sampling.',
-      },
-    },
-    seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 42 },
-  },
-  genie3: {
-    length: { min: 30, max: 256, step: 1, integer: true, defaultValue: 80, unit: 'aa' },
-    numDesigns: { min: 1, max: 16, step: 1, integer: true, defaultValue: 1 },
-    nSampleStep: { min: 10, max: 250, step: 10, integer: true, defaultValue: 100 },
-    directionScale: { min: 0.0, max: 1.5, step: 0.1, integer: false, defaultValue: 0.8 },
-    noiseScale: { min: 0, max: 1.5, step: 0.1, integer: false, defaultValue: 1.0 },
-    seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 42 },
-  },
-  'web-protein-mpnn': {
-    numSequences: { min: 1, max: 8, step: 1, integer: true, defaultValue: 2 },
-    temperature: { min: 0.01, max: 1.5, step: 0.05, integer: false, defaultValue: 0.1 },
-    backboneNoise: { min: 0, max: 1, step: 0.05, integer: false, defaultValue: 0, unit: 'Å' },
-    seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 42 },
-  },
-  'localfold-af2': {
-    recycles: { min: 0, max: 20, step: 1, integer: true, defaultValue: 1 },
-    tolerance: { min: 0, max: 5, step: 0.1, integer: false, defaultValue: 0, unit: 'Å' },
-    diffusionSteps: { min: 10, max: 200, step: 5, integer: true, defaultValue: 25 },
-    maxSequences: { min: 1, max: 8, step: 1, integer: true, defaultValue: 2 },
-    maxTotalFolds: { min: 1, max: 64, step: 1, integer: true, defaultValue: 16 },
-    seed: { min: 0, max: 2_147_483_647, step: 1, integer: true, defaultValue: 0 },
-  },
-  'top-k-filter': {
-    topK: { min: 1, max: 16, step: 1, integer: true, defaultValue: 2 },
-    maxTotal: { min: 1, max: 64, step: 1, integer: true, defaultValue: 8 },
-  },
-  'designability-scorer': {
-    scRmsdThreshold: { min: 0.5, max: 10, step: 0.1, integer: false, defaultValue: 2.0, unit: 'Å' },
-    plddtThreshold: { min: 10, max: 99, step: 5, integer: true, defaultValue: 70 },
-    motifRmsdThreshold: { min: 0.1, max: 10, step: 0.1, integer: false, defaultValue: 1.0, unit: 'Å' },
-    ipaeThreshold: { min: 1, max: 31.75, step: 0.5, integer: false, defaultValue: 10.0, unit: 'Å' },
-    ipsaeThreshold: { min: 0, max: 1, step: 0.05, integer: false, defaultValue: 0 },
-    targetAlignedBinderRmsdThreshold: { min: 0.5, max: 20, step: 0.5, integer: false, defaultValue: 4.0, unit: 'Å' },
-  },
-};
+/**
+ * Derived directly from `ADAPTER_REGISTRY[id].paramSchema` via `fieldToNumericSpec`
+ * (zero duplicated bounds, defaults, or `warnBelow` guardrails).
+ */
+export const NUMERIC_SPECS: Record<string, Record<string, NumericFieldSpec>> = Object.fromEntries(
+  Object.entries(ADAPTER_REGISTRY)
+    .map(([adapterId, manifest]) => {
+      const specs: Record<string, NumericFieldSpec> = {};
+      for (const field of manifest.paramSchema ?? []) {
+        if (field.kind === 'number' || field.kind === 'integer') {
+          specs[field.key] = fieldToNumericSpec(field);
+        }
+      }
+      return [adapterId, specs] as const;
+    })
+    .filter(([, specs]) => Object.keys(specs).length > 0),
+);
 
 /**
  * Strip non-numeric characters from a live text draft so letters like `5r` or `1e5`
@@ -471,48 +407,10 @@ export function validateSequenceText(raw: string): SequenceValidationResult {
  * Validate a residue selector token like `A54`, `A16-35`, `12`, `10-14`,
  * insertion codes (`A100A`, `A100A-100C`), negative resnums (`A-2`, `A-5--2`, `A-2-5`),
  * or colon-delimited multi-char chain selectors (`AA:1-5`, `AA:100A`), while rejecting reversed ranges (`A999-1`).
+ * Delegates directly to the canonical `isValidResidueSelectorToken` in `param-schema.ts`.
  */
 export function isValidResidueToken(token: string): boolean {
-  const t = token.trim();
-  if (!t) return false;
-  const colonM = /^([A-Za-z0-9_]+):(-?\d+)([A-Z])?(?:-(-?\d+)([A-Z])?)?$/.exec(t);
-  const bareM = !colonM
-    ? /^([A-Za-z_])?(-?\d+)([A-Z])?(?:-([A-Za-z_])?(-?\d+)([A-Z])?)?$/.exec(t)
-    : null;
-  if (!colonM && !bareM) return false;
-
-  let start: number;
-  let startIns: string | undefined;
-  let end: number;
-  let endIns: string | undefined;
-  if (colonM) {
-    start = Number(colonM[2]);
-    startIns = colonM[3];
-    if (colonM[4] !== undefined) {
-      end = Number(colonM[4]);
-      endIns = colonM[5];
-    } else {
-      end = start;
-      endIns = startIns;
-    }
-  } else {
-    const startChain = bareM![1];
-    const endChain = bareM![4];
-    if (startChain && endChain && startChain.toUpperCase() !== endChain.toUpperCase()) return false;
-    start = Number(bareM![2]);
-    startIns = bareM![3];
-    if (bareM![5] !== undefined) {
-      end = Number(bareM![5]);
-      endIns = bareM![6];
-    } else {
-      end = start;
-      endIns = startIns;
-    }
-  }
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
-  if (end < start) return false;
-  if (end === start && (startIns ?? '') > (endIns ?? '')) return false;
-  return true;
+  return isValidResidueSelectorToken(token, { allowBareChain: false });
 }
 
 /**
@@ -680,6 +578,8 @@ export function validateStructureText(raw: string): ValidationFeedback {
 
 /**
  * Validate node-level parameter values before running the workflow.
+ * Always runs declarative `validateParamsWithSchema` first, followed by
+ * `manifest.crossValidate` and domain-specific format/integrity checks.
  * Returns human-readable error strings for hard blocking issues.
  */
 export function validateNodeParams(
@@ -689,52 +589,35 @@ export function validateNodeParams(
   const errs: string[] = [];
   const label = node.label || node.adapterId;
   const p = node.params ?? {};
-  const foldModel = node.adapterId === 'localfold-af2'
-    ? LOCALFOLD_MODEL_OPTIONS.find((model) => model.id === (p.model ?? 'monomer'))
+  const manifest = Object.hasOwn(ADAPTER_REGISTRY, node.adapterId)
+    ? ADAPTER_REGISTRY[node.adapterId]
     : undefined;
+  const connectedSet =
+    opts?.connectedInputs !== undefined ? new Set(opts.connectedInputs) : undefined;
 
-  const numSpecs = Object.hasOwn(NUMERIC_SPECS, node.adapterId)
-    ? NUMERIC_SPECS[node.adapterId]
-    : undefined;
-  if (numSpecs) {
-    for (const [key, spec] of Object.entries(numSpecs)) {
-      if (p[key] === undefined) continue;
-      if (foldModel?.family === 'esmfold2' && ['recycles', 'tolerance', 'diffusionSteps'].includes(key)) continue;
-      // Skip mode-irrelevant params
-      if (node.adapterId === 'rfd4-proteina') {
-        const mode = String(p.mode ?? 'unconditional');
-        const usesFallbackLength =
-          (mode === 'motif' || mode === 'conditioned') &&
-          !String(p.contig ?? '').trim() &&
-          !String(p.customSpecYaml ?? '').trim();
-        if (key === 'length' && mode !== 'unconditional' && mode !== 'binder' && !usesFallbackLength) continue;
-        if (key === 'partialFraction' && mode !== 'partial') continue;
-      }
-      const val = Number(p[key]);
-      if (!Number.isFinite(val) || val < spec.min || val > spec.max) {
-        const unit = spec.unit ? ` ${spec.unit}` : '';
-        errs.push(`"${label}": ${key} must be between ${spec.min} and ${spec.max}${unit}.`);
-      } else if (spec.integer && !Number.isInteger(val)) {
-        errs.push(`"${label}": ${key} must be an integer.`);
-      }
+  // 1. Canonical declarative schema validation (ALWAYS runs for every registered adapter)
+  if (manifest && (manifest.paramSchema?.length || manifest.modes?.length)) {
+    errs.push(
+      ...validateParamsWithSchema(manifest, p, {
+        label,
+        ...(connectedSet ? { connectedInputs: connectedSet } : {}),
+      }),
+    );
+  }
+
+  // 2. Manifest-declared cross-field & cross-input validation
+  if (manifest?.crossValidate) {
+    const crossErrs = manifest.crossValidate(
+      p,
+      connectedSet ? { connectedInputs: connectedSet } : undefined,
+    );
+    for (const msg of crossErrs) {
+      errs.push(msg.startsWith(`"${label}":`) ? msg : `"${label}": ${msg}`);
     }
   }
 
-  // Enum & syntax parameter validation (prevents invalid recipes from crashing mid-run)
+  // 3. Domain-specific syntax, structure, sequence, and upload-integrity checks
   if (node.adapterId === 'rfd4-proteina') {
-    const mode = p.mode !== undefined ? String(p.mode) : 'unconditional';
-    if (!VALID_RFD4_MODES.has(mode)) {
-      errs.push(`"${label}": Unknown RFD4 mode "${mode}".`);
-    }
-    if (mode === 'preset' && p.presetId !== undefined) {
-      const presetId = String(p.presetId);
-      if (!VALID_RFD4_PRESET_IDS.has(presetId)) {
-        errs.push(`"${label}": Unknown RFD4 preset "${presetId}".`);
-      }
-    }
-    if (p.recycleSchedule !== undefined && !VALID_RFD4_RECYCLE_SCHEDULES.has(String(p.recycleSchedule))) {
-      errs.push(`"${label}": Invalid recycleSchedule "${String(p.recycleSchedule)}" (expected none, low, medium, or high).`);
-    }
     const customYaml = String(p.customSpecYaml ?? '').trim();
     if (customYaml) {
       const yamlCheck = validateCustomSpecYaml(customYaml);
@@ -744,104 +627,11 @@ export function validateNodeParams(
     }
   }
 
-  if (node.adapterId === 'genie3') {
-    const taskMode = p.taskMode !== undefined ? String(p.taskMode) : 'unconditional';
-    if (p.taskMode !== undefined && !VALID_GENIE3_TASK_MODES.has(taskMode)) {
-      errs.push(`"${label}": Unknown Genie 3 taskMode "${taskMode}" (expected unconditional, binder, or motif).`);
-    }
-    if (taskMode === 'motif' && !String(p.motifSpan ?? '').trim() && !String(p.contig ?? '').trim()) {
-      errs.push(`"${label}": Genie 3 motif mode requires a motifSpan (e.g. A16-35) or contig specifying motif residues.`);
-    }
-  }
-
-  if (node.adapterId === 'web-protein-mpnn') {
-    const family = p.family !== undefined ? String(p.family) : 'solublempnn';
-    const allowedModels = Object.hasOwn(VALID_MPNN_CATALOG, family)
-      ? VALID_MPNN_CATALOG[family]
-      : undefined;
-    if (!allowedModels) {
-      errs.push(`"${label}": Unknown ProteinMPNN family "${family}" (expected solublempnn, proteinmpnn, or ca).`);
-    } else if (p.modelName !== undefined) {
-      const modelName = String(p.modelName);
-      if (!allowedModels.has(modelName)) {
-        errs.push(
-          `"${label}": Unknown ${family} modelName "${modelName}" (expected ${[...allowedModels].join(', ')}).`,
-        );
-      }
-    }
-    const fixedSpec = String(p.fixedPositions ?? '').trim();
-    if (fixedSpec) {
-      for (const tok of fixedSpec.split(/[,\s]+/).filter(Boolean)) {
-        if (!/^[A-Za-z_]$/.test(tok) && !isValidResidueToken(tok)) {
-          errs.push(
-            `"${label}": Invalid fixedPositions token "${tok}" (expected e.g. "A", "A10", "A10-15", "A-2", or "A100A").`,
-          );
-        }
-      }
-    }
+  if (node.adapterId === 'web-protein-mpnn' || node.adapterId === 'ligandmpnn') {
     if (typeof p.tiedPositions === 'string' && p.tiedPositions.trim()) {
       const tiedErr = validateTiedPositions(p.tiedPositions);
       if (tiedErr) {
         errs.push(`"${label}": ${tiedErr}`);
-      }
-    }
-    if (typeof p.omitAminoAcids === 'string' && p.omitAminoAcids.trim()) {
-      const compact = p.omitAminoAcids.trim().toUpperCase().replace(/[\s,;]+/g, '');
-      const badChars = new Set<string>();
-      const omittedCanonical = new Set<string>();
-      for (const ch of compact) {
-        if (VALID_AA_SET.has(ch)) omittedCanonical.add(ch);
-        else if (ch !== 'X') badChars.add(ch);
-      }
-      if (badChars.size > 0) {
-        errs.push(
-          `"${label}": omitAminoAcids contains invalid amino acid character(s): ${[...badChars].join(', ')} (use standard 1-letter AA codes e.g. C, M).`,
-        );
-      } else if (omittedCanonical.size >= VALID_AA_SET.size) {
-        errs.push(
-          `"${label}": omitAminoAcids excludes all 20 standard amino acids — leave at least 1 amino acid allowed for design.`,
-        );
-      }
-    }
-  }
-
-  if (node.adapterId === 'ligandmpnn') {
-    if (typeof p.tiedPositions === 'string' && p.tiedPositions.trim()) {
-      const tiedErr = validateTiedPositions(p.tiedPositions);
-      if (tiedErr) {
-        errs.push(`"${label}": ${tiedErr}`);
-      }
-    }
-  }
-
-  if (node.adapterId === 'localfold-af2') {
-    const modelId = p.model !== undefined ? String(p.model) : 'monomer';
-    if (p.model !== undefined && !foldModel) {
-      errs.push(`"${label}": Unknown LocalFold model "${modelId}".`);
-    }
-    if (foldModel?.family === 'esmfold2') {
-      const issue = esmfold2ParamIssue(p);
-      if (issue) errs.push(`"${label}": ${issue}`);
-    }
-    const maxRecycles = modelId === 'mol1' || modelId.startsWith('multimer') ? 20 : 10;
-    if (p.recycles !== undefined && foldModel?.family !== 'esmfold2') {
-      const rec = Number(p.recycles);
-      if (Number.isFinite(rec) && Number.isInteger(rec) && rec > maxRecycles && rec <= 20) {
-        errs.push(
-          `"${label}": recycles must be <= ${maxRecycles} for "${modelId}" (up to 20 allowed for mol1 and AF2-Multimer).`,
-        );
-      }
-    }
-    if (p.msaMode !== undefined && foldModel?.family !== 'esmfold2') {
-      const msaMode = String(p.msaMode);
-      if (!VALID_MSA_MODES.has(msaMode)) {
-        errs.push(
-          `"${label}": Invalid msaMode "${msaMode}" (expected single, mmseqs2, target-only, or a3m).`,
-        );
-      } else if (msaMode === 'a3m' && !String(p.msaA3mText ?? '').trim()) {
-        errs.push(
-          `"${label}": Custom .a3m MSA mode requires non-empty msaA3mText alignment data.`,
-        );
       }
     }
   }
@@ -876,9 +666,7 @@ export function validateNodeParams(
 
   if (node.adapterId === 'pdb-input') {
     const mode = p.mode !== undefined ? String(p.mode) : 'demo-bundle';
-    if (!VALID_PDB_INPUT_MODES.has(mode)) {
-      errs.push(`"${label}": Unknown PDB Input mode "${mode}" (expected demo-bundle, pdb-id, or custom).`);
-    } else if (mode === 'custom') {
+    if (mode === 'custom') {
       const rawPdb = String(p.pdbText ?? '');
       const missingUpload = Boolean(p.missingUpload);
       const expectedShaRaw = String(p.expectedPdbSha256 ?? '').trim();
@@ -928,49 +716,6 @@ export function validateNodeParams(
     const check = validateSequenceText(String(p.sequence ?? ''));
     if (check.status === 'error') {
       errs.push(`"${label}": ${check.message}`);
-    }
-  }
-
-  if (node.adapterId === 'top-k-filter') {
-    if (p.mode !== undefined && !VALID_TOPK_MODES.has(String(p.mode))) {
-      errs.push(
-        `"${label}": Invalid mode "${String(p.mode)}" (expected per-backbone or global).`,
-      );
-    }
-    if (p.metric !== undefined && !VALID_TOPK_METRICS.has(String(p.metric))) {
-      errs.push(
-        `"${label}": Invalid metric "${String(p.metric)}" (expected score or globalScore).`,
-      );
-    }
-    if (p.direction !== undefined && !VALID_TOPK_DIRECTIONS.has(String(p.direction))) {
-      errs.push(
-        `"${label}": Invalid direction "${String(p.direction)}" (expected min or max).`,
-      );
-    }
-  }
-
-  // Schema-driven fallback for any plug-and-play adapter not in the built-in hand-tuned set
-  const BUILTIN_HAND_VALIDATED = new Set([
-    'pdb-input',
-    'sequence-input',
-    'rfd4-proteina',
-    'genie3',
-    'web-protein-mpnn',
-    'localfold-af2',
-    'top-k-filter',
-    'designability-scorer',
-  ]);
-  if (!BUILTIN_HAND_VALIDATED.has(node.adapterId)) {
-    const manifest = Object.hasOwn(ADAPTER_REGISTRY, node.adapterId)
-      ? ADAPTER_REGISTRY[node.adapterId]
-      : undefined;
-    if (manifest && (manifest.paramSchema?.length || manifest.modes?.length)) {
-      errs.push(
-        ...validateParamsWithSchema(manifest, p, {
-          label,
-          ...(opts?.connectedInputs ? { connectedInputs: opts.connectedInputs } : {}),
-        }),
-      );
     }
   }
 

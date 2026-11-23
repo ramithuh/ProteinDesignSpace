@@ -1,8 +1,11 @@
 <script lang="ts">
   import NumericInput from './NumericInput.svelte';
-  import { fieldToNumericSpec } from '$lib/engine/param-schema';
   import {
-    isValidResidueToken,
+    fieldToNumericSpec,
+    isValidResidueSelectorToken,
+    validateResidueMappingSyntax,
+  } from '$lib/engine/param-schema';
+  import {
     validateTiedPositions,
     type NumericFieldSpec,
   } from '$lib/engine/param-validation';
@@ -12,6 +15,8 @@
     fields: AdapterParamField[];
     params: Record<string, unknown>;
     disabled?: boolean;
+    /** Optional active mode ID (used to evaluate mode-scoped `warnBelow` guardrails). */
+    activeMode?: string | null;
     /** Optional per-field select option overrides (e.g. family-dependent MPNN checkpoints). */
     optionOverrides?: Record<string, AdapterParamOption[]>;
     /** Optional per-field NumericFieldSpec overrides (e.g. dynamic max or warnBelow). */
@@ -25,6 +30,7 @@
     fields,
     params,
     disabled = false,
+    activeMode = undefined,
     optionOverrides = undefined,
     numericSpecOverrides = undefined,
     disabledKeys = [],
@@ -37,8 +43,25 @@
     return disabled || disabledKeys.includes(key);
   }
 
+  function resolveCurrentMode(): string | null {
+    if (activeMode !== undefined && activeMode !== null && activeMode.trim() !== '') {
+      return activeMode.trim();
+    }
+    for (const key of ['mode', 'taskMode', 'msaMode', 'variant', 'inputMode']) {
+      const raw = params[key];
+      if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
+        return String(raw).trim();
+      }
+      const field = fields.find((f) => f.key === key);
+      if (field && typeof field.defaultValue === 'string' && field.defaultValue.trim()) {
+        return field.defaultValue.trim();
+      }
+    }
+    return null;
+  }
+
   function resolveNumericSpec(field: AdapterParamField): NumericFieldSpec {
-    const base = fieldToNumericSpec(field);
+    const base = fieldToNumericSpec(field, resolveCurrentMode());
     const override = numericSpecOverrides?.[field.key];
     return override ? { ...base, ...override } : base;
   }
@@ -103,6 +126,7 @@
   {@const fieldDisabled = isFieldDisabled(field.key)}
   {#if field.kind === 'number' || field.kind === 'integer'}
     {@const numSpec = resolveNumericSpec(field)}
+    {@const curNumVal = Number(params[field.key] ?? field.defaultValue ?? numSpec.defaultValue)}
     <label class="schema-field">
       <span class="label-row">
         <span>{labelWithUnit(field)}</span>
@@ -116,9 +140,19 @@
         name={field.key}
         ariaLabel={field.label}
         spec={numSpec}
-        value={Number(params[field.key] ?? field.defaultValue ?? numSpec.defaultValue)}
+        value={curNumVal}
         onChange={(v) => onChange(field.key, v)}
       />
+      {#if numSpec.warnBelow && numSpec.warnBelow.fixValue !== undefined && Number.isFinite(curNumVal) && curNumVal < numSpec.warnBelow.threshold}
+        <button
+          type="button"
+          class="warn-fix-btn"
+          disabled={fieldDisabled}
+          onclick={() => onChange(field.key, numSpec.warnBelow!.fixValue)}
+        >
+          Reset to {numSpec.warnBelow.fixValue}
+        </button>
+      {/if}
       {#if field.description}
         <span class="field-hint">{field.description}</span>
       {/if}
@@ -212,11 +246,18 @@
       {#if tokens.length > 0}
         <div class="res-chips">
           {#each tokens as tok, i (`res_${field.key}_${tok}_${i}`)}
-            {@const badTok = !/^[A-Za-z_]$/.test(tok) && !isValidResidueToken(tok)}
+            {@const badTok = !isValidResidueSelectorToken(tok, {
+              allowBareChain: Boolean(field.allowBareChain),
+              allowLigandRef: field.studioRole === 'crop',
+            })}
             <span
               class="res-chip"
               class:invalid-chip={badTok}
-              title={badTok ? 'Expected format like A, A10, or A12-15' : undefined}
+              title={badTok
+                ? field.allowBareChain
+                  ? 'Expected format like A, AA, A10, or A12-15'
+                  : 'Expected format like A10 or A12-15'
+                : undefined}
             >
               {tok}
               <button
@@ -284,7 +325,12 @@
     </div>
   {:else}
     {@const rawVal = String(params[field.key] ?? field.defaultValue ?? '')}
-    {@const fieldErr = field.key === 'tiedPositions' ? validateTiedPositions(rawVal) : null}
+    {@const fieldErr =
+      field.key === 'tiedPositions'
+        ? validateTiedPositions(rawVal)
+        : field.key === 'residueMapping'
+          ? validateResidueMappingSyntax(rawVal)
+          : null}
     <label class="schema-field wide">
       <span class="label-row">
         <span>{field.label}</span>
@@ -434,5 +480,24 @@
   }
   .field-hint.err {
     color: var(--err-strong);
+  }
+  .warn-fix-btn {
+    align-self: flex-start;
+    margin-top: 2px;
+    padding: 2px 7px;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--warn-text);
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .warn-fix-btn:hover:not(:disabled) {
+    filter: brightness(1.06);
+  }
+  .warn-fix-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
 </style>

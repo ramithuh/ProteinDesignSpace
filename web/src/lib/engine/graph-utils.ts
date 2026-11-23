@@ -1,7 +1,7 @@
 // Typed DAG validation, port colors, default node factories, and auto-layout
 // for the model-agnostic denovo.run node-graph canvas.
 
-import { ADAPTER_REGISTRY } from './registry';
+import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { getDefaultParamsFromSchema } from './param-schema';
 import { validateNodeParams } from './param-validation';
 import type { PortType, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
@@ -36,255 +36,141 @@ export const STAGE_LABELS: Record<string, string> = {
   score: 'Evaluation',
 };
 
+const LOCALFOLD_DEFAULT_BASELINE_KEYS = new Set([
+  'model',
+  'recycles',
+  'diffusionSteps',
+  'maxSequences',
+  'seed',
+]);
+
+/**
+ * Synthesize default parameters for any registered adapter directly from
+ * `ADAPTER_REGISTRY[adapterId].paramSchema` (single source of truth).
+ */
 export function defaultParamsForAdapter(adapterId: string): Record<string, unknown> {
-  switch (adapterId) {
-    case 'pdb-input':
-      return { mode: 'demo-bundle', pdbText: '', filename: 'demo_3helix_53aa.pdb' };
-    case 'sequence-input':
-      return {
-        label: 'custom-seq-1',
-        sequence: 'MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQQIAAALE',
-      };
-    case 'rfd4-proteina':
-      return {
-        mode: 'unconditional',
-        length: 70,
-        nsteps: 60,
-        recycleSchedule: 'low',
-        earlyStop: false,
-        seed: 42,
-        presetId: 'custom_cath_monomer',
-        partialFraction: 0.5,
-        contig: '',
-        lockChain: '',
-        hotspots: '',
-        motifSpan: '',
-        unindexedMotif: false,
-        hbondMode: 'none',
-        hbondSelection: '',
-        cathCode: '',
-        customSpecYaml: '',
-      };
-    case 'genie3':
-      return {
-        taskMode: 'unconditional',
-        length: 80,
-        nSampleStep: 100,
-        directionScale: 0.8,
-        noiseScale: 1.0,
-        predictSequence: true,
-        seed: 42,
-        contig: '',
-        lockChain: '',
-        hotspots: '',
-        motifSpan: '',
-      };
-    case 'rfd4-conditioner':
-      return {
-        taskPreset: 'custom',
-        contig: '70-70',
-        lockChain: '',
-        hotspots: '',
-        motifSpan: '',
-        unindexedMotif: false,
-        hbondMode: 'none',
-        hbondSelection: '',
-        cathCode: '',
-        paintBrush: 'hotspots',
-        rawJsonOverride: '',
-      };
-    case 'web-protein-mpnn':
-      return {
-        family: 'solublempnn',
-        modelName: 'v_48_020',
-        numSequences: 2,
-        temperature: 0.1,
-        seed: 42,
-        fixedPositions: '',
-      };
-    case 'ligandmpnn':
-      return {
-        checkpoint: 'ligandmpnn_v_32_020_25',
-        precision: 'fp16',
-        numSequences: 2,
-        temperature: 0.1,
-        fixedPositions: '',
-        omitAminoAcids: '',
-        useLigandContext: true,
-        unlockInherited: false,
-        seed: 42,
-      };
-    case 'lasermpnn':
-      return {
-        precision: 'fp16',
-        numSequences: 2,
-        temperature: 0.1,
-        fixedPositions: '',
-        omitAminoAcids: '',
-        unlockInherited: false,
-        seed: 42,
-      };
-    case 'antifold-esmif1':
-      return {
-        variant: 'antifold',
-        precision: 'fp16',
-        numSequences: 2,
-        temperature: 0.2,
-        samplingMode: 'independent',
-        targetChain: '',
-        numbering: 'auto',
-        regions: 'CDR1 CDR2 CDR3',
-        fixedPositions: '',
-        unlockInherited: false,
-        seed: 42,
-      };
-    case 'localfold-af2':
-      return { model: 'monomer', recycles: 1, diffusionSteps: 25, maxSequences: 2, seed: 0 };
-    case 'thermompnn':
-      return {
-        precision: 'fp16',
-        chain: '',
-        bfactorAggregate: 'best-stabilizing',
-      };
-    case 'protpardelle':
-      return {
-        taskMode: 'unconditional',
-        checkpoint: 'cc91_epoch383',
-        precision: 'int8',
-        length: 80,
-        numDesigns: 1,
-        numSteps: 100,
-        sidechainMode: true,
-        motifSelection: '',
-        rewindSteps: 40,
-        stepScale: 1.2,
-        temperature: 0.1,
-        seed: 42,
-      };
-    case 'rfdiffusion':
-      return {
-        taskMode: 'unconditional',
-        precision: 'int8',
-        length: 80,
-        contig: '',
-        symmetry: 'c3',
-        numDesigns: 1,
-        numSteps: 50,
-        seed: 42,
-      };
-    case 'boltzgen':
-      return {
-        taskMode: 'unconditional',
-        variant: 'diverse',
-        precision: 'int8',
-        length: 48,
-        hotspots: '',
-        numDesigns: 1,
-        numSteps: 20,
-        recyclingSteps: 0,
-        motifOffset: 10,
-        seed: 42,
-      };
-    case 'evodiff':
-      return {
-        taskMode: 'unconditional',
-        precision: 'int8',
-        length: 64,
-        numSequences: 2,
-        fixedSequence: '',
-        maskPositions: '',
-        seed: 42,
-      };
-    case 'la-proteina':
-      return {
-        precision: 'int8',
-        length: 80,
-        steps: 400,
-        mode: 'sde',
-        numDesigns: 1,
-        seed: 42,
-      };
-    case 'proteina':
-      return {
-        precision: 'int8',
-        length: 80,
-        steps: 400,
-        mode: 'sc',
-        noiseScale: 0.45,
-        selfCondition: true,
-        numDesigns: 1,
-        seed: 42,
-      };
-    case 'sid-protein':
-      return {
-        precision: 'int8',
-        length: 80,
-        steps: 16,
-        noiseScale: 0.45,
-        numDesigns: 1,
-        seed: 5,
-      };
-    case 'genie2':
-      return {
-        precision: 'fp16',
-        length: 80,
-        steps: 1000,
-        scale: 0.6,
-        motifRange: '',
-        numDesigns: 1,
-        seed: 42,
-      };
-    case 'frameflow':
-      return {
-        precision: 'fp16',
-        length: 80,
-        steps: 100,
-        schedule: 'exp',
-        expRate: 10,
-        selfCondition: true,
-        numDesigns: 1,
-        seed: 42,
-      };
-    case 'foldflow2':
-      return {
-        precision: 'int8',
-        length: 80,
-        steps: 50,
-        rotationScaling: 10,
-        selfConditioning: true,
-        numDesigns: 1,
-        seed: 42,
-      };
-    case 'esmc':
-      return {
-        mode: 'wildtype',
-        precision: 'int8',
-        maskPositions: '',
-        maxSequences: 1,
-      };
-    case 'dyna1':
-      return {
-        inputMode: 'auto',
-        precision: 'int8',
-        maxSequences: 1,
-      };
-    case 'top-k-filter':
-      return {
-        mode: 'per-backbone',
-        topK: 2,
-        maxTotal: 8,
-        metric: 'score',
-        direction: 'min',
-      };
-    case 'designability-scorer':
-      return { scRmsdThreshold: 2.0, plddtThreshold: 70 };
-    default: {
-      const manifest = Object.hasOwn(ADAPTER_REGISTRY, adapterId)
-        ? ADAPTER_REGISTRY[adapterId]
-        : undefined;
-      return manifest?.paramSchema ? getDefaultParamsFromSchema(manifest) : {};
+  const manifest = Object.hasOwn(ADAPTER_REGISTRY, adapterId)
+    ? ADAPTER_REGISTRY[adapterId]
+    : undefined;
+  if (!manifest?.paramSchema) return {};
+  const full = getDefaultParamsFromSchema(manifest);
+  // Keep LocalFold's baseline default keyset concise so AF2-Multimer retains dynamic
+  // 0.5 Å early-stop tolerance resolution and compact #g= share payloads stay stable.
+  if (adapterId === 'localfold-af2') {
+    const trimmed: Record<string, unknown> = {};
+    for (const key of LOCALFOLD_DEFAULT_BASELINE_KEYS) {
+      if (key in full) trimmed[key] = full[key];
+    }
+    return trimmed;
+  }
+  return full;
+}
+
+/**
+ * Pure parameter sanitizer invoked when switching an adapter's active mode/model (`WF-07`, `WF-09`).
+ * Resets mode-incompatible fields to schema defaults so stale constraints (e.g. RFD4 `hotspots`
+ * in `motif` mode, or non-single `msaMode` on ESMFold2) never leak across mode transitions.
+ */
+export function sanitizeParamsOnModeSwitch(
+  adapterId: string,
+  prev: Record<string, unknown>,
+  nextMode: string,
+): Record<string, unknown> {
+  const manifest = Object.hasOwn(ADAPTER_REGISTRY, adapterId)
+    ? ADAPTER_REGISTRY[adapterId]
+    : undefined;
+  const next: Record<string, unknown> = { ...prev };
+
+  const cloneDefault = (val: unknown): unknown =>
+    val !== null && typeof val === 'object' ? structuredClone(val) : val;
+
+  if (adapterId === 'localfold-af2') {
+    const prevModelId = String(prev.model ?? 'monomer');
+    const prevMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === prevModelId);
+    const nextMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === nextMode);
+    next.model = nextMode;
+
+    if (nextMeta?.family === 'esmfold2') {
+      next.msaMode = 'single';
+      delete next.msaA3mText;
+      delete next.tolerance;
+      delete next.diffusionSteps;
+      return next;
+    }
+
+    delete next.esmfold2Steps;
+    const nextMaxRec =
+      nextMeta && (nextMode === 'mol1' || nextMeta.family === 'af2-multimer') ? 20 : 10;
+    const curRec = Number(next.recycles ?? 1);
+    if (Number.isFinite(curRec) && curRec > nextMaxRec) {
+      next.recycles = nextMaxRec;
+    }
+
+    if (nextMeta?.family === 'af2' || nextMeta?.family === 'af2-multimer') {
+      delete next.ligandCcdCodes;
+      delete next.dnaSequences;
+      delete next.rnaSequences;
+      if (prevMeta && prevMeta.family !== nextMeta.family) {
+        const prevDefaultTol = prevMeta.family === 'af2-multimer' ? 0.5 : 0;
+        if (next.tolerance !== undefined && Number(next.tolerance) === prevDefaultTol) {
+          delete next.tolerance;
+        }
+      }
+    } else if (nextMeta?.family === 'af3') {
+      delete next.tolerance;
+    }
+    return next;
+  }
+
+  if (!manifest) return next;
+
+  const modeKey = manifest.modeParamKey;
+  if (modeKey) {
+    next[modeKey] = nextMode;
+  }
+
+  for (const field of manifest.paramSchema ?? []) {
+    if (field.modes && field.modes.length > 0 && !field.modes.includes(nextMode)) {
+      if (field.key in next) {
+        next[field.key] = cloneDefault(field.defaultValue);
+      }
     }
   }
+
+  if (adapterId === 'rfd4-proteina') {
+    const prevContig = String(prev.contig ?? '').trim();
+    if (nextMode === 'unconditional' || nextMode === 'preset') {
+      next.hbondMode = 'none';
+      next.hbondSelection = '';
+    }
+    if (nextMode === 'inverse-folding') {
+      next.earlyStop = false;
+    }
+    if (nextMode === 'motif' && (prevContig.includes('/0') || /^\d+(?:-\d+)?$/.test(prevContig))) {
+      next.contig = '';
+    }
+    if (
+      nextMode === 'binder' &&
+      prevContig &&
+      (/^\d+(?:-\d+)?$/.test(prevContig) || !prevContig.includes('/0'))
+    ) {
+      next.contig = '';
+    }
+  } else if (adapterId === 'genie3') {
+    const prevContig = String(prev.contig ?? '').trim();
+    if (nextMode === 'motif' && (prevContig.includes('/0') || /^\d+(?:-\d+)?$/.test(prevContig))) {
+      next.contig = '';
+    }
+    if (
+      nextMode === 'binder' &&
+      prevContig &&
+      (/^\d+(?:-\d+)?$/.test(prevContig) || !prevContig.includes('/0'))
+    ) {
+      next.contig = '';
+    }
+  }
+
+  return next;
 }
 
 export interface ConnectionCheck {
@@ -853,6 +739,19 @@ export function proposeConnectionsForNode(
     return proposed;
   }
 
+  // Parallel sibling generator wiring (WF-08): when inserting a generator while a sibling
+  // generator is selected and already wired to an upstream source/template, share that upstream
+  // producer instead of chaining generators in series or leaving the sibling unwired.
+  if (manifest.stage === 'generate' && anchorManifest?.stage === 'generate') {
+    for (const upEdge of graphWithNode.edges) {
+      if (upEdge.toNode !== anchorNode.id) continue;
+      const sibEdge = findFirstValidEdge(upEdge.fromNode, newNodeId, true);
+      if (sibEdge && tryAddEdge(sibEdge.fromNode, sibEdge.fromPort, sibEdge.toNode, sibEdge.toPort)) {
+        return proposed;
+      }
+    }
+  }
+
   // Match compatible output(s) from anchorNode into newNode
   const directEdge = findFirstValidEdge(anchorNode.id, newNodeId, true);
   if (directEdge) {
@@ -961,7 +860,19 @@ export function insertBlockSmart(
   if (dropPos) {
     position = { x: Math.round(dropPos.x), y: Math.round(dropPos.y) };
   } else if (selectedNode) {
-    const px = (selectedNode.position?.x ?? 60) + 280;
+    const selectedManifest = ADAPTER_REGISTRY[selectedNode.adapterId];
+    const insertUpstream =
+      manifest.stage === 'source' ||
+      (manifest.stage === 'condition' && selectedManifest?.stage !== 'source');
+    const isParallelSiblingGen =
+      manifest.stage === 'generate' &&
+      selectedManifest?.stage === 'generate' &&
+      graph.edges.some((e) => e.toNode === selectedNode.id);
+    const px = insertUpstream
+      ? Math.max(20, (selectedNode.position?.x ?? 300) - 280)
+      : isParallelSiblingGen
+        ? (selectedNode.position?.x ?? 60)
+        : (selectedNode.position?.x ?? 60) + 280;
     let py = selectedNode.position?.y ?? 60;
     let guard = 0;
     while (isOccupied(px, py) && guard < 24) {

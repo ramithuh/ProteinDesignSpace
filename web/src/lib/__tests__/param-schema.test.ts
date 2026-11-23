@@ -4,15 +4,24 @@ import { resolve } from 'node:path';
 import {
   ADAPTER_REGISTRY,
   MPNN_CHECKPOINTS_BY_FAMILY,
+  WORKFLOW_PRESETS,
 } from '../engine/registry';
 import {
   fieldToNumericSpec,
   getActiveModeSpec,
   getDefaultParamsFromSchema,
   getVisibleParamFields,
+  isValidResidueSelectorToken,
   validateParamsWithSchema,
+  validateResidueMappingSyntax,
 } from '../engine/param-schema';
+import {
+  defaultParamsForAdapter,
+  insertBlockSmart,
+  sanitizeParamsOnModeSwitch,
+} from '../engine/graph-utils';
 import { NUMERIC_SPECS } from '../engine/param-validation';
+import { formatNodeParamSummary } from '../ui/node-display-helpers';
 import type { AdapterManifest } from '../engine/types';
 
 /**
@@ -338,7 +347,6 @@ describe('declarative ParamSchema & modes single source of truth', () => {
         adapterId: 'designability-scorer',
         start: "if (node.adapterId === 'designability-scorer') {",
         end: 'throw new Error(`Unknown CPU adapter',
-        aliases: new Set(['referenceMapping']), // alias of declared `residueMapping`
       },
     ];
 
@@ -352,5 +360,184 @@ describe('declarative ParamSchema & modes single source of truth', () => {
         `CPU node "${check.adapterId}" reads params missing from paramSchema: ${missing.join(', ')}`,
       ).toEqual([]);
     }
+  });
+
+  it('Wave 1B Primitive 1: unified residue tokens (UX-04), mode-scoped warnBelow (#78), sanitizeParamsOnModeSwitch (WF-07/WF-09), preset fix (CT-07) & Inspector parity (CT-02/CT-04)', () => {
+    // 1. Unified residue-selector token predicate (UX-04)
+    expect(isValidResidueSelectorToken('A', { allowBareChain: true })).toBe(true);
+    expect(isValidResidueSelectorToken('AA', { allowBareChain: true })).toBe(true);
+    expect(isValidResidueSelectorToken('HL', { allowBareChain: true })).toBe(true);
+    expect(isValidResidueSelectorToken('A', { allowBareChain: false })).toBe(false);
+    expect(isValidResidueSelectorToken('AA', { allowBareChain: false })).toBe(false);
+    expect(isValidResidueSelectorToken('123', { allowBareChain: true })).toBe(true); // numeric residue index
+    expect(isValidResidueSelectorToken('A:SAM', { allowBareChain: true, allowLigandRef: true })).toBe(true);
+    expect(isValidResidueSelectorToken('A:SAM', { allowBareChain: true, allowLigandRef: false })).toBe(false);
+    expect(isValidResidueSelectorToken('AA:1-5', { allowBareChain: false })).toBe(true);
+    expect(isValidResidueSelectorToken('A100A-100C', { allowBareChain: false })).toBe(true);
+    expect(isValidResidueSelectorToken('A-5--2', { allowBareChain: false })).toBe(true);
+    expect(isValidResidueSelectorToken('A999-1', { allowBareChain: true })).toBe(false);
+    expect(isValidResidueSelectorToken('A1-B5', { allowBareChain: true })).toBe(false);
+
+    // Schema allowBareChain flags match design intent
+    expect(ADAPTER_REGISTRY['web-protein-mpnn'].paramSchema!.find((f) => f.key === 'fixedPositions')?.allowBareChain).toBe(true);
+    expect(ADAPTER_REGISTRY.ligandmpnn.paramSchema!.find((f) => f.key === 'fixedPositions')?.allowBareChain).toBe(true);
+    expect(ADAPTER_REGISTRY.lasermpnn.paramSchema!.find((f) => f.key === 'fixedPositions')?.allowBareChain).toBe(true);
+    expect(ADAPTER_REGISTRY['antifold-esmif1'].paramSchema!.find((f) => f.key === 'fixedPositions')?.allowBareChain).toBe(true);
+    expect(ADAPTER_REGISTRY['pdb-input'].paramSchema!.find((f) => f.key === 'cropSegments')?.allowBareChain).toBe(true);
+    expect(ADAPTER_REGISTRY['rfd4-proteina'].paramSchema!.find((f) => f.key === 'hotspots')?.allowBareChain).toBe(false);
+    expect(ADAPTER_REGISTRY['rfd4-proteina'].paramSchema!.find((f) => f.key === 'motifSpan')?.allowBareChain).toBe(false);
+    expect(ADAPTER_REGISTRY.genie3.paramSchema!.find((f) => f.key === 'hotspots')?.allowBareChain).toBe(false);
+    expect(ADAPTER_REGISTRY.genie3.paramSchema!.find((f) => f.key === 'motifSpan')?.allowBareChain).toBe(false);
+    expect(ADAPTER_REGISTRY.boltzgen.paramSchema!.find((f) => f.key === 'hotspots')?.allowBareChain).toBe(false);
+
+    // 2. Schema-driven #78 step guardrails & mode-scoped warnBelow
+    const genie2Steps = ADAPTER_REGISTRY.genie2.paramSchema!.find((f) => f.key === 'steps')!;
+    expect(genie2Steps.min).toBe(1000);
+    expect(genie2Steps.max).toBe(1000);
+    expect(genie2Steps.defaultValue).toBe(1000);
+    expect(fieldToNumericSpec(genie2Steps).warnBelow).toMatchObject({ threshold: 1000, fixValue: 1000 });
+
+    const laSteps = ADAPTER_REGISTRY['la-proteina'].paramSchema!.find((f) => f.key === 'steps')!;
+    expect(laSteps.min).toBe(50);
+    expect(laSteps.max).toBe(400);
+    expect(fieldToNumericSpec(laSteps, 'sde').warnBelow).toMatchObject({ threshold: 350, fixValue: 400 });
+    expect(fieldToNumericSpec(laSteps, 'ode').warnBelow).toBeUndefined();
+
+    const proSteps = ADAPTER_REGISTRY.proteina.paramSchema!.find((f) => f.key === 'steps')!;
+    expect(proSteps.min).toBe(50);
+    expect(proSteps.max).toBe(400);
+    expect(fieldToNumericSpec(proSteps, 'sc').warnBelow).toMatchObject({ threshold: 350, fixValue: 400 });
+    expect(fieldToNumericSpec(proSteps, 'vf').warnBelow).toBeUndefined();
+
+    const dynaModeField = ADAPTER_REGISTRY.dyna1.paramSchema!.find((f) => f.key === 'inputMode')!;
+    expect(dynaModeField.description).toMatch(/sequence-only/i);
+    expect(dynaModeField.options?.find((o) => o.value === 'seq-only')?.label).toMatch(/3D/i);
+
+    // 3. CT-07: rfd4-conditioned-cath preset uses mode: 'conditioned'
+    const cathPreset = WORKFLOW_PRESETS.find((p) => p.id === 'rfd4-conditioned-cath')!;
+    expect(cathPreset.graph.nodes[0].params.mode).toBe('conditioned');
+
+    // 4. WF-10 / WF-13: defaultParamsForAdapter delegates to schema & removes dead rfd4-conditioner
+    expect(defaultParamsForAdapter('rfd4-conditioner')).toEqual({});
+    expect(defaultParamsForAdapter('rfd4-proteina').numDesigns).toBe(1);
+    expect(defaultParamsForAdapter('designability-scorer').targetAlignedBinderRmsdThreshold).toBe(4.0);
+    expect(defaultParamsForAdapter('web-protein-mpnn')).toMatchObject({
+      omitAminoAcids: '',
+      tiedPositions: '',
+      designChains: '',
+      backboneNoise: 0,
+      unlockInherited: false,
+    });
+
+    // 5. WF-07 / WF-09: sanitizeParamsOnModeSwitch clears incompatible mode constraints
+    const rfdBinderToMotif = sanitizeParamsOnModeSwitch(
+      'rfd4-proteina',
+      {
+        mode: 'binder',
+        lockChain: 'A',
+        hotspots: 'A54, A56',
+        contig: 'A17-132,/0,70-70',
+        cathCode: '3.40.50',
+        length: 70,
+      },
+      'motif',
+    );
+    expect(rfdBinderToMotif.mode).toBe('motif');
+    expect(rfdBinderToMotif.hotspots).toBe('');
+    expect(rfdBinderToMotif.lockChain).toBe('');
+    expect(rfdBinderToMotif.contig).toBe('');
+    expect(rfdBinderToMotif.cathCode).toBe('');
+
+    const rfdBinderToUncond = sanitizeParamsOnModeSwitch(
+      'rfd4-proteina',
+      {
+        mode: 'binder',
+        lockChain: 'A',
+        hotspots: 'A54',
+        hbondMode: 'ACCEPTOR',
+        hbondSelection: 'B/SAM/*/*',
+        contig: 'A17-132,/0,70-70',
+      },
+      'unconditional',
+    );
+    expect(rfdBinderToUncond.hotspots).toBe('');
+    expect(rfdBinderToUncond.lockChain).toBe('');
+    expect(rfdBinderToUncond.contig).toBe('');
+    expect(rfdBinderToUncond.hbondMode).toBe('none');
+    expect(rfdBinderToUncond.hbondSelection).toBe('');
+
+    const lfToEsmfold2 = sanitizeParamsOnModeSwitch(
+      'localfold-af2',
+      { model: 'boltz2', msaMode: 'mmseqs2', msaA3mText: '>q\nACDEF', diffusionSteps: 25, recycles: 4 },
+      'ef2-fast-300m',
+    );
+    expect(lfToEsmfold2.model).toBe('ef2-fast-300m');
+    expect(lfToEsmfold2.msaMode).toBe('single');
+    expect(lfToEsmfold2.msaA3mText).toBeUndefined();
+    expect(lfToEsmfold2.diffusionSteps).toBeUndefined();
+
+    const lfEsmfoldToMono = sanitizeParamsOnModeSwitch(
+      'localfold-af2',
+      { model: 'ef2-fast-300m', esmfold2Steps: 32, ligandCcdCodes: 'SAM', dnaSequences: 'ACGT', recycles: 15 },
+      'monomer',
+    );
+    expect(lfEsmfoldToMono.esmfold2Steps).toBeUndefined();
+    expect(lfEsmfoldToMono.ligandCcdCodes).toBeUndefined();
+    expect(lfEsmfoldToMono.dnaSequences).toBeUndefined();
+    expect(lfEsmfoldToMono.recycles).toBe(10);
+
+    // 6. CT-02 / CT-04 / UX-04 Inspector & helper parity
+    expect(validateResidueMappingSyntax('0:0, 1:1, 2:2')).toBeNull();
+    expect(validateResidueMappingSyntax('bad_token')).not.toBeNull();
+    expect(
+      formatNodeParamSummary('rfd4-proteina', { mode: 'preset', presetId: 'yaml_5o45_binder', nsteps: 60 }),
+    ).toContain('5O45 PD-L1 Binder');
+
+    const inspectorSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/NodeInspector.svelte'), 'utf8');
+    expect(inspectorSrc).toContain('value="conditioned"');
+    expect(inspectorSrc).toContain('rfd4PresetOptions');
+    expect(inspectorSrc).toContain('sanitizeParamsOnModeSwitch');
+    expect(inspectorSrc).toContain('isValidResidueSelectorToken');
+    expect(inspectorSrc).toContain('Auto (${inferredTemplateChain})');
+    expect(inspectorSrc).not.toContain("node.params.lockChain ?? 'A'");
+    expect(inspectorSrc).toContain('scorerAdvFields');
+    expect(inspectorSrc).not.toContain('updateBinderLengthInContig(prevContig, v, false)');
+
+    const schemaFieldsSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/SchemaParamFields.svelte'), 'utf8');
+    expect(schemaFieldsSrc).toContain('isValidResidueSelectorToken');
+    expect(schemaFieldsSrc).toContain('validateResidueMappingSyntax');
+    expect(schemaFieldsSrc).toContain('fieldToNumericSpec(field, resolveCurrentMode())');
+    expect(schemaFieldsSrc).toContain('warn-fix-btn');
+
+    // 7. WF-08: insertBlockSmart places upstream sources -280px to the left and wires parallel sibling generators
+    const rfdOnlyGraph = {
+      id: 'wf08-upstream',
+      name: 'WF-08 Upstream',
+      nodes: [
+        {
+          id: 'rfd',
+          adapterId: 'rfd4-proteina',
+          label: 'RFD4-Proteina',
+          params: defaultParamsForAdapter('rfd4-proteina'),
+          position: { x: 340, y: 60 },
+        },
+      ],
+      edges: [],
+    };
+    const upRes = insertBlockSmart(rfdOnlyGraph, 'pdb-input', 'rfd', undefined, { autoCommit: true });
+    const pdbNode = upRes.graph.nodes.find((n) => n.id === upRes.nodeId)!;
+    expect(pdbNode.position!.x).toBe(60); // 340 - 280 (to the left of RFD4)
+    expect(upRes.proposedEdges).toEqual([
+      { fromNode: upRes.nodeId, fromPort: 'structure', toNode: 'rfd', toPort: 'structure' },
+    ]);
+
+    const sibRes = insertBlockSmart(upRes.graph, 'genie3', 'rfd', undefined, { autoCommit: false });
+    const genieNode = sibRes.graph.nodes.find((n) => n.id === sibRes.nodeId)!;
+    expect(genieNode.position!.x).toBe(340); // parallel sibling in same column below RFD4
+    expect(genieNode.position!.y).toBeGreaterThan(60);
+    expect(sibRes.proposedEdges).toEqual([
+      { fromNode: upRes.nodeId, fromPort: 'structure', toNode: sibRes.nodeId, toPort: 'structure' },
+    ]);
+    expect(sibRes.graph.edges).toEqual(upRes.graph.edges); // autoCommit: false respected
   });
 });

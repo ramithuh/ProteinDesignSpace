@@ -183,6 +183,9 @@ function estimateGraphWorkload(
         );
       }
       res = { backbones: upInfo.backbones, sequences: Math.max(0, kept) };
+    } else if (node.adapterId === 'evodiff') {
+      const k = readClampedInt(node.params?.numSequences, 2, 1, MAX_SEQUENCES_PER_DESIGN);
+      res = { backbones: 1, sequences: k };
     } else if (node.adapterId === 'sequence-input') {
       res = { backbones: 1, sequences: countFastaSequences(node.params?.sequence) };
     } else {
@@ -199,6 +202,8 @@ function estimateGraphWorkload(
   let generatorBackbones = 0;
   let generatorCount = 0;
   let mpnnSequences = 0;
+  let evodiffSequences = 0;
+  let inputSequences = 0;
   let hasMpnn = false;
   let hasTopKFilter = false;
   let topKSelectedSequences = 0;
@@ -236,6 +241,19 @@ function estimateGraphWorkload(
       continue;
     }
 
+    if (node.adapterId === 'evodiff') {
+      const out = sequencesOut(node);
+      evodiffSequences += out.sequences;
+      nodeWorkItems.set(node.id, out.sequences);
+      if (isGpu) totalGpuWorkItems += out.sequences;
+      continue;
+    }
+
+    if (node.adapterId === 'sequence-input') {
+      inputSequences += countFastaSequences(node.params?.sequence);
+      continue;
+    }
+
     if (node.adapterId === 'top-k-filter') {
       hasTopKFilter = true;
       const out = sequencesOut(node);
@@ -269,6 +287,21 @@ function estimateGraphWorkload(
       continue;
     }
 
+    if (node.adapterId === 'esmc' || node.adapterId === 'dyna1') {
+      const maxSeqs = readClampedInt(node.params?.maxSequences, 1, 1, 8);
+      const upSeq = findUpstreamNode(node.id, 'sequences');
+      const upStruct = findUpstreamNode(node.id, 'structure');
+      const rawCount = upSeq
+        ? sequencesOut(upSeq).sequences
+        : upStruct
+          ? backbonesOut(upStruct)
+          : 1;
+      const items = Math.max(1, Math.min(maxSeqs, rawCount));
+      nodeWorkItems.set(node.id, items);
+      if (isGpu) totalGpuWorkItems += items;
+      continue;
+    }
+
     if (isGpu) {
       const upStruct = findUpstreamNode(node.id, 'structure');
       const upSeq = findUpstreamNode(node.id, 'sequences');
@@ -283,13 +316,15 @@ function estimateGraphWorkload(
   }
 
   const plannedBackbones = generatorCount > 0 ? generatorBackbones : 0;
-  // When MPNN is present, report MPNN's planned sequence total; otherwise if a generator feeds
-  // LocalFold directly (e.g. RFD4 native sequences -> LocalFold), report the native sequence count.
+  // Report MPNN / EvoDiff sequence totals when present, else native generator sequences,
+  // else multi-FASTA Sequence Input counts.
   const plannedSequences = hasMpnn
-    ? mpnnSequences
-    : generatorCount > 0
-      ? generatorBackbones
-      : 0;
+    ? mpnnSequences + evodiffSequences
+    : evodiffSequences > 0
+      ? evodiffSequences
+      : generatorCount > 0
+        ? generatorBackbones
+        : inputSequences;
   const plannedSelectedSequences =
     hasTopKFilter && topKSelectedSequences < plannedSequences ? topKSelectedSequences : null;
 
@@ -333,17 +368,6 @@ function rfd4NeedsEncoder(graph: WorkflowGraph, nodeId: string): boolean {
     const presetId = String(node.params.presetId ?? '');
     if (RFD4_BENCHMARK_OPTIONS.find((b) => b.id === presetId)?.needsEncoder) {
       return true;
-    }
-  }
-
-  // Check if a connected rfd4-conditioner node selects a benchmark that requires the encoder
-  const condEdge = graph.edges.find((e) => e.toNode === nodeId && e.toPort === 'condition');
-  if (condEdge) {
-    const condNode = graph.nodes.find((n) => n.id === condEdge.fromNode);
-    if (condNode?.adapterId === 'rfd4-conditioner') {
-      const taskPreset = String(condNode.params.taskPreset ?? '');
-      const bm = RFD4_BENCHMARK_OPTIONS.find((b) => b.id === taskPreset);
-      if (bm?.needsEncoder) return true;
     }
   }
   return false;
@@ -483,8 +507,8 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
     }
 
     if (node.adapterId === 'thermompnn') {
-      const precision = String(node.params.precision ?? 'fp16');
-      const approxMB = precision === 'int8' ? 1.9 : precision === 'fp32' ? 7.4 : 3.7;
+      const precision = String(node.params.precision ?? 'fp16').toLowerCase();
+      const approxMB = manifest.precisionWeightsMB?.[precision] ?? manifest.approxWeightsMB;
       const key = `thermompnn:${precision}`;
       if (!byKey.has(key)) {
         byKey.set(key, {
@@ -502,8 +526,8 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
 
     if (node.adapterId === 'ligandmpnn') {
       const checkpoint = String(node.params.checkpoint ?? 'ligandmpnn_v_32_020_25');
-      const precision = String(node.params.precision ?? 'fp16');
-      const approxMB = precision === 'int8' ? 2.8 : precision === 'fp32' ? 10.5 : 5.3;
+      const precision = String(node.params.precision ?? 'fp16').toLowerCase();
+      const approxMB = manifest.precisionWeightsMB?.[precision] ?? manifest.approxWeightsMB;
       const ckptShort = checkpoint.replace(/^ligandmpnn_/, '');
       const key = `ligandmpnn:${checkpoint}:${precision}`;
       if (!byKey.has(key)) {
@@ -521,8 +545,8 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
     }
 
     if (node.adapterId === 'lasermpnn') {
-      const precision = String(node.params.precision ?? 'fp16');
-      const approxMB = precision === 'int8' ? 21.1 : precision === 'fp32' ? 82.5 : 41.5;
+      const precision = String(node.params.precision ?? 'fp16').toLowerCase();
+      const approxMB = manifest.precisionWeightsMB?.[precision] ?? manifest.approxWeightsMB;
       const key = `lasermpnn:${precision}`;
       if (!byKey.has(key)) {
         byKey.set(key, {
@@ -540,8 +564,8 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
 
     if (node.adapterId === 'antifold-esmif1') {
       const variant = String(node.params.variant ?? 'antifold') === 'esmif1' ? 'esmif1' : 'antifold';
-      const precision = String(node.params.precision ?? 'fp16');
-      const approxMB = precision === 'int8' ? 137 : precision === 'fp32' ? 567 : 271;
+      const precision = String(node.params.precision ?? 'fp16').toLowerCase();
+      const approxMB = manifest.precisionWeightsMB?.[precision] ?? manifest.approxWeightsMB;
       const estimatedVramMB = precision === 'int8' ? 520 : manifest.estimatedVramMB;
       const variantLabel = variant === 'esmif1' ? 'ESM-IF1' : 'AntiFold';
       const key = `antifold-esmif1:${variant}:${precision}`;
@@ -584,8 +608,8 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
     }
 
     if (node.adapterId === 'esmc') {
-      const precision = String(node.params.precision ?? 'int8');
-      const approxMB = precision === 'fp16' ? 667 : 335;
+      const precision = String(node.params.precision ?? 'int8').toLowerCase();
+      const approxMB = manifest.precisionWeightsMB?.[precision] ?? manifest.approxWeightsMB;
       const estimatedVramMB = precision === 'fp16' ? 1150 : manifest.estimatedVramMB;
       const key = `esmc:${precision}`;
       if (!byKey.has(key)) {
@@ -603,11 +627,11 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
     }
 
     if (node.adapterId === 'dyna1') {
-      const precision = String(node.params.precision ?? 'int8');
+      const precision = String(node.params.precision ?? 'int8').toLowerCase();
       const inputMode = String(node.params.inputMode ?? 'auto');
       const hasStructWire = graph.edges.some((e) => e.toNode === node.id && e.toPort === 'structure');
       const needsStructEnc = hasStructWire && inputMode !== 'seq-only';
-      const baseMB = precision === 'fp32' ? 3362 : precision === 'fp16' ? 1745 : 844;
+      const baseMB = manifest.precisionWeightsMB?.[precision] ?? manifest.approxWeightsMB;
       const approxMB = baseMB + (needsStructEnc ? 88 : 0);
       const estimatedVramMB =
         (precision === 'fp32' ? 3900 : precision === 'fp16' ? 2200 : manifest.estimatedVramMB) +
@@ -627,35 +651,43 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
       continue;
     }
 
-    const PRECISION_WEIGHTS: Record<
-      string,
-      { int8: number; fp16: number; vramFp16?: number; nonCommercial?: boolean }
-    > = {
-      rfdiffusion: { int8: 69, fp16: 125, vramFp16: 650 },
-      boltzgen: { int8: 482, fp16: 950, vramFp16: 2200 },
-      'la-proteina': { int8: 295, fp16: 548, vramFp16: 1200 },
-      proteina: { int8: 193, fp16: 366, vramFp16: 900, nonCommercial: true },
-      'sid-protein': { int8: 193, fp16: 366, vramFp16: 900, nonCommercial: true },
-      genie2: { int8: 16, fp16: 31, vramFp16: 320 },
-      frameflow: { int8: 15, fp16: 26, vramFp16: 320 },
-      foldflow2: { int8: 644, fp16: 1340, vramFp16: 2400, nonCommercial: true },
-      evodiff: { int8: 40, fp16: 74, vramFp16: 380 },
-    };
-    const precSpec = PRECISION_WEIGHTS[node.adapterId];
-    if (precSpec) {
-      const precision = String(node.params.precision ?? (node.adapterId === 'genie2' ? 'fp16' : 'int8')).toLowerCase();
-      const isFp16 = precision === 'fp16';
-      const approxMB = isFp16 ? precSpec.fp16 : precSpec.int8;
-      const estimatedVramMB = isFp16 && precSpec.vramFp16 ? precSpec.vramFp16 : manifest.estimatedVramMB;
-      const key = `${manifest.id}:${isFp16 ? 'fp16' : 'int8'}`;
+    // Drive per-precision weight sizes and nonCommercial flags directly from ADAPTER_REGISTRY (SSOT).
+    if (manifest.precisionWeightsMB) {
+      const defaultPrec =
+        String(
+          manifest.paramSchema?.find((f) => f.key === 'precision')?.defaultValue ?? 'int8',
+        ).toLowerCase();
+      const rawPrec = String(node.params.precision ?? defaultPrec).toLowerCase();
+      const resolvedPrec = Object.hasOwn(manifest.precisionWeightsMB, rawPrec)
+        ? rawPrec
+        : Object.hasOwn(manifest.precisionWeightsMB, defaultPrec)
+          ? defaultPrec
+          : Object.keys(manifest.precisionWeightsMB)[0];
+      const approxMB = manifest.precisionWeightsMB[resolvedPrec] ?? manifest.approxWeightsMB;
+      const FP16_VRAM_MB: Record<string, number> = {
+        rfdiffusion: 650,
+        boltzgen: 2200,
+        'la-proteina': 1200,
+        proteina: 900,
+        'sid-protein': 900,
+        genie2: 320,
+        frameflow: 320,
+        foldflow2: 2400,
+        evodiff: 380,
+      };
+      const estimatedVramMB =
+        resolvedPrec === 'fp16' && Object.hasOwn(FP16_VRAM_MB, node.adapterId)
+          ? FP16_VRAM_MB[node.adapterId]
+          : manifest.estimatedVramMB;
+      const key = `${manifest.id}:${resolvedPrec}`;
       if (!byKey.has(key)) {
         byKey.set(key, {
           key,
-          label: `${manifest.displayName} (${isFp16 ? 'FP16' : 'INT8'})`,
+          label: `${manifest.displayName} (${resolvedPrec.toUpperCase()})`,
           approxMB,
           estimatedVramMB,
           runtime: manifest.runtime,
-          ...(precSpec.nonCommercial ? { nonCommercial: true } : {}),
+          ...(manifest.nonCommercial ? { nonCommercial: true } : {}),
           plannedItems: 0,
         });
       }
@@ -670,6 +702,7 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
         approxMB: manifest.approxWeightsMB,
         estimatedVramMB: manifest.estimatedVramMB,
         runtime: manifest.runtime,
+        ...(manifest.nonCommercial ? { nonCommercial: true } : {}),
         plannedItems: 0,
       });
     }

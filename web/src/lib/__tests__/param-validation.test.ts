@@ -158,35 +158,35 @@ describe('parameter validation & numeric sanitization', () => {
       }),
     ).toEqual([]);
 
-    // Finding #29: enum parameter validation
+    // Finding #29: enum parameter validation (now unified via validateParamsWithSchema + crossValidate)
     expect(
       validateNodeParams({
         id: 'e1',
         adapterId: 'rfd4-proteina',
         params: { mode: 'bogus_mode' },
       }).join(' '),
-    ).toMatch(/Unknown RFD4 mode/);
+    ).toMatch(/Unknown mode "bogus_mode"/);
     expect(
       validateNodeParams({
         id: 'e2',
         adapterId: 'rfd4-proteina',
         params: { mode: 'preset', presetId: 'nonexistent_preset' },
       }).join(' '),
-    ).toMatch(/Unknown RFD4 preset/);
+    ).toMatch(/Invalid presetId "nonexistent_preset"/);
     expect(
       validateNodeParams({
         id: 'e3',
         adapterId: 'genie3',
         params: { taskMode: 'ligand' },
       }).join(' '),
-    ).toMatch(/Unknown Genie 3 taskMode/);
+    ).toMatch(/Unknown taskMode "ligand"/);
     expect(
       validateNodeParams({
         id: 'e4',
         adapterId: 'web-protein-mpnn',
         params: { family: 'unknown_mpnn' },
       }).join(' '),
-    ).toMatch(/Unknown ProteinMPNN family/);
+    ).toMatch(/Invalid family "unknown_mpnn"/);
     expect(
       validateNodeParams({
         id: 'e5',
@@ -200,7 +200,7 @@ describe('parameter validation & numeric sanitization', () => {
         adapterId: 'localfold-af2',
         params: { model: 'af4_turbo' },
       }).join(' '),
-    ).toMatch(/Unknown LocalFold model/);
+    ).toMatch(/Invalid model "af4_turbo"/);
   });
 
   it.each(['ef2-fast-300m', 'ef2-fast-600m'])('validates the active inputs and schedule for %s', (model) => {
@@ -346,7 +346,7 @@ describe('parameter validation & numeric sanitization', () => {
         adapterId: 'pdb-input',
         params: { mode: 'bogus' },
       }).join(' '),
-    ).toMatch(/Unknown PDB Input mode/i);
+    ).toMatch(/Unknown mode "bogus"/i);
   });
 
   it('reports every unresolvedImportIssues entry and blocks execution until resolved (Issue #1)', () => {
@@ -505,7 +505,7 @@ describe('parameter validation & numeric sanitization', () => {
     }
     expect(
       validateNodeParams({ id: 'msa-bad', adapterId: 'localfold-af2', params: { msaMode: 'blast' } }).join(' '),
-    ).toMatch(/Invalid msaMode/);
+    ).toMatch(/Unknown msaMode "blast"/);
     expect(
       validateNodeParams({ id: 'msa-empty-a3m', adapterId: 'localfold-af2', params: { msaMode: 'a3m', msaA3mText: '   ' } }).join(' '),
     ).toMatch(/msaA3mText/);
@@ -721,5 +721,150 @@ describe('parameter validation & numeric sanitization', () => {
         params: { tiedPositions: 'A10' },
       }).join(' '),
     ).toMatch(/tiedPositions/i);
+  });
+
+  it('Wave 1B: eliminates BUILTIN_HAND_VALIDATED (CT-03), enforces crossValidate hooks (CT-02/CT-06/CT-10), unifies residue tokens (UX-04), and enforces #78 step guardrails without duplicate errors', () => {
+    // 1. CT-03: RFD4 validates hbondMode, non-empty motif, and residue tokens via schema
+    expect(
+      validateNodeParams({
+        id: 'rfd-hb',
+        adapterId: 'rfd4-proteina',
+        params: { mode: 'unconditional', hbondMode: 'INVALID_HB' },
+      }).join(' '),
+    ).toMatch(/hbondMode/i);
+    expect(
+      validateNodeParams({
+        id: 'rfd-empty-motif',
+        adapterId: 'rfd4-proteina',
+        params: { mode: 'motif', motifSpan: '', contig: '', customSpecYaml: '' },
+      }).join(' '),
+    ).toMatch(/motifSpan.*contig/i);
+    expect(
+      validateNodeParams({
+        id: 'rfd-bad-hot',
+        adapterId: 'rfd4-proteina',
+        params: { mode: 'binder', hotspots: 'A' },
+      }).join(' '),
+    ).toMatch(/Invalid hotspots token "A"/);
+    expect(
+      validateNodeParams({
+        id: 'g3-bad-motif',
+        adapterId: 'genie3',
+        params: { taskMode: 'motif', motifSpan: 'A999-1' },
+      }).join(' '),
+    ).toMatch(/Invalid motifSpan token "A999-1"/);
+
+    // 2. UX-04: multi-char bare chains (AA, HL) pass in MPNN fixedPositions & pdb-input cropSegments
+    expect(
+      validateNodeParams({
+        id: 'mpnn-multichar',
+        adapterId: 'web-protein-mpnn',
+        params: { fixedPositions: 'AA, HL, A10-15' },
+      }),
+    ).toEqual([]);
+    expect(
+      validateNodeParams({
+        id: 'pdb-crop-lig',
+        adapterId: 'pdb-input',
+        params: { mode: 'pdb-id', pdbId: '7C7M', cropSegments: 'A102, A:ZN, A:DHZ, AA' },
+      }),
+    ).toEqual([]);
+    expect(
+      validateNodeParams({
+        id: 'pdb-crop-bad',
+        adapterId: 'pdb-input',
+        params: { mode: 'pdb-id', pdbId: '5O45', cropSegments: 'A999-1' },
+      }).join(' '),
+    ).toMatch(/Invalid cropSegments token/);
+
+    // 3. CT-06: protpardelle enforces rewindSteps < numSteps in partial mode
+    expect(
+      validateNodeParams({
+        id: 'pp-bad-rewind',
+        adapterId: 'protpardelle',
+        params: { taskMode: 'partial', numSteps: 30, rewindSteps: 40 },
+      }).join(' '),
+    ).toMatch(/rewindSteps \(40\) must be strictly less than numSteps \(30\)/);
+    expect(
+      validateNodeParams({
+        id: 'pp-eq-rewind',
+        adapterId: 'protpardelle',
+        params: { taskMode: 'partial', numSteps: 40, rewindSteps: 40 },
+      }).join(' '),
+    ).toMatch(/rewindSteps/);
+    expect(
+      validateNodeParams({
+        id: 'pp-ok-rewind',
+        adapterId: 'protpardelle',
+        params: { taskMode: 'partial', numSteps: 50, rewindSteps: 20 },
+      }),
+    ).toEqual([]);
+
+    // 4. CT-10: esmc & dyna1 require at least one connected sequences or structure input
+    expect(
+      validateNodeParams(
+        { id: 'esmc-disconn', adapterId: 'esmc', params: { mode: 'wildtype' } },
+        { connectedInputs: [] },
+      ).join(' '),
+    ).toMatch(/sequences.*structure/i);
+    expect(
+      validateNodeParams(
+        { id: 'esmc-ok', adapterId: 'esmc', params: { mode: 'wildtype' } },
+        { connectedInputs: ['sequences'] },
+      ),
+    ).toEqual([]);
+    expect(
+      validateNodeParams(
+        { id: 'dyna-disconn', adapterId: 'dyna1', params: { inputMode: 'auto' } },
+        { connectedInputs: [] },
+      ).join(' '),
+    ).toMatch(/sequences.*structure/i);
+    expect(
+      validateNodeParams(
+        { id: 'dyna-struct-only', adapterId: 'dyna1', params: { inputMode: 'struct-only' } },
+        { connectedInputs: ['sequences'] },
+      ).join(' '),
+    ).toMatch(/requires a connected "structure" input/i);
+
+    // 5. CT-02: designability-scorer validates residueMapping syntax before runtime
+    expect(
+      validateNodeParams({
+        id: 'sc-bad-map',
+        adapterId: 'designability-scorer',
+        params: { residueMapping: 'bad:xyz' },
+      }).join(' '),
+    ).toMatch(/Invalid residueMapping/);
+    expect(
+      validateNodeParams({
+        id: 'sc-ok-map',
+        adapterId: 'designability-scorer',
+        params: { residueMapping: '0:0, 1:1, 2:2' },
+      }),
+    ).toEqual([]);
+
+    // 6. #78: step guardrails produce single non-duplicated errors
+    const g2Errs = validateNodeParams({
+      id: 'g2-low',
+      adapterId: 'genie2',
+      params: { steps: 500 },
+    });
+    expect(g2Errs).toHaveLength(1);
+    expect(g2Errs[0]).toMatch(/between 1000 and 1000/);
+
+    const laErrs = validateNodeParams({
+      id: 'la-low',
+      adapterId: 'la-proteina',
+      params: { steps: 20, mode: 'sde' },
+    });
+    expect(laErrs).toHaveLength(1);
+    expect(laErrs[0]).toMatch(/between 50 and 400/);
+
+    const proErrs = validateNodeParams({
+      id: 'pro-low',
+      adapterId: 'proteina',
+      params: { steps: 20, mode: 'sc' },
+    });
+    expect(proErrs).toHaveLength(1);
+    expect(proErrs[0]).toMatch(/between 50 and 400/);
   });
 });

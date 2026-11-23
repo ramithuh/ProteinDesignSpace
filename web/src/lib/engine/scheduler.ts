@@ -1742,12 +1742,12 @@ export class ExecutionScheduler {
       const ipaeThresh = Number(node.params.ipaeThreshold ?? 10.0);
       const ipsaeThresh = Number(node.params.ipsaeThreshold ?? 0);
       const targetAlignedBinderThresh = Number(
-        node.params.targetAlignedBinderRmsdThreshold ?? Math.max(scThresh * 2, 4.0),
+        node.params.targetAlignedBinderRmsdThreshold ?? 4.0,
       );
 
       const allowExternalReference = Boolean(node.params.allowExternalReference);
       const strictLineage = Boolean(node.params.strictLineage);
-      const rawMappingParam = node.params.residueMapping ?? node.params.referenceMapping;
+      const rawMappingParam = node.params.residueMapping;
 
       const normalizeLineageId = (val: string | undefined | null): string => {
         const s = String(val ?? '').trim();
