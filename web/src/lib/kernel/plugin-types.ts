@@ -2,6 +2,9 @@
 // Strict Layer 1 rule: ZERO imports from Layer 2 (domains/*) or Layer 3 (plugins/*).
 
 import type { ArtifactEnvelope } from './artifacts';
+import type { ConditionIntent, ConditionTargetCompiler } from './condition-intent';
+
+export type { ConditionIntent, ConditionTargetCompiler };
 
 export type RuntimeKind = 'wgsl-custom' | 'ort-webgpu' | 'cpu-ts' | 'wasm-cpu';
 
@@ -79,8 +82,10 @@ export interface KernelAdapterManifest {
   id: string;
   displayName: string;
   shortName: string;
-  /** Extensible stage ID validated against DomainPack.stages (no closed protein enum in Layer 1). */
+  /** Primary stage ID validated against DomainPack.stages (no closed protein enum in Layer 1). */
   stage: string;
+  /** Optional secondary stage IDs for multi-task / omni foundation models (e.g. Boltz-2 folding+affinity, ESM3). */
+  secondaryStages?: readonly string[];
   runtime: RuntimeKind;
   estimatedVramMB: number;
   approxWeightsMB: number;
@@ -461,16 +466,23 @@ export interface PlannerRepairRule {
   apply: (node: KernelWorkflowNode, issue: KernelCompatibilityIssue) => Partial<KernelWorkflowNode> | null;
 }
 
+export type KernelPlannerRole =
+  | 'source'
+  | 'conditioner'
+  | 'generator'
+  | 'sequence-designer'
+  | 'predictor'
+  | 'scorer'
+  | 'filter'
+  | 'comparator'
+  | 'optimizer'
+  | 'simulator';
+
 export interface PluginPlannerContributor {
-  plannerRole:
-    | 'source'
-    | 'conditioner'
-    | 'generator'
-    | 'sequence-designer'
-    | 'predictor'
-    | 'scorer'
-    | 'filter'
-    | 'comparator';
+  /** Primary planner role (backwards-compatible single role). */
+  plannerRole?: KernelPlannerRole;
+  /** Multi-role declaration for omni / multi-task foundation models (e.g. Boltz-2: ['predictor', 'scorer'], ESM3: ['generator', 'sequence-designer', 'predictor']). */
+  plannerRoles?: readonly KernelPlannerRole[];
   keywords: readonly string[];
   capabilities: readonly string[];
   extractParamsFromPrompt?: (prompt: string, context: PlannerIntentContext) => Record<string, unknown>;
@@ -505,23 +517,6 @@ export interface PluginInspectorContribution<TParams extends Record<string, unkn
   customWidgetId?: string;
   customSections?: readonly InspectorSectionDescriptor[];
   summaryHeaderExtras?: (params: TParams) => Array<{ label: string; value: string }>;
-}
-
-export interface ConditionIntent<TPayload = Record<string, unknown>> {
-  domainId: string;
-  intentKind: string;
-  payload: TPayload;
-  summary?: string;
-}
-
-export interface ConditionTargetCompiler<
-  TIntent extends ConditionIntent = ConditionIntent,
-  TCompiled = unknown,
-> {
-  readonly id: string;
-  readonly domainId: string;
-  readonly targetPluginId: string;
-  compile: (intent: TIntent, ctx?: { templateArtifact?: ArtifactEnvelope }) => TCompiled;
 }
 
 export interface ModelPlugin<

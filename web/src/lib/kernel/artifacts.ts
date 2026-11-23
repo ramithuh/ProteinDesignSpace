@@ -9,7 +9,92 @@ export type KernelCollectionKind =
   | 'paired-refolds'
   | 'trajectory'
   | 'ensemble'
+  | 'conformational-ensemble'
+  | 'md-trajectory'
   | (string & {});
+
+export type ThermodynamicEnergyUnit = 'kcal/mol' | 'kJ/mol' | 'eV' | 'kT';
+
+/**
+ * First-class metadata for conformational ensembles, MD trajectories, and MLIP/Boltzmann state distributions
+ * (BioEmu, AlphaFlow, MDGen, Dyna-1, MACE/UMA relaxation, docking pose Boltzmann weighting).
+ */
+export interface ThermodynamicEnsembleMeta {
+  ensembleKind:
+    | 'conformational-ensemble'
+    | 'md-trajectory'
+    | 'denoising-trajectory'
+    | 'independent-designs';
+  frameCount: number;
+  /** Optional normalized Boltzmann / state probability weights (length === frameCount). */
+  weights?: Float32Array;
+  /** Optional per-frame potential or free energies (length === frameCount). */
+  energies?: Float32Array;
+  energyUnit?: ThermodynamicEnergyUnit;
+  temperatureK?: number;
+  timestepFs?: number;
+}
+
+/**
+ * Compute numerically stable normalized Boltzmann weights `p_i ∝ exp(-E_i / k_B T)`
+ * from per-frame energies without floating-point overflow or NaN.
+ */
+export function computeBoltzmannWeights(
+  energies: Float32Array,
+  temperatureK = 300,
+  unit: ThermodynamicEnergyUnit = 'kcal/mol',
+): Float32Array {
+  const n = energies.length;
+  const out = new Float32Array(n);
+  if (n === 0) return out;
+  const T = Number.isFinite(temperatureK) && temperatureK > 0 ? temperatureK : 300;
+  let kT: number;
+  switch (unit) {
+    case 'kcal/mol':
+      kT = 0.00198720425864083 * T;
+      break;
+    case 'kJ/mol':
+      kT = 0.00831446261815324 * T;
+      break;
+    case 'eV':
+      kT = 8.617333262e-5 * T;
+      break;
+    case 'kT':
+      kT = 1;
+      break;
+  }
+  let minBetaE = Infinity;
+  const betaE = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const e = energies[i];
+    if (!Number.isFinite(e)) {
+      betaE[i] = Infinity;
+      continue;
+    }
+    const v = e / kT;
+    betaE[i] = v;
+    if (v < minBetaE) minBetaE = v;
+  }
+  if (!Number.isFinite(minBetaE)) {
+    out.fill(1 / n);
+    return out;
+  }
+  let sum = 0;
+  const raw = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const w = Number.isFinite(betaE[i]) ? Math.exp(-(betaE[i] - minBetaE)) : 0;
+    raw[i] = w;
+    sum += w;
+  }
+  if (sum <= 0 || !Number.isFinite(sum)) {
+    out.fill(1 / n);
+    return out;
+  }
+  for (let i = 0; i < n; i++) {
+    out[i] = raw[i] / sum;
+  }
+  return out;
+}
 
 export interface KernelRepresentativeSelection {
   strategy: string;
@@ -27,9 +112,15 @@ export interface ArtifactLineage {
   groupKey?: string;
   /** 0-based creation ordinal within a collection (never score rank). */
   ordinal?: number;
+  /** 0-based round index for closed-loop iterative optimization / active learning. */
+  roundIndex?: number;
+  /** Parent round index when derived from a prior optimization round. */
+  parentRoundIndex?: number;
   seed?: number;
   collectionKind?: KernelCollectionKind;
   representativeSelection?: KernelRepresentativeSelection;
+  /** Optional thermodynamic/conformational ensemble metadata (Boltzmann weights, energies, temperature). */
+  ensembleMeta?: ThermodynamicEnsembleMeta;
   /** Domain-specific lineage metadata (e.g. sourceStructureId, sequenceKey, foldKey). */
   domainMeta?: Record<string, unknown>;
 }

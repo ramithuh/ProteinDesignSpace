@@ -3,7 +3,7 @@
 
 import { PortTypeRegistry } from './artifacts';
 import { DomainPackRegistry, type DomainPack } from './domain-pack';
-import type { ModelPlugin, PluginCachePolicy, PortSpec } from './plugin-types';
+import type { KernelPlannerRole, ModelPlugin, PluginCachePolicy, PortSpec } from './plugin-types';
 
 function normalizePortTypes(spec: PortSpec): readonly string[] {
   if (typeof spec.type === 'string') return spec.type ? [spec.type] : [];
@@ -70,6 +70,16 @@ export class PluginRegistry {
       throw new Error(
         `Plugin "${id}" references stage "${plugin.manifest.stage}" not declared by domain "${plugin.domainId}".`,
       );
+    }
+    for (const secStage of plugin.manifest.secondaryStages ?? []) {
+      const stageExists = this.domains
+        .list()
+        .some((d) => this.domains.hasStage(d.id, secStage));
+      if (!stageExists) {
+        throw new Error(
+          `Plugin "${id}" references secondary stage "${secStage}" not declared by any registered DomainPack.`,
+        );
+      }
     }
 
     // Invariant 2: globally unique share.shortCode (and non-colliding legacyShortCodes)
@@ -172,6 +182,28 @@ export class PluginRegistry {
 
   listPlugins(): ModelPlugin[] {
     return [...this.plugins.values()];
+  }
+
+  /** Return all plugins matching a primary or secondary stage (supports multi-task / omni models). */
+  findPluginsByStage(stageId: string): ModelPlugin[] {
+    return [...this.plugins.values()].filter(
+      (p) => p.manifest.stage === stageId || Boolean(p.manifest.secondaryStages?.includes(stageId)),
+    );
+  }
+
+  /** Return all planner roles declared by a plugin (merges legacy single `plannerRole` + `plannerRoles`). */
+  getPluginPlannerRoles(plugin: ModelPlugin): KernelPlannerRole[] {
+    const roles: KernelPlannerRole[] = [];
+    if (plugin.planner?.plannerRole) roles.push(plugin.planner.plannerRole);
+    for (const r of plugin.planner?.plannerRoles ?? []) {
+      if (!roles.includes(r)) roles.push(r);
+    }
+    return roles;
+  }
+
+  /** Find all plugins advertising a given planner role (multi-role omni-models match every role they declare). */
+  findPluginsByPlannerRole(role: KernelPlannerRole): ModelPlugin[] {
+    return [...this.plugins.values()].filter((p) => this.getPluginPlannerRoles(p).includes(role));
   }
 
   resolveShortCode(shortCode: string): string | undefined {
