@@ -106,7 +106,7 @@ function num(val: unknown, fallback: number): number {
 
 /**
  * Format the compact 1-line parameter chip displayed on a node card for all 25 active
- * registry adapters (plus legacy `rfd4-conditioner`).
+ * registry adapters.
  */
 export function formatNodeParamSummary(
   adapterId: string,
@@ -143,23 +143,6 @@ export function formatNodeParamSummary(
       }
       return `${check.totalResidues || 0} aa FASTA${emptyNote}`;
     }
-    case 'rfd4-conditioner': {
-      const tp = String(p.taskPreset ?? 'custom');
-      if (tp !== 'custom') {
-        const opt = RFD4_BENCHMARK_OPTIONS.find((o) => o.id === tp);
-        return opt ? opt.label : tp;
-      }
-      const bits: string[] = [];
-      const contig = String(p.contig ?? '').trim();
-      if (contig) bits.push(contig);
-      const hotCount = String(p.hotspots ?? '').split(/[,\s]+/).filter(Boolean).length;
-      if (hotCount > 0) bits.push(`${hotCount} hotspot${hotCount === 1 ? '' : 's'}`);
-      const motif = String(p.motifSpan ?? '').trim();
-      if (motif) bits.push('motif');
-      const cath = String(p.cathCode ?? '').trim();
-      if (cath) bits.push(`CATH ${cath}`);
-      return bits.join(' · ') || 'custom constraints';
-    }
     case 'rfd4-proteina': {
       const mode = String(p.mode ?? 'unconditional');
       const steps = num(p.nsteps, 60);
@@ -178,8 +161,11 @@ export function formatNodeParamSummary(
         return `Conditioned${contig ? ` · ${contig}` : ''} · ${steps} steps`;
       }
       if (mode === 'preset') {
-        const opt = RFD4_BENCHMARK_OPTIONS.find((o) => o.id === String(p.presetId ?? ''));
-        return `${opt?.label ?? 'Preset task'} · ${steps} steps`;
+        const presetId = String(p.presetId ?? '');
+        const opt = RFD4_BENCHMARK_OPTIONS.find((o) => o.id === presetId);
+        const presetLabel =
+          opt?.label ?? (presetId === 'yaml_5o45_binder' ? '5O45 PD-L1 Binder (YAML)' : 'Preset task');
+        return `${presetLabel} · ${steps} steps`;
       }
       if (mode === 'partial') return `Partial (${num(p.partialFraction, 0.5)}) · ${steps} steps`;
       if (mode === 'inverse-folding') return `Inverse folding · ${steps} steps`;

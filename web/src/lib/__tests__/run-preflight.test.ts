@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { estimateRunRequirements, formatApproxSize } from '$lib/engine/run-preflight';
-import { WORKFLOW_PRESETS } from '$lib/engine/registry';
+import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from '$lib/engine/registry';
+import { CATALOG_CATEGORIES } from '$lib/engine/catalog';
 import { extractSubgraphUpTo } from '$lib/engine/peek';
 import type { WorkflowGraph } from '$lib/engine/types';
 
@@ -266,5 +267,101 @@ describe('estimateRunRequirements (first-run preflight)', () => {
     expect(summary.plannedSequences).toBe(16);
     expect(summary.plannedFolds).toBe(4);
     expect(summary.fanoutSummary).toBe('4 backbones → 16 sequences → 4 selected → 4 refolds');
+  });
+
+  it('CT-09: drives precisionWeightsMB & nonCommercial from ADAPTER_REGISTRY, honors sequence-input/evodiff counts, and clamps esmc/dyna1 to maxSequences', () => {
+    // 1. Precision weights match ADAPTER_REGISTRY.*.precisionWeightsMB across all 5 previously divergent adapters
+    for (const [adapterId, int8MB, fp16MB] of [
+      ['la-proteina', 277, 548],
+      ['proteina', 186, 366],
+      ['sid-protein', 185, 366],
+      ['frameflow', 17, 33],
+      ['evodiff', 37, 73],
+    ] as const) {
+      expect(ADAPTER_REGISTRY[adapterId].precisionWeightsMB).toEqual({ int8: int8MB, fp16: fp16MB });
+      const int8Summary = estimateRunRequirements({
+        id: `${adapterId}-int8`,
+        name: adapterId,
+        nodes: [{ id: 'n', adapterId, params: { precision: 'int8' } }],
+        edges: [],
+      });
+      expect(int8Summary.totalDownloadMB).toBe(int8MB);
+      const fp16Summary = estimateRunRequirements({
+        id: `${adapterId}-fp16`,
+        name: adapterId,
+        nodes: [{ id: 'n', adapterId, params: { precision: 'fp16' } }],
+        edges: [],
+      });
+      expect(fp16Summary.totalDownloadMB).toBe(fp16MB);
+    }
+
+    // 2. sid-protein nonCommercial parity between registry, preflight, and catalog
+    expect(ADAPTER_REGISTRY['sid-protein'].nonCommercial).toBe(true);
+    const sidSummary = estimateRunRequirements({
+      id: 'sid-nc',
+      name: 'SiD NC',
+      nodes: [{ id: 's', adapterId: 'sid-protein', params: { precision: 'int8' } }],
+      edges: [],
+    });
+    expect(sidSummary.hasNonCommercialModel).toBe(true);
+    const genCat = CATALOG_CATEGORIES.find((c) => c.id === 'generation')!;
+    const sidCatalogItem = genCat.subGroups.flatMap((g) => g.items).find((i) => i.key === 'sid-protein')!;
+    expect(sidCatalogItem.nonCommercial).toBe(true);
+    expect(sidCatalogItem.badge).toBe('Non-Commercial');
+
+    // 3. Multi-FASTA sequence-input & evodiff populate plannedSequences
+    const seqFeedSummary = estimateRunRequirements({
+      id: 'seq-to-lf',
+      name: 'Seq to LF',
+      nodes: [
+        {
+          id: 'seq',
+          adapterId: 'sequence-input',
+          params: { sequence: '>s1\nACDEFGHIK\n>s2\nLMNPQRSTV\n>s3\nWYACDEFGH' },
+        },
+        { id: 'lf', adapterId: 'localfold-af2', params: { model: 'monomer', maxSequences: 2 } },
+      ],
+      edges: [{ fromNode: 'seq', fromPort: 'sequences', toNode: 'lf', toPort: 'sequences' }],
+    });
+    expect(seqFeedSummary.plannedSequences).toBe(3);
+    expect(seqFeedSummary.plannedFolds).toBe(2);
+
+    const evoFeedSummary = estimateRunRequirements({
+      id: 'evo-to-lf',
+      name: 'EvoDiff to LF',
+      nodes: [
+        { id: 'evo', adapterId: 'evodiff', params: { taskMode: 'unconditional', numSequences: 4 } },
+        { id: 'lf', adapterId: 'localfold-af2', params: { model: 'monomer', maxSequences: 2 } },
+      ],
+      edges: [{ fromNode: 'evo', fromPort: 'sequences', toNode: 'lf', toPort: 'sequences' }],
+    });
+    expect(evoFeedSummary.plannedSequences).toBe(4);
+    expect(evoFeedSummary.plannedFolds).toBe(2);
+    expect(evoFeedSummary.models.find((m) => m.key === 'evodiff:int8')?.plannedItems).toBe(4);
+
+    // 4. esmc & dyna1 clamp GPU work items by maxSequences (default 1)
+    const scorerClampSummary = estimateRunRequirements({
+      id: 'clamp-scorers',
+      name: 'Clamp Scorers',
+      nodes: [
+        {
+          id: 'seq',
+          adapterId: 'sequence-input',
+          params: {
+            sequence:
+              '>s1\nACDEFGHIK\n>s2\nACDEFGHIK\n>s3\nACDEFGHIK\n>s4\nACDEFGHIK\n>s5\nACDEFGHIK\n>s6\nACDEFGHIK',
+          },
+        },
+        { id: 'ec', adapterId: 'esmc', params: { mode: 'wildtype', maxSequences: 2 } },
+        { id: 'dy', adapterId: 'dyna1', params: { inputMode: 'seq-only', maxSequences: 1 } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'ec', toPort: 'sequences' },
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'dy', toPort: 'sequences' },
+      ],
+    });
+    expect(scorerClampSummary.models.find((m) => m.key === 'esmc:int8')?.plannedItems).toBe(2);
+    expect(scorerClampSummary.models.find((m) => m.key === 'dyna1:int8:seq')?.plannedItems).toBe(1);
+    expect(scorerClampSummary.totalGpuWorkItems).toBe(3);
   });
 });

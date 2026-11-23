@@ -1,6 +1,7 @@
 // Static registry of denovo.run node adapters + curated 1-click workflow presets.
 
 import type { AdapterManifest, AdapterParamOption, CampaignState, WorkflowGraph } from './types';
+import { validateResidueMappingSyntax } from './param-schema';
 
 export interface Rfd4BenchmarkMeta {
   id: string;
@@ -196,6 +197,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'residue-list',
         tier: 'primary',
         studioRole: 'crop',
+        allowBareChain: true,
         defaultValue: '',
         placeholder: 'e.g. A163-181, A17-132',
         modes: ['pdb-id', 'custom'],
@@ -386,6 +388,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'residue-list',
         tier: 'primary',
         studioRole: 'motif',
+        allowBareChain: false,
         defaultValue: '',
         placeholder: 'A16-35, A52-71',
         modes: ['motif', 'conditioned', 'partial', 'inverse-folding'],
@@ -416,6 +419,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'residue-list',
         tier: 'primary',
         studioRole: 'hotspot',
+        allowBareChain: false,
         defaultValue: '',
         placeholder: 'A54, A56, A66, A115',
         modes: ['binder', 'conditioned', 'partial', 'inverse-folding'],
@@ -469,6 +473,12 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         max: 120,
         step: 1,
         upstreamDefaultHint: 'Upstream default: 60 (≥58 recommended)',
+        warnBelow: {
+          threshold: 58,
+          message:
+            'Fewer than 58 steps may reduce structure quality in RFD4-Proteina; set Recycle to None if you need faster sampling.',
+          fixValue: 60,
+        },
         description: 'Number of flow-matching integration steps.',
       },
       {
@@ -536,6 +546,21 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Full raw RFD4 condition specification in YAML or JSON format.',
       },
     ],
+    crossValidate: (p) => {
+      const errs: string[] = [];
+      const mode = String(p.mode ?? 'unconditional');
+      if (
+        mode === 'motif' &&
+        !String(p.motifSpan ?? '').trim() &&
+        !String(p.contig ?? '').trim() &&
+        !String(p.customSpecYaml ?? '').trim()
+      ) {
+        errs.push(
+          'RFD4-Proteina motif mode requires a motifSpan (e.g. A16-35), contig, or customSpecYaml specifying motif residues.',
+        );
+      }
+      return errs;
+    },
   },
   genie3: {
     id: 'genie3',
@@ -619,6 +644,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'residue-list',
         tier: 'primary',
         studioRole: 'motif',
+        allowBareChain: false,
         defaultValue: '',
         placeholder: 'A16-35, A52-71',
         modes: ['motif'],
@@ -640,6 +666,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'residue-list',
         tier: 'primary',
         studioRole: 'hotspot',
+        allowBareChain: false,
         defaultValue: '',
         placeholder: 'A54, A56, A66, A115',
         modes: ['binder'],
@@ -711,6 +738,16 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Run Genie 3 1-step SequenceNet head (off emits poly-ALA with locked residues preserved).',
       },
     ],
+    crossValidate: (p) => {
+      const errs: string[] = [];
+      const taskMode = String(p.taskMode ?? 'unconditional');
+      if (taskMode === 'motif' && !String(p.motifSpan ?? '').trim() && !String(p.contig ?? '').trim()) {
+        errs.push(
+          'Genie 3 motif mode requires a motifSpan (e.g. A16-35) or contig specifying motif residues.',
+        );
+      }
+      return errs;
+    },
   },
   protpardelle: {
     id: 'protpardelle',
@@ -893,6 +930,19 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         step: 1,
       },
     ],
+    crossValidate: (p) => {
+      const errs: string[] = [];
+      if (String(p.taskMode ?? 'unconditional') === 'partial') {
+        const numSteps = Number(p.numSteps ?? 100);
+        const rewindSteps = Number(p.rewindSteps ?? 40);
+        if (Number.isFinite(numSteps) && Number.isFinite(rewindSteps) && rewindSteps >= numSteps) {
+          errs.push(
+            `rewindSteps (${rewindSteps}) must be strictly less than numSteps (${numSteps}).`,
+          );
+        }
+      }
+      return errs;
+    },
   },
   rfdiffusion: {
     id: 'rfdiffusion',
@@ -902,6 +952,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 480,
     approxWeightsMB: 69,
+    precisionWeightsMB: { int8: 69, fp16: 125 },
     licenseNote: 'BSD (RosettaCommons/RFdiffusion Base_ckpt.pt · WebGPU port ramithuh/rfdiffusion-webgpu)',
     description:
       'Original RFdiffusion rigid-frame backbone diffusion supporting unconditional de novo design, contig-based motif scaffolding, and Cn/Dn symmetric oligomers.',
@@ -1042,6 +1093,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 1400,
     approxWeightsMB: 482,
+    precisionWeightsMB: { int8: 482, fp16: 950 },
     licenseNote: 'MIT (HannesStark/boltzgen · WebGPU port ramithuh/boltzgen-webgpu)',
     description:
       'All-atom generative protein diffusion model supporting unconditional de novo design, target-conditioned binder design, and motif scaffolding.',
@@ -1163,6 +1215,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'residue-list',
         tier: 'primary',
         studioRole: 'hotspot',
+        allowBareChain: false,
         defaultValue: '',
         placeholder: 'e.g. A54, A56, A66',
         modes: ['binder'],
@@ -1200,6 +1253,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 180,
     approxWeightsMB: 37,
+    precisionWeightsMB: { int8: 37, fp16: 73 },
     licenseNote: 'MIT (microsoft/evodiff) · CC-BY-4.0 weights (OA_DM_38M · ramithuh/evodiff-webgpu)',
     description:
       'Order-agnostic discrete protein sequence diffusion (OA-DM 38M) for MSA-free de novo sequence generation and masked sequence inpainting (with automatic CPU fallback).',
@@ -1313,6 +1367,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 900,
     approxWeightsMB: 277,
+    precisionWeightsMB: { int8: 277, fp16: 548 },
     licenseNote: 'Apache-2.0 (code) · NVIDIA Open Model License (weights · ramithuh/la-proteina-webgpu)',
     description:
       'All-atom latent protein diffusion combining the 14-block LD1 latent velocity network with the 12-block AE1 decoder to co-design full atom37 structures and amino acid sequences.',
@@ -1352,10 +1407,17 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'integer',
         tier: 'primary',
         defaultValue: 400,
-        min: 10,
+        min: 50,
         max: 400,
         step: 10,
         upstreamDefaultHint: 'Upstream full schedule: 400',
+        warnBelow: {
+          threshold: 350,
+          modes: ['sde'],
+          message:
+            'La-Proteina SDE mode requires ~350–400 steps for Euler-Maruyama stability; fewer steps fracture Cα bonds (use ODE or SiD-Protein for fast runs).',
+          fixValue: 400,
+        },
         description: 'Number of LD1 reverse-sampling steps before AE1 all-atom decoding.',
       },
       {
@@ -1401,6 +1463,8 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 720,
     approxWeightsMB: 186,
+    precisionWeightsMB: { int8: 186, fp16: 366 },
+    nonCommercial: true,
     licenseNote: 'NVIDIA Source Code License — Non-Commercial Research/Eval (ramithuh/proteina-webgpu)',
     description:
       'Scalable 200M-parameter transformer flow-matching generator for de novo Cα protein backbones (15 pair-biased transformer blocks with register tokens).',
@@ -1439,10 +1503,17 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'integer',
         tier: 'primary',
         defaultValue: 400,
-        min: 10,
+        min: 50,
         max: 400,
         step: 10,
         upstreamDefaultHint: 'Upstream full schedule: 400',
+        warnBelow: {
+          threshold: 350,
+          modes: ['sc'],
+          message:
+            'Proteina 200M SDE (sc) mode requires ~350–400 steps for numerical stability; fewer steps break peptide bonds (use ODE or SiD-Protein for fast runs).',
+          fixValue: 400,
+        },
         description: 'Number of logarithmic flow-matching integration steps.',
       },
       {
@@ -1507,6 +1578,8 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 720,
     approxWeightsMB: 185,
+    precisionWeightsMB: { int8: 185, fp16: 366 },
+    nonCommercial: true,
     licenseNote: 'SiD-Protein / Proteina License (LY-Xie/SiD_Protein · ramithuh/sid-protein-webgpu)',
     description:
       'Score-identity distilled 200M Proteina generator producing de novo Cα protein backbones in just 16 sampling steps (~25× fewer steps than standard flow matching).',
@@ -1593,6 +1666,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 360,
     approxWeightsMB: 31,
+    precisionWeightsMB: { int8: 16, fp16: 31 },
     licenseNote: 'Apache-2.0 (aqlaboratory/genie2 epoch-40 · ramithuh/genie2-webgpu)',
     description:
       'Compact 15.7M-parameter Cα diffusion generator supporting unconditional backbone design and optional soft motif scaffolding from a template structure.',
@@ -1633,11 +1707,18 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'integer',
         tier: 'primary',
         defaultValue: 1000,
-        min: 10,
+        min: 1000,
         max: 1000,
         step: 10,
-        upstreamDefaultHint: 'Upstream full schedule: 1000',
-        description: 'Number of cosine-schedule reverse diffusion steps.',
+        upstreamDefaultHint: 'Fixed full schedule: 1000',
+        warnBelow: {
+          threshold: 1000,
+          message:
+            'Genie 2 uses a fixed 1000-step cosine diffusion schedule; fewer steps are unsupported and yield distorted backbones (use Genie 3 or SiD-Protein for fast runs).',
+          fixValue: 1000,
+        },
+        description:
+          'Fixed 1000-step cosine reverse-diffusion schedule; fewer steps are unsupported (use Genie 3 or SiD-Protein for fast runs).',
       },
       {
         key: 'scale',
@@ -1690,6 +1771,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 380,
     approxWeightsMB: 33,
+    precisionWeightsMB: { int8: 17, fp16: 33 },
     licenseNote: 'MIT (microsoft/protein-frame-flow · ramithuh/frameflow-webgpu)',
     description:
       'Compact 16.8M-parameter rigid-frame flow matching generator producing 5-atom protein backbones (N, Cα, C, O, Cβ) with exponential rotation annealing.',
@@ -1795,6 +1877,8 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 1400,
     approxWeightsMB: 644,
+    precisionWeightsMB: { int8: 644, fp16: 1340 },
+    nonCommercial: true,
     licenseNote: 'CC BY-NC 4.0 (DreamFold/FoldFlow ReFT + MIT ESM-2 650M · ramithuh/foldflow2-webgpu)',
     description:
       'Reinforcement-fine-tuned rigid-frame flow-matching generator paired with a frozen ESM-2 650M encoder for unconditional or sequence-conditioned 5-atom backbone generation.',
@@ -1941,6 +2025,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'residue-list',
         tier: 'primary',
         studioRole: 'fixed',
+        allowBareChain: true,
         defaultValue: '',
         placeholder: 'e.g. A5, A10-14',
         description: 'Residues or whole chains (e.g. "B", "A10-14") kept identical to the input structure.',
@@ -2020,6 +2105,22 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         step: 1,
       },
     ],
+    crossValidate: (p) => {
+      const errs: string[] = [];
+      const family = p.family !== undefined ? String(p.family) : 'solublempnn';
+      const allowed = Object.hasOwn(MPNN_CHECKPOINTS_BY_FAMILY, family)
+        ? MPNN_CHECKPOINTS_BY_FAMILY[family]
+        : undefined;
+      if (allowed && p.modelName !== undefined) {
+        const modelName = String(p.modelName);
+        if (!allowed.some((o) => o.value === modelName)) {
+          errs.push(
+            `Unknown ${family} modelName "${modelName}" (expected ${allowed.map((o) => o.value).join(', ')}).`,
+          );
+        }
+      }
+      return errs;
+    },
   },
   ligandmpnn: {
     id: 'ligandmpnn',
@@ -2029,6 +2130,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 220,
     approxWeightsMB: 5,
+    precisionWeightsMB: { int8: 2.8, fp16: 5.3, fp32: 10.5 },
     licenseNote: 'MIT (dauparas/LigandMPNN · WebGPU port ramithuh/ligandmpnn-webgpu)',
     description:
       'Atomic context-conditioned inverse folding that preserves small-molecule ligands, metal ions, and nucleic acids when designing protein sequences.',
@@ -2094,6 +2196,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'residue-list',
         tier: 'primary',
         studioRole: 'fixed',
+        allowBareChain: true,
         defaultValue: '',
         placeholder: 'e.g. A5, A10-14',
         description: 'Residues or whole chains held fixed during ligand-aware sequence design.',
@@ -2154,6 +2257,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 350,
     approxWeightsMB: 40,
+    precisionWeightsMB: { int8: 21.1, fp16: 41.5, fp32: 82.5 },
     licenseNote: 'MIT (polizzilab/LASErMPNN · WebGPU port ramithuh/lasermpnn-webgpu)',
     description:
       'Ligand-aware all-atom sequence and sidechain rotamer (χ1–χ4) co-design with an embedded small-molecule encoder, outputting designed sequences and packed all-atom structures.',
@@ -2207,6 +2311,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'residue-list',
         tier: 'primary',
         studioRole: 'fixed',
+        allowBareChain: true,
         defaultValue: '',
         placeholder: 'e.g. A5, A10-14',
         description: 'Residues or whole chains held fixed during sequence and rotamer design.',
@@ -2248,6 +2353,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 750,
     approxWeightsMB: 271,
+    precisionWeightsMB: { int8: 137, fp16: 271, fp32: 567 },
     licenseNote: 'BSD-3-Clause (oxpig/AntiFold) · MIT (Meta ESM-IF1 & ramithuh/antifold-esmif1-webgpu)',
     description:
       'GVP-Transformer inverse folding supporting antibody/nanobody CDR redesign (AntiFold) and general protein inverse folding (ESM-IF1) with independent or autoregressive sampling.',
@@ -2371,6 +2477,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'residue-list',
         tier: 'primary',
         studioRole: 'fixed',
+        allowBareChain: true,
         defaultValue: '',
         placeholder: 'e.g. H95-102, A10',
         description: 'Residues or whole chains held fixed during inverse folding.',
@@ -2583,6 +2690,34 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Campaign-wide cap on total refolds across multi-backbone designs.',
       },
     ],
+    crossValidate: (p) => {
+      const errs: string[] = [];
+      const modelId = p.model !== undefined ? String(p.model) : 'monomer';
+      const foldModel = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId);
+      if (foldModel?.family === 'esmfold2') {
+        const steps = p.esmfold2Steps;
+        if (steps !== undefined && !ESMFOLD2_STEPS.some((n) => steps === n || steps === String(n))) {
+          errs.push(`ESMFold2 diffusion schedule must be one of ${ESMFOLD2_STEPS.join(', ')}.`);
+        }
+        if ((p.msaMode ?? 'single') !== 'single') {
+          errs.push('ESMFold2 requires single-sequence mode.');
+        }
+        return errs;
+      }
+      const maxRecycles = modelId === 'mol1' || modelId.startsWith('multimer') ? 20 : 10;
+      if (p.recycles !== undefined) {
+        const rec = Number(p.recycles);
+        if (Number.isFinite(rec) && Number.isInteger(rec) && rec > maxRecycles && rec <= 20) {
+          errs.push(
+            `recycles must be <= ${maxRecycles} for "${modelId}" (up to 20 allowed for mol1 and AF2-Multimer).`,
+          );
+        }
+      }
+      if (String(p.msaMode ?? 'single') === 'a3m' && !String(p.msaA3mText ?? '').trim()) {
+        errs.push('Custom .a3m MSA mode requires non-empty msaA3mText alignment data.');
+      }
+      return errs;
+    },
   },
   thermompnn: {
     id: 'thermompnn',
@@ -2592,6 +2727,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 180,
     approxWeightsMB: 4,
+    precisionWeightsMB: { int8: 1.9, fp16: 3.7, fp32: 7.4 },
     licenseNote: 'MIT (Kuhlman-Lab/ThermoMPNN · WebGPU port ramithuh/thermompnn-webgpu)',
     description:
       'Predicts single point-mutation stability changes (ΔΔG in kcal/mol, negative = stabilizing) across all 20 amino acids from a 3D protein backbone and paints per-residue stability onto B-factors.',
@@ -2648,6 +2784,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 620,
     approxWeightsMB: 335,
+    precisionWeightsMB: { int8: 335, fp16: 667 },
     licenseNote: 'MIT (Biohub/esm · biohub/esmc-300m-2024-12 · WebGPU port ramithuh/esmc-webgpu)',
     description:
       'Sequence-only 333M-parameter protein language model computing L×20 zero-shot mutation log-likelihood ratios (wild-type or masked-marginal), naturalness / pseudo-perplexity tracks, and masked-position sequence fill.',
@@ -2730,6 +2867,14 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Maximum candidate sequences scored from an incoming SequenceSet.',
       },
     ],
+    crossValidate: (_p, ctx) => {
+      if (ctx?.connectedInputs !== undefined) {
+        if (!ctx.connectedInputs.has('sequences') && !ctx.connectedInputs.has('structure')) {
+          return ['ESM-C 300M requires at least one connected "sequences" or "structure" input.'];
+        }
+      }
+      return [];
+    },
   },
   dyna1: {
     id: 'dyna1',
@@ -2739,6 +2884,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     runtime: 'wgsl-custom',
     estimatedVramMB: 1150,
     approxWeightsMB: 844,
+    precisionWeightsMB: { int8: 844, fp16: 1745, fp32: 3362 },
     licenseNote: 'MIT (Dyna-1 classifier & port) · ESM-3 small open v1 backbone',
     description:
       'Predicts per-residue millisecond conformational exchange probabilities (0 = rigid, 1 = flexible) using ESM-3 small + VQ-VAE Structure Encoder + Dyna-1 in WebGPU. Automatically conditions on both sequence and 3D backbone coordinates when a structure is connected (matching upstream dyna1.py --use_pdb_seq), and paints dynamics onto 3D B-factors.',
@@ -2761,11 +2907,11 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         options: [
           { value: 'auto', label: 'Auto (Seq + Structure if wired)' },
           { value: 'seq+struct', label: 'Sequence + Structure (recommended)' },
-          { value: 'seq-only', label: 'Sequence only' },
+          { value: 'seq-only', label: 'Sequence only (omits 3D structure)' },
           { value: 'struct-only', label: 'Structure only' },
         ],
         description:
-          'Auto uses ESM-3 VQ-VAE 3D structure tokens + sequence whenever a full-backbone structure is connected (~88 MB encoder cached once), or sequence-only otherwise.',
+          'Auto uses ESM-3 VQ-VAE 3D structure tokens + sequence whenever a full-backbone structure is connected (~88 MB encoder cached once). Sequence-only skips 3D geometry cues and is best reserved for sequences without an available 3D structure.',
       },
       {
         key: 'precision',
@@ -2792,6 +2938,20 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Maximum candidate sequences scored from an incoming SequenceSet.',
       },
     ],
+    crossValidate: (p, ctx) => {
+      const errs: string[] = [];
+      if (ctx?.connectedInputs !== undefined) {
+        const hasSeq = ctx.connectedInputs.has('sequences');
+        const hasStruct = ctx.connectedInputs.has('structure');
+        const mode = String(p.inputMode ?? 'auto');
+        if (!hasSeq && !hasStruct) {
+          errs.push('Dyna-1 requires at least one connected "sequences" or "structure" input.');
+        } else if ((mode === 'struct-only' || mode === 'seq+struct') && !hasStruct) {
+          errs.push(`Dyna-1 (${mode}) requires a connected "structure" input.`);
+        }
+      }
+      return errs;
+    },
   },
   'top-k-filter': {
     id: 'top-k-filter',
@@ -3016,7 +3176,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         max: 20,
         step: 0.5,
         unit: 'Å',
-        upstreamDefaultHint: 'Default: max(2 × scRMSD, 4.0 Å)',
+        upstreamDefaultHint: 'Default: 4.0 Å',
         description: 'Maximum binder Cα RMSD (Å) after superimposing the locked target chain.',
       },
       {
@@ -3045,6 +3205,10 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Optional 0-based "foldIdx:refIdx" pairs for external-reference Kabsch superposition.',
       },
     ],
+    crossValidate: (p) => {
+      const err = validateResidueMappingSyntax(p.residueMapping);
+      return err ? [err] : [];
+    },
   },
 };
 
@@ -3336,7 +3500,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
           adapterId: 'rfd4-proteina',
           label: 'RFD4-Proteina',
           params: {
-            mode: 'preset',
+            mode: 'conditioned',
             length: 70,
             nsteps: 60,
             recycleSchedule: 'low',

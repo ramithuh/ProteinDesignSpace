@@ -15,6 +15,11 @@ export interface SchemaNumericSpec {
   integer?: boolean;
   defaultValue: number;
   unit?: string;
+  warnBelow?: {
+    threshold: number;
+    message: string;
+    fixValue?: number;
+  };
 }
 
 export interface SchemaValidationOptions {
@@ -29,10 +34,32 @@ export interface SchemaValidationOptions {
 
 const VALID_AA_CHAR_RE = /^[ACDEFGHIKLMNPQRSTVWYX]$/i;
 
-function isValidSchemaResidueToken(token: string): boolean {
-  const t = token.trim();
+/**
+ * Canonical single-source-of-truth residue selector token validator used across
+ * `param-schema.ts`, `param-validation.ts`, `SchemaParamFields.svelte`, and `NodeInspector.svelte`.
+ *
+ * Accepts:
+ * - Residue numbers / ranges (`A54`, `A16-35`, `12`, `10-14`)
+ * - Insertion codes (`A100A`, `A100A-100C`)
+ * - Negative residue numbers (`A-2`, `A-5--2`, `A-2-5`)
+ * - Colon-delimited multi-char chain selectors (`AA:1-5`, `AA:100A`)
+ * - Bare 1–4 char chain tokens (`A`, `AA`, `HL`) when `opts.allowBareChain` is true
+ * - Chain-qualified ligand/CCD tokens (`A:SAM`, `A:ZN`, `A:FE2`) when `opts.allowLigandRef` is true
+ *
+ * Rejects reversed ranges (`A999-1`, `A10B-10A`), cross-chain ranges (`A1-B5`), and malformed tokens.
+ */
+export function isValidResidueSelectorToken(
+  tok: string,
+  opts?: { allowBareChain?: boolean; allowLigandRef?: boolean },
+): boolean {
+  const t = tok.trim();
   if (!t) return false;
-  if (/^[A-Za-z_][A-Za-z0-9_]{0,3}$/.test(t) && !/^\d+$/.test(t)) return true;
+  if (opts?.allowBareChain && /^[A-Za-z_][A-Za-z0-9_]{0,3}$/.test(t) && !/^\d+$/.test(t)) {
+    return true;
+  }
+  if (opts?.allowLigandRef && /^[A-Za-z0-9_]{1,4}:[A-Za-z][A-Za-z0-9_]{0,4}$/.test(t)) {
+    return true;
+  }
   const colonM = /^([A-Za-z0-9_]+):(-?\d+)([A-Z])?(?:-(-?\d+)([A-Z])?)?$/.exec(t);
   const bareM = !colonM
     ? /^([A-Za-z_])?(-?\d+)([A-Z])?(?:-([A-Za-z_])?(-?\d+)([A-Z])?)?$/.exec(t)
@@ -71,6 +98,76 @@ function isValidSchemaResidueToken(token: string): boolean {
   if (end < start) return false;
   if (end === start && (startIns ?? '') > (endIns ?? '')) return false;
   return true;
+}
+
+/**
+ * Validate `designability-scorer` `residueMapping` syntax before runtime.
+ * Mirrors `parseReferenceResidueMapping` in `scheduler.ts`.
+ * Returns `null` when empty or valid, or a human-readable error message.
+ */
+export function validateResidueMappingSyntax(raw: unknown): string | null {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const checkInt = (v: unknown, role: string): string | null => {
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
+      return `Invalid residueMapping: ${role} must be a strict finite integer (>= 0; got ${String(v)}).`;
+    }
+    return null;
+  };
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    for (const tok of trimmed.split(/[,\s;]+/).filter(Boolean)) {
+      if (!/^(\d+)\s*(?::|->|=)\s*(\d+)$/.test(tok)) {
+        return `Invalid residueMapping entry "${tok}". Expected 0-based "foldIdx:refIdx" pairs (e.g. "0:0, 1:1, 2:2").`;
+      }
+    }
+    return null;
+  }
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (!Array.isArray(entry) || entry.length < 2) {
+        return 'Invalid residueMapping array: every entry must be a [foldIdx, refIdx] pair.';
+      }
+      const e0 = checkInt(entry[0], 'fold index');
+      if (e0) return e0;
+      const e1 = checkInt(entry[1], 'reference index');
+      if (e1) return e1;
+    }
+    return null;
+  }
+  if (typeof raw === 'object') {
+    const obj = raw as {
+      pairs?: unknown;
+      foldIndices?: unknown;
+      referenceIndices?: unknown;
+    };
+    if (Array.isArray(obj.pairs)) {
+      for (const entry of obj.pairs) {
+        if (!Array.isArray(entry) || entry.length < 2) {
+          return 'Invalid residueMapping.pairs: every entry must be a [foldIdx, refIdx] pair.';
+        }
+        const e0 = checkInt(entry[0], 'fold index');
+        if (e0) return e0;
+        const e1 = checkInt(entry[1], 'reference index');
+        if (e1) return e1;
+      }
+      return null;
+    }
+    if (Array.isArray(obj.foldIndices) && Array.isArray(obj.referenceIndices)) {
+      if (obj.foldIndices.length !== obj.referenceIndices.length) {
+        return `Invalid residueMapping: foldIndices (${obj.foldIndices.length}) and referenceIndices (${obj.referenceIndices.length}) must have equal length.`;
+      }
+      for (let i = 0; i < obj.foldIndices.length; i++) {
+        const e0 = checkInt(obj.foldIndices[i], 'fold index');
+        if (e0) return e0;
+        const e1 = checkInt(obj.referenceIndices[i], 'reference index');
+        if (e1) return e1;
+      }
+      return null;
+    }
+    return 'Invalid residueMapping object: provide either "pairs" or both "foldIndices" and "referenceIndices".';
+  }
+  return 'Invalid residueMapping parameter type.';
 }
 
 function resolveDefaultModeId(manifest: AdapterManifest): string | null {
@@ -139,7 +236,10 @@ export function getVisibleParamFields(
 }
 
 /** Convert a numeric `AdapterParamField` into a `NumericInput`-compatible spec object. */
-export function fieldToNumericSpec(field: AdapterParamField): SchemaNumericSpec {
+export function fieldToNumericSpec(
+  field: AdapterParamField,
+  activeMode?: string | null,
+): SchemaNumericSpec {
   const isInt = field.kind === 'integer';
   const defaultNum =
     typeof field.defaultValue === 'number' && Number.isFinite(field.defaultValue)
@@ -147,6 +247,21 @@ export function fieldToNumericSpec(field: AdapterParamField): SchemaNumericSpec 
       : typeof field.min === 'number' && Number.isFinite(field.min)
         ? field.min
         : 0;
+  let warnBelow: SchemaNumericSpec['warnBelow'];
+  if (field.warnBelow) {
+    const modeMatches =
+      !field.warnBelow.modes ||
+      field.warnBelow.modes.length === 0 ||
+      activeMode === undefined ||
+      (activeMode !== null && field.warnBelow.modes.includes(activeMode));
+    if (modeMatches) {
+      warnBelow = {
+        threshold: field.warnBelow.threshold,
+        message: field.warnBelow.message,
+        ...(field.warnBelow.fixValue !== undefined ? { fixValue: field.warnBelow.fixValue } : {}),
+      };
+    }
+  }
   return {
     min: typeof field.min === 'number' ? field.min : 0,
     max: typeof field.max === 'number' ? field.max : 1_000_000,
@@ -154,6 +269,7 @@ export function fieldToNumericSpec(field: AdapterParamField): SchemaNumericSpec 
     integer: isInt,
     defaultValue: defaultNum,
     ...(field.unit ? { unit: field.unit } : {}),
+    ...(warnBelow ? { warnBelow } : {}),
   };
 }
 
@@ -288,10 +404,15 @@ export function validateParamsWithSchema(
     if (field.kind === 'residue-list') {
       const str = String(raw ?? '').trim();
       if (str) {
+        const allowBareChain = Boolean(field.allowBareChain);
+        const allowLigandRef = field.studioRole === 'crop';
+        const exampleHint = allowBareChain
+          ? '"A", "A10", "A10-15", "A-2", or "A100A"'
+          : '"A10", "A10-15", "A-2", or "A100A"';
         for (const tok of str.split(/[,\s]+/).filter(Boolean)) {
-          if (!isValidSchemaResidueToken(tok)) {
+          if (!isValidResidueSelectorToken(tok, { allowBareChain, allowLigandRef })) {
             errs.push(
-              `"${label}": Invalid ${field.key} token "${tok}" (expected e.g. "A", "A10", "A10-15", "A-2", or "A100A").`,
+              `"${label}": Invalid ${field.key} token "${tok}" (expected e.g. ${exampleHint}).`,
             );
           }
         }

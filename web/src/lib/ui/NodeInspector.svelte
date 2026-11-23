@@ -8,12 +8,15 @@
     MPNN_VARIANT_OPTIONS,
     RFD4_BENCHMARK_OPTIONS,
   } from '$lib/engine/registry';
-  import { getActiveModeSpec, getVisibleParamFields } from '$lib/engine/param-schema';
-  import { STAGE_COLORS } from '$lib/engine/graph-utils';
+  import {
+    getActiveModeSpec,
+    getVisibleParamFields,
+    isValidResidueSelectorToken,
+  } from '$lib/engine/param-schema';
+  import { STAGE_COLORS, sanitizeParamsOnModeSwitch } from '$lib/engine/graph-utils';
   import {
     NUMERIC_SPECS,
     computeUploadDigest,
-    isValidResidueToken,
     isValidSha256Hex,
     validatePdbId,
     validateSequenceText,
@@ -178,6 +181,11 @@
 
   let manifest = $derived(ADAPTER_REGISTRY[node.adapterId]);
   let stageColor = $derived(STAGE_COLORS[manifest?.stage ?? 'source'] ?? '#64748b');
+  let inferredTemplateChain = $derived(
+    (upstreamStructure?.chainIds?.[0] || 'A').toUpperCase(),
+  );
+  const rfd4PresetOptions =
+    ADAPTER_REGISTRY['rfd4-proteina'].paramSchema?.find((f) => f.key === 'presetId')?.options ?? [];
 
   // Lightweight cache for parsed upstream template structure so typing motif/hotspot tokens
   // never re-parses large mmCIF/PDB texts on every keystroke.
@@ -391,30 +399,6 @@
   onDestroy(() => {
     flushPendingTextCommit();
   });
-
-  const SCORER_MOTIF_RMSD_SPEC: NumericFieldSpec = {
-    min: 0.1,
-    max: 10,
-    step: 0.1,
-    integer: false,
-    defaultValue: 1.0,
-    unit: 'Å',
-  };
-  const SCORER_IPAE_SPEC: NumericFieldSpec = {
-    min: 1,
-    max: 31.75,
-    step: 0.5,
-    integer: false,
-    defaultValue: 10.0,
-    unit: 'Å',
-  };
-  const SCORER_IPSAE_SPEC: NumericFieldSpec = {
-    min: 0,
-    max: 1,
-    step: 0.05,
-    integer: false,
-    defaultValue: 0,
-  };
 
   function localFoldMaxRecycles(modelId: string, family: string): number {
     return modelId === 'mol1' || family === 'af2-multimer' ? 20 : 10;
@@ -1246,7 +1230,12 @@
       {@const hotspotTokens = parseResidueTokens(node.params.hotspots)}
       {@const motifTokens = parseResidueTokens(node.params.motifSpan)}
       {@const hasCustomContig =
-        (rfdMode === 'motif' || rfdMode === 'binder') && String(node.params.contig ?? '').trim().length > 0}
+        (rfdMode === 'motif' ||
+          rfdMode === 'binder' ||
+          rfdMode === 'conditioned' ||
+          rfdMode === 'partial' ||
+          rfdMode === 'inverse-folding') &&
+        String(node.params.contig ?? '').trim().length > 0}
       <label class="full">
         Design Task
         <select
@@ -1254,22 +1243,14 @@
           value={rfdMode}
           onchange={(e) => {
             const nextMode = e.currentTarget.value;
-            const prevContig = String(node.params.contig ?? '').trim();
-            if (nextMode === 'binder' && /^\d+(?:-\d+)?$/.test(prevContig)) {
-              onUpdate(node.id, {
-                ...node.params,
-                mode: nextMode,
-                contig: '',
-                userEditedTask: true,
-              });
-              return;
-            }
-            setParam('mode', nextMode);
+            const sanitized = sanitizeParamsOnModeSwitch('rfd4-proteina', node.params, nextMode);
+            onUpdate(node.id, { ...sanitized, userEditedTask: true });
           }}
         >
           <option value="unconditional">Unconditional Monomer</option>
           <option value="motif">Motif Scaffolding (fixed residues)</option>
           <option value="binder">PPI Binder (target + hotspots)</option>
+          <option value="conditioned">Conditioned Design (inline / spec)</option>
           <option value="partial">Partial Diffusion (refine structure)</option>
           <option value="inverse-folding">Inverse Folding (design sequence)</option>
           <option value="preset">All-Atom / Built-In Task Preset</option>
@@ -1312,6 +1293,16 @@
           />
         </label>
       {:else if rfdMode === 'motif'}
+        <label>
+          Scaffold Length (aa)
+          <NumericInput
+            {disabled}
+            ariaLabel="Scaffold Length (aa)"
+            spec={NUMERIC_SPECS['rfd4-proteina'].length}
+            value={Number(node.params.length ?? 70)}
+            onChange={(v) => setParam('length', v)}
+          />
+        </label>
         <div class="chip-field full">
           <label>
             Fixed Motif Spans (click 3D residues or enter e.g. A16-35, A52-71)
@@ -1326,7 +1317,7 @@
           {#if motifTokens.length > 0}
             <div class="res-chips">
               {#each motifTokens as tok, i (`rfd_motif_${tok}_${i}`)}
-                {@const badTok = !isValidResidueToken(tok)}
+                {@const badTok = !isValidResidueSelectorToken(tok, { allowBareChain: false })}
                 <span class="res-chip" class:invalid-chip={badTok}>
                   {tok}
                   <button type="button" class="chip-x" {disabled} aria-label={`Remove motif ${tok}`} onclick={() => removeResidueTokenAt('motifSpan', i)}>×</button>
@@ -1350,8 +1341,8 @@
           <input
             type="text"
             {disabled}
-            placeholder="A"
-            value={String(node.params.lockChain ?? 'A')}
+            placeholder={`Auto (${inferredTemplateChain})`}
+            value={String(node.params.lockChain ?? '')}
             oninput={(e) => setParam('lockChain', e.currentTarget.value.toUpperCase())}
           />
         </label>
@@ -1389,7 +1380,93 @@
           {#if hotspotTokens.length > 0}
             <div class="res-chips">
               {#each hotspotTokens as tok, i (`rfd_hot_${tok}_${i}`)}
-                {@const badTok = !isValidResidueToken(tok)}
+                {@const badTok = !isValidResidueSelectorToken(tok, { allowBareChain: false })}
+                <span class="res-chip" class:invalid-chip={badTok}>
+                  {tok}
+                  <button type="button" class="chip-x" {disabled} aria-label={`Remove hotspot ${tok}`} onclick={() => removeResidueTokenAt('hotspots', i)}>×</button>
+                </span>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {:else if rfdMode === 'conditioned'}
+        <label>
+          Length (aa)
+          <NumericInput
+            {disabled}
+            ariaLabel="Length (aa)"
+            spec={NUMERIC_SPECS['rfd4-proteina'].length}
+            value={Number(node.params.length ?? 70)}
+            onChange={(v) => setParam('length', v)}
+          />
+        </label>
+        <label>
+          CATH Fold (optional)
+          <input
+            type="text"
+            {disabled}
+            placeholder="e.g. 3.40.50"
+            value={String(node.params.cathCode ?? '')}
+            oninput={(e) => setParam('cathCode', e.currentTarget.value)}
+          />
+        </label>
+        <label>
+          Target Chain
+          <input
+            type="text"
+            {disabled}
+            placeholder={`Auto (${inferredTemplateChain})`}
+            value={String(node.params.lockChain ?? '')}
+            oninput={(e) => setParam('lockChain', e.currentTarget.value.toUpperCase())}
+          />
+        </label>
+        <div class="chip-field full">
+          <label>
+            Fixed Motif Spans (optional)
+            <input
+              type="text"
+              {disabled}
+              placeholder="A16-35, A52-71"
+              value={String(node.params.motifSpan ?? '')}
+              oninput={(e) => setParam('motifSpan', e.currentTarget.value)}
+            />
+          </label>
+          {#if motifTokens.length > 0}
+            <div class="res-chips">
+              {#each motifTokens as tok, i (`rfd_cond_motif_${tok}_${i}`)}
+                {@const badTok = !isValidResidueSelectorToken(tok, { allowBareChain: false })}
+                <span class="res-chip" class:invalid-chip={badTok}>
+                  {tok}
+                  <button type="button" class="chip-x" {disabled} aria-label={`Remove motif ${tok}`} onclick={() => removeResidueTokenAt('motifSpan', i)}>×</button>
+                </span>
+              {/each}
+            </div>
+          {/if}
+        </div>
+        <label class="inline-check full">
+          <input
+            type="checkbox"
+            {disabled}
+            checked={Boolean(node.params.unindexedMotif)}
+            onchange={(e) => setParam('unindexedMotif', e.currentTarget.checked)}
+          />
+          Unindexed motif (auto-place catalytic residues)
+        </label>
+        <div class="chip-field full">
+          <label>
+            Binding Hotspots (optional)
+            <input
+              type="text"
+              {disabled}
+              placeholder="A54, A56, A66, A115"
+              value={String(node.params.hotspots ?? '')}
+              oninput={(e) => setParam('hotspots', e.currentTarget.value)}
+            />
+          </label>
+          {#if hotspotTokens.length > 0}
+            <div class="res-chips">
+              {#each hotspotTokens as tok, i (`rfd_cond_hot_${tok}_${i}`)}
+                {@const badTok = !isValidResidueSelectorToken(tok, { allowBareChain: false })}
                 <span class="res-chip" class:invalid-chip={badTok}>
                   {tok}
                   <button type="button" class="chip-x" {disabled} aria-label={`Remove hotspot ${tok}`} onclick={() => removeResidueTokenAt('hotspots', i)}>×</button>
@@ -1406,8 +1483,8 @@
             value={String(node.params.presetId ?? 'custom_cath_monomer')}
             onchange={(e) => setParam('presetId', e.currentTarget.value)}
           >
-            {#each RFD4_BENCHMARK_OPTIONS as opt (opt.id)}
-              <option value={opt.id}>[{opt.category}] {opt.label}</option>
+            {#each rfd4PresetOptions as opt (opt.value)}
+              <option value={opt.value}>{opt.label}</option>
             {/each}
           </select>
         </label>
@@ -1477,7 +1554,7 @@
           {/if}
         </summary>
         <div class="adv-fields">
-          {#if rfdMode === 'motif' || rfdMode === 'binder'}
+          {#if rfdMode === 'motif' || rfdMode === 'binder' || rfdMode === 'conditioned' || rfdMode === 'partial' || rfdMode === 'inverse-folding'}
             <label class="full">
               {rfdMode === 'binder' ? 'Binder Contig (optional override)' : 'Contig (optional override)'}
               <input
@@ -1595,18 +1672,11 @@
           value={g3Mode}
           onchange={(e) => {
             const nextMode = e.currentTarget.value;
-            if (nextMode === 'unconditional') {
-              onUpdate(node.id, {
-                ...node.params,
-                taskMode: nextMode,
-                lockChain: '',
-                motifSpan: '',
-                hotspots: '',
-                contig: '',
-              });
-              return;
-            }
-            setParam('taskMode', nextMode);
+            const sanitized = sanitizeParamsOnModeSwitch('genie3', node.params, nextMode);
+            onUpdate(
+              node.id,
+              nextMode === 'unconditional' ? sanitized : { ...sanitized, userEditedTask: true },
+            );
           }}
         >
           <option value="unconditional">Unconditional Monomer</option>
@@ -1665,7 +1735,7 @@
           {#if g3Motifs.length > 0}
             <div class="res-chips">
               {#each g3Motifs as tok, i (`g3_motif_${tok}_${i}`)}
-                {@const badTok = !isValidResidueToken(tok)}
+                {@const badTok = !isValidResidueSelectorToken(tok, { allowBareChain: false })}
                 <span class="res-chip" class:invalid-chip={badTok}>
                   {tok}
                   <button type="button" class="chip-x" {disabled} aria-label={`Remove motif ${tok}`} onclick={() => removeResidueTokenAt('motifSpan', i)}>×</button>
@@ -1684,7 +1754,7 @@
             value={Number(node.params.length ?? 80)}
             onChange={(v) => {
               const prevContig = String(node.params.contig ?? '');
-              const nextContig = updateBinderLengthInContig(prevContig, v, false);
+              const nextContig = updateBinderLengthInContig(prevContig, v, true);
               onUpdate(node.id, {
                 ...node.params,
                 length: v,
@@ -1700,8 +1770,8 @@
           <input
             type="text"
             {disabled}
-            placeholder="A"
-            value={String(node.params.lockChain ?? 'A')}
+            placeholder={`Auto (${inferredTemplateChain})`}
+            value={String(node.params.lockChain ?? '')}
             oninput={(e) => setParam('lockChain', e.currentTarget.value.toUpperCase())}
           />
         </label>
@@ -1719,7 +1789,7 @@
           {#if g3Hotspots.length > 0}
             <div class="res-chips">
               {#each g3Hotspots as tok, i (`g3_hot_${tok}_${i}`)}
-                {@const badTok = !isValidResidueToken(tok)}
+                {@const badTok = !isValidResidueSelectorToken(tok, { allowBareChain: false })}
                 <span class="res-chip" class:invalid-chip={badTok}>
                   {tok}
                   <button type="button" class="chip-x" {disabled} aria-label={`Remove hotspot ${tok}`} onclick={() => removeResidueTokenAt('hotspots', i)}>×</button>
@@ -1939,10 +2009,8 @@
         {#if fixedTokens.length > 0}
           <div class="res-chips">
             {#each fixedTokens as tok, i (`fix_${tok}_${i}`)}
-              {@const badTok =
-                !isValidResidueToken(tok) &&
-                !(/^[A-Za-z_][A-Za-z0-9_]{0,3}$/.test(tok) && !/^\d+$/.test(tok))}
-              <span class="res-chip" class:invalid-chip={badTok} title={badTok ? 'Expected format like A, A10, or A12-15' : undefined}>
+              {@const badTok = !isValidResidueSelectorToken(tok, { allowBareChain: true })}
+              <span class="res-chip" class:invalid-chip={badTok} title={badTok ? 'Expected format like A, AA, A10, or A12-15' : undefined}>
                 {tok}
                 <button
                   type="button"
@@ -2010,17 +2078,8 @@
             if (autoInfo.auto && nextMeta) {
               onUpdateLabel?.(node.id, `${nextMeta.shortLabel}${autoInfo.suffix}`);
             }
-            if (nextMeta?.family === 'esmfold2') {
-              setParam('model', nextModel);
-              return;
-            }
-            const nextMaxRec = nextMeta ? localFoldMaxRecycles(nextModel, nextMeta.family) : 10;
-            const curRec = Number(node.params.recycles ?? 1);
-            if (Number.isFinite(curRec) && curRec > nextMaxRec) {
-              onUpdate(node.id, { ...node.params, model: nextModel, recycles: nextMaxRec });
-              return;
-            }
-            setParam('model', nextModel);
+            const sanitized = sanitizeParamsOnModeSwitch('localfold-af2', node.params, nextModel);
+            onUpdate(node.id, sanitized);
           }}
         >
           <optgroup label="AlphaFold2-Class (Monomer)">
@@ -2292,10 +2351,16 @@
       </details>
 
     {:else if node.adapterId === 'designability-scorer'}
-      {@const curMotifThresh = Number(node.params.motifRmsdThreshold ?? 1.0)}
-      {@const curIpaeThresh = Number(node.params.ipaeThreshold ?? 10.0)}
-      {@const curIpsaeThresh = Number(node.params.ipsaeThreshold ?? 0)}
-      {@const hasCustomAdvGate = curMotifThresh !== 1.0 || curIpaeThresh !== 10.0 || curIpsaeThresh > 0}
+      {@const scorerAdvFields = getVisibleParamFields(manifest, node.params, 'advanced')}
+      {@const hasCustomAdvGate =
+        Number(node.params.motifRmsdThreshold ?? 1.0) !== 1.0 ||
+        Number(node.params.ipaeThreshold ?? 10.0) !== 10.0 ||
+        Number(node.params.ipsaeThreshold ?? 0) > 0 ||
+        (node.params.targetAlignedBinderRmsdThreshold !== undefined &&
+          Number(node.params.targetAlignedBinderRmsdThreshold) !== 4.0) ||
+        Boolean(node.params.allowExternalReference) ||
+        Boolean(node.params.strictLineage) ||
+        Boolean(String(node.params.residueMapping ?? '').trim())}
       <label>
         scRMSD &lt; Å
         <NumericInput
@@ -2318,43 +2383,18 @@
       </label>
       <details class="adv-details full">
         <summary>
-          Advanced thresholds
+          Advanced thresholds &amp; reference options
           {#if hasCustomAdvGate}
             <span class="adv-badge">Custom</span>
           {/if}
         </summary>
         <div class="adv-fields">
-          <label>
-            Motif RMSD threshold (Å)
-            <NumericInput
-              {disabled}
-              ariaLabel="Motif RMSD threshold (Å)"
-              spec={SCORER_MOTIF_RMSD_SPEC}
-              value={curMotifThresh}
-              onChange={(v) => setParam('motifRmsdThreshold', v)}
-            />
-          </label>
-          <label>
-            iPAE threshold (Å)
-            <NumericInput
-              {disabled}
-              ariaLabel="iPAE threshold (Å)"
-              spec={SCORER_IPAE_SPEC}
-              value={curIpaeThresh}
-              onChange={(v) => setParam('ipaeThreshold', v)}
-            />
-          </label>
-          <label>
-            ipSAE threshold (0 = off)
-            <NumericInput
-              {disabled}
-              ariaLabel="ipSAE threshold"
-              spec={SCORER_IPSAE_SPEC}
-              value={curIpsaeThresh}
-              onChange={(v) => setParam('ipsaeThreshold', v)}
-            />
-            <span class="field-hint">Optional Dunbrack interface gate (e.g. 0.6; 0 disables).</span>
-          </label>
+          <SchemaParamFields
+            fields={scorerAdvFields}
+            params={node.params}
+            {disabled}
+            onChange={(key, value) => setParam(key, value)}
+          />
         </div>
       </details>
 
@@ -2373,7 +2413,11 @@
           <select
             {disabled}
             value={schemaActiveMode?.id ?? manifest.modes[0].id}
-            onchange={(e) => setParam(schemaModeKey, e.currentTarget.value)}
+            onchange={(e) => {
+              const nextMode = e.currentTarget.value;
+              const sanitized = sanitizeParamsOnModeSwitch(node.adapterId, node.params, nextMode);
+              onUpdate(node.id, sanitized);
+            }}
           >
             {#each manifest.modes as modeSpec (modeSpec.id)}
               <option value={modeSpec.id}>{modeSpec.label}</option>
@@ -2397,6 +2441,7 @@
         <SchemaParamFields
           fields={schemaPrimaryFields}
           params={node.params}
+          activeMode={schemaActiveMode?.id}
           {disabled}
           onChange={(key, value) => setParam(key, value)}
         />
@@ -2408,6 +2453,7 @@
             <SchemaParamFields
               fields={schemaAdvancedFields}
               params={node.params}
+              activeMode={schemaActiveMode?.id}
               {disabled}
               onChange={(key, value) => setParam(key, value)}
             />

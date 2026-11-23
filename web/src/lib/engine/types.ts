@@ -615,6 +615,15 @@ export interface AdapterParamField {
   upstreamDefaultHint?: string;
   /** Optional interactive Node Studio brush role for residue-list / tied-position fields. */
   studioRole?: 'fixed' | 'hotspot' | 'motif' | 'tied' | 'crop';
+  /** Optional non-blocking guardrail warning shown when numeric value drops below `threshold`. */
+  warnBelow?: {
+    threshold: number;
+    message: string;
+    modes?: string[];
+    fixValue?: number;
+  };
+  /** For `residue-list` fields: whether bare chain tokens (e.g. "A", "AA") are valid selectors. */
+  allowBareChain?: boolean;
 }
 
 export interface AdapterModeSpec {
@@ -633,6 +642,10 @@ export interface AdapterManifest {
   runtime: RuntimeKind;
   estimatedVramMB: number;
   approxWeightsMB: number;
+  /** Optional per-precision weight download sizes in MB (SSOT for preflight & catalog). */
+  precisionWeightsMB?: Record<string, number>;
+  /** True when model weights carry non-commercial license restrictions. */
+  nonCommercial?: boolean;
   licenseNote: string;
   description: string;
   inputs: Record<string, PortSpec>;
@@ -643,6 +656,11 @@ export interface AdapterManifest {
   modes?: AdapterModeSpec[];
   /** Declarative parameter schema (single source of truth for UI, validation & coverage tests). */
   paramSchema?: AdapterParamField[];
+  /** Optional cross-field or cross-input validation hook run after declarative schema validation. */
+  crossValidate?: (
+    params: Record<string, unknown>,
+    ctx?: { connectedInputs?: ReadonlySet<string> },
+  ) => string[];
 }
 
 export interface WorkflowNode {
