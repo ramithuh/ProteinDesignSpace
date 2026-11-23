@@ -1080,9 +1080,16 @@
   }
 
   function handleProgress(ev: NodeProgressEvent) {
-    const isRemoteEv = ev.phase === 'remote' || Boolean(ev.detail?.startsWith('[Host GPU]'));
+    const node = graph.nodes.find((n) => n.id === ev.nodeId);
+    const isRemoteEv =
+      ev.phase === 'remote' ||
+      Boolean(ev.detail?.startsWith('[Host GPU]')) ||
+      (Boolean(node) &&
+        shouldRouteNodeToRemote(node!, computeBackend, {
+          localWebGpuAvailable: webgpuSupported !== false,
+          localWebGpuFallback: webgpuIsFallback,
+        }));
     if (!isRemoteEv && webgpuSupported === false && (ev.status === 'running' || ev.status === 'done')) {
-      const node = graph.nodes.find((n) => n.id === ev.nodeId);
       if (node && ADAPTER_REGISTRY[node.adapterId]?.runtime !== 'cpu-ts') {
         webgpuSupported = true;
         webgpuDetail = 'ready (worker verified)';
