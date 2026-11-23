@@ -120,8 +120,10 @@ function normalizeVariant(raw: unknown): Variant {
 }
 
 function normalizePrecision(raw: unknown): Precision {
-  const val = String(raw ?? 'fp16').trim().toLowerCase();
-  return val === 'int8' ? 'int8' : 'fp16';
+  if (raw == null || String(raw).trim() === '') return 'fp16';
+  const val = String(raw).trim().toLowerCase();
+  if (val === 'fp16' || val === 'int8') return val;
+  throw new Error(`Unsupported AntiFold/ESM-IF1 precision "${String(raw)}" (supported: fp16, int8).`);
 }
 
 function normalizeSamplingMode(raw: unknown): SamplingMode {

@@ -747,7 +747,7 @@ function resolveSequenceDesignerNodeSpec(
     };
   }
   // web-protein-mpnn or solublempnn
-  const isCa = genId === 'genie3' || mpnnFamily === 'ca';
+  const isCa = CA_ONLY_GENERATORS.has(genId) || mpnnFamily === 'ca';
   if (isCa) {
     return {
       dedupeKey: 'web-protein-mpnn:ca',
@@ -1233,6 +1233,12 @@ function applyEditCurrentPlan(
           inferredAdapters.add('antifold-esmif1');
         }
         if (op.numDesigns !== undefined && op.numDesigns !== null) {
+          for (const n of nodes) {
+            const manifest = resolvePlannerManifest(n.adapterId);
+            if (manifest?.paramSchema?.some((f) => f.key === 'numDesigns')) {
+              inferredAdapters.add(n.adapterId);
+            }
+          }
           inferredAdapters.add('rfd4-proteina');
           inferredAdapters.add('genie3');
           inferredAdapters.add('protpardelle');
@@ -1292,7 +1298,13 @@ function applyEditCurrentPlan(
           }
         }
         if (op.numDesigns !== undefined && op.numDesigns !== null) {
-          if (target.adapterId === 'rfd4-proteina' || target.adapterId === 'genie3') {
+          const manifest = resolvePlannerManifest(target.adapterId);
+          const numDesignsSpec = manifest?.paramSchema?.find((f) => f.key === 'numDesigns');
+          if (numDesignsSpec) {
+            const minD = typeof numDesignsSpec.min === 'number' ? numDesignsSpec.min : 1;
+            const maxD = typeof numDesignsSpec.max === 'number' ? numDesignsSpec.max : 16;
+            p.numDesigns = Math.max(minD, Math.min(maxD, Math.round(op.numDesigns)));
+          } else if (target.adapterId === 'rfd4-proteina' || target.adapterId === 'genie3') {
             p.numDesigns = Math.max(1, Math.min(16, Math.round(op.numDesigns)));
           } else if (target.adapterId === 'protpardelle') {
             p.numDesigns = Math.max(1, Math.min(8, Math.round(op.numDesigns)));
@@ -1420,13 +1432,30 @@ function applyEditCurrentPlan(
     } else if (op.action === 'add_sequence_designer') {
       let structTarget = resolveNode(op.attachToNodeId);
       if (!structTarget || !hasOutputPort(structTarget, 'structure')) {
-        const structPriority = ['pdb-input', 'rfd4-proteina', 'genie3', 'localfold-af2'];
+        const structPriority = [
+          'pdb-input',
+          'rfd4-proteina',
+          'genie3',
+          'boltzgen',
+          'protpardelle',
+          'rfdiffusion',
+          'genie2',
+          'frameflow',
+          'la-proteina',
+          'proteina',
+          'sid-protein',
+          'foldflow2',
+          'localfold-af2',
+        ];
         for (const aid of structPriority) {
           const matches = nodes.filter((n) => n.adapterId === aid && hasOutputPort(n, 'structure'));
           if (matches.length > 0) {
             structTarget = matches[matches.length - 1];
             break;
           }
+        }
+        if (!structTarget) {
+          structTarget = [...nodes].reverse().find((n) => hasOutputPort(n, 'structure'));
         }
       }
       if (!structTarget) {
@@ -1446,7 +1475,7 @@ function applyEditCurrentPlan(
                 : 'web-protein-mpnn';
       const isCa =
         adapterId === 'web-protein-mpnn' &&
-        (structTarget.adapterId === 'genie3' || op.mpnnFamily === 'ca');
+        (CA_ONLY_GENERATORS.has(structTarget.adapterId) || op.mpnnFamily === 'ca');
       const useSoluble =
         adapterId === 'web-protein-mpnn' &&
         !isCa &&
@@ -2173,6 +2202,10 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
       String(tn.params.family ?? '').trim().toLowerCase() === 'ca'
     ) {
       tn.params.family = 'solublempnn';
+      const curModel = String(tn.params.modelName ?? 'v_48_020');
+      if (curModel !== 'v_48_020' && curModel !== 'v_48_010') {
+        tn.params.modelName = 'v_48_020';
+      }
       if (!tn.label || /c[αa]/i.test(tn.label)) {
         tn.label = 'SolubleMPNN';
       }
@@ -2818,6 +2851,10 @@ function compileBlockGraphPlan(
         String(tn.params.family ?? '').trim().toLowerCase() === 'ca')
     ) {
       tn.params.family = 'solublempnn';
+      const curModel = String(tn.params.modelName ?? 'v_48_020');
+      if (curModel !== 'v_48_020' && curModel !== 'v_48_010') {
+        tn.params.modelName = 'v_48_020';
+      }
       if (!tn.label || /c[αa]/i.test(tn.label)) {
         tn.label = 'SolubleMPNN';
       }
@@ -3065,6 +3102,16 @@ export function compileWorkflowPlanToGraph(
       if (gens.length === 0) gens = ['rfd4-proteina'];
       notes.push(
         'ProtPardelle-1c released denoisers are protein-only, so RFD4-Proteina is used for ligand/DNA conditioning.',
+      );
+    }
+    if (
+      (plan.designTask === 'binder' || bench?.category === 'binder') &&
+      gens.includes('protpardelle')
+    ) {
+      gens = gens.filter((g) => g !== 'protpardelle');
+      if (gens.length === 0) gens = ['rfd4-proteina'];
+      notes.push(
+        'ProtPardelle-1c does not support protein–protein binder design (monomer/motif/partial only), so RFD4-Proteina is used instead.',
       );
     }
 
@@ -3561,8 +3608,11 @@ export function compileWorkflowPlanToGraph(
               ? { family: 'solublempnn', modelName: 'v_48_020' }
               : useCa
                 ? { family: 'ca', modelName: 'v_48_020' }
-                : plan.mpnnFamily && adapterId === 'web-protein-mpnn'
-                  ? { family: plan.mpnnFamily, modelName: 'v_48_020' }
+                : adapterId === 'web-protein-mpnn'
+                  ? {
+                      family: plan.mpnnFamily ?? (task === 'proteinmpnn' ? 'proteinmpnn' : 'solublempnn'),
+                      modelName: 'v_48_020',
+                    }
                   : {}),
             ...(plan.numSequences
               ? { numSequences: Math.max(1, Math.min(8, Math.round(plan.numSequences))) }
@@ -4066,7 +4116,7 @@ function extractPromptFoldModels(prompt: string): FoldOracleId[] {
   if (multiMatch) {
     hits.push({ idx: multiMatch.index, id: 'multimer' });
   } else {
-    check(/\b(?:af2|alphafold2|alphafold)\b/i, 'monomer');
+    check(/\b(?:af2|alphafold[\s-]*2|alphafold(?!\s*3\b))\b/i, 'monomer');
   }
   check(/\b(?:boltz[\s-]*2|boltz2)\b/i, 'boltz2');
   check(/\b(?:rf3|rosettafold[\s-]*3|rosettafold3)\b/i, 'rosettafold3');
@@ -4075,7 +4125,12 @@ function extractPromptFoldModels(prompt: string): FoldOracleId[] {
   check(/\b(?:opendde)\b/i, 'opendde');
   check(/\b(?:mol[\s-]*1|mol1)\b/i, 'mol1');
   check(/\b(?:intellifold[\s-]*2|intellifold2)\b/i, 'intellifold2');
-  check(/\b(?:esmfold[\s-]*2|ef2)\b/i, 'ef2-fast-300m');
+  const ef2_600 = /\b(?:esmfold[\s-]*2|ef2)[\s-]*(?:fast[\s-]*)?600m\b/i.exec(prompt);
+  if (ef2_600) {
+    hits.push({ idx: ef2_600.index, id: 'ef2-fast-600m' });
+  } else {
+    check(/\b(?:esmfold[\s-]*2|ef2)\b/i, 'ef2-fast-300m');
+  }
   check(/\b(?:af3|alphafold[\s-]*3)\b/i, 'af3');
   hits.sort((a, b) => a.idx - b.idx);
   return hits.map((h) => h.id).slice(0, MAX_FOLD_MODELS);
@@ -4258,6 +4313,8 @@ export function parseDeterministicEditOperations(
       ops.push({ ...makeEmptyEditOp('add_esmc'), score: false });
     } else if (hasAddVerb && /\bdyna[\s-]*1\b/i.test(clause)) {
       ops.push({ ...makeEmptyEditOp('add_dyna1'), score: false });
+    } else if (hasAddVerb && /\bgnina\b/i.test(clause)) {
+      ops.push({ ...makeEmptyEditOp('add_gnina'), score: false });
     } else if ((hasAddVerb || /\binsert\b/i.test(clause)) && /\btop[\s-]*k\b/i.test(clause)) {
       const topK = extractPromptTopK(clause) ?? 2;
       ops.push({ ...makeEmptyEditOp('insert_top_k'), topK });
@@ -4701,7 +4758,7 @@ function reconcileBlockGraphPlan(
       if (!n.params.symmetry) n.params.symmetry = promptSym;
     }
     const effMode = String(n.params.taskMode ?? n.params.mode ?? '').trim().toLowerCase();
-    if (effMode === 'symmetry' && promptSym && !n.params.symmetry) {
+    if (effMode === 'symmetry' && promptSym && String(n.params.symmetry ?? '').toLowerCase() !== promptSym) {
       n.params.symmetry = promptSym;
     }
     if (promptLength !== null) {

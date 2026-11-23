@@ -34,9 +34,10 @@ const DEFAULT_BASE_URL = 'https://huggingface.co/ramithuh/dyna1-webgpu/resolve/m
 type Precision = 'int8' | 'fp16' | 'fp32';
 
 function normalizePrecision(raw: unknown): Precision {
-  const val = String(raw ?? 'int8').trim().toLowerCase();
-  if (val === 'fp16' || val === 'fp32') return val;
-  return 'int8';
+  if (raw == null || String(raw).trim() === '') return 'int8';
+  const val = String(raw).trim().toLowerCase();
+  if (val === 'int8' || val === 'fp16' || val === 'fp32') return val;
+  throw new Error(`Unsupported Dyna-1 precision "${String(raw)}" (supported: int8, fp16, fp32).`);
 }
 
 function cleanCanonicalSequence(raw: string, label: string): string {
@@ -107,6 +108,13 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
 
   const device = await acquireWebGpuDevice();
   ownedDevice = device;
+  void device.lost.then(() => {
+    if (ownedDevice === device) {
+      engine = null;
+      ownedDevice = null;
+      loadedPrecision = null;
+    }
+  });
 
   const envBaseUrl = (import.meta.env.VITE_DYNA1_WEIGHTS_URL as string | undefined)?.trim();
   const baseUrl = envBaseUrl || DEFAULT_BASE_URL;

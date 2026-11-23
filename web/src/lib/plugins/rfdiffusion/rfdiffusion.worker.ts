@@ -26,7 +26,10 @@ const VALID_SYMMETRIES = new Set(['c2', 'c3', 'c4', 'c6', 'd2', 'd3']);
 const SYMMETRY_COPIES: Record<string, number> = { c2: 2, c3: 3, c4: 4, c6: 6, d2: 4, d3: 6 };
 
 function normalizePrecision(raw: unknown): Precision {
-  return String(raw ?? 'int8').trim().toLowerCase() === 'fp16' ? 'fp16' : 'int8';
+  if (raw == null || String(raw).trim() === '') return 'int8';
+  const val = String(raw).trim().toLowerCase();
+  if (val === 'int8' || val === 'fp16') return val;
+  throw new Error(`Unsupported RFdiffusion precision "${String(raw)}" (supported: int8, fp16).`);
 }
 
 function normalizeTaskMode(raw: unknown): TaskMode {

@@ -19,7 +19,10 @@ type Precision = 'int8' | 'fp16';
 type SampleMode = 'sc' | 'vf';
 
 function normalizePrecision(raw: unknown): Precision {
-  return String(raw ?? 'int8').trim().toLowerCase() === 'fp16' ? 'fp16' : 'int8';
+  if (raw == null || String(raw).trim() === '') return 'int8';
+  const val = String(raw).trim().toLowerCase();
+  if (val === 'fp16' || val === 'int8') return val;
+  throw new Error(`Unsupported Proteina precision "${String(raw)}" (supported: int8, fp16).`);
 }
 
 function normalizeMode(raw: unknown): SampleMode {

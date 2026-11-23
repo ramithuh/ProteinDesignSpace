@@ -18,7 +18,10 @@ const DEFAULT_BASE_URL =
 type Precision = 'int8' | 'fp16';
 
 function normalizePrecision(raw: unknown): Precision {
-  return String(raw ?? 'int8').trim().toLowerCase() === 'fp16' ? 'fp16' : 'int8';
+  if (raw == null || String(raw).trim() === '') return 'int8';
+  const val = String(raw).trim().toLowerCase();
+  if (val === 'fp16' || val === 'int8') return val;
+  throw new Error(`Unsupported SiD-Protein precision "${String(raw)}" (supported: int8, fp16).`);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -39,9 +39,10 @@ type Precision = 'int8' | 'fp16' | 'fp32';
 type TaskMode = 'score' | 'pocket-scan' | 'minimize' | 'dock';
 
 function normalizePrecision(raw: unknown): Precision {
-  const val = String(raw ?? 'fp16').trim().toLowerCase();
-  if (val === 'int8' || val === 'fp32') return val;
-  return 'fp16';
+  if (raw == null || String(raw).trim() === '') return 'fp16';
+  const val = String(raw).trim().toLowerCase();
+  if (val === 'int8' || val === 'fp16' || val === 'fp32') return val;
+  throw new Error(`Unsupported GNINA precision "${String(raw)}" (supported: int8, fp16, fp32).`);
 }
 
 function normalizeTaskMode(raw: unknown): TaskMode {
@@ -120,6 +121,13 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
 
   const device = await acquireWebGpuDevice();
   ownedDevice = device;
+  void device.lost.then(() => {
+    if (ownedDevice === device) {
+      engine = null;
+      ownedDevice = null;
+      loadedPrecision = null;
+    }
+  });
 
   const envBaseUrl = (import.meta.env.VITE_GNINA_WEIGHTS_URL as string | undefined)?.trim();
   const baseUrl = envBaseUrl || DEFAULT_BASE_URL;

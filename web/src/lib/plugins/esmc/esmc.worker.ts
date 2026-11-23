@@ -30,8 +30,10 @@ type Precision = 'int8' | 'fp16';
 type EsmcMode = 'wildtype' | 'masked' | 'fill';
 
 function normalizePrecision(raw: unknown): Precision {
-  const val = String(raw ?? 'int8').trim().toLowerCase();
-  return val === 'fp16' ? 'fp16' : 'int8';
+  if (raw == null || String(raw).trim() === '') return 'int8';
+  const val = String(raw).trim().toLowerCase();
+  if (val === 'fp16' || val === 'int8') return val;
+  throw new Error(`Unsupported ESM-C precision "${String(raw)}" (supported: int8, fp16).`);
 }
 
 function normalizeMode(raw: unknown): EsmcMode {
@@ -189,8 +191,18 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
     }
   };
 
-  engine = await loadOnce(false);
+  const loaded = await loadOnce(false);
+  engine = loaded;
   loadedPrecision = precision;
+  const engDevice = (loaded as { device?: GPUDevice } | null)?.device;
+  if (engDevice?.lost) {
+    void engDevice.lost.then(() => {
+      if (engine === loaded) {
+        engine = null;
+        loadedPrecision = null;
+      }
+    });
+  }
   return engine;
 }
 

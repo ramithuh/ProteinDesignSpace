@@ -17,7 +17,10 @@ const DEFAULT_BASE_URL = 'https://huggingface.co/ramithuh/genie2-webgpu/resolve/
 type Precision = 'int8' | 'fp16';
 
 function normalizePrecision(raw: unknown): Precision {
-  return String(raw ?? 'fp16').trim().toLowerCase() === 'int8' ? 'int8' : 'fp16';
+  if (raw == null || String(raw).trim() === '') return 'fp16';
+  const val = String(raw).trim().toLowerCase();
+  if (val === 'int8' || val === 'fp16') return val;
+  throw new Error(`Unsupported Genie 2 precision "${String(raw)}" (supported: fp16, int8).`);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

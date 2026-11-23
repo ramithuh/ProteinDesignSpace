@@ -365,12 +365,26 @@ function readRawBinTensor(record, buffer) {
  * @param {{ onProgress?: (p: { loadedShards: number, totalShards: number, loadedBytes: number, totalBytes: number, fraction: number }) => void, concurrency?: number }} [opts]
  * @returns {Promise<{ tensors: Record<string, { data: Float32Array, shape: number[], dtype: string }>, config: object | null, manifest: object }>}
  */
+async function verifyShardSha256(buf, expectedHex, filename) {
+  if (!expectedHex || typeof expectedHex !== 'string') return;
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return;
+  const digest = await subtle.digest('SHA-256', buf);
+  const actualHex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+  if (actualHex !== expectedHex.trim().toLowerCase()) {
+    throw new Error(
+      `Genie 3 weight shard integrity mismatch for ${filename}: expected SHA-256 ${expectedHex}, got ${actualHex}`,
+    );
+  }
+}
+
 export async function loadWeightsFromManifestData(manifest, loadShard, opts = {}) {
   const { onProgress = null, concurrency = 4 } = opts;
 
   // Determine list of shard files
   const shardSet = new Set();
   const shardBytesMap = new Map();
+  const shardSha256Map = new Map();
 
   if (Array.isArray(manifest.shards)) {
     for (const entry of manifest.shards) {
@@ -380,6 +394,16 @@ export async function loadWeightsFromManifestData(manifest, loadShard, opts = {}
         if (typeof entry === 'object' && (entry.bytes || entry.size)) {
           shardBytesMap.set(file, entry.bytes ?? entry.size);
         }
+        if (typeof entry === 'object' && typeof entry.sha256 === 'string' && entry.sha256.trim()) {
+          shardSha256Map.set(file, entry.sha256.trim());
+        }
+      }
+    }
+  }
+  if (manifest.sha256 && typeof manifest.sha256 === 'object') {
+    for (const [file, digest] of Object.entries(manifest.sha256)) {
+      if (typeof digest === 'string' && digest.trim()) {
+        shardSha256Map.set(file, digest.trim());
       }
     }
   }
@@ -428,6 +452,10 @@ export async function loadWeightsFromManifestData(manifest, loadShard, opts = {}
       const buf = ArrayBuffer.isView(rawBuf)
         ? rawBuf.buffer.slice(rawBuf.byteOffset, rawBuf.byteOffset + rawBuf.byteLength)
         : rawBuf;
+      const expectedSha = shardSha256Map.get(file);
+      if (expectedSha) {
+        await verifyShardSha256(buf, expectedSha, file);
+      }
 
       if (file.endsWith('.safetensors')) {
         const parsed = parseSafetensors(buf);

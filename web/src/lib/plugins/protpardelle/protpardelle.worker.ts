@@ -46,8 +46,10 @@ const ALLATOM_CHECKPOINTS = new Set([
 const TIP_CHECKPOINTS = new Set(['cc91_tip_epoch480']);
 
 function normalizePrecision(raw: unknown): Precision {
-  const val = String(raw ?? 'int8').trim().toLowerCase();
-  return val === 'fp16' ? 'fp16' : 'int8';
+  if (raw == null || String(raw).trim() === '') return 'int8';
+  const val = String(raw).trim().toLowerCase();
+  if (val === 'fp16' || val === 'int8') return val;
+  throw new Error(`Unsupported ProtPardelle precision "${String(raw)}" (supported: int8, fp16).`);
 }
 
 function normalizeCheckpoint(raw: unknown): string {

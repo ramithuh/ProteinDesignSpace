@@ -29,7 +29,10 @@ function makeMulberry32(seed: number): () => number {
 }
 
 function normalizePrecision(raw: unknown): Precision {
-  return String(raw ?? 'fp16').trim().toLowerCase() === 'int8' ? 'int8' : 'fp16';
+  if (raw == null || String(raw).trim() === '') return 'fp16';
+  const val = String(raw).trim().toLowerCase();
+  if (val === 'int8' || val === 'fp16') return val;
+  throw new Error(`Unsupported FrameFlow precision "${String(raw)}" (supported: fp16, int8).`);
 }
 
 function normalizeSchedule(raw: unknown): Schedule {
