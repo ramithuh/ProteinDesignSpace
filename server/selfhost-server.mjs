@@ -2,51 +2,55 @@
 /**
  * Zero-Python Self-Hosted WebGPU Server for denovo.run (ProteinDesignSpace).
  *
- * Runs ALL 22 existing browser-native JS/WebGPU workers on the host machine's GPU
- * inside a single persistent headless Chromium instance — zero Python, zero uv/conda,
- * zero CUDA wheel conflicts — while serving the static denovo.run web app and
- * exposing a clean HTTP + SSE execution API for LAN / Tailscale / iPad / thin clients.
- *
- * Usage:
- *   node server/selfhost-server.mjs
- *
- * Environment variables:
- *   PORT=8787                         HTTP listen port (default: 8787)
- *   HOST=0.0.0.0                      Bind address (default: 0.0.0.0)
- *   DENOVO_API_TOKEN=...              Optional Bearer token for /api/* endpoints
- *   DENOVO_ALLOWED_ORIGINS=*          Comma-separated CORS origins or * (default: *)
- *   DENOVO_DATA_DIR=...               Persistent Chromium profile / OPFS weight cache dir
- *   DENOVO_CHROME_PATH=...            Explicit Chromium/Chrome binary path (auto-detected if omitted)
- *   DENOVO_ALLOW_SOFTWARE_GPU=0       Set to 1 to permit SwiftShader/software WebGPU fallback
- *   DENOVO_MAX_BODY_MB=128            Max JSON request payload size in MB (default: 128)
+ * Hardened host-GPU execution server:
+ *   - Defaults to loopback (127.0.0.1) and same-origin only (no wildcard CORS)
+ *   - Refuses non-loopback binds unless DENOVO_API_TOKEN is configured
+ *   - Constant-time Bearer token verification (SHA-256 + crypto.timingSafeEqual)
+ *   - Server-side Origin allowlist + Content-Type: application/json enforcement
+ *   - Canonical realpath + path.relative static file containment & browser security headers
+ *   - Allowlisted GPU adapter validation + bounded upload/queue/job-timeout budgets
+ *   - Per-job random cancel capability tokens (prevents cross-user job cancellation)
+ *   - Minimal allowlisted environment + Chromium sandbox enabled by default
  */
 
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, '..');
-const BUILD_DIR = path.resolve(REPO_ROOT, 'web', 'build');
+const DEFAULT_REPO_ROOT = path.resolve(__dirname, '..');
+const DEFAULT_BUILD_DIR = path.resolve(DEFAULT_REPO_ROOT, 'web', 'build');
 
-const PORT = Number(process.env.PORT || 8787);
-const HOST = process.env.HOST || '0.0.0.0';
-const API_TOKEN = (process.env.DENOVO_API_TOKEN || '').trim();
-const ALLOWED_ORIGINS = (process.env.DENOVO_ALLOWED_ORIGINS || '*').trim();
-const DATA_DIR = path.resolve(
-  process.env.DENOVO_DATA_DIR || path.join(os.homedir(), '.cache', 'denovo-selfhost', 'profile'),
-);
-const ALLOW_SOFTWARE_GPU = process.env.DENOVO_ALLOW_SOFTWARE_GPU === '1';
-const MAX_BODY_BYTES = Math.max(4, Number(process.env.DENOVO_MAX_BODY_MB || 128)) * 1024 * 1024;
-const MAX_FOLD_RESIDUES = Math.max(
-  512,
-  Math.min(4096, Math.round(Number(process.env.DENOVO_MAX_FOLD_RESIDUES || 2048) || 2048)),
-);
+/** Explicit allowlist of GPU-backed denovo.run adapters permitted on /api/run-node (H4). */
+export const ALLOWED_GPU_ADAPTER_IDS = new Set([
+  'web-protein-mpnn',
+  'localfold-af2',
+  'rfd4-proteina',
+  'genie3',
+  'thermompnn',
+  'ligandmpnn',
+  'lasermpnn',
+  'antifold-esmif1',
+  'protpardelle',
+  'rfdiffusion',
+  'boltzgen',
+  'evodiff',
+  'la-proteina',
+  'proteina',
+  'genie2',
+  'frameflow',
+  'foldflow2',
+  'sid-protein',
+  'esmc',
+  'dyna1',
+  'gnina',
+]);
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -68,11 +72,132 @@ const MIME_TYPES = {
   '.wgsl': 'text/plain; charset=utf-8',
 };
 
-function loadPlaywright() {
+const VALID_HOST_HEADER_RE = /^[a-zA-Z0-9._\-:[\]]{1,255}$/;
+const MAX_CONTROL_BODY_BYTES = 64 * 1024;
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function parseFiniteInt(raw, fallback, min, max) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function isLoopbackHost(host) {
+  const h = String(host || '').trim().toLowerCase();
+  return h === '127.0.0.1' || h === '::1' || h === 'localhost';
+}
+
+function isLoopbackRemoteAddress(addr) {
+  const a = String(addr || '').trim().toLowerCase();
+  return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
+}
+
+function sha256Buf(str) {
+  return crypto.createHash('sha256').update(String(str), 'utf8').digest();
+}
+
+function constantTimeEquals(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0 || b.length === 0) {
+    return false;
+  }
+  return crypto.timingSafeEqual(sha256Buf(a), sha256Buf(b));
+}
+
+function formatShortGpuName(rawName) {
+  const cleaned = String(rawName || '')
+    .replace(/^NVIDIA\s+GeForce\s+/i, '')
+    .replace(/^NVIDIA\s+/i, '')
+    .replace(/^AMD\s+Radeon\(TM\)\s+/i, '')
+    .replace(/^AMD\s+Radeon\s+/i, '')
+    .replace(/^Intel\(R\)\s+/i, '')
+    .replace(/\s+Laptop\s+GPU$/i, '')
+    .trim();
+  return cleaned.length > 22 ? `${cleaned.slice(0, 21)}…` : cleaned;
+}
+
+function detectHostGpuHardware() {
+  const customLabel = (process.env.DENOVO_GPU_LABEL || '').trim();
+  if (customLabel) {
+    return { name: customLabel, shortName: formatShortGpuName(customLabel), vramMB: null };
+  }
+  try {
+    const out = execFileSync(
+      'nvidia-smi',
+      ['--query-gpu=name,memory.total', '--format=csv,noheader,nounits'],
+      { encoding: 'utf8', timeout: 1500, maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+    const firstLine = out.split(/\r?\n/)[0]?.trim();
+    if (firstLine) {
+      const [rawName, rawMem] = firstLine.split(',').map((s) => s.trim());
+      if (rawName) {
+        const memNum = Number(rawMem);
+        const vramMB = Number.isFinite(memNum) && memNum > 0 ? Math.round(memNum) : null;
+        return { name: rawName, shortName: formatShortGpuName(rawName), vramMB };
+      }
+    }
+  } catch {
+    /* nvidia-smi unavailable */
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const out = execFileSync('system_profiler', ['SPDisplaysDataType'], {
+        encoding: 'utf8',
+        timeout: 2000,
+        maxBuffer: 256 * 1024,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const m = out.match(/Chipset Model:\s*(.+)/);
+      if (m?.[1]?.trim()) {
+        const name = m[1].trim();
+        return { name, shortName: formatShortGpuName(name), vramMB: null };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  if (process.platform === 'linux') {
+    try {
+      const out = execFileSync('lspci', ['-mm'], {
+        encoding: 'utf8',
+        timeout: 1500,
+        maxBuffer: 256 * 1024,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const line = out
+        .split(/\r?\n/)
+        .find((l) => /VGA compatible controller|3D controller/i.test(l));
+      if (line) {
+        const cols = [...line.matchAll(/"([^"]*)"/g)].map((x) => x[1]);
+        const name = [cols[1], cols[2]].filter(Boolean).join(' ').trim();
+        if (name) return { name, shortName: formatShortGpuName(name), vramMB: null };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
+function enrichGpuInfo(gpu, hostHw) {
+  if (!gpu) return null;
+  if (!hostHw || gpu.fallback) return gpu;
+  const vramLabel =
+    hostHw.vramMB && hostHw.vramMB >= 1024 ? `${Math.round(hostHw.vramMB / 1024)} GB` : null;
+  return {
+    ...gpu,
+    name: hostHw.name,
+    shortName: hostHw.shortName,
+    vramMB: hostHw.vramMB,
+    description: vramLabel ? `${hostHw.name} (${vramLabel})` : hostHw.name,
+  };
+}
+
+function loadPlaywright(repoRoot) {
   const candidates = [
-    path.join(REPO_ROOT, 'server', 'package.json'),
-    path.join(REPO_ROOT, 'web', 'package.json'),
-    path.join(REPO_ROOT, 'package.json'),
+    path.join(repoRoot, 'server', 'package.json'),
+    path.join(repoRoot, 'web', 'package.json'),
+    path.join(repoRoot, 'package.json'),
     process.env.DENOVO_PLAYWRIGHT_PKG || '',
   ].filter(Boolean);
 
@@ -89,17 +214,8 @@ function loadPlaywright() {
       /* try next */
     }
   }
-  // Fallback: check sibling denovo-webgpu-models or global node_modules
-  const siblingPkg = path.resolve(REPO_ROOT, '..', 'denovo-webgpu-models', 'models', 'rfdiffusion', 'package.json');
-  if (fs.existsSync(siblingPkg)) {
-    try {
-      return createRequire(siblingPkg)('playwright-core');
-    } catch {
-      /* ignore */
-    }
-  }
   throw new Error(
-    'Playwright is not installed. Run `npm install playwright-core` (and `npx playwright-core install chromium`) in server/ or set DENOVO_PLAYWRIGHT_PKG.',
+    'Playwright is not installed. Run `npm --prefix server install playwright-core` (and install Chromium) or set DENOVO_PLAYWRIGHT_PKG.',
   );
 }
 
@@ -107,7 +223,6 @@ function findChromeExecutable() {
   if (process.env.DENOVO_CHROME_PATH && fs.existsSync(process.env.DENOVO_CHROME_PATH)) {
     return process.env.DENOVO_CHROME_PATH;
   }
-  // Check Playwright's local chromium cache first
   const pwCacheDir = path.join(os.homedir(), '.cache', 'ms-playwright');
   if (fs.existsSync(pwCacheDir)) {
     const dirs = fs
@@ -151,542 +266,1034 @@ function detectLinuxVulkanIcd() {
   return undefined;
 }
 
-function formatShortGpuName(rawName) {
-  const cleaned = String(rawName || '')
-    .replace(/^NVIDIA\s+GeForce\s+/i, '')
-    .replace(/^NVIDIA\s+/i, '')
-    .replace(/^AMD\s+Radeon\(TM\)\s+/i, '')
-    .replace(/^AMD\s+Radeon\s+/i, '')
-    .replace(/^Intel\(R\)\s+/i, '')
-    .replace(/\s+Laptop\s+GPU$/i, '')
-    .trim();
-  return cleaned.length > 22 ? `${cleaned.slice(0, 21)}…` : cleaned;
+/** Build a minimal allowlisted env for headless Chromium (never leaking DENOVO_API_TOKEN or secrets, H6). */
+function buildMinimalChromiumEnv(vulkanIcd) {
+  const allow = [
+    'PATH',
+    'HOME',
+    'USER',
+    'LOGNAME',
+    'TMPDIR',
+    'TEMP',
+    'TMP',
+    'LANG',
+    'LC_ALL',
+    'TZ',
+    'XDG_RUNTIME_DIR',
+    'XDG_CONFIG_HOME',
+    'XDG_CACHE_HOME',
+    'DISPLAY',
+    'WAYLAND_DISPLAY',
+    'DBUS_SESSION_BUS_ADDRESS',
+    'LD_LIBRARY_PATH',
+    'VK_ICD_FILENAMES',
+    'VK_DRIVER_FILES',
+    '__GLX_VENDOR_LIBRARY_NAME',
+    'GBM_BACKEND',
+  ];
+  const env = {};
+  for (const k of allow) {
+    if (typeof process.env[k] === 'string' && process.env[k].length > 0) {
+      env[k] = process.env[k];
+    }
+  }
+  if (vulkanIcd) {
+    env.VK_ICD_FILENAMES = vulkanIcd;
+  }
+  return env;
 }
 
-function detectHostGpuHardware() {
-  const customLabel = (process.env.DENOVO_GPU_LABEL || '').trim();
-  if (customLabel) {
-    return { name: customLabel, shortName: formatShortGpuName(customLabel), vramMB: null };
+function sanitizeJsonObject(val, depth = 0) {
+  if (depth > 32) {
+    throw new Error('Request JSON nesting exceeds maximum depth (32).');
   }
-  // 1. NVIDIA (Linux / Windows) via nvidia-smi
+  if (val === null || typeof val !== 'object') return val;
+  if (Array.isArray(val)) {
+    return val.map((item) => sanitizeJsonObject(item, depth + 1));
+  }
+  const out = Object.create(null);
+  for (const [k, v] of Object.entries(val)) {
+    if (FORBIDDEN_KEYS.has(k)) {
+      throw new Error(`Forbidden property key "${k}" in request payload.`);
+    }
+    out[k] = sanitizeJsonObject(v, depth + 1);
+  }
+  return out;
+}
+
+function sendJson(res, status, payload) {
+  if (res.writableEnded || res.destroyed) return;
+  if (!res.headersSent) {
+    res.writeHead(status, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      ...(status === 413 || status === 429 ? { Connection: 'close' } : {}),
+    });
+  }
+  res.end(JSON.stringify(payload));
+}
+
+function setSecurityHeaders(res, isHtml) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  if (isHtml) {
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'none'; base-uri 'self'; object-src 'none'");
+  }
+}
+
+function canonicalOrigin(raw) {
   try {
-    const out = execFileSync(
-      'nvidia-smi',
-      ['--query-gpu=name,memory.total', '--format=csv,noheader,nounits'],
-      { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] },
-    ).trim();
-    const firstLine = out.split(/\r?\n/)[0]?.trim();
-    if (firstLine) {
-      const [rawName, rawMem] = firstLine.split(',').map((s) => s.trim());
-      if (rawName) {
-        const memNum = Number(rawMem);
-        const vramMB = Number.isFinite(memNum) && memNum > 0 ? Math.round(memNum) : null;
-        return { name: rawName, shortName: formatShortGpuName(rawName), vramMB };
-      }
-    }
+    const u = new URL(String(raw).trim());
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.origin.toLowerCase();
   } catch {
-    /* nvidia-smi unavailable */
+    return null;
   }
-  // 2. macOS Apple Silicon / discrete GPU via system_profiler
-  if (process.platform === 'darwin') {
-    try {
-      const out = execFileSync('system_profiler', ['SPDisplaysDataType'], {
-        encoding: 'utf8',
-        timeout: 2000,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      const m = out.match(/Chipset Model:\s*(.+)/);
-      if (m?.[1]?.trim()) {
-        const name = m[1].trim();
-        return { name, shortName: formatShortGpuName(name), vramMB: null };
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-  // 3. Linux AMD / Intel fallback via lspci
-  if (process.platform === 'linux') {
-    try {
-      const out = execFileSync('lspci', ['-mm'], {
-        encoding: 'utf8',
-        timeout: 1500,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      const line = out
-        .split(/\r?\n/)
-        .find((l) => /VGA compatible controller|3D controller/i.test(l));
-      if (line) {
-        const cols = [...line.matchAll(/"([^"]*)"/g)].map((x) => x[1]);
-        const name = [cols[1], cols[2]].filter(Boolean).join(' ').trim();
-        if (name) return { name, shortName: formatShortGpuName(name), vramMB: null };
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-  return null;
 }
 
-const HOST_GPU_HW = detectHostGpuHardware();
+/**
+ * Create the hardened self-hosted HTTP server + job scheduler (testable directly in Node/Vitest
+ * with a mock runner bridge, or wired to live headless WebGPU Chromium in CLI mode).
+ */
+export function createSelfhostServer(options = {}) {
+  const repoRoot = path.resolve(options.repoRoot || DEFAULT_REPO_ROOT);
+  const buildDir = path.resolve(options.buildDir || DEFAULT_BUILD_DIR);
+  const realBuildDir = fs.existsSync(buildDir) ? fs.realpathSync(buildDir) : buildDir;
 
-function enrichGpuInfo(gpu) {
-  if (!gpu) return null;
-  if (!HOST_GPU_HW || gpu.fallback) return gpu;
-  const vramLabel =
-    HOST_GPU_HW.vramMB && HOST_GPU_HW.vramMB >= 1024
-      ? `${Math.round(HOST_GPU_HW.vramMB / 1024)} GB`
-      : null;
-  return {
-    ...gpu,
-    name: HOST_GPU_HW.name,
-    shortName: HOST_GPU_HW.shortName,
-    vramMB: HOST_GPU_HW.vramMB,
-    description: vramLabel ? `${HOST_GPU_HW.name} (${vramLabel})` : HOST_GPU_HW.name,
+  const host = String(options.host ?? process.env.HOST ?? '127.0.0.1').trim() || '127.0.0.1';
+  const port = parseFiniteInt(options.port ?? process.env.PORT, 8787, 0, 65535);
+  const apiToken = String(options.apiToken ?? process.env.DENOVO_API_TOKEN ?? '').trim();
+  const allowUnauthenticatedRemote =
+    Boolean(options.allowUnauthenticatedRemote) ||
+    process.env.DENOVO_ALLOW_UNAUTHENTICATED_REMOTE === '1';
+
+  // H1: Refuse non-loopback bind without Bearer authentication unless explicitly overridden
+  if (!isLoopbackHost(host) && !apiToken && !allowUnauthenticatedRemote) {
+    throw new Error(
+      `Refusing to bind non-loopback host "${host}" without DENOVO_API_TOKEN. Set DENOVO_API_TOKEN or bind HOST=127.0.0.1.`,
+    );
+  }
+
+  const rawAllowedOrigins = String(
+    options.allowedOrigins ?? process.env.DENOVO_ALLOWED_ORIGINS ?? '',
+  ).trim();
+  const allowedOriginSet = new Set(
+    rawAllowedOrigins
+      .split(',')
+      .map((s) => canonicalOrigin(s))
+      .filter(Boolean),
+  );
+
+  const allowSoftwareGpu =
+    options.allowSoftwareGpu !== undefined
+      ? Boolean(options.allowSoftwareGpu)
+      : process.env.DENOVO_ALLOW_SOFTWARE_GPU === '1';
+  const maxBodyBytes =
+    parseFiniteInt(options.maxBodyMB ?? process.env.DENOVO_MAX_BODY_MB, 64, 1, 256) * 1024 * 1024;
+  const maxFoldResidues = parseFiniteInt(
+    options.maxFoldResidues ?? process.env.DENOVO_MAX_FOLD_RESIDUES,
+    2048,
+    512,
+    4096,
+  );
+  const maxQueueDepth = parseFiniteInt(
+    options.maxQueueDepth ?? process.env.DENOVO_MAX_QUEUE_DEPTH,
+    8,
+    1,
+    64,
+  );
+  const maxConcurrentUploads = parseFiniteInt(
+    options.maxConcurrentUploads ?? process.env.DENOVO_MAX_CONCURRENT_UPLOADS,
+    4,
+    1,
+    16,
+  );
+  const maxInflightUploadBytes = maxBodyBytes * 2;
+  const jobTimeoutMs = parseFiniteInt(
+    options.jobTimeoutMs ?? process.env.DENOVO_JOB_TIMEOUT_MS,
+    600_000,
+    1_000,
+    3_600_000,
+  );
+  const hostGpuHw = options.hostGpuHw !== undefined ? options.hostGpuHw : detectHostGpuHardware();
+
+  // Runner bridge (replaced by real Playwright page in CLI mode or mock bridge in integration tests)
+  let runnerBridge = options.runnerBridge ?? null;
+  let observedHealth = {
+    ready: false,
+    gpu: null,
+    activeAdapter: null,
+    error: 'Starting host GPU runner...',
   };
-}
 
-function setCorsHeaders(req, res) {
-  const origin = req.headers.origin;
-  if (ALLOWED_ORIGINS === '*') {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  } else if (origin) {
-    const list = ALLOWED_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean);
-    if (list.includes(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Vary', 'Origin');
+  /** M8: Separate raw runner health from operator policy; recompute admission on every check/dispatch. */
+  function evaluateAdmission(raw) {
+    const h = raw || observedHealth;
+    if (!h.ready) {
+      return { ok: false, error: h.error || 'Host GPU runner is still starting.', gpu: null };
+    }
+    if (!h.gpu) {
+      return { ok: false, error: h.error || 'Host GPU unavailable.', gpu: null };
+    }
+    if (h.gpu.fallback && !allowSoftwareGpu) {
+      return {
+        ok: false,
+        error:
+          'Host Chromium fell back to software WebGPU (SwiftShader). Install Vulkan/GPU drivers or set DENOVO_ALLOW_SOFTWARE_GPU=1 to override.',
+        gpu: h.gpu,
+      };
+    }
+    if (h.error) {
+      return { ok: false, error: h.error, gpu: h.gpu };
+    }
+    return { ok: true, error: null, gpu: enrichGpuInfo(h.gpu, hostGpuHw) };
+  }
+
+  function isSameOrigin(originHeader, hostHeader) {
+    const canon = canonicalOrigin(originHeader);
+    if (!canon || !hostHeader) return false;
+    try {
+      return new URL(canon).host.toLowerCase() === hostHeader.toLowerCase();
+    } catch {
+      return false;
     }
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
-  if (req.headers['access-control-request-private-network'] === 'true') {
-    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+
+  /** H1: Server-side Origin admission check (never reflects arbitrary origins). */
+  function checkOriginPolicy(req, res) {
+    const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    const hostHeader = typeof req.headers.host === 'string' ? req.headers.host.trim() : '';
+    if (!originHeader) {
+      return { allowed: true, grantedOrigin: null };
+    }
+    const canon = canonicalOrigin(originHeader);
+    if (!canon) {
+      return { allowed: false, grantedOrigin: null };
+    }
+    const sameOrig = isSameOrigin(originHeader, hostHeader);
+    const explicitlyAllowed = allowedOriginSet.has(canon);
+    if (!sameOrig && !explicitlyAllowed) {
+      return { allowed: false, grantedOrigin: null };
+    }
+    res.setHeader('Access-Control-Allow-Origin', originHeader);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+    if (explicitlyAllowed && req.headers['access-control-request-private-network'] === 'true') {
+      res.setHeader('Access-Control-Allow-Private-Network', 'true');
+    }
+    return { allowed: true, grantedOrigin: originHeader };
   }
-}
 
-function isAuthorized(req) {
-  if (!API_TOKEN) return true;
-  const auth = String(req.headers.authorization || '');
-  return auth === `Bearer ${API_TOKEN}`;
-}
+  /** L1: Constant-time Bearer token verification. */
+  function isAuthorized(req) {
+    if (!apiToken) return true;
+    const auth = String(req.headers.authorization || '');
+    if (!auth.startsWith('Bearer ')) return false;
+    const provided = auth.slice(7).trim();
+    return constantTimeEquals(provided, apiToken);
+  }
 
-function readJsonBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let total = 0;
-    req.on('data', (chunk) => {
-      total += chunk.length;
-      if (total > MAX_BODY_BYTES) {
-        reject(new Error(`Payload exceeds limit (${Math.round(MAX_BODY_BYTES / 1024 / 1024)} MB)`));
-        req.destroy();
+  let activeUploads = 0;
+  let inflightUploadBytes = 0;
+
+  /** H5: Bounded JSON body reader enforcing concurrent upload & aggregate byte budgets. */
+  function readJsonBody(req, limitBytes) {
+    return new Promise((resolve, reject) => {
+      if (activeUploads >= maxConcurrentUploads) {
+        const err = new Error('Too many concurrent uploads.');
+        err.statusCode = 429;
+        reject(err);
         return;
       }
-      chunks.push(chunk);
-    });
-    req.on('end', () => {
-      try {
-        const text = Buffer.concat(chunks).toString('utf8');
-        resolve(text ? JSON.parse(text) : {});
-      } catch (err) {
-        reject(new Error(`Invalid JSON body: ${err instanceof Error ? err.message : String(err)}`));
+      const contentLen = Number(req.headers['content-length']);
+      if (Number.isFinite(contentLen) && contentLen > limitBytes) {
+        const err = new Error(`Payload exceeds limit (${Math.round(limitBytes / 1024 / 1024) || 1} MB)`);
+        err.statusCode = 413;
+        reject(err);
+        return;
       }
-    });
-    req.on('error', reject);
-  });
-}
+      if (Number.isFinite(contentLen) && inflightUploadBytes + contentLen > maxInflightUploadBytes) {
+        const err = new Error('Server upload memory budget temporarily full.');
+        err.statusCode = 429;
+        reject(err);
+        return;
+      }
 
-function sendSse(res, event, data) {
-  if (res.writableEnded || res.destroyed) return;
-  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-}
+      activeUploads++;
+      const chunks = [];
+      let total = 0;
+      let done = false;
 
-function serveStaticFile(req, res, pathname) {
-  let cleanPath = decodeURIComponent(pathname.split('?')[0]);
-  if (cleanPath === '/' || cleanPath === '') cleanPath = '/index.html';
+      const release = () => {
+        if (done) return;
+        done = true;
+        activeUploads = Math.max(0, activeUploads - 1);
+        inflightUploadBytes = Math.max(0, inflightUploadBytes - total);
+      };
 
-  const tryFiles = [
-    path.join(BUILD_DIR, cleanPath),
-    path.join(BUILD_DIR, `${cleanPath}.html`),
-    path.join(BUILD_DIR, cleanPath, 'index.html'),
-  ];
-
-  let target = null;
-  for (const cand of tryFiles) {
-    const resolved = path.resolve(cand);
-    if (!resolved.startsWith(BUILD_DIR)) continue;
-    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-      target = resolved;
-      break;
-    }
-  }
-
-  // SPA fallback to index.html for client-side routes without file extension
-  if (!target && !path.extname(cleanPath)) {
-    const fallback = path.join(BUILD_DIR, 'index.html');
-    if (fs.existsSync(fallback)) target = fallback;
-  }
-
-  if (!target) {
-    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Not found');
-    return;
-  }
-
-  const ext = path.extname(target).toLowerCase();
-  res.writeHead(200, {
-    'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
-    'Cache-Control': target.includes('/_app/immutable/') ? 'public, max-age=31536000, immutable' : 'no-cache',
-  });
-  fs.createReadStream(target).pipe(res);
-}
-
-// ---- Headless Host-GPU Chromium Runner Manager ----
-let runnerContext = null;
-let runnerPage = null;
-let runnerHealth = { ready: false, gpu: null, activeAdapter: null, error: 'Starting host GPU runner...' };
-
-const jobQueue = [];
-let runningJob = null;
-
-function notifyQueuePositions() {
-  for (let i = 0; i < jobQueue.length; i++) {
-    const item = jobQueue[i];
-    sendSse(item.res, 'progress', {
-      status: 'loading',
-      phase: 'queue',
-      progress: 0.01,
-      detail: `Queued on host GPU (position #${i + 1})...`,
-    });
-  }
-}
-
-async function pumpQueue() {
-  if (runningJob || jobQueue.length === 0) return;
-  const next = jobQueue.shift();
-  notifyQueuePositions();
-
-  if (next.cancelled || next.res.writableEnded || next.res.destroyed) {
-    void pumpQueue();
-    return;
-  }
-
-  runningJob = next;
-  const heartbeat = setInterval(() => {
-    if (!next.res.writableEnded && !next.res.destroyed) {
-      next.res.write(': ping\n\n');
-    }
-  }, 15_000);
-
-  try {
-    if (!runnerPage || !runnerHealth.ready) {
-      throw new Error(runnerHealth.error || 'Host GPU runner is still starting.');
-    }
-    if (runnerHealth.error) {
-      throw new Error(runnerHealth.error);
-    }
-
-    const result = await runnerPage.evaluate(
-      async ({ jobId, node, inputs, maxFoldResidues }) => {
-        if (!window.__denovoHostRunner) {
-          throw new Error('Host runner bridge not mounted.');
+      req.on('data', (chunk) => {
+        if (done) return;
+        if (total + chunk.length > limitBytes) {
+          release();
+          const err = new Error(`Payload exceeds limit (${Math.max(1, Math.round(limitBytes / 1024 / 1024))} MB)`);
+          err.statusCode = 413;
+          req.pause();
+          reject(err);
+          return;
         }
-        return await window.__denovoHostRunner.runNode(jobId, { node, inputs, maxFoldResidues });
-      },
-      { jobId: next.jobId, node: next.node, inputs: next.inputs, maxFoldResidues: MAX_FOLD_RESIDUES },
-    );
-
-    if (!next.cancelled && !next.res.writableEnded) {
-      sendSse(next.res, 'result', result);
-      next.res.end();
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (!next.cancelled && !next.res.writableEnded) {
-      sendSse(next.res, 'error', { message });
-      next.res.end();
-    }
-  } finally {
-    clearInterval(heartbeat);
-    if (runningJob === next) runningJob = null;
-    try {
-      if (runnerPage) {
-        const h = await runnerPage.evaluate(() => window.__denovoHostRunner?.getHealth?.() ?? null);
-        if (h) runnerHealth = h;
-      }
-    } catch {
-      /* ignore */
-    }
-    void pumpQueue();
-  }
-}
-
-async function cancelJob(jobId) {
-  const qIdx = jobQueue.findIndex((j) => j.jobId === jobId);
-  if (qIdx !== -1) {
-    const [removed] = jobQueue.splice(qIdx, 1);
-    removed.cancelled = true;
-    sendSse(removed.res, 'error', { message: 'Workflow run cancelled' });
-    removed.res.end();
-    notifyQueuePositions();
-    return true;
-  }
-  if (runningJob && runningJob.jobId === jobId) {
-    runningJob.cancelled = true;
-    try {
-      await runnerPage?.evaluate((id) => window.__denovoHostRunner?.cancel(id), jobId);
-    } catch {
-      /* ignore */
-    }
-    return true;
-  }
-  return false;
-}
-
-async function startHostGpuRunner(localOrigin) {
-  const { chromium } = loadPlaywright();
-  const executablePath = findChromeExecutable();
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  for (const lf of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
-    try {
-      fs.rmSync(path.join(DATA_DIR, lf), { force: true });
-    } catch {
-      /* ignore */
-    }
-  }
-
-  const env = { ...process.env };
-  const vkIcd = detectLinuxVulkanIcd();
-  if (process.platform === 'linux') {
-    delete env.DISPLAY;
-    delete env.WAYLAND_DISPLAY;
-    if (vkIcd) env.VK_ICD_FILENAMES = vkIcd;
-  }
-
-  const args = [
-    '--headless=new',
-    '--no-sandbox',
-    '--disable-gpu-sandbox',
-    '--enable-unsafe-webgpu',
-    '--ignore-gpu-blocklist',
-  ];
-  if (process.platform === 'linux') {
-    args.push(
-      '--ozone-platform=headless',
-      '--enable-features=Vulkan',
-      '--use-angle=vulkan',
-      '--use-vulkan=native',
-      '--disable-vulkan-surface',
-    );
-  }
-
-  console.log(`[denovo-selfhost] Launching host WebGPU Chromium (${executablePath || 'bundled'})...`);
-  if (vkIcd) console.log(`[denovo-selfhost] Vulkan ICD: ${vkIcd}`);
-
-  runnerContext = await chromium.launchPersistentContext(DATA_DIR, {
-    ...(executablePath ? { executablePath } : {}),
-    headless: false,
-    env,
-    args,
-  });
-
-  runnerPage = runnerContext.pages()[0] || (await runnerContext.newPage());
-  runnerPage.on('pageerror', (err) => {
-    console.error('[denovo-selfhost] Host runner pageerror:', err.message);
-  });
-  runnerPage.on('console', (msg) => {
-    if (msg.type() === 'error') {
-      console.error('[denovo-selfhost] Host runner console.error:', msg.text());
-    }
-  });
-
-  await runnerPage.exposeFunction('__denovoHostEmit', (ev) => {
-    if (!ev || typeof ev !== 'object') return;
-    if (ev.type === 'progress' && runningJob && ev.jobId === runningJob.jobId) {
-      sendSse(runningJob.res, 'progress', {
-        status: ev.status,
-        phase: ev.phase,
-        progress: ev.progress,
-        detail: ev.detail,
+        if (inflightUploadBytes + chunk.length > maxInflightUploadBytes) {
+          release();
+          const err = new Error('Server upload memory budget exceeded.');
+          err.statusCode = 429;
+          req.pause();
+          reject(err);
+          return;
+        }
+        total += chunk.length;
+        inflightUploadBytes += chunk.length;
+        chunks.push(chunk);
       });
+      req.on('end', () => {
+        if (done) return;
+        try {
+          const text = Buffer.concat(chunks).toString('utf8');
+          const parsed = text ? JSON.parse(text) : {};
+          const safe = sanitizeJsonObject(parsed);
+          release();
+          resolve(safe);
+        } catch (err) {
+          release();
+          const parseErr = new Error(
+            `Invalid JSON body: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          parseErr.statusCode = 400;
+          reject(parseErr);
+        }
+      });
+      req.on('error', (err) => {
+        release();
+        reject(err);
+      });
+      req.on('aborted', () => {
+        release();
+        const err = new Error('Client aborted upload');
+        err.statusCode = 400;
+        reject(err);
+      });
+    });
+  }
+
+  function sendSse(res, event, data, allowDropIfBackpressured = false) {
+    if (res.writableEnded || res.destroyed) return;
+    if (allowDropIfBackpressured && res.writableNeedDrain) return;
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      /* client disconnected */
     }
-  });
-
-  await runnerPage.goto(`${localOrigin}/runner`, { waitUntil: 'domcontentloaded' });
-  await runnerPage.waitForFunction(() => Boolean(window.__denovoHostRunner?.getHealth()?.ready), {
-    timeout: 30_000,
-  });
-
-  runnerHealth = await runnerPage.evaluate(() => window.__denovoHostRunner.getHealth());
-  if (runnerHealth.gpu?.fallback && !ALLOW_SOFTWARE_GPU) {
-    runnerHealth = {
-      ...runnerHealth,
-      error:
-        'Host Chromium fell back to software WebGPU (SwiftShader). Install Vulkan/GPU drivers or set DENOVO_ALLOW_SOFTWARE_GPU=1 to override.',
-    };
-    console.warn(`[denovo-selfhost] WARNING: ${runnerHealth.error}`);
-  } else if (runnerHealth.gpu) {
-    console.log(
-      `[denovo-selfhost] Host GPU ready: ${runnerHealth.gpu.vendor} ${runnerHealth.gpu.description} (fallback=${runnerHealth.gpu.fallback})`,
-    );
-  } else {
-    console.warn(`[denovo-selfhost] Host GPU unavailable: ${runnerHealth.error}`);
-  }
-}
-
-async function main() {
-  if (!fs.existsSync(path.join(BUILD_DIR, 'index.html'))) {
-    console.error(`[denovo-selfhost] Missing web/build/index.html. Run "npm --prefix web run build" first.`);
-    process.exit(1);
   }
 
-  const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-    setCorsHeaders(req, res);
+  // ---- FIFO GPU Job Queue with M1 cancel capabilities, M2 res.close finalizer, H5 deadlines ----
+  const jobQueue = [];
+  let runningJob = null;
 
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
+  /** M2: Single idempotent finalizer ensuring SSE streams always close cleanly on every terminal path. */
+  function finalizeJob(item, event, payload) {
+    if (item.finalized) return;
+    item.finalized = true;
+    if (item.heartbeat) {
+      clearInterval(item.heartbeat);
+      item.heartbeat = null;
+    }
+    if (item.deadlineTimer) {
+      clearTimeout(item.deadlineTimer);
+      item.deadlineTimer = null;
+    }
+    if (!item.res.writableEnded && !item.res.destroyed) {
+      if (event) sendSse(item.res, event, payload, false);
+      try {
+        item.res.end();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  function notifyQueuePositions() {
+    for (let i = 0; i < jobQueue.length; i++) {
+      const item = jobQueue[i];
+      if (!item.finalized) {
+        sendSse(
+          item.res,
+          'progress',
+          {
+            status: 'loading',
+            phase: 'queue',
+            progress: 0.01,
+            detail: `Queued on host GPU (position #${i + 1})...`,
+          },
+          true,
+        );
+      }
+    }
+  }
+
+  async function refreshObservedHealth() {
+    if (!runnerBridge || runningJob) return;
+    try {
+      const h = await runnerBridge.getHealth();
+      if (h) observedHealth = h;
+    } catch {
+      /* ignore transient probe errors */
+    }
+  }
+
+  async function pumpQueue() {
+    if (runningJob || jobQueue.length === 0) return;
+    const next = jobQueue.shift();
+    notifyQueuePositions();
+
+    if (next.cancelled || next.finalized || next.res.writableEnded || next.res.destroyed) {
+      finalizeJob(next, null, null);
+      void pumpQueue();
       return;
     }
 
-    if (url.pathname.startsWith('/api/')) {
-      if (!isAuthorized(req)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'Unauthorized: invalid or missing Bearer token.' }));
-        return;
-      }
-
-      if (req.method === 'GET' && url.pathname === '/api/health') {
+    runningJob = next;
+    next.heartbeat = setInterval(() => {
+      if (!next.res.writableEnded && !next.res.destroyed && !next.res.writableNeedDrain) {
         try {
-          if (runnerPage && !runningJob) {
-            const h = await runnerPage.evaluate(() => window.__denovoHostRunner?.getHealth?.() ?? null);
-            if (h) runnerHealth = { ...h, error: runnerHealth.error || h.error };
-          }
+          next.res.write(': ping\n\n');
         } catch {
           /* ignore */
         }
-        const ok = Boolean(runnerHealth.ready && runnerHealth.gpu && !runnerHealth.error);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            ok,
-            service: 'denovo-selfhost',
-            version: '0.1.0',
-            gpu: enrichGpuInfo(runnerHealth.gpu),
-            activeAdapter: runnerHealth.activeAdapter,
-            queueDepth: jobQueue.length + (runningJob ? 1 : 0),
-            runningJobId: runningJob?.jobId ?? null,
-            maxFoldResidues: MAX_FOLD_RESIDUES,
-            ...(runnerHealth.error ? { error: runnerHealth.error } : {}),
-          }),
-        );
-        return;
+      }
+    }, 15_000);
+
+    try {
+      const admission = evaluateAdmission(observedHealth);
+      if (!runnerBridge || !admission.ok) {
+        throw new Error(admission.error || 'Host GPU runner is unavailable.');
       }
 
-      if (req.method === 'POST' && url.pathname === '/api/cancel') {
-        try {
-          const body = await readJsonBody(req);
-          const cancelled = await cancelJob(String(body.jobId || ''));
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, cancelled }));
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-        }
-        return;
+      const timeoutPromise = new Promise((_, reject) => {
+        next.deadlineTimer = setTimeout(() => {
+          next.cancelled = true;
+          void runnerBridge?.cancel?.(next.jobId).catch(() => {});
+          reject(new Error(`Host GPU job exceeded deadline (${Math.round(jobTimeoutMs / 1000)}s).`));
+        }, jobTimeoutMs);
+      });
+
+      const result = await Promise.race([
+        runnerBridge.runNode(next.jobId, {
+          node: next.node,
+          inputs: next.inputs,
+          maxFoldResidues,
+        }),
+        timeoutPromise,
+      ]);
+
+      if (next.cancelled) {
+        finalizeJob(next, 'error', { message: 'Workflow run cancelled' });
+      } else {
+        finalizeJob(next, 'result', result);
       }
-
-      if (req.method === 'POST' && url.pathname === '/api/release-gpu') {
-        try {
-          if (!runningJob && runnerPage) {
-            await runnerPage.evaluate(() => window.__denovoHostRunner?.releaseGpu?.());
-            runnerHealth.activeAdapter = null;
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-        }
-        return;
+    } catch (err) {
+      const message = next.cancelled
+        ? 'Workflow run cancelled'
+        : err instanceof Error
+          ? err.message
+          : String(err);
+      finalizeJob(next, 'error', { message });
+    } finally {
+      if (next.heartbeat) {
+        clearInterval(next.heartbeat);
+        next.heartbeat = null;
       }
-
-      if (req.method === 'POST' && url.pathname === '/api/run-node') {
-        let body;
-        try {
-          body = await readJsonBody(req);
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-          return;
-        }
-        if (!body?.node?.adapterId) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'Missing node.adapterId in request body.' }));
-          return;
-        }
-
-        const jobId = String(body.jobId || `job_${Date.now().toString(36)}`);
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream; charset=utf-8',
-          'Cache-Control': 'no-cache, no-transform',
-          Connection: 'keep-alive',
-          'X-Accel-Buffering': 'no',
-        });
-
-        const item = {
-          jobId,
-          node: body.node,
-          inputs: body.inputs ?? {},
-          res,
-          cancelled: false,
-        };
-
-        req.on('close', () => {
-          if (!res.writableEnded) {
-            void cancelJob(jobId);
-          }
-        });
-
-        jobQueue.push(item);
-        if (runningJob) {
-          notifyQueuePositions();
-        }
-        void pumpQueue();
-        return;
+      if (next.deadlineTimer) {
+        clearTimeout(next.deadlineTimer);
+        next.deadlineTimer = null;
       }
+      if (runningJob === next) runningJob = null;
+      await refreshObservedHealth();
+      void pumpQueue();
+    }
+  }
 
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'Unknown API endpoint' }));
+  async function cancelJobAuthorized(jobId, cancelToken) {
+    const qIdx = jobQueue.findIndex((j) => j.jobId === jobId);
+    if (qIdx !== -1) {
+      const item = jobQueue[qIdx];
+      if (!constantTimeEquals(cancelToken, item.cancelToken)) {
+        return { ok: false, status: 403, error: 'Invalid cancellation token for job.' };
+      }
+      jobQueue.splice(qIdx, 1);
+      item.cancelled = true;
+      finalizeJob(item, 'error', { message: 'Workflow run cancelled' });
+      notifyQueuePositions();
+      return { ok: true, status: 200, cancelled: true };
+    }
+    if (runningJob && runningJob.jobId === jobId) {
+      if (!constantTimeEquals(cancelToken, runningJob.cancelToken)) {
+        return { ok: false, status: 403, error: 'Invalid cancellation token for job.' };
+      }
+      const target = runningJob;
+      target.cancelled = true;
+      try {
+        await runnerBridge?.cancel?.(jobId);
+      } catch {
+        /* ignore */
+      }
+      finalizeJob(target, 'error', { message: 'Workflow run cancelled' });
+      return { ok: true, status: 200, cancelled: true };
+    }
+    return { ok: true, status: 200, cancelled: false };
+  }
+
+  function handleRunnerEmit(ev) {
+    if (!ev || typeof ev !== 'object') return;
+    if (ev.type === 'runner-ready') {
+      observedHealth = {
+        ready: true,
+        gpu: ev.gpu || null,
+        activeAdapter: null,
+        error: ev.error || null,
+      };
+      return;
+    }
+    if (ev.type === 'progress' && runningJob && ev.jobId === runningJob.jobId && !runningJob.cancelled) {
+      sendSse(
+        runningJob.res,
+        'progress',
+        {
+          status: ev.status,
+          phase: ev.phase,
+          progress: ev.progress,
+          detail: ev.detail,
+        },
+        true,
+      );
+    }
+  }
+
+  /** H3: Canonical realpath + path.relative containment with symlink escape protection. */
+  function resolveSafeStaticFile(rawPathname) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(rawPathname);
+    } catch {
+      return { error: 400 };
+    }
+    if (decoded.includes('\0')) return { error: 400 };
+    const cleanPath = decoded === '/' || decoded === '' ? '/index.html' : decoded;
+    const relRequested = cleanPath.replace(/^\/+/, '');
+
+    const candidates = [
+      path.resolve(realBuildDir, relRequested),
+      path.resolve(realBuildDir, `${relRequested}.html`),
+      path.resolve(realBuildDir, relRequested, 'index.html'),
+    ];
+    if (!path.extname(cleanPath)) {
+      candidates.push(path.resolve(realBuildDir, 'index.html'));
+    }
+
+    for (const cand of candidates) {
+      let realCand;
+      let stat;
+      try {
+        realCand = fs.realpathSync(cand);
+        stat = fs.statSync(realCand);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      const rel = path.relative(realBuildDir, realCand);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+        continue;
+      }
+      return { filePath: realCand };
+    }
+    return { error: 404 };
+  }
+
+  function serveStaticFile(req, res, pathname) {
+    // Restrict internal /runner harness strictly to direct loopback Chromium (never external visitors)
+    const lowerPath = pathname.toLowerCase();
+    if (
+      (lowerPath === '/runner' || lowerPath === '/runner.html' || lowerPath.startsWith('/runner/')) &&
+      (!isLoopbackRemoteAddress(req.socket?.remoteAddress) || Boolean(req.headers['x-forwarded-for']))
+    ) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' });
+      res.end('Forbidden');
       return;
     }
 
-    serveStaticFile(req, res, url.pathname);
-  });
+    const resolved = resolveSafeStaticFile(pathname);
+    if (resolved.error) {
+      res.writeHead(resolved.error, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      res.end(resolved.error === 400 ? 'Bad Request' : 'Not Found');
+      return;
+    }
 
-  await new Promise((resolve) => server.listen(PORT, HOST, resolve));
-  const localOrigin = `http://127.0.0.1:${PORT}`;
-  console.log(`[denovo-selfhost] Listening on http://${HOST}:${PORT} (serving ${BUILD_DIR})`);
-  console.log(`[denovo-selfhost] Persistent weight cache: ${DATA_DIR}`);
-  if (API_TOKEN) {
-    console.log('[denovo-selfhost] Bearer API token auth: ENABLED');
+    const target = resolved.filePath;
+    const ext = path.extname(target).toLowerCase();
+    const isHtml = ext === '.html';
+    const stream = fs.createReadStream(target);
+
+    stream.on('open', () => {
+      if (res.writableEnded || res.destroyed) {
+        stream.destroy();
+        return;
+      }
+      setSecurityHeaders(res, isHtml);
+      res.writeHead(200, {
+        'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+        'Cache-Control': target.includes(`${path.sep}_app${path.sep}immutable${path.sep}`)
+          ? 'public, max-age=31536000, immutable'
+          : 'no-cache',
+      });
+      stream.pipe(res);
+    });
+    stream.on('error', () => {
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Static file read error');
+      } else {
+        res.destroy();
+      }
+    });
+    res.on('close', () => {
+      if (!stream.destroyed) stream.destroy();
+    });
   }
 
-  await startHostGpuRunner(localOrigin);
+  const server = http.createServer((req, res) => {
+    void (async () => {
+      // H1/H2: Validate Host header syntax & parse request target against fixed internal base
+      const rawHost = typeof req.headers.host === 'string' ? req.headers.host.trim() : '';
+      if (rawHost && !VALID_HOST_HEADER_RE.test(rawHost)) {
+        sendJson(res, 400, { ok: false, error: 'Malformed Host header.' });
+        return;
+      }
+
+      let url;
+      try {
+        url = new URL(req.url || '/', 'http://selfhost.internal');
+      } catch {
+        sendJson(res, 400, { ok: false, error: 'Malformed request URL.' });
+        return;
+      }
+
+      if (url.pathname.startsWith('/api/')) {
+        const originCheck = checkOriginPolicy(req, res);
+        if (!originCheck.allowed) {
+          sendJson(res, 403, { ok: false, error: 'Forbidden origin.' });
+          return;
+        }
+
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+
+        if (!isAuthorized(req)) {
+          sendJson(res, 401, { ok: false, error: 'Unauthorized: invalid or missing Bearer token.' });
+          return;
+        }
+
+        if (req.method === 'POST') {
+          const ct = String(req.headers['content-type'] || '').toLowerCase();
+          if (!ct.includes('application/json')) {
+            sendJson(res, 415, { ok: false, error: 'Content-Type must be application/json.' });
+            return;
+          }
+        }
+
+        if (req.method === 'GET' && url.pathname === '/api/health') {
+          await refreshObservedHealth();
+          const admission = evaluateAdmission(observedHealth);
+          // M1: Never leak runningJobId in shared /api/health
+          sendJson(res, 200, {
+            ok: admission.ok,
+            service: 'denovo-selfhost',
+            version: '0.2.0',
+            gpu: admission.gpu,
+            activeAdapter: observedHealth.activeAdapter ?? null,
+            queueDepth: jobQueue.length + (runningJob ? 1 : 0),
+            busy: Boolean(runningJob),
+            maxFoldResidues,
+            ...(admission.error ? { error: admission.error } : {}),
+          });
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/cancel') {
+          try {
+            const body = await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
+            const jobId = String(body.jobId || '').trim();
+            const cancelToken = String(body.cancelToken || '').trim();
+            if (!jobId || !cancelToken) {
+              sendJson(res, 400, { ok: false, error: 'Both jobId and cancelToken are required.' });
+              return;
+            }
+            const out = await cancelJobAuthorized(jobId, cancelToken);
+            sendJson(res, out.status, out.ok ? { ok: true, cancelled: out.cancelled } : { ok: false, error: out.error });
+          } catch (err) {
+            const code = typeof err?.statusCode === 'number' ? err.statusCode : 400;
+            sendJson(res, code, { ok: false, error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/release-gpu') {
+          try {
+            await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
+            if (!runningJob && runnerBridge) {
+              await runnerBridge.releaseGpu();
+              observedHealth = { ...observedHealth, activeAdapter: null };
+            }
+            sendJson(res, 200, { ok: true });
+          } catch (err) {
+            const code = typeof err?.statusCode === 'number' ? err.statusCode : 500;
+            sendJson(res, code, { ok: false, error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/run-node') {
+          // H5: Reserve queue capacity BEFORE reading request body
+          if (jobQueue.length >= maxQueueDepth) {
+            sendJson(res, 429, {
+              ok: false,
+              error: `Host GPU queue is full (max ${maxQueueDepth} queued jobs). Try again shortly.`,
+            });
+            return;
+          }
+
+          let body;
+          try {
+            body = await readJsonBody(req, maxBodyBytes);
+          } catch (err) {
+            const code = typeof err?.statusCode === 'number' ? err.statusCode : 400;
+            sendJson(res, code, { ok: false, error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+
+          const node = body?.node;
+          const adapterId = typeof node?.adapterId === 'string' ? node.adapterId.trim() : '';
+          // H4: Reject unknown or CPU adapters before queueing
+          if (!adapterId || !ALLOWED_GPU_ADAPTER_IDS.has(adapterId)) {
+            sendJson(res, 400, {
+              ok: false,
+              error: `Unsupported or disallowed GPU adapter "${adapterId || '(missing)'}".`,
+            });
+            return;
+          }
+          if (node.params !== undefined && (typeof node.params !== 'object' || node.params === null || Array.isArray(node.params))) {
+            sendJson(res, 400, { ok: false, error: 'node.params must be a JSON object.' });
+            return;
+          }
+          if (body.inputs !== undefined && (typeof body.inputs !== 'object' || body.inputs === null || Array.isArray(body.inputs))) {
+            sendJson(res, 400, { ok: false, error: 'inputs must be a JSON object.' });
+            return;
+          }
+
+          // Re-check queue depth after async body read
+          if (jobQueue.length >= maxQueueDepth) {
+            sendJson(res, 429, {
+              ok: false,
+              error: `Host GPU queue is full (max ${maxQueueDepth} queued jobs).`,
+            });
+            return;
+          }
+
+          // M1: Server-generated jobId & random cancel capability token
+          const jobId = `job_${crypto.randomBytes(12).toString('hex')}`;
+          const cancelToken = crypto.randomBytes(18).toString('hex');
+
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'X-Accel-Buffering': 'no',
+            'X-Content-Type-Options': 'nosniff',
+          });
+
+          const item = {
+            jobId,
+            cancelToken,
+            node: {
+              id: typeof node.id === 'string' && node.id.length <= 128 ? node.id : jobId,
+              adapterId,
+              ...(typeof node.label === 'string' ? { label: node.label.slice(0, 128) } : {}),
+              params: node.params ?? {},
+            },
+            inputs: body.inputs ?? {},
+            res,
+            cancelled: false,
+            finalized: false,
+            heartbeat: null,
+            deadlineTimer: null,
+          };
+
+          // Emit server-assigned jobId + cancelToken immediately so only this owner can cancel
+          sendSse(res, 'started', { jobId, cancelToken }, false);
+
+          // M2: Listen on res.close (not req.close) to detect SSE client disconnects accurately
+          res.on('close', () => {
+            if (!item.finalized && !res.writableEnded) {
+              void cancelJobAuthorized(jobId, cancelToken);
+            }
+          });
+
+          jobQueue.push(item);
+          if (runningJob) {
+            notifyQueuePositions();
+          }
+          void pumpQueue();
+          return;
+        }
+
+        sendJson(res, 404, { ok: false, error: 'Unknown API endpoint.' });
+        return;
+      }
+
+      serveStaticFile(req, res, url.pathname);
+    })().catch((err) => {
+      // H2: Never allow unhandled rejections to crash the Node server
+      console.error('[denovo-selfhost] Request handler error:', err);
+      if (!res.headersSent) {
+        sendJson(res, 500, { ok: false, error: 'Internal server error.' });
+      } else if (!res.destroyed) {
+        res.destroy();
+      }
+    });
+  });
+
+  // H5: Bound HTTP header/keep-alive timeouts against slowloris clients
+  server.headersTimeout = 15_000;
+  server.keepAliveTimeout = 65_000;
+
+  return {
+    server,
+    config: {
+      host,
+      port,
+      apiTokenEnabled: Boolean(apiToken),
+      allowedOrigins: [...allowedOriginSet],
+      maxBodyBytes,
+      maxFoldResidues,
+      maxQueueDepth,
+      jobTimeoutMs,
+      allowSoftwareGpu,
+      realBuildDir,
+    },
+    setRunnerBridge(bridge, initialHealth) {
+      runnerBridge = bridge;
+      if (initialHealth) observedHealth = initialHealth;
+    },
+    handleRunnerEmit,
+    getState() {
+      return {
+        queueDepth: jobQueue.length,
+        runningJobId: runningJob?.jobId ?? null,
+        activeUploads,
+        inflightUploadBytes,
+      };
+    },
+  };
+}
+
+async function startPlaywrightRunner(localOrigin, { repoRoot, dataDir, disableSandbox, onEmit }) {
+  const { chromium } = loadPlaywright(repoRoot);
+  const executablePath = findChromeExecutable();
+  fs.mkdirSync(dataDir, { recursive: true });
+
+  // H6: Only clear stale lockfiles if not actively owned by a live process; use a lockfile guard
+  const serverLockPath = path.join(dataDir, '.denovo-server.pid');
+  if (fs.existsSync(serverLockPath)) {
+    const prevPid = Number(fs.readFileSync(serverLockPath, 'utf8').trim());
+    if (Number.isInteger(prevPid) && prevPid > 0 && prevPid !== process.pid) {
+      let alive = false;
+      try {
+        process.kill(prevPid, 0);
+        alive = true;
+      } catch {
+        alive = false;
+      }
+      if (alive) {
+        throw new Error(
+          `Another denovo-selfhost instance (PID ${prevPid}) is already using DENOVO_DATA_DIR="${dataDir}".`,
+        );
+      }
+    }
+  }
+  fs.writeFileSync(serverLockPath, `${process.pid}\n`, { mode: 0o600 });
+
+  for (const lf of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    try {
+      fs.rmSync(path.join(dataDir, lf), { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const vulkanIcd = detectLinuxVulkanIcd();
+  const minimalEnv = buildMinimalChromiumEnv(vulkanIcd);
+
+  const launchArgs = [
+    '--enable-unsafe-webgpu',
+    '--ignore-gpu-blocklist',
+    '--disable-dev-shm-usage',
+  ];
+  if (process.platform === 'linux') {
+    launchArgs.push('--enable-features=Vulkan', '--use-angle=vulkan', '--use-vulkan=native');
+  }
+  if (disableSandbox) {
+    launchArgs.push('--no-sandbox', '--disable-gpu-sandbox');
+  }
+
+  console.log(`[denovo-selfhost] Launching host WebGPU Chromium (${executablePath || 'bundled'}, sandbox=${!disableSandbox})...`);
+  if (vulkanIcd) {
+    console.log(`[denovo-selfhost] Vulkan ICD: ${vulkanIcd}`);
+  }
+
+  const context = await chromium.launchPersistentContext(dataDir, {
+    headless: true,
+    chromiumSandbox: !disableSandbox,
+    ...(executablePath ? { executablePath } : {}),
+    args: launchArgs,
+    env: minimalEnv,
+    viewport: { width: 800, height: 600 },
+  });
+
+  const page = context.pages()[0] || (await context.newPage());
+  await page.exposeFunction('__denovoHostEmit', onEmit);
+
+  page.on('console', (msg) => {
+    const t = msg.type();
+    if (t === 'error' || t === 'warning') {
+      console.log(`[host-chromium:${t}] ${msg.text()}`);
+    }
+  });
+  page.on('pageerror', (err) => {
+    console.error(`[host-chromium:pageerror] ${err.message}`);
+  });
+
+  await page.goto(`${localOrigin}/runner`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => Boolean(window.__denovoHostRunner?.getHealth()?.ready), {
+    timeout: 30_000,
+  });
+
+  const initialHealth = await page.evaluate(() => window.__denovoHostRunner.getHealth());
+  const bridge = {
+    getHealth: () => page.evaluate(() => window.__denovoHostRunner?.getHealth?.() ?? null),
+    runNode: (jobId, payload) =>
+      page.evaluate(
+        async ({ jobId: id, node, inputs, maxFoldResidues }) => {
+          if (!window.__denovoHostRunner) {
+            throw new Error('Host runner bridge not mounted.');
+          }
+          return await window.__denovoHostRunner.runNode(id, { node, inputs, maxFoldResidues });
+        },
+        { jobId, ...payload },
+      ),
+    cancel: (jobId) => page.evaluate((id) => window.__denovoHostRunner?.cancel(id), jobId),
+    releaseGpu: () => page.evaluate(() => window.__denovoHostRunner?.releaseGpu?.()),
+  };
+
+  return {
+    context,
+    bridge,
+    initialHealth,
+    cleanupLock: () => {
+      try {
+        fs.rmSync(serverLockPath, { force: true });
+      } catch {
+        /* ignore */
+      }
+    },
+  };
+}
+
+async function main() {
+  if (!fs.existsSync(path.join(DEFAULT_BUILD_DIR, 'index.html'))) {
+    console.error('[denovo-selfhost] Missing web/build/index.html. Run "npm --prefix web run build" first.');
+    process.exit(1);
+  }
+
+  const dataDir = path.resolve(
+    process.env.DENOVO_DATA_DIR || path.join(os.homedir(), '.cache', 'denovo-selfhost', 'profile'),
+  );
+  const disableSandbox = process.env.DENOVO_DISABLE_SANDBOX === '1';
+
+  const instance = createSelfhostServer({
+    repoRoot: DEFAULT_REPO_ROOT,
+    buildDir: DEFAULT_BUILD_DIR,
+  });
+
+  await new Promise((resolve) =>
+    instance.server.listen(instance.config.port, instance.config.host, resolve),
+  );
+  const addr = instance.server.address();
+  const actualPort = typeof addr === 'object' && addr ? addr.port : instance.config.port;
+  const localOrigin = `http://127.0.0.1:${actualPort}`;
+
+  console.log(
+    `[denovo-selfhost] Listening on http://${instance.config.host}:${actualPort} (serving ${instance.config.realBuildDir})`,
+  );
+  console.log(`[denovo-selfhost] Persistent weight cache: ${dataDir}`);
+  console.log(
+    `[denovo-selfhost] Bearer API token auth: ${instance.config.apiTokenEnabled ? 'ENABLED' : 'DISABLED (loopback only)'}`,
+  );
+  if (instance.config.allowedOrigins.length > 0) {
+    console.log(`[denovo-selfhost] Allowed CORS origins: ${instance.config.allowedOrigins.join(', ')}`);
+  }
+
+  const runner = await startPlaywrightRunner(localOrigin, {
+    repoRoot: DEFAULT_REPO_ROOT,
+    dataDir,
+    disableSandbox,
+    onEmit: instance.handleRunnerEmit,
+  });
+  instance.setRunnerBridge(runner.bridge, runner.initialHealth);
+
+  if (runner.initialHealth?.gpu?.fallback && !instance.config.allowSoftwareGpu) {
+    console.warn('[denovo-selfhost] WARNING: Host Chromium fell back to software WebGPU (SwiftShader).');
+  } else if (runner.initialHealth?.gpu) {
+    const hw = detectHostGpuHardware();
+    const enriched = enrichGpuInfo(runner.initialHealth.gpu, hw);
+    console.log(
+      `[denovo-selfhost] Host GPU ready: ${enriched.description} (fallback=${enriched.fallback})`,
+    );
+  }
 
   const shutdown = async () => {
     console.log('\n[denovo-selfhost] Shutting down...');
     try {
-      await runnerContext?.close();
+      await runner.context?.close();
     } catch {
       /* ignore */
     }
-    server.close(() => process.exit(0));
+    runner.cleanupLock();
+    instance.server.close(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
 
-main().catch((err) => {
-  console.error('[denovo-selfhost] Fatal startup error:', err);
-  process.exit(1);
-});
+const isMainEntry =
+  process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename);
+if (isMainEntry) {
+  main().catch((err) => {
+    console.error('[denovo-selfhost] Fatal startup error:', err);
+    process.exit(1);
+  });
+}

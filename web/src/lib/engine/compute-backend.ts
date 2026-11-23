@@ -1,9 +1,10 @@
 // Pluggable compute backend routing & SSE client for self-hosted host-GPU WebGPU execution.
-// Supports three modes:
-//   - 'local'  : all GPU models run in local browser WebGPU workers (default on denovo.run)
-//   - 'remote' : all GPU models run on the self-hosted machine's GPU (zero Python deps)
-//   - 'hybrid' : lightweight GPU models (<= hybridThresholdMB) run locally when hardware WebGPU
-//                is available; heavy models (or devices without WebGPU) route to the host GPU.
+// Hardened:
+//   - Never persists apiToken in localStorage (in-memory session only, strips legacy stored tokens)
+//   - Enforces HTTPS outside loopback, rejects URL credentials/redirects
+//   - Clamps Host GPU folding residue ceiling to server's advertised maxFoldResidues
+//   - Uses server-issued { jobId, cancelToken } capability tokens for cancellation
+//   - Enforces Content-Type, response byte budgets, and immediate reader cancel on terminal SSE events
 
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS, RFD4_BENCHMARK_OPTIONS } from './registry';
 import { decodeWireValue, encodeWireValue } from './remote-codec';
@@ -15,7 +16,7 @@ export interface ComputeBackendConfig {
   mode: ComputeRoutingMode;
   /** Base URL of self-hosted server (empty string = same origin when served by selfhost-server.mjs). */
   serverUrl: string;
-  /** Optional Bearer API token when server sets DENOVO_API_TOKEN. */
+  /** Optional Bearer API token (kept in memory only; never saved to localStorage). */
   apiToken: string;
   /** In 'hybrid' mode, models whose active weight download exceeds this MB threshold run on host GPU. */
   hybridThresholdMB: number;
@@ -41,7 +42,7 @@ export interface RemoteServerHealth {
   } | null;
   activeAdapter?: string | null;
   queueDepth?: number;
-  runningJobId?: string | null;
+  busy?: boolean;
   maxFoldResidues?: number;
   error?: string;
 }
@@ -51,6 +52,9 @@ export const DEFAULT_HYBRID_THRESHOLD_MB = 40;
 export const DEFAULT_HOST_MAX_FOLD_RESIDUES = 2048;
 export const MIN_CUSTOM_FOLD_RESIDUES = 512;
 export const MAX_CUSTOM_FOLD_RESIDUES = 4096;
+
+const MAX_HEALTH_RESPONSE_BYTES = 64 * 1024;
+const MAX_SSE_BUFFER_CHARS = 128 * 1024 * 1024;
 
 export function sanitizeMaxFoldResidues(raw: unknown): number | null {
   if (raw === null || raw === undefined || raw === '' || raw === 'auto') return null;
@@ -70,8 +74,81 @@ export function defaultComputeBackendConfig(): ComputeBackendConfig {
 }
 
 export function normalizeServerBaseUrl(raw: string): string {
-  const trimmed = raw.trim().replace(/\/+$/, '');
-  return trimmed;
+  return raw.trim().replace(/\/+$/, '');
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1';
+}
+
+/**
+ * Validate and canonicalize a remote backend URL (H7).
+ * Empty string means same-origin. Non-loopback URLs must use HTTPS and contain no credentials/query/hash.
+ */
+export function validateRemoteServerUrl(raw: string): {
+  ok: boolean;
+  baseUrl: string;
+  origin: string;
+  error?: string;
+} {
+  const trimmed = normalizeServerBaseUrl(raw);
+  if (!trimmed) {
+    const pageOrigin =
+      typeof window !== 'undefined' && window.location?.origin
+        ? window.location.origin
+        : 'same-origin';
+    return { ok: true, baseUrl: '', origin: pageOrigin };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { ok: false, baseUrl: trimmed, origin: '', error: 'Invalid Host Server URL.' };
+  }
+  if (parsed.username || parsed.password) {
+    return {
+      ok: false,
+      baseUrl: trimmed,
+      origin: '',
+      error: 'Host Server URL must not contain embedded credentials.',
+    };
+  }
+  if (parsed.search || parsed.hash) {
+    return {
+      ok: false,
+      baseUrl: trimmed,
+      origin: '',
+      error: 'Host Server URL must not contain query parameters or fragments.',
+    };
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return {
+      ok: false,
+      baseUrl: trimmed,
+      origin: '',
+      error: 'Host Server URL must use https:// (or http:// for localhost only).',
+    };
+  }
+  if (parsed.protocol === 'http:' && !isLoopbackHostname(parsed.hostname)) {
+    return {
+      ok: false,
+      baseUrl: trimmed,
+      origin: '',
+      error: 'Non-loopback Host Server URLs must use https:// (e.g. Tailscale Serve or reverse proxy TLS).',
+    };
+  }
+  return {
+    ok: true,
+    baseUrl: parsed.origin,
+    origin: parsed.origin.toLowerCase(),
+  };
+}
+
+/** Return the canonical backend origin string for trust-boundary & token-isolation checks. */
+export function resolveRemoteBackendOrigin(serverUrl: string): string {
+  const check = validateRemoteServerUrl(serverUrl);
+  return check.ok ? check.origin : normalizeServerBaseUrl(serverUrl).toLowerCase();
 }
 
 export function loadComputeBackendConfig(): ComputeBackendConfig {
@@ -84,16 +161,22 @@ export function loadComputeBackendConfig(): ComputeBackendConfig {
     const mode: ComputeRoutingMode =
       parsed.mode === 'remote' || parsed.mode === 'hybrid' ? parsed.mode : 'local';
     const threshold = Number(parsed.hybridThresholdMB);
-    return {
+    const cfg: ComputeBackendConfig = {
       mode,
       serverUrl: typeof parsed.serverUrl === 'string' ? normalizeServerBaseUrl(parsed.serverUrl) : '',
-      apiToken: typeof parsed.apiToken === 'string' ? parsed.apiToken.trim() : '',
+      // M5: Never hydrate reusable Bearer tokens from localStorage
+      apiToken: '',
       hybridThresholdMB:
         Number.isFinite(threshold) && threshold >= 0 && threshold <= 2000
           ? Math.round(threshold)
           : DEFAULT_HYBRID_THRESHOLD_MB,
       maxFoldResidues: sanitizeMaxFoldResidues(parsed.maxFoldResidues),
     };
+    // Migrate legacy storage entries immediately to purge any previously persisted token
+    if (typeof parsed.apiToken === 'string' && parsed.apiToken.length > 0) {
+      saveComputeBackendConfig(cfg);
+    }
+    return cfg;
   } catch {
     return base;
   }
@@ -102,12 +185,12 @@ export function loadComputeBackendConfig(): ComputeBackendConfig {
 export function saveComputeBackendConfig(cfg: ComputeBackendConfig): void {
   if (typeof localStorage === 'undefined') return;
   try {
+    // M5: Persist non-secret routing preferences only — apiToken remains strictly in memory
     localStorage.setItem(
       COMPUTE_BACKEND_STORAGE_KEY,
       JSON.stringify({
         mode: cfg.mode,
         serverUrl: normalizeServerBaseUrl(cfg.serverUrl),
-        apiToken: cfg.apiToken.trim(),
         hybridThresholdMB: cfg.hybridThresholdMB,
         maxFoldResidues: sanitizeMaxFoldResidues(cfg.maxFoldResidues),
       }),
@@ -124,15 +207,12 @@ export function formatHostGpuPillLabel(
 ): string {
   const prefix = mode === 'hybrid' ? 'Hybrid' : 'Host';
   if (!health?.ok) return `${prefix} GPU (!)`;
-  const short =
-    health.gpu?.shortName?.trim() ||
-    health.gpu?.name?.trim() ||
-    '';
+  const short = health.gpu?.shortName?.trim() || health.gpu?.name?.trim() || '';
   if (short) return `${prefix} · ${short}`;
   return `${prefix} GPU`;
 }
 
-/** Format a rich GPU summary for the popover status line (e.g. "NVIDIA GeForce RTX 5090 (32 GB)"). */
+/** Format a rich GPU summary for the popover status line (e.g. "NVIDIA GeForce RTX 5090 · 32 GB"). */
 export function formatHostGpuDetail(health: RemoteServerHealth | null): string {
   if (!health?.ok) return health?.error ? `Offline: ${health.error}` : 'Not tested yet';
   const g = health.gpu;
@@ -144,7 +224,10 @@ export function formatHostGpuDetail(health: RemoteServerHealth | null): string {
   return g.description || g.vendor || 'Host GPU ready';
 }
 
-/** Resolve the effective folding residue ceiling for a node given Settings + Host GPU routing. */
+/**
+ * Resolve the effective folding residue ceiling for a node given Settings + Host GPU routing.
+ * H4: On Host GPU, never exceed the operator's advertised `remoteHealth.maxFoldResidues`.
+ */
 export function resolveNodeFoldLimitOptions(
   node: WorkflowNode,
   config: ComputeBackendConfig,
@@ -157,7 +240,7 @@ export function resolveNodeFoldLimitOptions(
     const hostDefault =
       sanitizeMaxFoldResidues(remoteHealth?.maxFoldResidues) ?? DEFAULT_HOST_MAX_FOLD_RESIDUES;
     return {
-      maxFoldResidues: userOverride ?? hostDefault,
+      maxFoldResidues: userOverride !== null ? Math.min(userOverride, hostDefault) : hostDefault,
       isHostGpu: true,
     };
   }
@@ -205,7 +288,6 @@ export function shouldRouteNodeToRemote(
   if (!manifest || manifest.runtime === 'cpu-ts') return false;
   if (config.mode === 'local') return false;
   if (config.mode === 'remote') return true;
-  // Hybrid mode: route to host GPU if client lacks hardware WebGPU OR model exceeds weight threshold
   if (opts?.localWebGpuAvailable === false || opts?.localWebGpuFallback === true) {
     return true;
   }
@@ -213,8 +295,11 @@ export function shouldRouteNodeToRemote(
 }
 
 function buildApiUrl(serverUrl: string, path: string): string {
-  const base = normalizeServerBaseUrl(serverUrl);
-  return base ? `${base}${path}` : path;
+  const check = validateRemoteServerUrl(serverUrl);
+  if (!check.ok) {
+    throw new Error(check.error || 'Invalid Host Server URL.');
+  }
+  return check.baseUrl ? `${check.baseUrl}${path}` : path;
 }
 
 function buildAuthHeaders(apiToken: string, extra?: Record<string, string>): Record<string, string> {
@@ -225,21 +310,54 @@ function buildAuthHeaders(apiToken: string, extra?: Record<string, string>): Rec
   return headers;
 }
 
+async function readBoundedText(resp: Response, maxBytes: number): Promise<string> {
+  if (!resp.body) {
+    const t = await resp.text();
+    if (t.length > maxBytes) throw new Error('Response exceeded maximum allowed size.');
+    return t;
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let out = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        void reader.cancel().catch(() => {});
+        throw new Error('Response exceeded maximum allowed size.');
+      }
+      out += decoder.decode(value, { stream: true });
+    }
+    out += decoder.decode();
+    return out;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export async function checkRemoteServerHealth(
   serverUrl: string,
   apiToken = '',
   fetchImpl: typeof fetch = fetch,
   timeoutMs = 3500,
 ): Promise<RemoteServerHealth> {
+  const urlCheck = validateRemoteServerUrl(serverUrl);
+  if (!urlCheck.ok) {
+    return { ok: false, error: urlCheck.error };
+  }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const resp = await fetchImpl(buildApiUrl(serverUrl, '/api/health'), {
       method: 'GET',
       headers: buildAuthHeaders(apiToken),
+      redirect: 'error',
       signal: ctrl.signal,
     });
-    const text = await resp.text();
+    const text = await readBoundedText(resp, MAX_HEALTH_RESPONSE_BYTES);
     let json: Record<string, unknown> | null = null;
     try {
       json = JSON.parse(text) as Record<string, unknown>;
@@ -261,7 +379,7 @@ export async function checkRemoteServerHealth(
       gpu: (json.gpu as RemoteServerHealth['gpu']) ?? null,
       activeAdapter: typeof json.activeAdapter === 'string' ? json.activeAdapter : null,
       queueDepth: typeof json.queueDepth === 'number' ? json.queueDepth : 0,
-      runningJobId: typeof json.runningJobId === 'string' ? json.runningJobId : null,
+      busy: Boolean(json.busy),
       maxFoldResidues: sanitizeMaxFoldResidues(json.maxFoldResidues) ?? undefined,
       error: typeof json.error === 'string' ? json.error : undefined,
     };
@@ -283,15 +401,9 @@ export async function releaseRemoteServerGpu(
   await fetchImpl(buildApiUrl(serverUrl, '/api/release-gpu'), {
     method: 'POST',
     headers: buildAuthHeaders(apiToken, { 'Content-Type': 'application/json' }),
+    redirect: 'error',
     body: '{}',
   });
-}
-
-function makeJobId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `job_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /**
@@ -313,7 +425,6 @@ export async function runNodeOnRemoteServer(opts: {
     throw new Error('Workflow run cancelled');
   }
 
-  const jobId = makeJobId();
   const plainNode: WorkflowNode = {
     id: node.id,
     adapterId: node.adapterId,
@@ -329,11 +440,16 @@ export async function runNodeOnRemoteServer(opts: {
     detail: `Sending ${node.label ?? node.adapterId} to host GPU...`,
   });
 
+  // Server issues { jobId, cancelToken } via the opening 'started' SSE frame (M1)
+  let serverJobId = '';
+  let serverCancelToken = '';
   const cancelRemote = () => {
+    if (!serverJobId || !serverCancelToken) return;
     void fetchImpl(buildApiUrl(serverUrl, '/api/cancel'), {
       method: 'POST',
       headers: buildAuthHeaders(apiToken, { 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ jobId }),
+      redirect: 'error',
+      body: JSON.stringify({ jobId: serverJobId, cancelToken: serverCancelToken }),
     }).catch(() => {});
   };
 
@@ -347,8 +463,8 @@ export async function runNodeOnRemoteServer(opts: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
       }),
+      redirect: 'error',
       body: JSON.stringify({
-        jobId,
         node: plainNode,
         inputs: encodeWireValue(inputs),
       }),
@@ -358,12 +474,18 @@ export async function runNodeOnRemoteServer(opts: {
     if (!resp.ok) {
       let msg = `Host GPU server returned HTTP ${resp.status}`;
       try {
-        const errJson = (await resp.json()) as { error?: string };
+        const text = await readBoundedText(resp, MAX_HEALTH_RESPONSE_BYTES);
+        const errJson = JSON.parse(text) as { error?: string };
         if (errJson?.error) msg = errJson.error;
       } catch {
         /* ignore */
       }
       throw new Error(msg);
+    }
+
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    if (!ct.includes('text/event-stream')) {
+      throw new Error(`Unexpected response Content-Type from host GPU server ("${ct || 'missing'}").`);
     }
 
     if (!resp.body) {
@@ -373,84 +495,87 @@ export async function runNodeOnRemoteServer(opts: {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let resultPayload: { outputs: Record<string, CanonicalArtifact>; elapsedMs: number } | null = null;
-    let streamError: string | null = null;
+    let finalResult: { outputs: Record<string, CanonicalArtifact>; elapsedMs: number } | null = null;
+    let finalError: string | null = null;
 
-    const handleFrame = (rawFrame: string) => {
-      const lines = rawFrame.split(/\r?\n/);
-      let eventName = 'message';
+    const processEventBlock = (block: string) => {
+      let eventType = 'message';
       const dataLines: string[] = [];
-      for (const line of lines) {
-        if (!line || line.startsWith(':')) continue;
-        if (line.startsWith('event:')) {
-          eventName = line.slice(6).trim();
-        } else if (line.startsWith('data:')) {
-          dataLines.push(line.slice(5).trimStart());
+      for (const rawLine of block.split(/\r?\n/)) {
+        if (!rawLine || rawLine.startsWith(':')) continue;
+        if (rawLine.startsWith('event:')) {
+          eventType = rawLine.slice(6).trim();
+        } else if (rawLine.startsWith('data:')) {
+          dataLines.push(rawLine.slice(5).trimStart());
         }
       }
       if (dataLines.length === 0) return;
-      const dataText = dataLines.join('\n');
-      let data: Record<string, unknown>;
+      let payload: Record<string, unknown>;
       try {
-        data = JSON.parse(dataText) as Record<string, unknown>;
+        payload = JSON.parse(dataLines.join('\n')) as Record<string, unknown>;
       } catch {
         return;
       }
-      if (eventName === 'progress') {
-        const detailRaw = typeof data.detail === 'string' ? data.detail : '';
+
+      if (eventType === 'started') {
+        if (typeof payload.jobId === 'string') serverJobId = payload.jobId;
+        if (typeof payload.cancelToken === 'string') serverCancelToken = payload.cancelToken;
+        if (signal?.aborted) cancelRemote();
+      } else if (eventType === 'progress') {
+        const detail = typeof payload.detail === 'string' ? payload.detail : '';
         onProgress({
           nodeId: node.id,
           status:
-            data.status === 'loading' || data.status === 'running'
-              ? data.status
-              : data.phase === 'weights' || data.phase === 'init' || data.phase === 'queue'
-                ? 'loading'
-                : 'running',
-          phase: typeof data.phase === 'string' ? data.phase : 'remote',
-          progress: typeof data.progress === 'number' ? data.progress : undefined,
-          detail: detailRaw ? `[Host GPU] ${detailRaw}` : '[Host GPU] Running...',
+            payload.status === 'loading' || payload.status === 'running'
+              ? payload.status
+              : 'running',
+          phase: typeof payload.phase === 'string' ? payload.phase : 'running',
+          progress: typeof payload.progress === 'number' ? payload.progress : undefined,
+          detail: detail ? `[Host GPU] ${detail}` : '[Host GPU] Running...',
         });
-      } else if (eventName === 'result') {
-        const decodedOutputs = decodeWireValue<Record<string, CanonicalArtifact>>(data.outputs ?? {});
-        const elapsedMs = typeof data.elapsedMs === 'number' ? data.elapsedMs : 0;
-        resultPayload = { outputs: decodedOutputs, elapsedMs };
-      } else if (eventName === 'error') {
-        streamError = typeof data.message === 'string' ? data.message : 'Host GPU execution failed';
+      } else if (eventType === 'result') {
+        const decodedOutputs = decodeWireValue<Record<string, CanonicalArtifact>>(payload.outputs);
+        finalResult = {
+          outputs: decodedOutputs,
+          elapsedMs: typeof payload.elapsedMs === 'number' ? payload.elapsedMs : 0,
+        };
+      } else if (eventType === 'error') {
+        finalError = typeof payload.message === 'string' ? payload.message : 'Host GPU node execution failed';
       }
     };
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let sepIdx: number;
-      while ((sepIdx = buffer.search(/\r?\n\r?\n/)) !== -1) {
-        const frame = buffer.slice(0, sepIdx);
-        const matchLen = buffer.slice(sepIdx).startsWith('\r\n\r\n') ? 4 : 2;
-        buffer = buffer.slice(sepIdx + matchLen);
-        handleFrame(frame);
+    try {
+      while (!finalResult && !finalError) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > MAX_SSE_BUFFER_CHARS) {
+          throw new Error('Host GPU stream exceeded maximum allowed buffer size.');
+        }
+        let sepIdx = buffer.indexOf('\n\n');
+        while (sepIdx !== -1 && !finalResult && !finalError) {
+          const block = buffer.slice(0, sepIdx);
+          buffer = buffer.slice(sepIdx + 2);
+          processEventBlock(block);
+          sepIdx = buffer.indexOf('\n\n');
+        }
       }
-    }
-    if (buffer.trim()) {
-      handleFrame(buffer);
+      if (!finalResult && !finalError && buffer.trim()) {
+        processEventBlock(buffer);
+      }
+    } finally {
+      // M4: Immediately cancel the underlying stream once terminal event or error arrives
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
     }
 
-    if (streamError) {
-      throw new Error(streamError);
+    if (finalError) {
+      throw new Error(finalError);
     }
-    if (!resultPayload) {
-      throw new Error(
-        signal?.aborted
-          ? 'Workflow run cancelled'
-          : 'Host GPU stream ended before returning a result.',
-      );
+    if (!finalResult) {
+      throw new Error('Host GPU server closed the stream before returning a result.');
     }
-    return resultPayload;
-  } catch (err) {
-    if (signal?.aborted) {
-      throw new Error('Workflow run cancelled');
-    }
-    throw err;
+    return finalResult;
   } finally {
     signal?.removeEventListener('abort', onAbort);
   }

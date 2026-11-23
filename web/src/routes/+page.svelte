@@ -104,6 +104,7 @@
     loadComputeBackendConfig,
     releaseRemoteServerGpu,
     resolveNodeFoldLimitOptions,
+    resolveRemoteBackendOrigin,
     runNodeOnRemoteServer,
     sanitizeMaxFoldResidues,
     saveComputeBackendConfig,
@@ -155,6 +156,8 @@
   let computeBackend = $state<ComputeBackendConfig>(defaultComputeBackendConfig());
   let remoteHealth = $state<RemoteServerHealth | null>(null);
   let remoteChecking = $state(false);
+  let sameOriginHostDetected = $state<RemoteServerHealth | null>(null);
+  let acknowledgedRemoteOrigins = $state<Set<string>>(new Set());
 
   function buildFoldLimitOpts(
     cfg: ComputeBackendConfig = computeBackend,
@@ -170,22 +173,24 @@
   }
 
   function syncSchedulerRemoteExecutor(cfg: ComputeBackendConfig) {
+    const localOpts = {
+      localWebGpuAvailable: webgpuSupported !== false,
+      localWebGpuFallback: webgpuIsFallback,
+    };
     scheduler.setFoldLimitResolver((node) =>
-      resolveNodeFoldLimitOptions(node, cfg, remoteHealth, {
-        localWebGpuAvailable: webgpuSupported !== false,
-        localWebGpuFallback: webgpuIsFallback,
-      }),
+      resolveNodeFoldLimitOptions(node, cfg, remoteHealth, localOpts),
+    );
+    // M6: Partition memo & checkpoint cache keys across compute trust boundaries
+    const remoteOrigin = resolveRemoteBackendOrigin(cfg.serverUrl);
+    scheduler.setExecutionProvenanceResolver((node) =>
+      shouldRouteNodeToRemote(node, cfg, localOpts) ? `remote:${remoteOrigin}` : 'local',
     );
     if (cfg.mode === 'local') {
       scheduler.setRemoteGpuExecutor(null);
       return;
     }
     scheduler.setRemoteGpuExecutor((node, inputs, onProgress, signal) => {
-      const routeRemote = shouldRouteNodeToRemote(node, cfg, {
-        localWebGpuAvailable: webgpuSupported !== false,
-        localWebGpuFallback: webgpuIsFallback,
-      });
-      if (!routeRemote) return null;
+      if (!shouldRouteNodeToRemote(node, cfg, localOpts)) return null;
       return runNodeOnRemoteServer({
         serverUrl: cfg.serverUrl,
         apiToken: cfg.apiToken,
@@ -208,10 +213,21 @@
   }
 
   function updateComputeBackend(patch: Partial<ComputeBackendConfig>) {
-    computeBackend = { ...computeBackend, ...patch };
+    const prevOrigin = resolveRemoteBackendOrigin(computeBackend.serverUrl);
+    const nextRaw: ComputeBackendConfig = { ...computeBackend, ...patch };
+    const nextOrigin = resolveRemoteBackendOrigin(nextRaw.serverUrl);
+    // H7: Never send the previous host's Bearer token to a different origin!
+    const originChanged = patch.serverUrl !== undefined && nextOrigin !== prevOrigin;
+    const nextCfg: ComputeBackendConfig = originChanged
+      ? { ...nextRaw, apiToken: patch.apiToken ?? '' }
+      : nextRaw;
+    computeBackend = nextCfg;
+    if (originChanged) {
+      remoteHealth = null;
+    }
     saveComputeBackendConfig(computeBackend);
     syncSchedulerRemoteExecutor(computeBackend);
-    if (computeBackend.mode !== 'local') {
+    if (computeBackend.mode !== 'local' && !originChanged) {
       void probeRemoteBackend(computeBackend);
     }
   }
@@ -1037,7 +1053,7 @@
       }
     }
 
-    // Load saved self-hosted compute backend config & auto-detect same-origin selfhost-server.mjs
+    // Load saved self-hosted compute backend config & probe same-origin server (H8: keep discovery informational, never silently upload)
     const loadedBackend = loadComputeBackendConfig();
     computeBackend = loadedBackend;
     syncSchedulerRemoteExecutor(loadedBackend);
@@ -1046,14 +1062,7 @@
     } else if (typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
       void checkRemoteServerHealth('', '', fetch, 1500).then((health) => {
         if (!health.ok) return;
-        remoteHealth = health;
-        const hasSavedPref = Boolean(localStorage.getItem('denovo.computeBackend.v1'));
-        if (!hasSavedPref) {
-          const autoMode: ComputeRoutingMode =
-            webgpuSupported === false || webgpuIsFallback ? 'remote' : 'hybrid';
-          computeBackend = { ...computeBackend, mode: autoMode, serverUrl: '' };
-          syncSchedulerRemoteExecutor(computeBackend);
-        }
+        sameOriginHostDetected = health;
       });
     }
     const { webMcpRegistered } = attachProgrammaticApi(scheduler, handleProgress);
@@ -2228,20 +2237,40 @@
       runError = errs.join('\n');
       return;
     }
-    const targetBioErrors = validateBioCapabilities(targetGraph, outputsByNode).filter(
-      (i) => i.severity === 'error',
-    );
+    const targetBioErrors = validateBioCapabilities(
+      targetGraph,
+      outputsByNode,
+      bioFoldLimitOpts,
+    ).filter((i) => i.severity === 'error');
     if (targetBioErrors.length > 0) {
       runError = targetBioErrors.map((i) => i.message).join('\n');
       return;
     }
+    const routesAnyRemote = targetGraph.nodes.some((n) =>
+      shouldRouteNodeToRemote(n, computeBackend, {
+        localWebGpuAvailable: webgpuSupported !== false,
+        localWebGpuFallback: webgpuIsFallback,
+      }),
+    );
+    const activeRemoteOrigin = routesAnyRemote
+      ? resolveRemoteBackendOrigin(computeBackend.serverUrl)
+      : null;
     if (!confirmed) {
       const preflight = estimateRunRequirements(targetGraph);
       const hasRemoteMsa = (preflight.remoteMsaTransfers?.length ?? 0) > 0;
-      if (hasRemoteMsa || (!firstRunAck && (preflight.usesWebGpu || preflight.totalDownloadMB > 0))) {
+      const needsRemoteConsent = Boolean(
+        activeRemoteOrigin && !acknowledgedRemoteOrigins.has(activeRemoteOrigin),
+      );
+      if (
+        hasRemoteMsa ||
+        needsRemoteConsent ||
+        (!firstRunAck && (preflight.usesWebGpu || preflight.totalDownloadMB > 0))
+      ) {
         pendingRun = { bypassCache, upToNodeId, preflight };
         return;
       }
+    } else if (activeRemoteOrigin) {
+      acknowledgedRemoteOrigins = new Set([...acknowledgedRemoteOrigins, activeRemoteOrigin]);
     }
     localRunning = true;
     appliedDraftNotice = null;
@@ -3750,6 +3779,24 @@
               </div>
             </div>
 
+            {#if computeBackend.mode === 'local' && sameOriginHostDetected?.ok}
+              <div class="pop-row">
+                <span class="pop-k" title="Same-origin self-hosted GPU detected">
+                  {formatHostGpuDetail(sameOriginHostDetected)}
+                </span>
+                <button
+                  type="button"
+                  class="pop-action"
+                  disabled={isRunning || activeRunState.leaseHeld}
+                  onclick={() => {
+                    remoteHealth = sameOriginHostDetected;
+                    updateComputeBackend({ mode: 'remote', serverUrl: '' });
+                  }}
+                >
+                  Use Host GPU
+                </button>
+              </div>
+            {/if}
             {#if computeBackend.mode !== 'local'}
               <label class="pop-field">
                 <span>Host Server URL (blank = same origin)</span>
@@ -4990,6 +5037,9 @@
     webgpuSupported={webgpuSupported !== false}
     {webgpuDetail}
     isPartialRun={Boolean(pendingRun.upToNodeId)}
+    remoteHostOrigin={computeBackend.mode !== 'local'
+      ? resolveRemoteBackendOrigin(computeBackend.serverUrl)
+      : null}
     onConfirm={confirmPendingRun}
     onCancel={cancelPendingRun}
   />

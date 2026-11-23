@@ -188,7 +188,7 @@ describe('Overnight Pass C — #88: Workbench shell & guard polish', () => {
     );
     // runWorkflow itself also guards against severity === 'error' bio issues on targetGraph
     expect(pageSrc).toMatch(
-      /const targetBioErrors = validateBioCapabilities\(targetGraph, outputsByNode\)\.filter\([\s\S]*?severity === 'error'[\s\S]*?\);[\s\S]*?if \(targetBioErrors\.length > 0\)/,
+      /const targetBioErrors = validateBioCapabilities\(\s*targetGraph,\s*outputsByNode(?:,\s*bioFoldLimitOpts)?,?\s*\)\.filter\([\s\S]*?severity === 'error'[\s\S]*?\);[\s\S]*?if \(targetBioErrors\.length > 0\)/,
     );
   });
 

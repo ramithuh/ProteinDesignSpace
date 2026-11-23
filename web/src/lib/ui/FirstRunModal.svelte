@@ -8,6 +8,8 @@
     webgpuSupported: boolean;
     webgpuDetail?: string;
     isPartialRun?: boolean;
+    /** Non-null when one or more GPU nodes in this run will upload inputs to a self-hosted Host GPU server (H8). */
+    remoteHostOrigin?: string | null;
     onConfirm: (rememberChoice: boolean) => void;
     onCancel: () => void;
   }
@@ -17,6 +19,7 @@
     webgpuSupported,
     webgpuDetail = '',
     isPartialRun = false,
+    remoteHostOrigin = null,
     onConfirm,
     onCancel,
   }: Props = $props();
@@ -25,6 +28,8 @@
   let confirmBtn = $state<HTMLButtonElement | null>(null);
   let remoteMsaList = $derived(preflight.remoteMsaTransfers ?? []);
   let hasRemoteMsa = $derived(remoteMsaList.length > 0);
+  let hasRemoteHost = $derived(Boolean(remoteHostOrigin));
+  let hasAnyExternalTransfer = $derived(hasRemoteMsa || hasRemoteHost);
 
   onMount(() => {
     confirmBtn?.focus();
@@ -55,16 +60,43 @@
     use:modalFocusTrap
   >
     <div class="modal-hdr">
-      <div class="hdr-badge">{hasRemoteMsa ? 'EXTERNAL MSA + LOCAL GPU RUN' : 'LOCAL BROWSER RUN'}</div>
-      <h2 id="first-run-title">{hasRemoteMsa ? 'Confirm external MSA & run' : 'Before your first run'}</h2>
+      <div class="hdr-badge">
+        {hasRemoteHost
+          ? hasRemoteMsa
+            ? 'HOST GPU + EXTERNAL MSA RUN'
+            : 'SELF-HOSTED GPU RUN'
+          : hasRemoteMsa
+            ? 'EXTERNAL MSA + LOCAL GPU RUN'
+            : 'LOCAL BROWSER RUN'}
+      </div>
+      <h2 id="first-run-title">
+        {hasRemoteHost
+          ? 'Confirm Host GPU upload & run'
+          : hasRemoteMsa
+            ? 'Confirm external MSA & run'
+            : 'Before your first run'}
+      </h2>
       <p class="hdr-sub">
-        {hasRemoteMsa
-          ? 'This workflow has remote ColabFold MMseqs2 MSA enabled. Selected chain sequences will be sent to api.colabfold.com before local GPU folding.'
-          : isPartialRun
-            ? "This partial run will download the required model weights and run protein design & folding locally on your device's GPU."
-            : "This workflow downloads model weights once into your browser and runs protein design & folding locally on your device's GPU."}
+        {#if hasRemoteHost}
+          Routed GPU nodes will send their parameters and input artifacts to your configured self-hosted server (<code>{remoteHostOrigin}</code>) for host WebGPU execution.
+        {:else if hasRemoteMsa}
+          This workflow has remote ColabFold MMseqs2 MSA enabled. Selected chain sequences will be sent to api.colabfold.com before local GPU folding.
+        {:else if isPartialRun}
+          This partial run will download the required model weights and run protein design &amp; folding locally on your device's GPU.
+        {:else}
+          This workflow downloads model weights once into your browser and runs protein design &amp; folding locally on your device's GPU.
+        {/if}
       </p>
     </div>
+
+    {#if hasRemoteHost}
+      <div class="gpu-warn" role="alert">
+        <strong>Remote Host GPU transfer ({remoteHostOrigin}):</strong>
+        <span>
+          Inputs for GPU blocks routed to Host GPU will be uploaded to <code>{remoteHostOrigin}</code>. Switch Compute to <code>Browser</code> in the top-right GPU menu to keep 100% of data local.
+        </span>
+      </div>
+    {/if}
 
     {#if hasRemoteMsa}
       <div class="gpu-warn" role="alert">
@@ -119,7 +151,7 @@
     {/if}
 
     <ul class="notes">
-      {#if !hasRemoteMsa}
+      {#if !hasAnyExternalTransfer}
         <li>
           <strong>100% local &amp; private:</strong> Nothing is uploaded — sequences and structures stay in your browser.
         </li>
@@ -132,7 +164,7 @@
       </li>
     </ul>
 
-    {#if !hasRemoteMsa}
+    {#if !hasAnyExternalTransfer}
       <label class="remember-row">
         <input type="checkbox" bind:checked={rememberChoice} />
         <span>Don't show this again on this browser</span>
@@ -147,11 +179,13 @@
         type="button"
         class="btn-confirm"
         bind:this={confirmBtn}
-        onclick={() => onConfirm(hasRemoteMsa ? false : rememberChoice)}
+        onclick={() => onConfirm(hasAnyExternalTransfer ? false : rememberChoice)}
       >
-        {hasRemoteMsa
-          ? `▶ Send MSA & Run (${formatApproxSize(preflight.totalDownloadMB)})`
-          : `▶ Download & Run (${formatApproxSize(preflight.totalDownloadMB)})`}
+        {hasRemoteHost
+          ? `▶ Send to Host GPU & Run`
+          : hasRemoteMsa
+            ? `▶ Send MSA & Run (${formatApproxSize(preflight.totalDownloadMB)})`
+            : `▶ Download & Run (${formatApproxSize(preflight.totalDownloadMB)})`}
       </button>
     </div>
   </div>

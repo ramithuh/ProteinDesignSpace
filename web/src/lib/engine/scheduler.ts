@@ -33,7 +33,7 @@ import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/pro
 import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS, WORKFLOW_PRESETS } from './registry';
 import { validateGraph } from './graph-utils';
-import { validateSequenceText } from './param-validation';
+import { validateNodeParams, validateSequenceText } from './param-validation';
 import { normalizeWorkflowGraph } from './share';
 import {
   resolveFoldConfidence,
@@ -894,11 +894,14 @@ export type FoldLimitResolver = (
   node: WorkflowNode,
 ) => { maxFoldResidues?: number | null; isHostGpu?: boolean } | undefined;
 
+export type ExecutionProvenanceResolver = (node: WorkflowNode) => string;
+
 export class ExecutionScheduler {
   private activeGpu: ActiveGpuSlot | null = null;
   private pluginRegistry: PluginRegistry | null = null;
   private remoteGpuExecutor: RemoteGpuExecutor | null = null;
   private foldLimitResolver: FoldLimitResolver | null = null;
+  private executionProvenanceResolver: ExecutionProvenanceResolver | null = null;
   private abortPendingPromise: Promise<void> | null = null;
   private gpuDisposalPromise: Promise<void> | null = null;
   private gpuIdleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1009,8 +1012,17 @@ export class ExecutionScheduler {
   }
 
   /**
+   * Register an execution provenance tag resolver (M6: partitions memo & checkpoint keys
+   * across compute trust boundaries, e.g. 'local' vs 'remote:https://host:8790').
+   */
+  setExecutionProvenanceResolver(resolver: ExecutionProvenanceResolver | null): void {
+    this.executionProvenanceResolver = resolver;
+  }
+
+  /**
    * Execute a single GPU node directly on local WebGPU workers (used by the hidden /runner
    * host harness inside server/selfhost-server.mjs so all 22 workers & VRAM lifecycle are reused).
+   * H4: Enforces manifest allowlist, validateNodeParams, and validateRuntimeNodeInputs with server ceiling.
    */
   async runSingleGpuNode(
     node: WorkflowNode,
@@ -1019,6 +1031,21 @@ export class ExecutionScheduler {
     signal?: AbortSignal,
     maxFoldResidues?: number,
   ): Promise<{ outputs: Record<string, CanonicalArtifact>; elapsedMs: number }> {
+    const manifest = ADAPTER_REGISTRY[node.adapterId];
+    if (!manifest || manifest.runtime === 'cpu-ts') {
+      throw new Error(`Disallowed or unknown GPU adapter "${node.adapterId}".`);
+    }
+    const connectedInputPorts = Object.keys(inputs ?? {});
+    const paramErrors = validateNodeParams(node, { connectedInputs: connectedInputPorts });
+    if (paramErrors.length > 0) {
+      throw new Error(`Invalid parameters for ${node.adapterId}: ${paramErrors.join('; ')}`);
+    }
+    validateRuntimeNodeInputs(node, inputs, {
+      ...(typeof maxFoldResidues === 'number' && Number.isFinite(maxFoldResidues)
+        ? { maxFoldResidues: Math.round(maxFoldResidues) }
+        : {}),
+      isHostGpu: true,
+    });
     this.clearGpuIdleTimer();
     try {
       return await this.runLocalGpuNode(node, inputs, onProgress, signal, maxFoldResidues);
@@ -1377,12 +1404,13 @@ export class ExecutionScheduler {
       }
     })();
 
-    this.abortPendingPromise = abortFlow.finally(() => {
-      if (this.abortPendingPromise === abortFlow) {
+    const tracked = abortFlow.finally(() => {
+      if (this.abortPendingPromise === tracked) {
         this.abortPendingPromise = null;
       }
     });
-    return this.abortPendingPromise;
+    this.abortPendingPromise = tracked;
+    return tracked;
   }
 
   private async releaseActiveGpuInternal(abortMessage?: string): Promise<void> {
@@ -2817,11 +2845,13 @@ export class ExecutionScheduler {
                 }
               }
               if (missingUpstreamMatch) continue;
+              const ckptProv = this.executionProvenanceResolver?.(node);
               const cacheKey = fnv1a(
                 canonicalJsonStringify({
                   adapter: node.adapterId,
                   params: normalizeParamsForComputation(node.adapterId, node.params),
                   inputIds,
+                  ...(ckptProv && ckptProv !== 'local' ? { backend: ckptProv } : {}),
                 }),
               );
               if (entry.cacheKey === cacheKey) {
@@ -3043,12 +3073,14 @@ export class ExecutionScheduler {
           }
         }
 
-        // Content-addressed memoization key (canonicalized key order prevents spurious misses)
+        // Content-addressed memoization key (canonicalized key order + compute provenance boundary, M6)
+        const execProv = this.executionProvenanceResolver?.(node);
         const cacheKey = fnv1a(
           canonicalJsonStringify({
             adapter: node.adapterId,
             params: normalizeParamsForComputation(node.adapterId, node.params),
             inputIds,
+            ...(execProv && execProv !== 'local' ? { backend: execProv } : {}),
           }),
         );
 

@@ -45,15 +45,10 @@ export const LEGACY_SHORT_CODES: Readonly<Record<string, string>> = {
   'structure-compare': 'c',
 };
 
-const COOPERATIVE_ABORT_ADAPTERS = new Set([
-  'evodiff',
-  'foldflow2',
-  'frameflow',
-  'genie2',
-  'la-proteina',
-  'proteina',
-  'sid-protein',
-]);
+// Legacy workers that have NOT yet been migrated onto `createWorkerHarness()` do not emit
+// `{ id, type: 'aborted' }` after settlement; cooperative abort is enabled per-plugin as each
+// worker migrates in Phase 3C (Astra Audit L3).
+const COOPERATIVE_ABORT_ADAPTERS = new Set<string>([]);
 
 const LEGACY_CACHE_POLICIES: Readonly<Record<string, PluginCachePolicy>> = {
   'web-protein-mpnn': { usesSharedOpfsStore: true, opfsDirs: ['denovo-weights'], cacheStoragePrefixes: ['denovo-run'] },

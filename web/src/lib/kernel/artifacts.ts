@@ -134,6 +134,8 @@ export interface PortTypeDescriptor<TArtifact extends ArtifactEnvelope = Artifac
   viewerId: string;
 }
 
+const FORBIDDEN_ARTIFACT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 const ENVELOPE_CORE_KEYS = new Set([
   'kind',
   'schemaVersion',
@@ -192,12 +194,29 @@ export function hydrateLegacyArtifactToEnvelope<TKind extends string = string>(
   const parentArtifactIds: string[] = [];
 
   for (const [k, v] of Object.entries(raw)) {
-    if (k === 'kind' || k === 'id' || k === 'label' || k === 'sourceModelId' || k === 'domainId') {
+    if (
+      FORBIDDEN_ARTIFACT_KEYS.has(k) ||
+      k === 'kind' ||
+      k === 'id' ||
+      k === 'label' ||
+      k === 'sourceModelId' ||
+      k === 'domainId'
+    ) {
       continue;
     }
-    payload[k] = v;
+    Object.defineProperty(payload, k, {
+      value: v,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
     if (LEGACY_LINEAGE_KEYS.has(k) && v !== undefined) {
-      lineageDomainMeta[k] = v;
+      Object.defineProperty(lineageDomainMeta, k, {
+        value: v,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
   }
 
@@ -289,14 +308,26 @@ export function serializeEnvelopeForDnv1(
   };
   if (env.payload && typeof env.payload === 'object' && !Array.isArray(env.payload)) {
     for (const [k, v] of Object.entries(env.payload as Record<string, unknown>)) {
-      if (!ENVELOPE_CORE_KEYS.has(k)) {
-        flat[k] = v;
+      if (!ENVELOPE_CORE_KEYS.has(k) && !FORBIDDEN_ARTIFACT_KEYS.has(k)) {
+        Object.defineProperty(flat, k, {
+          value: v,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
       }
     }
   }
   if (env.lineage?.domainMeta) {
     for (const [k, v] of Object.entries(env.lineage.domainMeta)) {
-      if (!(k in flat)) flat[k] = v;
+      if (!(k in flat) && !FORBIDDEN_ARTIFACT_KEYS.has(k)) {
+        Object.defineProperty(flat, k, {
+          value: v,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      }
     }
   }
   return flat;
