@@ -95,6 +95,18 @@
     requestResilientWebGpuAdapter,
     type WebGpuAdapterInfoSnapshot,
   } from '$lib/engine/webgpu-device';
+  import {
+    checkRemoteServerHealth,
+    defaultComputeBackendConfig,
+    loadComputeBackendConfig,
+    releaseRemoteServerGpu,
+    runNodeOnRemoteServer,
+    saveComputeBackendConfig,
+    shouldRouteNodeToRemote,
+    type ComputeBackendConfig,
+    type ComputeRoutingMode,
+    type RemoteServerHealth,
+  } from '$lib/engine/compute-backend';
 
   const scheduler = new ExecutionScheduler({
     checkpointStore: createIndexedDbCheckpointStore(),
@@ -129,6 +141,59 @@
     activeGpuWorker ? (ADAPTER_REGISTRY[activeGpuWorker]?.shortName ?? activeGpuWorker) : null,
   );
   let cacheUsedMB = $state<number>(0);
+  let computeBackend = $state<ComputeBackendConfig>(defaultComputeBackendConfig());
+  let remoteHealth = $state<RemoteServerHealth | null>(null);
+  let remoteChecking = $state(false);
+
+  function syncSchedulerRemoteExecutor(cfg: ComputeBackendConfig) {
+    if (cfg.mode === 'local') {
+      scheduler.setRemoteGpuExecutor(null);
+      return;
+    }
+    scheduler.setRemoteGpuExecutor((node, inputs, onProgress, signal) => {
+      const routeRemote = shouldRouteNodeToRemote(node, cfg, {
+        localWebGpuAvailable: webgpuSupported !== false,
+        localWebGpuFallback: webgpuIsFallback,
+      });
+      if (!routeRemote) return null;
+      return runNodeOnRemoteServer({
+        serverUrl: cfg.serverUrl,
+        apiToken: cfg.apiToken,
+        node,
+        inputs,
+        onProgress,
+        signal,
+      });
+    });
+  }
+
+  async function probeRemoteBackend(cfg: ComputeBackendConfig = computeBackend) {
+    remoteChecking = true;
+    try {
+      remoteHealth = await checkRemoteServerHealth(cfg.serverUrl, cfg.apiToken);
+    } finally {
+      remoteChecking = false;
+    }
+  }
+
+  function updateComputeBackend(patch: Partial<ComputeBackendConfig>) {
+    computeBackend = { ...computeBackend, ...patch };
+    saveComputeBackendConfig(computeBackend);
+    syncSchedulerRemoteExecutor(computeBackend);
+    if (computeBackend.mode !== 'local') {
+      void probeRemoteBackend(computeBackend);
+    }
+  }
+
+  async function freeRemoteVram() {
+    if (isRunning || activeRunState.leaseHeld) return;
+    try {
+      await releaseRemoteServerGpu(computeBackend.serverUrl, computeBackend.apiToken);
+      await probeRemoteBackend(computeBackend);
+    } catch {
+      /* ignore */
+    }
+  }
 
   // Header popovers & first-run confirmation dialog
   let sysMenuOpen = $state(false);
@@ -940,6 +1005,26 @@
         webgpuDetail = 'no GPU adapter';
       }
     }
+
+    // Load saved self-hosted compute backend config & auto-detect same-origin selfhost-server.mjs
+    const loadedBackend = loadComputeBackendConfig();
+    computeBackend = loadedBackend;
+    syncSchedulerRemoteExecutor(loadedBackend);
+    if (loadedBackend.mode !== 'local') {
+      void probeRemoteBackend(loadedBackend);
+    } else if (typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
+      void checkRemoteServerHealth('', '', fetch, 1500).then((health) => {
+        if (!health.ok) return;
+        remoteHealth = health;
+        const hasSavedPref = Boolean(localStorage.getItem('denovo.computeBackend.v1'));
+        if (!hasSavedPref) {
+          const autoMode: ComputeRoutingMode =
+            webgpuSupported === false || webgpuIsFallback ? 'remote' : 'hybrid';
+          computeBackend = { ...computeBackend, mode: autoMode, serverUrl: '' };
+          syncSchedulerRemoteExecutor(computeBackend);
+        }
+      });
+    }
     const { webMcpRegistered } = attachProgrammaticApi(scheduler, handleProgress);
     webMcpReady = webMcpRegistered;
 
@@ -995,7 +1080,8 @@
   }
 
   function handleProgress(ev: NodeProgressEvent) {
-    if (webgpuSupported === false && (ev.status === 'running' || ev.status === 'done')) {
+    const isRemoteEv = ev.phase === 'remote' || Boolean(ev.detail?.startsWith('[Host GPU]'));
+    if (!isRemoteEv && webgpuSupported === false && (ev.status === 'running' || ev.status === 'done')) {
       const node = graph.nodes.find((n) => n.id === ev.nodeId);
       if (node && ADAPTER_REGISTRY[node.adapterId]?.runtime !== 'cpu-ts') {
         webgpuSupported = true;
@@ -3533,9 +3619,9 @@
       <button
         type="button"
         class="hdr-pill"
-        class:ok={webgpuSupported && !webgpuIsFallback && !activeGpuWorker}
-        class:warn={webgpuSupported && webgpuIsFallback && !activeGpuWorker}
-        class:bad={webgpuSupported === false}
+        class:ok={((computeBackend.mode !== 'local' && remoteHealth?.ok) || (webgpuSupported && !webgpuIsFallback)) && !activeGpuWorker}
+        class:warn={computeBackend.mode === 'local' && webgpuSupported && webgpuIsFallback && !activeGpuWorker}
+        class:bad={(computeBackend.mode === 'local' && webgpuSupported === false) || (computeBackend.mode !== 'local' && remoteHealth?.ok === false)}
         class:gpu={Boolean(activeGpuWorker)}
         aria-expanded={sysMenuOpen}
         onclick={() => {
@@ -3544,18 +3630,29 @@
           const nextOpen = !sysMenuOpen;
           if (nextOpen && sysWrapEl) {
             const rect = sysWrapEl.getBoundingClientRect();
-            sysPopAlignLeft = rect.right < 276;
+            sysPopAlignLeft = rect.right < 300;
           }
           sysMenuOpen = nextOpen;
+          if (nextOpen && computeBackend.mode !== 'local') {
+            void probeRemoteBackend(computeBackend);
+          }
         }}
-        title="WebGPU status, VRAM & weight cache"
+        title="WebGPU & Self-Hosted GPU backend, VRAM & weight cache"
       >
         <span class="status-dot"></span>
         {activeGpuWorkerLabel
           ? `GPU: ${activeGpuWorkerLabel}`
-          : webgpuIsFallback
-            ? 'WebGPU (SW)'
-            : 'WebGPU'}
+          : computeBackend.mode === 'remote'
+            ? remoteHealth?.ok
+              ? 'Host GPU'
+              : 'Host GPU (!)'
+            : computeBackend.mode === 'hybrid'
+              ? remoteHealth?.ok
+                ? 'Hybrid GPU'
+                : 'Hybrid (!)'
+              : webgpuIsFallback
+                ? 'WebGPU (SW)'
+                : 'WebGPU'}
       </button>
 
       {#if sysMenuOpen}
@@ -3566,7 +3663,7 @@
           aria-label="System & WebGPU status"
         >
           <div class="pop-row">
-            <span class="pop-k">WebGPU</span>
+            <span class="pop-k">Browser GPU</span>
             <span
               class="pop-v"
               class:ok-t={webgpuSupported && !webgpuIsFallback}
@@ -3584,13 +3681,115 @@
               </span>
             </div>
           {/if}
-          {#if webgpuIsFallback}
+          {#if webgpuIsFallback && computeBackend.mode === 'local'}
             <div class="pop-warn-note">
-              Software WebGPU fallback detected. Heavy GPU models will be slower (ThermoMPNN,
-              LigandMPNN &amp; ProteinMPNN fall back to CPU automatically). On Linux Chrome with
-              NVIDIA/AMD, try launching with <code>--enable-features=Vulkan</code>.
+              Software WebGPU fallback detected. Switch Compute to <b>Host GPU</b> or launch Linux Chrome
+              with <code>--enable-features=Vulkan</code>.
             </div>
           {/if}
+
+          <div class="pop-divider"></div>
+          <div class="pop-compute-sec">
+            <div class="pop-row">
+              <span class="pop-k">Compute</span>
+              <div class="compute-seg" role="group" aria-label="Compute backend mode">
+                {#each [['local', 'Browser'], ['hybrid', 'Hybrid'], ['remote', 'Host GPU']] as [mVal, mLbl] (mVal)}
+                  <button
+                    type="button"
+                    class="compute-seg-btn"
+                    class:active={computeBackend.mode === mVal}
+                    disabled={isRunning || activeRunState.leaseHeld}
+                    onclick={() => updateComputeBackend({ mode: mVal as ComputeRoutingMode })}
+                  >
+                    {mLbl}
+                  </button>
+                {/each}
+              </div>
+            </div>
+
+            {#if computeBackend.mode !== 'local'}
+              <label class="pop-field">
+                <span>Host Server URL (blank = same origin)</span>
+                <input
+                  type="text"
+                  value={computeBackend.serverUrl}
+                  placeholder="http://localhost:8787"
+                  disabled={isRunning}
+                  onchange={(e) => updateComputeBackend({ serverUrl: (e.currentTarget as HTMLInputElement).value })}
+                />
+              </label>
+              <label class="pop-field">
+                <span>API Token (optional)</span>
+                <input
+                  type="password"
+                  value={computeBackend.apiToken}
+                  placeholder="Bearer token if set"
+                  disabled={isRunning}
+                  onchange={(e) => updateComputeBackend({ apiToken: (e.currentTarget as HTMLInputElement).value })}
+                />
+              </label>
+              {#if computeBackend.mode === 'hybrid'}
+                <div class="pop-row">
+                  <span class="pop-k">Offload &gt; {computeBackend.hybridThresholdMB} MB</span>
+                  <input
+                    class="pop-thresh"
+                    type="number"
+                    min="0"
+                    max="1000"
+                    step="10"
+                    value={computeBackend.hybridThresholdMB}
+                    disabled={isRunning}
+                    onchange={(e) =>
+                      updateComputeBackend({
+                        hybridThresholdMB: Math.max(0, Math.min(1000, Number((e.currentTarget as HTMLInputElement).value) || 40)),
+                      })}
+                  />
+                </div>
+              {/if}
+              <div class="pop-row">
+                <span
+                  class="pop-v"
+                  class:ok-t={remoteHealth?.ok}
+                  class:bad-t={remoteHealth?.ok === false}
+                  style="text-align: left; overflow: hidden; text-overflow: ellipsis;"
+                  title={remoteHealth?.error || remoteHealth?.gpu?.description || ''}
+                >
+                  {#if remoteChecking}
+                    Checking host GPU…
+                  {:else if remoteHealth?.ok}
+                    {remoteHealth.gpu?.description || remoteHealth.gpu?.vendor || 'Host GPU ready'}
+                    {(remoteHealth.queueDepth ?? 0) > 0 ? ` · q=${remoteHealth.queueDepth}` : ''}
+                  {:else if remoteHealth?.error}
+                    Offline: {remoteHealth.error}
+                  {:else}
+                    Not tested yet
+                  {/if}
+                </span>
+                <button
+                  type="button"
+                  class="pop-action"
+                  disabled={remoteChecking}
+                  onclick={() => void probeRemoteBackend(computeBackend)}
+                >
+                  Test
+                </button>
+              </div>
+              {#if remoteHealth?.ok && remoteHealth.activeAdapter}
+                <div class="pop-row">
+                  <span class="pop-k">Host VRAM</span>
+                  <button
+                    type="button"
+                    class="pop-action"
+                    disabled={isRunning || activeRunState.leaseHeld}
+                    onclick={freeRemoteVram}
+                  >
+                    Free ({remoteHealth.activeAdapter})
+                  </button>
+                </div>
+              {/if}
+            {/if}
+          </div>
+          <div class="pop-divider"></div>
           {#if webMcpReady}
             <div class="pop-row">
               <span class="pop-k">Agent API</span>
@@ -5180,12 +5379,67 @@
     box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35), var(--node-shadow);
   }
   .sys-pop {
-    width: min(260px, calc(100vw - 24px));
+    width: min(300px, calc(100vw - 24px));
     padding: 10px 12px;
     display: flex;
     flex-direction: column;
     gap: 8px;
     font-size: 11.5px;
+  }
+  .pop-divider {
+    height: 1px;
+    background: var(--border-subtle);
+    margin: 1px 0;
+  }
+  .pop-compute-sec {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .compute-seg {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--bg-surface-2);
+  }
+  .compute-seg-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 7px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .compute-seg-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+  }
+  .compute-seg-btn.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .pop-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+  .pop-field input,
+  .pop-thresh {
+    background: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 6px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  .pop-thresh {
+    width: 66px;
+    text-align: right;
   }
   .sys-pop.align-left {
     left: 0;

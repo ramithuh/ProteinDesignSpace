@@ -15,6 +15,7 @@
     "test": "svelte-kit sync && vitest run",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:deploy": "node ../tools/check-deploy.mjs",
+    "selfhost": "node ../server/selfhost-server.mjs",
     "sync:upstream": "node ../tools/sync-upstream.mjs && node ../tools/sync-ort-wasm.mjs"
   },
   "devDependencies": {

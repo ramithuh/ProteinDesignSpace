@@ -880,8 +880,16 @@ interface ActiveGpuSlot {
   abortActive?: (err: Error) => void;
 }
 
+export type RemoteGpuExecutor = (
+  node: WorkflowNode,
+  inputs: Record<string, CanonicalArtifact>,
+  onProgress: (ev: NodeProgressEvent) => void,
+  signal?: AbortSignal,
+) => Promise<{ outputs: Record<string, CanonicalArtifact>; elapsedMs: number }> | null;
+
 export class ExecutionScheduler {
   private activeGpu: ActiveGpuSlot | null = null;
+  private remoteGpuExecutor: RemoteGpuExecutor | null = null;
   private gpuDisposalPromise: Promise<void> | null = null;
   private gpuIdleTimer: ReturnType<typeof setTimeout> | null = null;
   private gpuIdleReleaseMs: number;
@@ -967,6 +975,32 @@ export class ExecutionScheduler {
 
   getActiveGpuAdapter(): string | null {
     return this.activeGpu?.adapterId ?? null;
+  }
+
+  /**
+   * Register an optional remote GPU executor (e.g. self-hosted host-GPU WebGPU server).
+   * Returning `null` falls through to the local browser WebGPU worker.
+   */
+  setRemoteGpuExecutor(executor: RemoteGpuExecutor | null): void {
+    this.remoteGpuExecutor = executor;
+  }
+
+  /**
+   * Execute a single GPU node directly on local WebGPU workers (used by the hidden /runner
+   * host harness inside server/selfhost-server.mjs so all 22 workers & VRAM lifecycle are reused).
+   */
+  async runSingleGpuNode(
+    node: WorkflowNode,
+    inputs: Record<string, CanonicalArtifact>,
+    onProgress: (ev: NodeProgressEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<{ outputs: Record<string, CanonicalArtifact>; elapsedMs: number }> {
+    this.clearGpuIdleTimer();
+    try {
+      return await this.runLocalGpuNode(node, inputs, onProgress, signal);
+    } finally {
+      this.scheduleGpuIdleRelease();
+    }
   }
 
   /** Return a snapshot of the canonical reactive run ownership state (shared by canvas and API runs). */
@@ -1381,6 +1415,26 @@ export class ExecutionScheduler {
   }
 
   private async runGpuNode(
+    node: WorkflowNode,
+    inputs: Record<string, CanonicalArtifact>,
+    onProgress: (ev: NodeProgressEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<{ outputs: Record<string, CanonicalArtifact>; elapsedMs: number }> {
+    if (signal?.aborted) {
+      throw new Error('Workflow run cancelled');
+    }
+
+    if (this.remoteGpuExecutor) {
+      const remotePromise = this.remoteGpuExecutor(node, inputs, onProgress, signal);
+      if (remotePromise) {
+        return await remotePromise;
+      }
+    }
+
+    return await this.runLocalGpuNode(node, inputs, onProgress, signal);
+  }
+
+  private async runLocalGpuNode(
     node: WorkflowNode,
     inputs: Record<string, CanonicalArtifact>,
     onProgress: (ev: NodeProgressEvent) => void,
