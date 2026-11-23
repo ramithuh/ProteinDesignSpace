@@ -8,6 +8,8 @@ import {
   syncTaskToSiblingGenerators,
 } from '$lib/ui/workbench-controller';
 import { pdbInputPlugin } from '$lib/plugins/pdb-input';
+import { defaultPluginRegistry } from '$lib/plugins';
+import { graphToYamlRecipe, parseRecipeToGraph, serializeWorkflowJson } from '$lib/engine/share';
 import { computeUploadDigest } from '$lib/engine/param-validation';
 import type { WorkflowGraph } from '$lib/engine/types';
 
@@ -33,7 +35,8 @@ describe('Phase 6: Architecture Layer Purity & Plugin Locality Certification Gat
     expect(files.length).toBeGreaterThanOrEqual(8);
 
     const forbiddenImportRe =
-      /(?:from|import)\s+['"][^'"]*(?:\$lib\/(?:domains|plugins|protein-ops|engine)|\.\.\/(?:domains|plugins|protein-ops|engine))/;
+      /(?:from\s+|import\s*\(?\s*)['"][^'"]*(?:\$lib\/(?:domains|plugins|protein-ops|engine|ui|stores)|\.\.\/(?:domains|plugins|protein-ops|engine|ui|stores))/;
+    const allPluginIds = defaultPluginRegistry.listPlugins().map((p) => p.id);
 
     const violations: string[] = [];
     for (const file of files) {
@@ -47,6 +50,11 @@ describe('Phase 6: Architecture Layer Purity & Plugin Locality Certification Gat
       }
       if (/adapterId\s*===/.test(src)) {
         violations.push(`${rel}: hardcoded adapterId === check in Layer 1`);
+      }
+      for (const pid of allPluginIds) {
+        if (src.includes(`'${pid}'`) || src.includes(`"${pid}"`)) {
+          violations.push(`${rel}: hardcoded plugin id literal "${pid}" in Layer 1`);
+        }
       }
     }
     expect(violations).toEqual([]);
@@ -166,12 +174,31 @@ describe('Phase 6: Architecture Layer Purity & Plugin Locality Certification Gat
     expect(nanRes!.syncLen).toBe(70);
     expect(nanRes!.nextGraph.nodes.find((n) => n.id === 'g3')?.params.length).toBe(70);
 
-    // pdb-input restoreOmittedInlineAsset restores missingUpload markers even in JSON mode (rawRecipeText=undefined)
+    // pdb-input restoreOmittedInlineAsset survives full YAML -> JSON -> YAML toggle & restores custom PDB
     const largePdb = 'ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 20.00           C\n'.repeat(30);
     const sha = computeUploadDigest(largePdb);
+    const origGraph: WorkflowGraph = {
+      id: 'upload-toggle',
+      name: 'Upload Toggle Test',
+      nodes: [
+        {
+          id: 'pdb1',
+          adapterId: 'pdb-input',
+          params: { mode: 'custom', pdbText: largePdb, filename: 'design.pdb' },
+        },
+      ],
+      edges: [],
+    };
+    const yaml1 = graphToYamlRecipe(origGraph);
+    const parsedFromYaml = parseRecipeToGraph(yaml1);
+    const json1 = serializeWorkflowJson(parsedFromYaml);
+    const parsedFromJson = parseRecipeToGraph(json1);
+    const jsonNode = parsedFromJson.nodes[0];
+    expect(jsonNode.params.missingUpload).toBe(true);
+    expect(jsonNode.params.expectedPdbSha256).toBe(sha);
     const restored = pdbInputPlugin.share.restoreOmittedInlineAsset?.(
-      { mode: 'custom', pdbText: largePdb, filename: 'design.pdb' },
-      { mode: 'custom', pdbText: '', missingUpload: true, expectedPdbSha256: sha },
+      origGraph.nodes[0].params,
+      jsonNode.params,
       undefined,
       'pdb1',
     );

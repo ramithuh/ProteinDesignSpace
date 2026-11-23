@@ -43,7 +43,11 @@
   }
 
   function csvEscape(raw: unknown): string {
-    const str = String(raw ?? '');
+    let str = String(raw ?? '');
+    // Guard against spreadsheet formula injection on untrusted ligand/pose names (keep negative numbers intact)
+    if (/^[=+@\t\r]/.test(str) || (/^-/.test(str) && Number.isNaN(Number(str)))) {
+      str = `'${str}`;
+    }
     if (/[",\r\n]/.test(str)) {
       return `"${str.replace(/"/g, '""')}"`;
     }
@@ -263,8 +267,8 @@
                 {#each modelEntries as [mName, mScore] (mName)}
                   <tr>
                     <td><code>{mName}</code></td>
-                    <td>{mScore.cnnScore.toFixed(3)}</td>
-                    <td>{mScore.cnnAffinity.toFixed(2)}</td>
+                    <td>{isFiniteNum(mScore.cnnScore) ? mScore.cnnScore.toFixed(3) : '—'}</td>
+                    <td>{isFiniteNum(mScore.cnnAffinity) ? mScore.cnnAffinity.toFixed(2) : '—'}</td>
                   </tr>
                 {/each}
               </tbody>
@@ -272,12 +276,12 @@
           {/if}
           {#if primaryDock.vinaTerms}
             <div class="gnina-vina-terms">
-              <span><b>gauss1:</b> {primaryDock.vinaTerms.gauss1.toFixed(2)}</span>
-              <span><b>gauss2:</b> {primaryDock.vinaTerms.gauss2.toFixed(2)}</span>
-              <span><b>repulsion:</b> {primaryDock.vinaTerms.repulsion.toFixed(2)}</span>
-              <span><b>hydrophobic:</b> {primaryDock.vinaTerms.hydrophobic.toFixed(2)}</span>
-              <span><b>h-bond:</b> {primaryDock.vinaTerms.hydrogen.toFixed(2)}</span>
-              <span><b>rotors:</b> {primaryDock.vinaTerms.rotors}</span>
+              <span><b>gauss1:</b> {isFiniteNum(primaryDock.vinaTerms.gauss1) ? primaryDock.vinaTerms.gauss1.toFixed(2) : '—'}</span>
+              <span><b>gauss2:</b> {isFiniteNum(primaryDock.vinaTerms.gauss2) ? primaryDock.vinaTerms.gauss2.toFixed(2) : '—'}</span>
+              <span><b>repulsion:</b> {isFiniteNum(primaryDock.vinaTerms.repulsion) ? primaryDock.vinaTerms.repulsion.toFixed(2) : '—'}</span>
+              <span><b>hydrophobic:</b> {isFiniteNum(primaryDock.vinaTerms.hydrophobic) ? primaryDock.vinaTerms.hydrophobic.toFixed(2) : '—'}</span>
+              <span><b>h-bond:</b> {isFiniteNum(primaryDock.vinaTerms.hydrogen) ? primaryDock.vinaTerms.hydrogen.toFixed(2) : '—'}</span>
+              <span><b>rotors:</b> {primaryDock.vinaTerms.rotors ?? '—'}</span>
             </div>
           {/if}
         </div>

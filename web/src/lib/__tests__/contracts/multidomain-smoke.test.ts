@@ -152,10 +152,12 @@ const solubilityGnnPlugin: ModelPlugin = {
         .map((pair) => pair.trim())
         .filter(Boolean)
         .map((pair, idx) => {
-          const [name, smi] = pair.includes('=') ? pair.split('=') : [`cmpd_${idx + 1}`, pair];
+          const eq = pair.indexOf('=');
+          const name = eq >= 0 ? pair.slice(0, eq) : `cmpd_${idx + 1}`;
+          const smi = eq >= 0 ? pair.slice(eq + 1) : pair;
           return {
             compoundId: name.trim(),
-            smiles: (smi ?? '').trim(),
+            smiles: smi.trim(),
             logS: Number((-1.2 - idx * 0.65).toFixed(2)),
             logP: Number((1.1 + idx * 0.4).toFixed(2)),
           };
@@ -281,6 +283,7 @@ describe('Phase 6: End-to-End Multi-Domain Extensibility Smoke Certification', (
       expect(propsArt.kind).toBe('PropertyTable');
       expect(propsArt.payload.rows).toHaveLength(2);
       expect(propsArt.payload.rows[0].compoundId).toBe('aspirin');
+      expect(propsArt.payload.rows[0].smiles).toBe('CC(=O)OC1=CC=CC=C1C(=O)O');
 
       // PortType.summarize + formatNodeFooterKpi work on the produced artifact
       const ptDesc = customRegistry.portTypes.get('PropertyTable')!;

@@ -1982,7 +1982,7 @@ function summarizeArtifact(art: CanonicalArtifact): ArtifactRef {
     const registry = getActivePluginRegistry();
     const desc = registry?.portTypes.get(rawArt.kind);
     const summary = desc
-      ? desc.summarize(hydrateLegacyArtifactToEnvelope(rawArt))
+      ? desc.summarize(hydrateLegacyArtifactToEnvelope(rawArt, desc.domainId))
       : { kind: rawArt.kind };
     return {
       id: rawArt.id,
