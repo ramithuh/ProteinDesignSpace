@@ -3060,16 +3060,16 @@
 
   // 3D Mol* viewport bindings derived strictly from the active peek modality
   let viewerDesignedPdb = $derived.by((): string | null => {
-    if (peekMetrics) return activeRow?.designedPdb ?? contextStructure?.cifText ?? contextStructure?.pdbText ?? null;
-    if (activePeekStructure) return activePeekStructure.cifText ?? activePeekStructure.pdbText;
+    if (peekMetrics) return activeRow?.designedPdb || contextStructure?.cifText || contextStructure?.pdbText || null;
+    if (activePeekStructure) return activePeekStructure.cifText || activePeekStructure.pdbText || null;
     if (perResidueDisplayStructure) {
-      return perResidueDisplayStructure.cifText ?? perResidueDisplayStructure.pdbText;
+      return perResidueDisplayStructure.cifText || perResidueDisplayStructure.pdbText || null;
     }
     if (peekSequences) {
       // Clear 3D viewport when peeking a sequence-only wire/port unless user explicitly
       // previews the parent backbone (keeps Parameters-tab 3D residue picking intact).
       if (rightPanelTab === 'peek' && !showSeqParentBackbone) return null;
-      return contextStructure?.cifText ?? contextStructure?.pdbText ?? null;
+      return contextStructure?.cifText || contextStructure?.pdbText || null;
     }
     // Standalone folds are not Kabsch-aligned to the designed backbone, so keep designedPdb null
     return null;
@@ -4389,13 +4389,13 @@
               : studioInputViewerActive
                 ? (studioPreview?.previewStructureMeta?.label ?? viewerLabel)
                 : viewerLabel}
-            atomGranularity={studioInputViewerActive
+            atomGranularity={!isCompareMode && studioInputViewerActive
               ? (studioPreview?.previewStructureMeta?.atomGranularity ?? viewerAtomGranularity)
               : viewerAtomGranularity}
-            bfactorSemantics={studioInputViewerActive
+            bfactorSemantics={!isCompareMode && studioInputViewerActive
               ? (studioPreview?.previewStructureMeta?.bfactorSemantics ?? 'none')
               : viewerBfactorSemantics}
-            highlightLayers={studioInputViewerActive ? studioPreview?.highlightLayers : undefined}
+            highlightLayers={!isCompareMode && studioInputViewerActive ? studioPreview?.highlightLayers : undefined}
             hoveredToken={studioOpen ? studioHoveredToken : null}
             focusToken={studioOpen ? studioFocusToken : viewerFocusToken}
             emptyMessage={isCompareMode ? compareEmptyMessage : isMultiDesignAll3d ? undefined : viewerEmptyMessage}

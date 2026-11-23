@@ -204,7 +204,7 @@
   let cachedParsedTemplate: ParsedStructure | null = null;
   function getParsedUpstreamTemplate(struct: StructureArtifact | null): ParsedStructure | null {
     if (!struct) return null;
-    const raw = struct.cifText ?? struct.pdbText ?? '';
+    const raw = struct.cifText || struct.pdbText || '';
     if (!raw.trim()) return null;
     const key = `${struct.id}:${raw.length}`;
     if (key === cachedTemplateKey) return cachedParsedTemplate;

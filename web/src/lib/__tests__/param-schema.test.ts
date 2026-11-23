@@ -371,7 +371,15 @@ describe('declarative ParamSchema & modes single source of truth', () => {
     expect(isValidResidueSelectorToken('AA', { allowBareChain: false })).toBe(false);
     expect(isValidResidueSelectorToken('123', { allowBareChain: true })).toBe(true); // numeric residue index
     expect(isValidResidueSelectorToken('A:SAM', { allowBareChain: true, allowLigandRef: true })).toBe(true);
+    expect(isValidResidueSelectorToken('A:1PE', { allowBareChain: true, allowLigandRef: true })).toBe(true);
     expect(isValidResidueSelectorToken('A:SAM', { allowBareChain: true, allowLigandRef: false })).toBe(false);
+    expect(
+      validateParamsWithSchema(ADAPTER_REGISTRY['pdb-input'], {
+        mode: 'pdb-id',
+        pdbId: '1CTT',
+        cropSegments: 'A, A:1PE',
+      }),
+    ).toEqual([]);
     expect(isValidResidueSelectorToken('AA:1-5', { allowBareChain: false })).toBe(true);
     expect(isValidResidueSelectorToken('A100A-100C', { allowBareChain: false })).toBe(true);
     expect(isValidResidueSelectorToken('A-5--2', { allowBareChain: false })).toBe(true);

@@ -2620,13 +2620,75 @@ export class ExecutionScheduler {
     // Validate & normalize graph BEFORE acquiring lease or emitting progress (preserves pre-run error contract)
     graph = normalizeWorkflowGraph(graph, graph?.id, graph?.name, false);
     const errors = validateGraph(graph);
-    for (const issue of validateBioCapabilities(graph)) {
+    let order: WorkflowNode[] | null = null;
+    let resumeOutputs: Record<string, Record<string, CanonicalArtifact>> | undefined;
+    if (errors.length === 0) {
+      order = topoSort(graph);
+      if (opts.resumeCheckpoint && !opts.bypassCache) {
+        try {
+          const ckpt =
+            typeof opts.resumeCheckpoint === 'string'
+              ? deserializeCheckpoint(opts.resumeCheckpoint)
+              : opts.resumeCheckpoint;
+          if (
+            ckpt &&
+            ckpt.schema === 'denovo.checkpoint/v1' &&
+            ckpt.nodes &&
+            typeof ckpt.nodes === 'object'
+          ) {
+            const matched: Record<string, Record<string, CanonicalArtifact>> = {};
+            for (const node of order) {
+              const entry = ckpt.nodes[node.id];
+              if (!entry || !entry.outputs) continue;
+              const manifest = ADAPTER_REGISTRY[node.adapterId];
+              if (!manifest) continue;
+              const inputIds: Record<string, string | string[]> = {};
+              let missingUpstreamMatch = false;
+              for (const edge of graph.edges) {
+                if (edge.toNode !== node.id) continue;
+                const upNodeOutputs = matched[edge.fromNode];
+                if (!upNodeOutputs) {
+                  missingUpstreamMatch = true;
+                  break;
+                }
+                const up = upNodeOutputs[edge.fromPort];
+                if (!up) continue;
+                if (manifest.inputs[edge.toPort]?.multiple) {
+                  const prev = inputIds[edge.toPort];
+                  inputIds[edge.toPort] = Array.isArray(prev) ? [...prev, up.id] : [up.id];
+                } else {
+                  inputIds[edge.toPort] = up.id;
+                }
+              }
+              if (missingUpstreamMatch) continue;
+              const cacheKey = fnv1a(
+                canonicalJsonStringify({
+                  adapter: node.adapterId,
+                  params: normalizeParamsForComputation(node.adapterId, node.params),
+                  inputIds,
+                }),
+              );
+              if (entry.cacheKey === cacheKey) {
+                matched[node.id] = entry.outputs;
+              }
+            }
+            if (Object.keys(matched).length > 0) {
+              resumeOutputs = matched;
+            }
+          }
+        } catch {
+          // Malformed checkpoint string/object will be reported by importCheckpoint below
+          resumeOutputs = undefined;
+        }
+      }
+    }
+    for (const issue of validateBioCapabilities(graph, resumeOutputs)) {
       if (issue.severity === 'error' && !errors.includes(issue.message)) {
         errors.push(issue.message);
       }
     }
     if (errors.length) throw new Error(errors.join('\n'));
-    const order = topoSort(graph);
+    order ??= topoSort(graph);
     this.clearGpuIdleTimer();
 
     if (opts.resumeCheckpoint) {

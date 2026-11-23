@@ -8,6 +8,7 @@ import {
   parseRetryAfterSec,
   PlannerHttpError,
   reconcilePlannedWorkflow,
+  repairDraftedWorkflowFromBioFeedback,
   requestWorkflowPlan,
   UnsupportedWorkflowError,
   type ConditionedDesignWorkflowPlan,
@@ -1359,5 +1360,40 @@ describe('WorkflowPlan R1–R4 regressions & Q1–Q10 reconciliation', () => {
     expect(rfdFree.params.mode).toBe('unconditional');
     expect(rfdFree.params.autoSeededBenchmarkId).toBeUndefined();
     expect(rfdFree.params.hbondMode).toBe('none');
+  });
+
+  it('rejects semicolon in plan.crop and normalizes semicolon-delimited ligandCcdCodes in repairDraftedWorkflowFromBioFeedback', () => {
+    expect(() =>
+      compileWorkflowPlanToGraph({
+        kind: 'pdb',
+        pdbId: '1CTT',
+        crop: 'A; A:DHZ',
+        task: 'ligandmpnn',
+        targetChain: null,
+        regions: null,
+        numSequences: 2,
+        topK: null,
+        refold: false,
+        foldModels: [],
+        stabilityScan: false,
+        summary: 'Semicolon crop test',
+      }),
+    ).toThrow(/invalid PDB crop/i);
+
+    const siblingGraph: WorkflowGraph = {
+      id: 'af3-sibling-sync-norm',
+      name: 'AF3 Sibling Ligand Sync',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', label: 'Seq', params: { sequence: 'MKTAYIAKQRQISFVKSHFSRQ' } },
+        { id: 'af3_1', adapterId: 'localfold-af2', label: 'AF3 1', params: { model: 'af3', ligandCcdCodes: ' zn ; dhz ' } },
+        { id: 'af3_2', adapterId: 'localfold-af2', label: 'AF3 2', params: { model: 'boltz2', ligandCcdCodes: ' , ; ' } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'af3_1', toPort: 'sequences' },
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'af3_2', toPort: 'sequences' },
+      ],
+    };
+    const repaired = repairDraftedWorkflowFromBioFeedback(siblingGraph).graph;
+    expect(repaired.nodes.find((n) => n.id === 'af3_2')!.params.ligandCcdCodes).toBe('ZN, DHZ');
   });
 });

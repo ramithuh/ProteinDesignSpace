@@ -26,6 +26,7 @@ import { sanitizeEvoDiffFixedSequence, validateSequenceText } from './param-vali
 import {
   selectFoldWorkItems,
   splitMultiChainSequence,
+  summarizeCropSegments,
   validateBioCapabilities,
   validateRuntimeNodeInputs,
 } from './bio-capabilities';
@@ -762,6 +763,7 @@ export interface SchemaFallbackPreviewContext {
   nodeLabel: string;
   manifest: AdapterManifest | undefined;
   resolvedInputs: Record<string, CanonicalArtifact>;
+  resolvedInputLists?: Record<string, CanonicalArtifact[]>;
   missingUpstreamByPort: Map<string, string>;
   allMissingUpstream: Set<string>;
   runRuntimeValidation: () => boolean;
@@ -892,7 +894,23 @@ export function compileSchemaFallbackPreview(
     runRuntimeValidation();
   }
 
+  const allCompareStructArts: StructureArtifact[] = [];
+  if (node.adapterId === 'structure-compare' && ctx.resolvedInputLists) {
+    const seenIds = new Set<string>();
+    const ordered = [
+      ...(ctx.resolvedInputLists.reference ?? []),
+      ...(ctx.resolvedInputLists.structures ?? []),
+      ...Object.values(ctx.resolvedInputLists).flat(),
+    ];
+    for (const art of ordered) {
+      if (art?.kind === 'StructureArtifact' && !seenIds.has(art.id)) {
+        seenIds.add(art.id);
+        allCompareStructArts.push(art);
+      }
+    }
+  }
   const structArt =
+    allCompareStructArts[0] ??
     (resolvedInputs.structure as StructureArtifact | undefined) ??
     (Object.values(resolvedInputs).find((a) => a?.kind === 'StructureArtifact') as
       | StructureArtifact
@@ -935,38 +953,90 @@ export function compileSchemaFallbackPreview(
           track.sequence += aa1;
         }
         chains = [...chainMap.values()];
-        const ligClass = classifyLigands(
-          structArt.diagnostics?.ligandNames ?? parsed.diagnostics.ligandNames,
-        );
+        const tryParseStruct = (s: StructureArtifact) => {
+          const t = s.pdbText || s.cifText || '';
+          if (!t) return null;
+          try {
+            return getOrParseCachedStructure(s.id, t).parsed;
+          } catch {
+            return null;
+          }
+        };
+        const rawLigNames =
+          allCompareStructArts.length > 1
+            ? allCompareStructArts.flatMap((s) => {
+                const p = !s.diagnostics ? tryParseStruct(s) : null;
+                return s.diagnostics?.ligandNames ?? p?.diagnostics.ligandNames ?? [];
+              })
+            : (structArt.diagnostics?.ligandNames ?? parsed.diagnostics.ligandNames);
+        const rawNucleicChains =
+          allCompareStructArts.length > 1
+            ? [
+                ...new Set(
+                  allCompareStructArts.flatMap((s) => {
+                    const p = !s.diagnostics ? tryParseStruct(s) : null;
+                    return s.diagnostics?.nucleicAcidChains ?? p?.diagnostics.nucleicAcidChains ?? [];
+                  }),
+                ),
+              ]
+            : [...(structArt.diagnostics?.nucleicAcidChains ?? parsed.diagnostics.nucleicAcidChains)];
+        const ligClass = classifyLigands(rawLigNames);
         entities = {
           includedLigands: ligClass.includedLigands,
           filteredBuffers: ligClass.filteredBuffers,
-          nucleicChains: [
-            ...(structArt.diagnostics?.nucleicAcidChains ?? parsed.diagnostics.nucleicAcidChains),
-          ],
+          nucleicChains: rawNucleicChains,
         };
         totalResidues = parsed.nResidues;
         fixedResidues = parsed.nResidues;
         estimatedTokens = parsed.nResidues;
-        previewStructurePdb = structArt.pdbText;
+        const hasPrimaryNonProt = Boolean(
+          ligClass.includedLigands.length > 0 ||
+            rawNucleicChains.length > 0 ||
+            structArt.diagnostics?.hasLigands ||
+            structArt.diagnostics?.hasNucleicAcids,
+        );
+        previewStructurePdb =
+          structArt.cifText && (hasPrimaryNonProt || !structArt.pdbText)
+            ? structArt.cifText
+            : structArt.pdbText || structArt.cifText || null;
         previewStructureMeta = {
           label: structArt.label,
           atomGranularity: structArt.atomGranularity ?? 'backbone4',
           bfactorSemantics: structArt.bfactorSemantics,
           length: parsed.nResidues,
         };
-        fastaEntries = [
-          {
-            id: structArt.id,
-            header: `>${structArt.label} (${parsed.nResidues} aa)`,
-            sequence: parsed.sequence,
-            chainLengths: parsed.diagnostics.chainLengths,
-            selected: true,
-          },
-        ];
+        fastaEntries =
+          allCompareStructArts.length > 1
+            ? allCompareStructArts.map((s) => {
+                const t = s.pdbText || s.cifText || '';
+                const p = t ? getOrParseCachedStructure(s.id, t).parsed : null;
+                const seq = p?.sequence || s.sequence || '';
+                const nRes = p?.nResidues ?? s.length;
+                return {
+                  id: s.id,
+                  header: `>${s.label} (${nRes} aa)`,
+                  sequence: seq,
+                  ...(p?.diagnostics.chainLengths
+                    ? { chainLengths: p.diagnostics.chainLengths }
+                    : s.chainLengths
+                      ? { chainLengths: s.chainLengths }
+                      : {}),
+                  selected: true,
+                };
+              })
+            : [
+                {
+                  id: structArt.id,
+                  header: `>${structArt.label} (${parsed.nResidues} aa)`,
+                  sequence: parsed.sequence,
+                  chainLengths: parsed.diagnostics.chainLengths,
+                  selected: true,
+                },
+              ];
       } catch {
         totalResidues = structArt.length;
         estimatedTokens = structArt.length;
+        previewStructurePdb = structArt.pdbText || structArt.cifText || null;
       }
     } else {
       totalResidues = structArt.length;
@@ -1076,6 +1146,7 @@ export function compileNodeInputPreview(
 
   // Resolve incoming port artifacts (materializing local CPU source nodes on the fly when un-run)
   const resolvedInputs: Record<string, CanonicalArtifact> = {};
+  const resolvedInputLists: Record<string, CanonicalArtifact[]> = {};
   const missingUpstreamByPort = new Map<string, string>();
   const allMissingUpstream = new Set<string>();
 
@@ -1096,6 +1167,8 @@ export function compileNodeInputPreview(
     }
     if (art) {
       resolvedInputs[edge.toPort] = art;
+      if (!resolvedInputLists[edge.toPort]) resolvedInputLists[edge.toPort] = [];
+      resolvedInputLists[edge.toPort].push(art);
     } else {
       missingUpstreamByPort.set(edge.toPort, edge.fromNode);
       allMissingUpstream.add(edge.fromNode);
@@ -1214,6 +1287,27 @@ export function compileNodeInputPreview(
         filename = nonDemoFilename || outStruct.label || (normId ? `${normId}.cif` : 'structure.cif');
       } else {
         availability = 'partial';
+        const benchId = String(node.params.benchmarkId ?? '').trim();
+        const bench = benchId ? getBenchmarkById(benchId) : undefined;
+        const effectiveCropHints = cropSpec || String(bench?.cropSegments ?? '').trim();
+        const nucleicChains = bench?.entities.includes('dna') ? ['DNA'] : [];
+        if (effectiveCropHints) {
+          const cropHints = summarizeCropSegments(effectiveCropHints);
+          if (cropHints.ligandNames.length > 0 || nucleicChains.length > 0) {
+            const ligClass = classifyLigands(cropHints.ligandNames);
+            entities = {
+              includedLigands: ligClass.includedLigands,
+              filteredBuffers: ligClass.filteredBuffers,
+              nucleicChains,
+            };
+          }
+        } else if (nucleicChains.length > 0) {
+          entities = {
+            includedLigands: [],
+            filteredBuffers: [],
+            nucleicChains,
+          };
+        }
         payload = {
           format: 'raw-input',
           headline: normId
@@ -2297,7 +2391,7 @@ export function compileNodeInputPreview(
           ];
 
           if (template) {
-            previewStructurePdb = template.pdbText;
+            previewStructurePdb = template.pdbText || template.cifText || null;
             previewStructureMeta = {
               label: template.label,
               atomGranularity: template.atomGranularity,
@@ -2404,7 +2498,7 @@ export function compileNodeInputPreview(
           ];
 
           if (template) {
-            previewStructurePdb = template.pdbText;
+            previewStructurePdb = template.pdbText || template.cifText || null;
             previewStructureMeta = {
               label: template.label,
               atomGranularity: template.atomGranularity,
@@ -2735,7 +2829,7 @@ export function compileNodeInputPreview(
 
       const ctxStruct = findContextStructure(graph, nodeId, mutableOutputs);
       if (ctxStruct) {
-        previewStructurePdb = ctxStruct.pdbText;
+        previewStructurePdb = ctxStruct.pdbText || ctxStruct.cifText || '';
         previewStructureMeta = {
           label: ctxStruct.label,
           atomGranularity: ctxStruct.atomGranularity,
@@ -2815,8 +2909,11 @@ export function compileNodeInputPreview(
     let referenceRelation = 'pending';
 
     if (structure) {
-      const structEntry = getOrParseCachedStructure(structure.id, structure.pdbText);
-      const parsed = structEntry.parsed;
+      const rawStructText = structure.pdbText || structure.cifText || '';
+      const structEntry = rawStructText
+        ? getOrParseCachedStructure(structure.id, rawStructText)
+        : null;
+      const parsed = structEntry?.parsed;
 
       if (folds) {
         const normalizeLineageId = (val: string | undefined | null): string => {
@@ -2898,8 +2995,8 @@ export function compileNodeInputPreview(
       const chainMap = new Map<string, PreviewChainTrack>();
       const allRes: PreviewResidue[] = [];
 
-      for (let i = 0; i < parsed.nResidues; i++) {
-        const src = parsed.sourceResidues[i];
+      for (let i = 0; i < (parsed?.nResidues ?? 0); i++) {
+        const src = parsed!.sourceResidues[i];
         let track = chainMap.get(src.authChainId);
         if (!track) {
           const roleTag = structure.chainRoles?.[src.authChainId];
@@ -2933,7 +3030,7 @@ export function compileNodeInputPreview(
           }
         }
 
-        const aa1 = parsed.sequence[i] ?? AA3_TO_AA1[src.resName] ?? 'X';
+        const aa1 = parsed!.sequence[i] ?? AA3_TO_AA1[src.resName] ?? 'X';
         const pr: PreviewResidue = {
           flatIndex: mappedRefSet && !mappedRefSet.has(i) ? -1 : i,
           authChain: src.authChainId,
@@ -2946,8 +3043,8 @@ export function compileNodeInputPreview(
           resName: src.resName,
           roles,
           ...(gapBefore > 0 ? { gapBefore } : {}),
-          ...(structEntry.bfactors ? { bfactor: structEntry.bfactors[i] } : {}),
-          backboneAtoms: formatBackboneAtoms(parsed.atomPresence[i], structure.atomGranularity),
+          ...(structEntry?.bfactors ? { bfactor: structEntry.bfactors[i] } : {}),
+          backboneAtoms: formatBackboneAtoms(parsed!.atomPresence[i], structure.atomGranularity),
         };
         track.residues.push(pr);
         track.sequence += aa1;
@@ -2957,20 +3054,27 @@ export function compileNodeInputPreview(
       chains = [...chainMap.values()];
       highlightLayers = buildHighlightLayersFromResidues(allRes);
 
-      const ligClass = classifyLigands(structure.diagnostics?.ligandNames ?? []);
+      const ligClass = classifyLigands(
+        structure.diagnostics?.ligandNames ?? parsed?.diagnostics.ligandNames ?? [],
+      );
       entities = {
         includedLigands: ligClass.includedLigands,
         filteredBuffers: ligClass.filteredBuffers,
-        nucleicChains: [...(structure.diagnostics?.nucleicAcidChains ?? [])],
+        nucleicChains: [
+          ...(structure.diagnostics?.nucleicAcidChains ?? parsed?.diagnostics.nucleicAcidChains ?? []),
+        ],
       };
 
       const hasNonProt = Boolean(
-        structure.diagnostics?.hasLigands || structure.diagnostics?.hasNucleicAcids,
+        structure.diagnostics?.hasLigands ||
+          structure.diagnostics?.hasNucleicAcids ||
+          parsed?.diagnostics.hasLigands ||
+          parsed?.diagnostics.hasNucleicAcids,
       );
       previewStructurePdb =
         structure.cifText && (hasNonProt || !structure.pdbText)
           ? structure.cifText
-          : structure.pdbText;
+          : structure.pdbText || structure.cifText || null;
       previewStructureMeta = {
         label: structure.label,
         atomGranularity: structure.atomGranularity,
@@ -3161,8 +3265,8 @@ export function compileNodeInputPreview(
 
       const chainMap = new Map<string, PreviewChainTrack>();
       const allRes: PreviewResidue[] = [];
-      for (let i = 0; i < parsed.nResidues; i++) {
-        const src = parsed.sourceResidues[i];
+      for (let i = 0; i < (parsed?.nResidues ?? 0); i++) {
+        const src = parsed!.sourceResidues[i];
         let track = chainMap.get(src.authChainId);
         if (!track) {
           const roleTag = structure.chainRoles?.[src.authChainId];
@@ -3224,7 +3328,7 @@ export function compileNodeInputPreview(
       fixedResidues = Math.max(0, parsed.nResidues - pocketSet.size);
       estimatedTokens = parsed.nResidues;
 
-      previewStructurePdb = structure.pdbText;
+      previewStructurePdb = structure.pdbText || structure.cifText || '';
       previewStructureMeta = {
         label: structure.label,
         atomGranularity: structure.atomGranularity ?? 'all-atom',
@@ -3355,8 +3459,8 @@ export function compileNodeInputPreview(
       const allRes: PreviewResidue[] = [];
       let scannedCount = 0;
 
-      for (let i = 0; i < parsed.nResidues; i++) {
-        const src = parsed.sourceResidues[i];
+      for (let i = 0; i < (parsed?.nResidues ?? 0); i++) {
+        const src = parsed!.sourceResidues[i];
         let track = chainMap.get(src.authChainId);
         if (!track) {
           const roleTag = structure.chainRoles?.[src.authChainId];
@@ -3416,7 +3520,7 @@ export function compileNodeInputPreview(
       fixedResidues = Math.max(0, parsed.nResidues - scannedCount);
       estimatedTokens = scannedCount;
 
-      previewStructurePdb = structure.pdbText;
+      previewStructurePdb = structure.pdbText || structure.cifText || null;
       previewStructureMeta = {
         label: structure.label,
         atomGranularity: structure.atomGranularity ?? 'backbone4',
@@ -3881,7 +3985,7 @@ export function compileNodeInputPreview(
         fixedResidues = fixedCount;
         estimatedTokens = totalResidues;
 
-        previewStructurePdb = structure.pdbText;
+        previewStructurePdb = structure.pdbText || structure.cifText || null;
         previewStructureMeta = {
           label: structure.label,
           atomGranularity: structure.atomGranularity ?? 'backbone4',
@@ -4041,7 +4145,7 @@ export function compileNodeInputPreview(
         nucleicChains: [],
       };
 
-      previewStructurePdb = template.pdbText;
+      previewStructurePdb = template.pdbText || template.cifText || null;
       previewStructureMeta = {
         label: template.label,
         atomGranularity: 'ca-only',
@@ -4380,7 +4484,7 @@ export function compileNodeInputPreview(
         designedResidues = parsed.nResidues;
         fixedResidues = 0;
         estimatedTokens = parsed.nResidues;
-        previewStructurePdb = structure.pdbText;
+        previewStructurePdb = structure.pdbText || structure.cifText || null;
         previewStructureMeta = {
           label: structure.label,
           atomGranularity: structure.atomGranularity ?? 'all-atom',
@@ -4572,7 +4676,7 @@ export function compileNodeInputPreview(
           fixedResidues = motifLen;
           designedResidues = sampleLen - motifLen;
           estimatedTokens = sampleLen;
-          previewStructurePdb = structure.pdbText;
+          previewStructurePdb = structure.pdbText || structure.cifText || null;
           previewStructureMeta = {
             label: structure.label,
             atomGranularity: structure.atomGranularity ?? 'all-atom',
@@ -5072,6 +5176,7 @@ export function compileNodeInputPreview(
       nodeLabel,
       manifest,
       resolvedInputs,
+      resolvedInputLists,
       missingUpstreamByPort,
       allMissingUpstream,
       runRuntimeValidation,

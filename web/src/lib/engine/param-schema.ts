@@ -57,7 +57,10 @@ export function isValidResidueSelectorToken(
   if (opts?.allowBareChain && /^[A-Za-z_][A-Za-z0-9_]{0,3}$/.test(t) && !/^\d+$/.test(t)) {
     return true;
   }
-  if (opts?.allowLigandRef && /^[A-Za-z0-9_]{1,4}:[A-Za-z][A-Za-z0-9_]{0,4}$/.test(t)) {
+  if (
+    opts?.allowLigandRef &&
+    /^[A-Za-z0-9_]{1,4}:(?=[A-Za-z0-9_]*[A-Za-z])[A-Za-z0-9_]{1,5}$/.test(t)
+  ) {
     return true;
   }
   const colonM = /^([A-Za-z0-9_]+):(-?\d+)([A-Z])?(?:-(-?\d+)([A-Z])?)?$/.exec(t);

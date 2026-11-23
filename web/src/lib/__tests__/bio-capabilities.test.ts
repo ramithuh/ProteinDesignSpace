@@ -1,14 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  extractUpstreamHoloHints,
   selectFoldRepresentative,
   selectFoldWorkItems,
   splitMultiChainSequence,
+  summarizeCropSegments,
   validateBioCapabilities,
   validateRuntimeNodeInputs,
 } from '$lib/engine/bio-capabilities';
 import { ExecutionScheduler } from '$lib/engine/scheduler';
 import { validateConnection } from '$lib/engine/graph-utils';
-import { atom37ToPdb, chainIdsFromLengths, parsePdbBackbone } from '$lib/protein-ops/pdb';
+import { atom37ToPdb, chainIdsFromLengths, parsePdbBackbone, parseStructureText } from '$lib/protein-ops/pdb';
+import { clearRcsbCache } from '$lib/protein-ops/rcsb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import type {
   FoldedCandidate,
@@ -887,5 +890,540 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
     expect(
       validateBioCapabilities(customNanobodyGraph, {}).some((i) => i.code === 'antifold-non-antibody'),
     ).toBe(false);
+  });
+
+  it('Issue #89: summarizeCropSegments & extractUpstreamHoloHints parse ligands, multi-char chains, and ignore insertion-code/water/MSE tokens', () => {
+    const holoCrop = summarizeCropSegments('A, A:ZN, A:DHZ');
+    expect(holoCrop.valid).toBe(true);
+    expect([...holoCrop.proteinChains]).toEqual(['A']);
+    expect(holoCrop.ligandNames).toEqual(['ZN', 'DHZ']);
+
+    const multiChar = summarizeCropSegments('AA, AB, AA:sam, A:10A, A:HOH, A:MSE');
+    expect(multiChar.valid).toBe(true);
+    expect([...multiChar.proteinChains]).toEqual(['AA', 'AB', 'A']);
+    expect(multiChar.ligandNames).toEqual(['SAM']);
+
+    const invalid = summarizeCropSegments('A, ???');
+    expect(invalid.valid).toBe(false);
+
+    const hintGraph: WorkflowGraph = {
+      id: 'holo-hints-multichar',
+      name: 'Holo Hints Multi-Char',
+      nodes: [
+        {
+          id: 'pdb_1',
+          adapterId: 'pdb-input',
+          params: { mode: 'pdb-id', pdbId: '7C7M', cropSegments: 'AA, aa:sam, A:10A, A:HOH, A:MSE' },
+        },
+        {
+          id: 'fold_1',
+          adapterId: 'localfold-af2',
+          params: { model: 'af3' },
+        },
+      ],
+      edges: [{ fromNode: 'pdb_1', fromPort: 'sequences', toNode: 'fold_1', toPort: 'sequences' }],
+    };
+    const hints = extractUpstreamHoloHints(hintGraph, 'fold_1');
+    expect(hints.ligandCcdCodes).toEqual(['SAM']);
+  });
+
+  it('Issue #89: apo AF3 downstream of holo RFD4 does NOT leak ligand entities, while holo AF3 downstream of unfetched cropSegments passes GNINA', () => {
+    // 1. Apo AF3 downstream of holo RFD4 (ame_1ctt_cda): no false mpnn-non-protein-stripped, catches gnina-no-organic-ligand, keeps af3-apo-refold-note
+    const apoBranchGraph: WorkflowGraph = {
+      id: 'apo-af3-rfd4-branch',
+      name: 'Apo AF3 Downstream of Holo RFD4',
+      nodes: [
+        {
+          id: 'pdb_1',
+          adapterId: 'pdb-input',
+          label: 'AME (1CTT)',
+          params: {
+            mode: 'pdb-id',
+            pdbId: '1CTT',
+            cropSegments: 'A102, A104, A129, A132, A:ZN, A:DHZ',
+            benchmarkId: 'ame_1ctt_cda',
+          },
+        },
+        {
+          id: 'rfd4_1',
+          adapterId: 'rfd4-proteina',
+          label: 'RFD4 (AME)',
+          params: {
+            mode: 'motif',
+            length: 180,
+            motifSpan: 'A102, A104, A129, A132',
+            unindexedMotif: true,
+            contig: '180-180',
+            autoSeededBenchmarkId: 'ame_1ctt_cda',
+          },
+        },
+        {
+          id: 'af3_apo',
+          adapterId: 'localfold-af2',
+          label: 'AlphaFold 3 #2',
+          params: { model: 'af3', ligandCcdCodes: '' },
+        },
+        {
+          id: 'mpnn_1',
+          adapterId: 'web-protein-mpnn',
+          label: 'ProteinMPNN',
+          params: { family: 'solublempnn' },
+        },
+        {
+          id: 'gnina_apo',
+          adapterId: 'gnina',
+          label: 'GNINA 1.3',
+          params: { taskMode: 'score' },
+        },
+      ],
+      edges: [
+        { fromNode: 'pdb_1', fromPort: 'structure', toNode: 'rfd4_1', toPort: 'structure' },
+        { fromNode: 'rfd4_1', fromPort: 'sequences', toNode: 'af3_apo', toPort: 'sequences' },
+        { fromNode: 'af3_apo', fromPort: 'structure', toNode: 'mpnn_1', toPort: 'structure' },
+        { fromNode: 'af3_apo', fromPort: 'structure', toNode: 'gnina_apo', toPort: 'structure' },
+      ],
+    };
+
+    const apoIssues = validateBioCapabilities(apoBranchGraph);
+    expect(apoIssues.some((i) => i.nodeId === 'mpnn_1' && i.code === 'mpnn-non-protein-stripped')).toBe(false);
+    expect(apoIssues.some((i) => i.nodeId === 'gnina_apo' && i.code === 'gnina-no-organic-ligand' && i.severity === 'error')).toBe(true);
+    expect(apoIssues.some((i) => i.nodeId === 'af3_apo' && i.code === 'af3-apo-refold-note' && i.severity === 'warning')).toBe(true);
+
+    // 2. Unfetched pdb-input with cropSegments: "A, A:ZN, A:DHZ" (no benchmarkId) -> holo AF3 -> GNINA passes cleanly
+    const pdbCropAf3Graph: WorkflowGraph = {
+      id: 'pdb-crop-af3-gnina',
+      name: 'Unfetched Crop -> AF3 -> GNINA',
+      nodes: [
+        {
+          id: 'pdb_input_1',
+          adapterId: 'pdb-input',
+          label: 'PDB Input #2',
+          params: { mode: 'pdb-id', pdbId: '1CTT', cropSegments: 'A, A:ZN, A:DHZ', pdbText: '' },
+        },
+        {
+          id: 'localfold_af2_2',
+          adapterId: 'localfold-af2',
+          label: 'AlphaFold 3 #3',
+          params: { model: 'af3', ligandCcdCodes: 'ZN, DHZ', msaMode: 'single' },
+        },
+        {
+          id: 'gnina_4',
+          adapterId: 'gnina',
+          label: 'GNINA 1.3 #4',
+          params: { taskMode: 'score' },
+        },
+      ],
+      edges: [
+        { fromNode: 'pdb_input_1', fromPort: 'sequences', toNode: 'localfold_af2_2', toPort: 'sequences' },
+        { fromNode: 'localfold_af2_2', fromPort: 'structure', toNode: 'gnina_4', toPort: 'structure' },
+      ],
+    };
+    const holoIssues = validateBioCapabilities(pdbCropAf3Graph);
+    expect(holoIssues.filter((i) => i.severity === 'error')).toEqual([]);
+    expect(holoIssues.some((i) => i.nodeId === 'localfold_af2_2' && i.code === 'natural-single-seq-msa')).toBe(true);
+    expect(holoIssues.some((i) => i.nodeId === 'localfold_af2_2' && i.code === 'af3-apo-refold-note')).toBe(false);
+
+    // 3. Customized benchmark cropSegments removing organic ligand (keeping only ZN) -> GNINA catches metal-only on both pdb-input and rfd4-proteina
+    const metalRfd4Graph: WorkflowGraph = {
+      id: 'metal-rfd4-gnina',
+      name: 'Metal RFD4 Template -> GNINA',
+      nodes: [
+        {
+          id: 'pdb_1',
+          adapterId: 'pdb-input',
+          label: 'AME (Metal Only)',
+          params: {
+            mode: 'pdb-id',
+            pdbId: '1CTT',
+            cropSegments: 'A102, A104, A129, A132, A:ZN',
+            benchmarkId: 'ame_1ctt_cda',
+          },
+        },
+        {
+          id: 'rfd4_1',
+          adapterId: 'rfd4-proteina',
+          label: 'RFD4',
+          params: { mode: 'motif', length: 180, motifSpan: 'A102, A104, A129, A132', unindexedMotif: true, contig: '180-180' },
+        },
+        {
+          id: 'gnina_1',
+          adapterId: 'gnina',
+          label: 'GNINA 1.3',
+          params: { taskMode: 'score' },
+        },
+      ],
+      edges: [
+        { fromNode: 'pdb_1', fromPort: 'structure', toNode: 'rfd4_1', toPort: 'structure' },
+        { fromNode: 'rfd4_1', fromPort: 'structure', toNode: 'gnina_1', toPort: 'structure' },
+      ],
+    };
+    const metalRfd4Err = validateBioCapabilities(metalRfd4Graph).find(
+      (i) => i.nodeId === 'gnina_1' && i.code === 'gnina-no-organic-ligand',
+    );
+    expect(metalRfd4Err).toBeDefined();
+    expect(metalRfd4Err!.message).toContain('ZN');
+  });
+
+  it('Issue #89: localfold-af2 honors live outputsByNode[id].structure diagnostics and scheduler.run validates resumeCheckpoint outputs', async () => {
+    const graph: WorkflowGraph = {
+      id: 'af3-live-diagnostics',
+      name: 'AF3 Live Diagnostics',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'MKTAYIAKQRQISFVKSHFSRQ' } },
+        { id: 'fold', adapterId: 'localfold-af2', label: 'AlphaFold 3', params: { model: 'af3', ligandCcdCodes: '' } },
+        { id: 'mpnn', adapterId: 'web-protein-mpnn', label: 'ProteinMPNN', params: { family: 'solublempnn' } },
+        { id: 'gnina', adapterId: 'gnina', label: 'GNINA 1.3', params: { taskMode: 'score' } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+        { fromNode: 'fold', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'structure', toNode: 'gnina', toPort: 'structure' },
+      ],
+    };
+
+    // Live StructureArtifact with DHZ overrides apo static params in inferNodeOutputProfile (triggering mpnn-non-protein-stripped and clearing gnina error)
+    const liveFoldHolo: StructureArtifact = {
+      kind: 'StructureArtifact',
+      id: 'af3-live-holo',
+      label: 'AF3 Holo',
+      sourceModelId: 'localfold-af2',
+      length: 22,
+      sequence: 'MKTAYIAKQRQISFVKSHFSRQ',
+      caCoords: new Float32Array(66),
+      backbone4Coords: new Float32Array(264),
+      pdbText: 'ATOM ...',
+      geometry: computeGeometryStats(new Float32Array(66)),
+      diagnostics: {
+        chainCount: 1,
+        chainLengths: [22],
+        hasLigands: true,
+        ligandNames: ['ZN', 'DHZ'],
+        hasNucleicAcids: false,
+        nucleicAcidChains: [],
+      },
+    };
+    const liveIssues = validateBioCapabilities(graph, { fold: { structure: liveFoldHolo } });
+    expect(liveIssues.some((i) => i.nodeId === 'mpnn' && i.code === 'mpnn-non-protein-stripped')).toBe(true);
+    expect(liveIssues.some((i) => i.nodeId === 'gnina' && i.severity === 'error')).toBe(false);
+
+    // ExecutionScheduler.run() resumeCheckpoint passes checkpointed outputs to pre-run bio validation
+    const scheduler = new ExecutionScheduler();
+    const pdbOnlyGraph: WorkflowGraph = {
+      id: 'ckpt-pdb-demo',
+      name: 'Checkpoint PDB Demo',
+      nodes: [
+        { id: 'pdb_1', adapterId: 'pdb-input', label: 'Demo PDB', params: { mode: 'demo-bundle' } },
+      ],
+      edges: [],
+    };
+    await scheduler.run(pdbOnlyGraph, () => {});
+    const ckpt = scheduler.exportCheckpointObject()!;
+    expect(ckpt).not.toBeNull();
+
+    const resumedApoGraph: WorkflowGraph = {
+      id: 'ckpt-pdb-demo-gnina',
+      name: 'Checkpoint PDB Demo -> GNINA',
+      nodes: [
+        pdbOnlyGraph.nodes[0],
+        { id: 'gnina_1', adapterId: 'gnina', label: 'GNINA 1.3', params: { taskMode: 'score' } },
+      ],
+      edges: [{ fromNode: 'pdb_1', fromPort: 'structure', toNode: 'gnina_1', toPort: 'structure' }],
+    };
+    await expect(
+      scheduler.run(resumedApoGraph, () => {}, {
+        resumeCheckpoint: ckpt,
+        signal: AbortSignal.abort(),
+        returnPartialOnCancel: true,
+      }),
+    ).rejects.toThrow(/no organic small-molecule ligand/);
+  });
+
+  it('Iteration 2: honors custom cropSegments on benchmark templates, RNA in MPNN, punctuation-only AF3 params, and strengthened resumeCheckpoint', async () => {
+    const MINI_HOLO_PDB = [
+      'ATOM      1  N   HIS A  10      10.000  10.000  10.000  1.00 20.00           N  ',
+      'ATOM      2  CA  HIS A  10      11.458  10.000  10.000  1.00 20.00           C  ',
+      'ATOM      3  C   HIS A  10      12.000  11.420  10.000  1.00 20.00           C  ',
+      'ATOM      4  O   HIS A  10      11.250  12.400  10.000  1.00 20.00           O  ',
+      'ATOM      5  N   ASP A  11      13.320  11.520  10.000  1.00 20.00           N  ',
+      'ATOM      6  CA  ASP A  11      13.980  12.820  10.000  1.00 20.00           C  ',
+      'ATOM      7  C   ASP A  11      15.490  12.680  10.000  1.00 20.00           C  ',
+      'ATOM      8  O   ASP A  11      16.050  11.580  10.000  1.00 20.00           O  ',
+      'ATOM      9  N   ALA A  12      16.140  13.840  10.000  1.00 20.00           N  ',
+      'ATOM     10  CA  ALA A  12      17.590  13.880  10.000  1.00 20.00           C  ',
+      'ATOM     11  C   ALA A  12      18.120  15.300  10.000  1.00 20.00           C  ',
+      'ATOM     12  O   ALA A  12      17.380  16.280  10.000  1.00 20.00           O  ',
+      'HETATM   13 ZN    ZN A 200      12.500  11.000  12.500  1.00 15.00          ZN  ',
+      'HETATM   14  C1  DHZ A 300      13.000  11.000  14.800  1.00 18.00           C  ',
+      'HETATM   15  C2  DHZ A 300      14.390  11.000  14.800  1.00 18.00           C  ',
+      'END',
+    ].join('\n');
+    const MINI_APO_PDB = MINI_HOLO_PDB.split('\n')
+      .filter((l) => !l.includes('DHZ') && !l.includes('ZN'))
+      .join('\n');
+
+    // 1. Customized cropSegments: 'A' on ame_1ctt_cda (both unfetched and fetched pdbText) strips ligand from RFD4 -> MPNN / AF3
+    for (const pdbText of ['', MINI_HOLO_PDB]) {
+      const strippedBenchGraph: WorkflowGraph = {
+        id: `stripped-bench-${pdbText ? 'fetched' : 'unfetched'}`,
+        name: 'Stripped Benchmark Crop',
+        nodes: [
+          {
+            id: 'pdb_1',
+            adapterId: 'pdb-input',
+            label: 'AME (Cropped)',
+            params: { mode: 'pdb-id', pdbId: '1CTT', benchmarkId: 'ame_1ctt_cda', cropSegments: 'A', pdbText },
+          },
+          {
+            id: 'rfd4_1',
+            adapterId: 'rfd4-proteina',
+            label: 'RFD4',
+            params: { mode: 'motif', length: 180, motifSpan: 'A10-11', unindexedMotif: true, contig: '180-180' },
+          },
+          { id: 'mpnn_1', adapterId: 'web-protein-mpnn', label: 'ProteinMPNN', params: { family: 'solublempnn' } },
+          { id: 'af3_apo', adapterId: 'localfold-af2', label: 'AlphaFold 3', params: { model: 'af3', ligandCcdCodes: '' } },
+        ],
+        edges: [
+          { fromNode: 'pdb_1', fromPort: 'structure', toNode: 'rfd4_1', toPort: 'structure' },
+          { fromNode: 'rfd4_1', fromPort: 'structure', toNode: 'mpnn_1', toPort: 'structure' },
+          { fromNode: 'rfd4_1', fromPort: 'sequences', toNode: 'af3_apo', toPort: 'sequences' },
+        ],
+      };
+      const issues = validateBioCapabilities(strippedBenchGraph);
+      expect(issues.some((i) => i.code === 'mpnn-non-protein-stripped')).toBe(false);
+      expect(issues.some((i) => i.code === 'af3-apo-refold-note')).toBe(false);
+    }
+
+    // 2. Live outputsByNode on pdb-input with customized cropSegments: 'A' does not re-inject bench.entities
+    const parsedApo = parseStructureText(MINI_APO_PDB);
+    const liveApoStruct: StructureArtifact = {
+      kind: 'StructureArtifact',
+      id: 'pdb-1-cropped-apo',
+      label: '1CTT (A)',
+      sourceModelId: 'pdb-input',
+      length: parsedApo.nResidues,
+      sequence: parsedApo.sequence,
+      caCoords: parsedApo.caCoords,
+      backbone4Coords: parsedApo.backbone4Coords,
+      pdbText: MINI_APO_PDB,
+      diagnostics: parsedApo.diagnostics,
+      geometry: computeGeometryStats(parsedApo.caCoords),
+    };
+    const liveBenchGraph: WorkflowGraph = {
+      id: 'live-stripped-bench',
+      name: 'Live Stripped Bench',
+      nodes: [
+        {
+          id: 'pdb_1',
+          adapterId: 'pdb-input',
+          label: 'AME (Cropped)',
+          params: { mode: 'pdb-id', pdbId: '1CTT', benchmarkId: 'ame_1ctt_cda', cropSegments: 'A' },
+        },
+        { id: 'mpnn_1', adapterId: 'web-protein-mpnn', label: 'ProteinMPNN', params: { family: 'solublempnn' } },
+      ],
+      edges: [{ fromNode: 'pdb_1', fromPort: 'structure', toNode: 'mpnn_1', toPort: 'structure' }],
+    };
+    expect(
+      validateBioCapabilities(liveBenchGraph, { pdb_1: { structure: liveApoStruct } }).some(
+        (i) => i.code === 'mpnn-non-protein-stripped',
+      ),
+    ).toBe(false);
+
+    // 3. Punctuation-only ligandCcdCodes (' , ; ') downstream of holo RFD4 preserves af3-apo-refold-note
+    const punctAf3Graph: WorkflowGraph = {
+      id: 'punct-af3-apo-note',
+      name: 'Punctuation AF3 Apo Note',
+      nodes: [
+        {
+          id: 'pdb_1',
+          adapterId: 'pdb-input',
+          params: { mode: 'pdb-id', pdbId: '1CTT', benchmarkId: 'ame_1ctt_cda', cropSegments: 'A102, A:ZN, A:DHZ' },
+        },
+        {
+          id: 'rfd4_1',
+          adapterId: 'rfd4-proteina',
+          params: { mode: 'motif', length: 180, motifSpan: 'A102', unindexedMotif: true, contig: '180-180' },
+        },
+        {
+          id: 'af3_punct',
+          adapterId: 'localfold-af2',
+          params: { model: 'af3', ligandCcdCodes: ' , ; ' },
+        },
+      ],
+      edges: [
+        { fromNode: 'pdb_1', fromPort: 'structure', toNode: 'rfd4_1', toPort: 'structure' },
+        { fromNode: 'rfd4_1', fromPort: 'sequences', toNode: 'af3_punct', toPort: 'sequences' },
+      ],
+    };
+    expect(
+      validateBioCapabilities(punctAf3Graph).some(
+        (i) => i.nodeId === 'af3_punct' && i.code === 'af3-apo-refold-note',
+      ),
+    ).toBe(true);
+
+    // 4. AF3 with rnaSequences triggers mpnn-non-protein-stripped on web-protein-mpnn and suppresses crop-dropped-ligands on ligandmpnn
+    const rnaMpnnGraph: WorkflowGraph = {
+      id: 'rna-mpnn-parity',
+      name: 'RNA MPNN Parity',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', params: { sequence: 'MKTAYIAKQRQISFVKSHFSRQ' } },
+        { id: 'af3_rna', adapterId: 'localfold-af2', params: { model: 'af3', rnaSequences: 'AUGCAUGC' } },
+        { id: 'mpnn', adapterId: 'web-protein-mpnn', params: { family: 'solublempnn' } },
+        { id: 'ligmpnn', adapterId: 'ligandmpnn', params: {} },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'af3_rna', toPort: 'sequences' },
+        { fromNode: 'af3_rna', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
+        { fromNode: 'af3_rna', fromPort: 'structure', toNode: 'ligmpnn', toPort: 'structure' },
+      ],
+    };
+    const rnaIssues = validateBioCapabilities(rnaMpnnGraph);
+    const rnaMpnnWarn = rnaIssues.find((i) => i.nodeId === 'mpnn' && i.code === 'mpnn-non-protein-stripped');
+    expect(rnaMpnnWarn).toBeDefined();
+    expect(rnaMpnnWarn!.message).toContain('RNA');
+    expect(rnaIssues.some((i) => i.nodeId === 'ligmpnn' && i.code === 'crop-dropped-ligands')).toBe(false);
+
+    // 5. mode: 'custom' with empty pdbText and metal-only cropSegments ('A, A:ZN') -> GNINA rejects
+    const customEmptyPdbMetal: WorkflowGraph = {
+      id: 'custom-empty-pdb-metal',
+      name: 'Custom Empty PDB Metal',
+      nodes: [
+        { id: 'pdb_1', adapterId: 'pdb-input', params: { mode: 'custom', pdbText: '', cropSegments: 'A, A:ZN' } },
+        { id: 'gnina_1', adapterId: 'gnina', params: { taskMode: 'score' } },
+      ],
+      edges: [{ fromNode: 'pdb_1', fromPort: 'structure', toNode: 'gnina_1', toPort: 'structure' }],
+    };
+    expect(
+      validateBioCapabilities(customEmptyPdbMetal).some(
+        (i) => i.nodeId === 'gnina_1' && i.code === 'gnina-no-organic-ligand' && i.severity === 'error',
+      ),
+    ).toBe(true);
+
+    // 6. Strengthened resumeCheckpoint test: unfetched pdb-id (1STP) passes statically without ckpt,
+    //    but rejects when ckpt holds a checkpointed apo StructureArtifact (and passes if cropSegments invalidates ckpt).
+    clearRcsbCache();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('.cif')) return new Response('Not Found', { status: 404 });
+      return new Response(MINI_APO_PDB, { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const fetchApoGraph: WorkflowGraph = {
+      id: 'ckpt-fetch-apo',
+      name: 'Checkpoint Fetch Apo',
+      nodes: [
+        { id: 'pdb_1', adapterId: 'pdb-input', label: '1STP', params: { mode: 'pdb-id', pdbId: '1STP', cropSegments: '' } },
+      ],
+      edges: [],
+    };
+    const scheduler = new ExecutionScheduler();
+    let apoPdbCkpt;
+    try {
+      await scheduler.run(fetchApoGraph, () => {});
+      apoPdbCkpt = scheduler.exportCheckpointObject()!;
+      expect(apoPdbCkpt).not.toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+      clearRcsbCache();
+    }
+
+    const unfetchedPdbGnina: WorkflowGraph = {
+      id: 'unfetched-1stp-gnina',
+      name: 'Unfetched 1STP -> GNINA',
+      nodes: [
+        fetchApoGraph.nodes[0],
+        { id: 'gnina_1', adapterId: 'gnina', label: 'GNINA 1.3', params: { taskMode: 'score' } },
+      ],
+      edges: [{ fromNode: 'pdb_1', fromPort: 'structure', toNode: 'gnina_1', toPort: 'structure' }],
+    };
+
+    // Without resumeCheckpoint: unfetched pdb-id passes pre-run static validation
+    const noCkptRes = await scheduler.run(unfetchedPdbGnina, () => {}, {
+      signal: AbortSignal.abort(),
+      returnPartialOnCancel: true,
+    });
+    expect(noCkptRes.status).toBe('cancelled');
+
+    // With resumeCheckpoint containing apo StructureArtifact: pre-run rejects!
+    await expect(
+      scheduler.run(unfetchedPdbGnina, () => {}, {
+        resumeCheckpoint: apoPdbCkpt,
+        signal: AbortSignal.abort(),
+        returnPartialOnCancel: true,
+      }),
+    ).rejects.toThrow(/no organic small-molecule ligand/);
+
+    // Invalidating pdb_1 via cropSegments misses checkpoint -> passes pre-run again
+    const invalidatedCropGraph: WorkflowGraph = {
+      ...unfetchedPdbGnina,
+      nodes: [
+        { ...unfetchedPdbGnina.nodes[0], params: { mode: 'pdb-id', pdbId: '1STP', pdbText: '', cropSegments: 'A, A:BTN' } },
+        unfetchedPdbGnina.nodes[1],
+      ],
+    };
+    const invalidatedRes = await scheduler.run(invalidatedCropGraph, () => {}, {
+      resumeCheckpoint: apoPdbCkpt,
+      signal: AbortSignal.abort(),
+      returnPartialOnCancel: true,
+    });
+    expect(invalidatedRes.status).toBe('cancelled');
+
+    // 7. Optional-port / uncheckpointed new upstream guard:
+    //    Checkpoint a 2-aa holo structure (valid in pdb-input due to DHZ, invalid for genie3 < 3 aa) -> cmp_1.
+    //    Without new edge, cmp_1 matches cmpCkpt in resumeOutputs and genie3 rejects pre-run.
+    //    Wiring uncheckpointed pdb_2 to cmp_1.reference MUST prevent cmp_1 from matching its stale checkpoint entry.
+    const twoAaHoloPdb = MINI_HOLO_PDB.split('\n')
+      .filter((l) => !l.includes('ALA A  12'))
+      .join('\n');
+    const cmpSeedGraph: WorkflowGraph = {
+      id: 'ckpt-cmp-seed',
+      name: 'Checkpoint Compare Seed',
+      nodes: [
+        { id: 'pdb_1', adapterId: 'pdb-input', label: '2aa Holo', params: { mode: 'custom', pdbText: twoAaHoloPdb } },
+        { id: 'cmp_1', adapterId: 'structure-compare', label: 'Compare', params: {} },
+      ],
+      edges: [{ fromNode: 'pdb_1', fromPort: 'structure', toNode: 'cmp_1', toPort: 'structures' }],
+    };
+    await scheduler.run(cmpSeedGraph, () => {});
+    const cmpCkpt = scheduler.exportCheckpointObject()!;
+    expect(cmpCkpt.nodes.cmp_1?.outputs?.structure).toBeDefined();
+
+    const cmpMatchedRejectsGraph: WorkflowGraph = {
+      id: 'ckpt-cmp-matched-rejects',
+      name: 'Compare Matched Rejects Genie3',
+      nodes: [
+        ...cmpSeedGraph.nodes,
+        { id: 'genie_1', adapterId: 'genie3', label: 'Genie 3', params: { taskMode: 'motif', motifSpan: 'A10-11' } },
+      ],
+      edges: [
+        ...cmpSeedGraph.edges,
+        { fromNode: 'cmp_1', fromPort: 'structure', toNode: 'genie_1', toPort: 'structure' },
+      ],
+    };
+    await expect(
+      scheduler.run(cmpMatchedRejectsGraph, () => {}, {
+        resumeCheckpoint: cmpCkpt,
+        signal: AbortSignal.abort(),
+        returnPartialOnCancel: true,
+      }),
+    ).rejects.toThrow(/protein|residue/i);
+
+    const cmpWithNewRefGraph: WorkflowGraph = {
+      id: 'ckpt-cmp-new-ref',
+      name: 'Compare With New Optional Ref',
+      nodes: [
+        ...cmpMatchedRejectsGraph.nodes,
+        { id: 'pdb_2', adapterId: 'pdb-input', label: '1STP Ref', params: { mode: 'pdb-id', pdbId: '1STP' } },
+      ],
+      edges: [
+        ...cmpMatchedRejectsGraph.edges,
+        { fromNode: 'pdb_2', fromPort: 'structure', toNode: 'cmp_1', toPort: 'reference' },
+      ],
+    };
+    const cmpRefRes = await scheduler.run(cmpWithNewRefGraph, () => {}, {
+      resumeCheckpoint: cmpCkpt,
+      signal: AbortSignal.abort(),
+      returnPartialOnCancel: true,
+    });
+    expect(cmpRefRes.status).toBe('cancelled');
   });
 });

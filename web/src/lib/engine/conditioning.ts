@@ -2950,12 +2950,13 @@ export function resolveLocalFoldEffectiveConfig(
       : 'single';
   const msaA3mText = typeof p.msaA3mText === 'string' ? p.msaA3mText : '';
 
-  const ligandCcdCodes: string[] = Array.isArray(p.ligandCcdCodes)
-    ? (p.ligandCcdCodes as string[]).map((s) => String(s).trim().toUpperCase()).filter(Boolean)
-    : String(p.ligandCcdCodes ?? '')
-        .split(/[,\s]+/)
-        .map((s) => s.trim().toUpperCase())
-        .filter(Boolean);
+  const ligandCcdCodes: string[] = (
+    Array.isArray(p.ligandCcdCodes)
+      ? (p.ligandCcdCodes as unknown[]).flatMap((s) => String(s ?? '').split(/[,;\s]+/))
+      : String(p.ligandCcdCodes ?? '').split(/[,;\s]+/)
+  )
+    .map((s) => s.trim().toUpperCase())
+    .filter((s) => s.length > 0 && /[A-Z0-9]/.test(s));
   const dnaSeqs: string[] = Array.isArray(p.dnaSequences)
     ? (p.dnaSequences as string[])
         .map((s) => String(s).replace(/[^ACGT]/gi, '').toUpperCase())

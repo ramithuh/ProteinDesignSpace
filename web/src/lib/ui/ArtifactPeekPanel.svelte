@@ -684,7 +684,7 @@
       return analyzeSequence(c.sequence, refSeq);
     });
   });
-  let rawStructText = $derived(displayedStruct ? (displayedStruct.cifText ?? displayedStruct.pdbText) : '');
+  let rawStructText = $derived(displayedStruct ? (displayedStruct.cifText || displayedStruct.pdbText) : '');
   let rawPrev = $derived(
     rawPreviewOpen && displayedStruct ? previewTextLines(rawStructText, 36) : null,
   );

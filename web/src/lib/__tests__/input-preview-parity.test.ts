@@ -836,4 +836,204 @@ describe('residue-tokens utilities round-trip', () => {
     expect(formatOrderReadyAa('ak-x123:def', true)).toBe('MAKDEF');
     expect(formatOrderReadyAa('MKDEF', true)).toBe('MKDEF');
   });
+
+  it('cifText-only StructureArtifact previews, structure-compare multi-port merge, and pdb-input benchmarkId partial preview', () => {
+    clearInputPreviewCache();
+    const cifHolo = [
+      'data_test_holo',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_seq_id',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      'ATOM 1 N MET A 1 0.000 0.000 0.000',
+      'ATOM 2 CA MET A 1 1.458 0.000 0.000',
+      'ATOM 3 C MET A 1 2.009 1.420 0.000',
+      'ATOM 4 O MET A 1 1.251 2.390 0.000',
+      'ATOM 5 N ALA A 2 3.320 1.520 0.000',
+      'ATOM 6 CA ALA A 2 3.980 2.820 0.000',
+      'ATOM 7 C ALA A 2 5.490 2.680 0.000',
+      'ATOM 8 O ALA A 2 6.050 1.580 0.000',
+      'ATOM 9 N VAL A 3 7.320 1.520 0.000',
+      'ATOM 10 CA VAL A 3 7.980 2.820 0.000',
+      'ATOM 11 C VAL A 3 9.490 2.680 0.000',
+      'ATOM 12 O VAL A 3 10.050 1.580 0.000',
+      'HETATM 13 C1 DHZ A 300 12.000 1.000 0.000',
+      'HETATM 14 C2 DHZ A 300 13.400 1.000 0.000',
+    ].join('\n');
+    const parsedCif = parseStructureText(cifHolo);
+    const cifOnlyArtifact: StructureArtifact = {
+      kind: 'StructureArtifact',
+      id: 'cif-only-holo-1',
+      label: 'CIF Only Holo',
+      sourceModelId: 'pdb-input',
+      length: parsedCif.nResidues,
+      sequence: parsedCif.sequence,
+      caCoords: parsedCif.caCoords,
+      backbone4Coords: parsedCif.backbone4Coords,
+      pdbText: '',
+      cifText: cifHolo,
+      chainIds: parsedCif.chainIds,
+      chainLengths: parsedCif.diagnostics.chainLengths,
+      insCodes: parsedCif.insCodes,
+      sourceResidues: parsedCif.sourceResidues,
+      chainIdMap: parsedCif.chainIdMap,
+      atomPresence: parsedCif.atomPresence,
+      observedBackboneMask: parsedCif.observedBackboneMask,
+      diagnostics: parsedCif.diagnostics,
+      atomGranularity: 'all-atom',
+      geometry: computeGeometryStats(parsedCif.caCoords),
+    };
+    const cifOnlyNoDiag: StructureArtifact = {
+      ...cifOnlyArtifact,
+      id: 'cif-only-nodiag-1',
+      diagnostics: undefined,
+    };
+
+    const apoPdb = [
+      'ATOM      1  N   MET A   1       0.000   0.000   0.000  1.00 20.00           N  ',
+      'ATOM      2  CA  MET A   1       1.458   0.000   0.000  1.00 20.00           C  ',
+      'ATOM      3  C   MET A   1       2.009   1.420   0.000  1.00 20.00           C  ',
+      'ATOM      4  O   MET A   1       1.251   2.390   0.000  1.00 20.00           O  ',
+      'ATOM      5  N   ALA A   2       3.320   1.520   0.000  1.00 20.00           N  ',
+      'ATOM      6  CA  ALA A   2       3.980   2.820   0.000  1.00 20.00           C  ',
+      'ATOM      7  C   ALA A   2       5.490   2.680   0.000  1.00 20.00           C  ',
+      'ATOM      8  O   ALA A   2       6.050   1.580   0.000  1.00 20.00           O  ',
+      'ATOM      9  N   VAL A   3       7.320   1.520   0.000  1.00 20.00           N  ',
+      'ATOM     10  CA  VAL A   3       7.980   2.820   0.000  1.00 20.00           C  ',
+      'ATOM     11  C   VAL A   3       9.490   2.680   0.000  1.00 20.00           C  ',
+      'ATOM     12  O   VAL A   3      10.050   1.580   0.000  1.00 20.00           O  ',
+      'END',
+    ].join('\n');
+    const apoArtifact = makeStructureArtifact(apoPdb, { id: 'apo-ref-1', label: 'Apo Ref' });
+
+    const folds: FoldedStructure = {
+      kind: 'FoldedStructure',
+      id: 'folds-cif-1',
+      parentStructureId: cifOnlyNoDiag.id,
+      sourceStructureId: cifOnlyNoDiag.id,
+      folds: [
+        {
+          sequenceId: 'cand-1',
+          sequence: cifOnlyNoDiag.sequence,
+          foldModelId: 'af3',
+          sourceStructureId: cifOnlyNoDiag.id,
+          pdbText: apoPdb,
+          caCoords: cifOnlyNoDiag.caCoords,
+          plddt: new Float32Array(cifOnlyNoDiag.length).fill(90),
+          meanPlddt: 90,
+          ptm: 0.9,
+          elapsedMs: 50,
+        },
+      ],
+    };
+
+    // 1. designability-scorer with cifText-only StructureArtifact (including missing diagnostics)
+    const scorerGraph: WorkflowGraph = {
+      id: 'g-cif-scorer',
+      name: 'CIF Scorer',
+      nodes: [
+        { id: 'src', adapterId: 'pdb-input', params: { mode: 'pdb-id', pdbId: '1CTT' } },
+        { id: 'fold', adapterId: 'localfold-af2', params: { model: 'af3' } },
+        { id: 'score', adapterId: 'designability-scorer', params: {} },
+      ],
+      edges: [
+        { fromNode: 'src', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
+        { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      ],
+    };
+    const scorerPrev = compileNodeInputPreview(scorerGraph, 'score', {
+      src: { structure: cifOnlyNoDiag },
+      fold: { folds },
+    });
+    expect(scorerPrev.availability).toBe('ready');
+    expect(scorerPrev.chains.length).toBeGreaterThan(0);
+    expect(scorerPrev.previewStructurePdb).toBe(cifHolo);
+    expect(scorerPrev.entities.includedLigands).toEqual(['DHZ']);
+
+    // 2. structure-compare with cifText-only reference + multiple structures
+    const cmpGraph: WorkflowGraph = {
+      id: 'g-cif-cmp',
+      name: 'CIF Compare',
+      nodes: [
+        { id: 'ref', adapterId: 'pdb-input', params: {} },
+        { id: 'm1', adapterId: 'localfold-af2', params: { model: 'af3' } },
+        { id: 'cmp', adapterId: 'structure-compare', params: {} },
+      ],
+      edges: [
+        { fromNode: 'ref', fromPort: 'structure', toNode: 'cmp', toPort: 'structures' },
+        { fromNode: 'm1', fromPort: 'structure', toNode: 'cmp', toPort: 'structures' },
+      ],
+    };
+    const cmpPrev = compileNodeInputPreview(cmpGraph, 'cmp', {
+      ref: { structure: apoArtifact },
+      m1: { structure: cifOnlyArtifact },
+    });
+    expect(cmpPrev.availability).toBe('ready');
+    expect(cmpPrev.chains.length).toBeGreaterThan(0);
+    expect(cmpPrev.previewStructurePdb).toBeTruthy();
+    expect(cmpPrev.fastaEntries).toHaveLength(2);
+    expect(cmpPrev.entities.includedLigands).toEqual(['DHZ']);
+
+    const cmpSingleCifPrev = compileNodeInputPreview(
+      {
+        ...cmpGraph,
+        edges: [{ fromNode: 'm1', fromPort: 'structure', toNode: 'cmp', toPort: 'structures' }],
+      },
+      'cmp',
+      { m1: { structure: cifOnlyArtifact } },
+    );
+    expect(cmpSingleCifPrev.chains.length).toBeGreaterThan(0);
+    expect(cmpSingleCifPrev.previewStructurePdb).toBe(cifHolo);
+
+    // 3. thermompnn, antifold-esmif1, genie2, genie3, protpardelle with cifText-only StructureArtifact
+    const singleStructAdapters: Array<{ adapterId: string; params: Record<string, unknown>; port: string }> = [
+      { adapterId: 'thermompnn', params: {}, port: 'structure' },
+      { adapterId: 'antifold-esmif1', params: { variant: 'esmif1' }, port: 'structure' },
+      { adapterId: 'genie2', params: { motifRange: 'A1-2', length: 60 }, port: 'template' },
+      {
+        adapterId: 'genie3',
+        params: { taskMode: 'motif', contig: '10-20,A1-2,10-20', motifSpan: 'A1-2' },
+        port: 'structure',
+      },
+      { adapterId: 'protpardelle', params: { taskMode: 'partial' }, port: 'structure' },
+      { adapterId: 'protpardelle', params: { taskMode: 'motif', motifSelection: 'A1-2', length: 60 }, port: 'structure' },
+    ];
+    for (const cfg of singleStructAdapters) {
+      clearInputPreviewCache();
+      const g: WorkflowGraph = {
+        id: `g-cif-${cfg.adapterId}`,
+        name: cfg.adapterId,
+        nodes: [
+          { id: 'src', adapterId: 'pdb-input', params: {} },
+          { id: 'dst', adapterId: cfg.adapterId, params: cfg.params },
+        ],
+        edges: [{ fromNode: 'src', fromPort: 'structure', toNode: 'dst', toPort: cfg.port }],
+      };
+      const p = compileNodeInputPreview(g, 'dst', { src: { structure: cifOnlyArtifact } });
+      expect(p.previewStructurePdb, `${cfg.adapterId} should populate previewStructurePdb from cifText`).toBe(cifHolo);
+    }
+
+    // 4. pdb-input partial preview falls back to benchmarkId cropSegments when cropSegments param is empty
+    const benchPartialGraph: WorkflowGraph = {
+      id: 'g-pdb-bench-partial',
+      name: 'PDB Bench Partial',
+      nodes: [
+        {
+          id: 'src',
+          adapterId: 'pdb-input',
+          params: { mode: 'pdb-id', pdbId: '1CTT', benchmarkId: 'ame_1ctt_cda', cropSegments: '' },
+        },
+      ],
+      edges: [],
+    };
+    const benchPartial = compileNodeInputPreview(benchPartialGraph, 'src', {});
+    expect(benchPartial.availability).toBe('partial');
+    expect(benchPartial.entities.includedLigands).toEqual(['ZN', 'DHZ']);
+  });
 });

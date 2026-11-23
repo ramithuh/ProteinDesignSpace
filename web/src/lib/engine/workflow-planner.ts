@@ -13,6 +13,7 @@ import {
   isResidueSpecDisjointFromBenchmark,
 } from './benchmark-sync';
 import { extractUpstreamHoloHints, validateBioCapabilities } from './bio-capabilities';
+import { resolveLocalFoldEffectiveConfig } from './conditioning';
 import { autoLayoutGraph, defaultParamsForAdapter, validateConnection, validateGraph } from './graph-utils';
 import { sanitizeEvoDiffFixedSequence } from './param-validation';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
@@ -292,7 +293,7 @@ export const DEFAULT_PLANNER_ENDPOINT = 'https://planner.denovo.run/api/plan';
 export const PLANNER_MIN_PROMPT_LENGTH = 4;
 export const PLANNER_TIMEOUT_MS = 30_000;
 
-const CROP_ALLOWLIST_RE = /^[A-Za-z0-9,:;+\s._-]{1,80}$/;
+const CROP_ALLOWLIST_RE = /^[A-Za-z0-9,:+\s._-]{1,80}$/;
 const MAX_GENERATORS = 3;
 const MAX_SEQUENCE_DESIGNERS = 4;
 const MAX_FOLD_MODELS = 4;
@@ -2205,11 +2206,23 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
   }
   for (const siblings of af3BySeqSource.values()) {
     if (siblings.length < 2) continue;
-    const sharedLig = siblings.map((n) => String(n.params.ligandCcdCodes ?? '').trim()).find(Boolean) ?? '';
+    const sharedLig =
+      siblings
+        .map((n) =>
+          resolveLocalFoldEffectiveConfig({
+            modelKey: String(n.params.model ?? 'af3'),
+            params: n.params,
+          }).ligandCcdCodes.join(', '),
+        )
+        .find(Boolean) ?? '';
     const sharedDna = siblings.map((n) => String(n.params.dnaSequences ?? '').trim()).find(Boolean) ?? '';
     const sharedRna = siblings.map((n) => String(n.params.rnaSequences ?? '').trim()).find(Boolean) ?? '';
     for (const n of siblings) {
-      if (sharedLig && !String(n.params.ligandCcdCodes ?? '').trim()) {
+      const nodeCfg = resolveLocalFoldEffectiveConfig({
+        modelKey: String(n.params.model ?? 'af3'),
+        params: n.params,
+      });
+      if (sharedLig && nodeCfg.ligandCcdCodes.length === 0) {
         n.params.ligandCcdCodes = sharedLig;
         notes.push(`Synced holo ligands (${sharedLig}) onto ${n.label ?? n.id}.`);
       }

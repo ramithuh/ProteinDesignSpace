@@ -11,11 +11,17 @@ import {
   isBareLengthContig,
   isCrystallizationBuffer,
   parseResidueRangeTokens,
+  resolveLocalFoldEffectiveConfig,
 } from './conditioning';
 import {
+  BUFFER_OR_SOLVENT_RESNAMES,
   classifyHetatmCompId,
   evaluateProteinOnlyStructurePolicy,
   inspectUnprotonatedOrganicLigands,
+  MODIFIED_AMINO_ACID_RESNAMES,
+  MONOATOMIC_ION_RESNAMES,
+  NUCLEIC_ACID_RESNAMES,
+  STANDARD_AA_RESNAMES,
 } from '$lib/protein-ops/hetatm-policy';
 import type { NumberedChainInfo } from './mpnn-spec';
 import type { CollectionMember } from './collections';
@@ -709,7 +715,11 @@ function resolveTemplateArtifactsAndEntities(opts: {
   const tplStruct = tplNode
     ? (opts.outputsByNode?.[tplNode.id]?.structure as StructureArtifact | undefined)
     : undefined;
-  const tplCrop = tplNode?.adapterId === 'pdb-input' ? String(tplNode.params.cropSegments ?? '').trim() : '';
+  const tplMode = tplNode?.adapterId === 'pdb-input' ? String(tplNode.params.mode ?? 'demo-bundle') : '';
+  const tplCrop =
+    tplNode?.adapterId === 'pdb-input' && tplMode !== 'demo-bundle'
+      ? String(tplNode.params.cropSegments ?? '').trim()
+      : '';
   const tplPdbText = tplNode?.adapterId === 'pdb-input' ? String(tplNode.params.pdbText ?? '').trim() : '';
   let tplSummary: CachedStructureBioSummary | null = null;
   if (!tplStruct?.diagnostics && tplPdbText) {
@@ -739,8 +749,32 @@ function resolveTemplateArtifactsAndEntities(opts: {
       fallbackNonProteinEntities: [],
     };
   }
+  if (tplMode === 'demo-bundle') {
+    return {
+      knownProteinChains,
+      retainedLigands: [],
+      nucleicAcidChains: [],
+      fallbackNonProteinEntities: [],
+    };
+  }
   const benchId = tplNode?.adapterId === 'pdb-input' ? String(tplNode.params.benchmarkId ?? '').trim() : '';
   const bench = benchId ? getBenchmarkById(benchId) : undefined;
+  if (tplCrop) {
+    const cropSummary = summarizeCropSegments(tplCrop);
+    if (cropSummary.valid && cropSummary.hasExplicitTokens) {
+      const retainedLigands = cropSummary.ligandNames.filter(
+        (lig) => !isCrystallizationBuffer(lig) || explicitlyNamed.has(lig.toUpperCase()),
+      );
+      const fallbackNonProteinEntities: BioEntityKind[] =
+        bench && bench.entities.includes('dna') ? ['dna'] : [];
+      return {
+        knownProteinChains,
+        retainedLigands,
+        nucleicAcidChains: [],
+        fallbackNonProteinEntities,
+      };
+    }
+  }
   const fallbackNonProteinEntities: BioEntityKind[] = bench
     ? bench.entities.filter((e) => e !== 'protein')
     : [];
@@ -844,6 +878,147 @@ function residueSpansOverlapAny(
   return false;
 }
 
+const SOLVENT_WATER_RESNAMES = new Set(['HOH', 'WAT', 'DOD', 'H2O', 'TIP', 'TIP3']);
+
+export interface CropSegmentsSummary {
+  proteinChains: Set<string>;
+  proteinRangeTokens: number;
+  hasWholeChainProtein: boolean;
+  ligandNames: string[];
+  hasExplicitTokens: boolean;
+  valid: boolean;
+}
+
+function parseCropRangeSpecLocal(tok: string): {
+  chain: string;
+  start: number;
+  end: number;
+} | null {
+  const colonMatch = /^([A-Za-z0-9_]+):(-?\d+)([A-Za-z])?(?:-(-?\d+)([A-Za-z])?)?$/.exec(tok);
+  const bareMatch = !colonMatch
+    ? /^([A-Za-z]+)?(-?\d+)([A-Za-z])?(?:-(-?\d+)([A-Za-z])?)?$/.exec(tok)
+    : null;
+  const m = colonMatch ?? bareMatch;
+  if (!m) return null;
+  const chain = m[1] || 'A';
+  const start = parseInt(m[2], 10);
+  const startIns = m[3] || undefined;
+  const hasEnd = m[4] !== undefined;
+  const end = hasEnd ? parseInt(m[4], 10) : start;
+  const endIns = hasEnd ? m[5] || undefined : startIns;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  if (end < start) return null;
+  if (end === start && startIns && endIns && endIns < startIns) return null;
+  return { chain, start, end };
+}
+
+/**
+ * Summarize explicit protein chain/range tokens and non-water/non-buffer/non-modified-AA
+ * ligand CCD names from a `cropSegments` specification, consistent with `pdb.ts`
+ * `parseRawCropRules`/`parseCropRangeSpec` and `hetatm-policy.ts`.
+ */
+export function summarizeCropSegments(cropSpec: string): CropSegmentsSummary {
+  const tokens = cropSpec
+    .trim()
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const proteinChains = new Set<string>();
+  let proteinRangeTokens = 0;
+  let hasWholeChainProtein = false;
+  const ligands: string[] = [];
+  const seenLigands = new Set<string>();
+  let valid = true;
+
+  const maybeAddLigand = (rawCode: string) => {
+    const comp = rawCode.trim().toUpperCase();
+    if (!comp) return;
+    if (
+      SOLVENT_WATER_RESNAMES.has(comp) ||
+      BUFFER_OR_SOLVENT_RESNAMES.has(comp) ||
+      MODIFIED_AMINO_ACID_RESNAMES.has(comp) ||
+      STANDARD_AA_RESNAMES.has(comp) ||
+      NUCLEIC_ACID_RESNAMES.has(comp)
+    ) {
+      return;
+    }
+    if (!seenLigands.has(comp)) {
+      seenLigands.add(comp);
+      ligands.push(comp);
+    }
+  };
+
+  for (const tok of tokens) {
+    if (tok.includes(':')) {
+      const range = parseCropRangeSpecLocal(tok);
+      if (range) {
+        proteinChains.add(range.chain);
+        proteinRangeTokens += Math.max(1, range.end - range.start + 1);
+        continue;
+      }
+      const chainLig = /^([A-Za-z0-9_]+):([A-Za-z0-9]{1,5})$/.exec(tok);
+      if (chainLig && !/^-?\d+$/.test(chainLig[2])) {
+        maybeAddLigand(chainLig[2]);
+        continue;
+      }
+      valid = false;
+      continue;
+    }
+
+    if (/^[A-Za-z]$/.test(tok)) {
+      proteinChains.add(tok);
+      hasWholeChainProtein = true;
+      continue;
+    }
+
+    const range = parseCropRangeSpecLocal(tok);
+    if (range) {
+      const upper = tok.toUpperCase();
+      if (
+        !tok.includes('-') &&
+        /^[A-Za-z][A-Za-z0-9]{1,4}$/.test(tok) &&
+        (MONOATOMIC_ION_RESNAMES.has(upper) || BUFFER_OR_SOLVENT_RESNAMES.has(upper))
+      ) {
+        maybeAddLigand(upper);
+        continue;
+      }
+      proteinChains.add(range.chain);
+      proteinRangeTokens += Math.max(1, range.end - range.start + 1);
+      continue;
+    }
+
+    if (/^[A-Za-z0-9]{2,5}$/.test(tok) && /[A-Za-z]/.test(tok)) {
+      const upper = tok.toUpperCase();
+      if (
+        MONOATOMIC_ION_RESNAMES.has(upper) ||
+        BUFFER_OR_SOLVENT_RESNAMES.has(upper) ||
+        MODIFIED_AMINO_ACID_RESNAMES.has(upper) ||
+        STANDARD_AA_RESNAMES.has(upper) ||
+        NUCLEIC_ACID_RESNAMES.has(upper) ||
+        tok.length >= 3
+      ) {
+        maybeAddLigand(upper);
+      } else {
+        // 2-char alphanumeric token (e.g. "AA", "AB") is treated as multi-char chain ID, not a ligand
+        proteinChains.add(tok);
+        hasWholeChainProtein = true;
+      }
+      continue;
+    }
+
+    valid = false;
+  }
+
+  return {
+    proteinChains,
+    proteinRangeTokens,
+    hasWholeChainProtein,
+    ligandNames: ligands,
+    hasExplicitTokens: tokens.length > 0,
+    valid,
+  };
+}
+
 function inferNodeOutputProfile(
   node: WorkflowNode,
   graph: WorkflowGraph,
@@ -877,9 +1052,12 @@ function inferNodeOutputProfile(
     const mode = String(node.params.mode ?? 'demo-bundle');
     const isNaturalPdb = mode === 'custom' || mode === 'pdb-id';
     const pdbText = String(node.params.pdbText ?? '').trim();
+    const cropSpec = mode === 'demo-bundle' ? '' : String(node.params.cropSegments ?? '').trim();
     const benchId = String(node.params.benchmarkId ?? '').trim();
     const bench = benchId ? getBenchmarkById(benchId) : undefined;
     const liveStruct = outputsByNode?.[node.id]?.structure as StructureArtifact | undefined;
+    const benchCropSpec = String(bench?.cropSegments ?? '').trim();
+    const hasCustomCrop = Boolean(bench && cropSpec.length > 0 && cropSpec !== benchCropSpec);
 
     if (liveStruct && liveStruct.kind === 'StructureArtifact' && liveStruct.diagnostics) {
       const diag = liveStruct.diagnostics;
@@ -889,7 +1067,7 @@ function inferNodeOutputProfile(
       }
       if (diag.hasLigands) entities.add('ligand');
       if (diag.hasNucleicAcids) entities.add('dna');
-      if (bench) {
+      if (bench && !hasCustomCrop) {
         for (const e of bench.entities) entities.add(e);
       }
       const totalChains = Math.max(
@@ -908,7 +1086,6 @@ function inferNodeOutputProfile(
       };
     } else if ((mode === 'custom' || mode === 'pdb-id') && pdbText.length > 0) {
       try {
-        const cropSpec = String(node.params.cropSegments ?? '').trim();
         const summary = getCachedStructureBioSummary(pdbText, cropSpec);
         const entities = new Set<BioEntityKind>();
         if (summary.nResidues > 0 || (!summary.diagnostics.hasLigands && !summary.diagnostics.hasNucleicAcids)) {
@@ -916,7 +1093,7 @@ function inferNodeOutputProfile(
         }
         if (summary.diagnostics.hasLigands) entities.add('ligand');
         if (summary.diagnostics.hasNucleicAcids) entities.add('dna');
-        if (bench) {
+        if (bench && !hasCustomCrop) {
           for (const e of bench.entities) entities.add(e);
         }
         const totalChains = Math.max(
@@ -944,20 +1121,50 @@ function inferNodeOutputProfile(
       const contigChains = bench.conditionParams.contig.includes('/0')
         ? bench.conditionParams.contig.split('/0').filter((s) => s.trim().length > 0).length
         : 1;
-      const cropChains = bench.cropSegments
-        ? new Set(
-            bench.cropSegments
-              .split(/[,\s]+/)
-              .map((tok) => /^([A-Za-z])(?:$|\d)/.exec(tok.trim())?.[1]?.toUpperCase())
-              .filter(Boolean),
-          ).size
-        : 1;
-      const chainCount = Math.max(1, contigChains, cropChains);
+      if (hasCustomCrop) {
+        const cropSummary = summarizeCropSegments(cropSpec);
+        const entities = new Set<BioEntityKind>(['protein']);
+        if (bench.entities.includes('dna')) entities.add('dna');
+        if (cropSummary.ligandNames.length > 0) entities.add('ligand');
+        const chainCount = Math.max(1, cropSummary.proteinChains.size);
+        const estimatedTokens =
+          !cropSummary.hasWholeChainProtein && cropSummary.proteinRangeTokens > 0
+            ? cropSummary.proteinRangeTokens + cropSummary.ligandNames.length
+            : bench.approxTokens;
+        profile = {
+          entities,
+          stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
+          chainCount,
+          estimatedTokens,
+          ...(isNaturalPdb ? { fromNaturalProtein: true } : {}),
+        };
+      } else {
+        const cropChains = bench.cropSegments
+          ? Math.max(1, summarizeCropSegments(bench.cropSegments).proteinChains.size)
+          : 1;
+        const chainCount = Math.max(1, contigChains, cropChains);
+        profile = {
+          entities: new Set<BioEntityKind>(bench.entities),
+          stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
+          chainCount,
+          estimatedTokens: bench.approxTokens,
+          ...(isNaturalPdb ? { fromNaturalProtein: true } : {}),
+        };
+      }
+    } else if (cropSpec) {
+      const cropSummary = summarizeCropSegments(cropSpec);
+      const entities = new Set<BioEntityKind>(['protein']);
+      if (cropSummary.ligandNames.length > 0) entities.add('ligand');
+      const chainCount = Math.max(1, cropSummary.proteinChains.size);
+      const baseProteinTokens =
+        !cropSummary.hasWholeChainProtein && cropSummary.proteinRangeTokens > 0
+          ? cropSummary.proteinRangeTokens
+          : 53;
       profile = {
-        entities: new Set<BioEntityKind>(bench.entities),
+        entities,
         stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
         chainCount,
-        estimatedTokens: bench.approxTokens,
+        estimatedTokens: baseProteinTokens + cropSummary.ligandNames.length,
         ...(isNaturalPdb ? { fromNaturalProtein: true } : {}),
       };
     } else {
@@ -1348,15 +1555,89 @@ function inferNodeOutputProfile(
     };
   } else if (node.adapterId === 'localfold-af2') {
     const seq = upstreamProfileForPort('sequences');
-    profile = {
-      entities: new Set<BioEntityKind>(seq ? [...seq.entities] : ['protein']),
-      stoichiometry: seq?.stoichiometry ?? 'monomer',
-      chainCount: seq?.chainCount ?? 1,
-      estimatedTokens: seq?.estimatedTokens ?? 80,
-      ...(seq?.strippedNonProtein ? { strippedNonProtein: seq.strippedNonProtein } : {}),
-      ...(seq?.hasLockedTarget ? { hasLockedTarget: true } : {}),
-      ...(seq?.fromNaturalProtein ? { fromNaturalProtein: true } : {}),
-    };
+    const modelId = String(node.params.model ?? 'monomer');
+    const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
+    const supportsHolo = meta.family === 'af3' || meta.family === 'esmfold2';
+    const liveStruct = outputsByNode?.[node.id]?.structure as StructureArtifact | undefined;
+
+    if (liveStruct && liveStruct.kind === 'StructureArtifact' && liveStruct.diagnostics) {
+      const diag = liveStruct.diagnostics;
+      const cfg = supportsHolo
+        ? resolveLocalFoldEffectiveConfig({ modelKey: modelId, params: node.params })
+        : null;
+      const entities = new Set<BioEntityKind>();
+      if (liveStruct.length > 0 || (!diag.hasLigands && !diag.hasNucleicAcids)) {
+        entities.add('protein');
+      }
+      if (diag.hasLigands) entities.add('ligand');
+      if (diag.hasNucleicAcids) {
+        entities.add(cfg && cfg.rnaSeqs.length > 0 && cfg.dnaSeqs.length === 0 ? 'rna' : 'dna');
+      }
+      const totalChains = Math.max(
+        1,
+        diag.chainCount + (diag.hasNucleicAcids ? diag.nucleicAcidChains.length : 0),
+      );
+      const coverage = inspectArtifactBackboneCoverage(liveStruct);
+      const strippedSet = new Set<BioEntityKind>(seq?.strippedNonProtein ?? []);
+      if (seq) {
+        for (const e of seq.entities) {
+          if (e !== 'protein' && !entities.has(e)) strippedSet.add(e);
+        }
+      }
+      for (const e of entities) strippedSet.delete(e);
+      const strippedNonProtein = strippedSet.size > 0 ? [...strippedSet] : undefined;
+      profile = {
+        entities,
+        stoichiometry: totalChains > 1 ? 'multimer' : 'monomer',
+        chainCount: totalChains,
+        estimatedTokens:
+          (liveStruct.length > 0 ? liveStruct.length : (seq?.estimatedTokens ?? 80)) +
+          diag.ligandNames.length,
+        missingBackboneCount: coverage.missingBackboneCount,
+        isCaOnly: coverage.isCaOnly,
+        ...(strippedNonProtein ? { strippedNonProtein } : {}),
+        ...(seq?.hasLockedTarget ? { hasLockedTarget: true } : {}),
+        ...(seq?.fromNaturalProtein ? { fromNaturalProtein: true } : {}),
+      };
+    } else {
+      const entities = new Set<BioEntityKind>(['protein']);
+      let chainCount = seq?.chainCount ?? 1;
+      let estimatedTokens = seq?.estimatedTokens ?? 80;
+      if (supportsHolo) {
+        const cfg = resolveLocalFoldEffectiveConfig({ modelKey: modelId, params: node.params });
+        if (cfg.ligandCcdCodes.length > 0) {
+          entities.add('ligand');
+          estimatedTokens += cfg.ligandCcdCodes.length;
+        }
+        if (cfg.dnaSeqs.length > 0) {
+          entities.add('dna');
+          chainCount += cfg.dnaSeqs.length;
+          estimatedTokens += cfg.dnaSeqs.reduce((s, d) => s + d.length, 0);
+        }
+        if (cfg.rnaSeqs.length > 0) {
+          entities.add('rna');
+          chainCount += cfg.rnaSeqs.length;
+          estimatedTokens += cfg.rnaSeqs.reduce((s, r) => s + r.length, 0);
+        }
+      }
+      const strippedSet = new Set<BioEntityKind>(seq?.strippedNonProtein ?? []);
+      if (seq) {
+        for (const e of seq.entities) {
+          if (e !== 'protein' && !entities.has(e)) strippedSet.add(e);
+        }
+      }
+      for (const e of entities) strippedSet.delete(e);
+      const strippedNonProtein = strippedSet.size > 0 ? [...strippedSet] : undefined;
+      profile = {
+        entities,
+        stoichiometry: chainCount > 1 ? 'multimer' : (seq?.stoichiometry ?? 'monomer'),
+        chainCount,
+        estimatedTokens,
+        ...(strippedNonProtein ? { strippedNonProtein } : {}),
+        ...(seq?.hasLockedTarget ? { hasLockedTarget: true } : {}),
+        ...(seq?.fromNaturalProtein ? { fromNaturalProtein: true } : {}),
+      };
+    }
   }
 
   visiting.delete(node.id);
@@ -1387,9 +1668,12 @@ export function extractUpstreamHoloHints(
     if (n?.adapterId === 'pdb-input') {
       const bmId = String(n.params.benchmarkId ?? '').trim();
       const bm = bmId ? getBenchmarkById(bmId) : undefined;
-      const crop = String(n.params.cropSegments ?? bm?.cropSegments ?? '');
-      for (const m of crop.matchAll(/\b[A-Za-z]:([A-Z0-9]{1,5})\b/g)) {
-        if (!/^\d+[A-Z]?$/.test(m[1])) ligands.add(m[1].toUpperCase());
+      const rawCrop = String(n.params.cropSegments ?? '').trim();
+      const crop = rawCrop || String(bm?.cropSegments ?? '').trim();
+      if (crop) {
+        for (const lig of summarizeCropSegments(crop).ligandNames) {
+          ligands.add(lig);
+        }
       }
       if (bm?.id === 'rfd4_7m5w_bdna') {
         dnas.add('TGAATGAA');
@@ -1873,7 +2157,7 @@ export function validateBioCapabilities(
       const src = edge ? graph.nodes.find((n) => n.id === edge.fromNode) : null;
       if (src) {
         const up = inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
-        if (up.entities.has('ligand') || up.entities.has('dna')) {
+        if (up.entities.has('ligand') || up.entities.has('dna') || up.entities.has('rna')) {
           const nonProt = [...up.entities].filter((e) => e !== 'protein').join('/');
           issues.push({
             severity: 'warning',
@@ -2011,7 +2295,7 @@ export function validateBioCapabilities(
         const src = edge ? graph.nodes.find((n) => n.id === edge.fromNode) : null;
         if (src) {
           const up = inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
-          const hasNonProt = up.entities.has('ligand') || up.entities.has('dna');
+          const hasNonProt = up.entities.has('ligand') || up.entities.has('dna') || up.entities.has('rna');
           if (!hasNonProt && src.adapterId === 'pdb-input') {
             const cropSpec = String(src.params.cropSegments ?? '').trim();
             if (cropSpec) {
@@ -2332,6 +2616,27 @@ export function validateBioCapabilities(
       const hasDockCcd = dockCcd.length > 0;
       const hasPocketSpec = String(node.params.pocketResidues ?? '').trim().length > 0;
       const requestedCode = String(node.params.ligandCode ?? '').trim().toUpperCase();
+      if (taskMode === 'dock' && !hasExternalLig && hasDockCcd) {
+        if (!/^[A-Z0-9]{1,5}$/.test(dockCcd)) {
+          issues.push({
+            severity: 'error',
+            code: 'gnina-invalid-dock-ccd',
+            nodeId: node.id,
+            message: `${node.label ?? 'GNINA 1.3'} has invalid Ligand CCD code "${dockCcd}" (expected 1–5 alphanumeric characters, e.g. BTN, ATP, I4B).`,
+          });
+        } else if (
+          STANDARD_AA_RESNAMES.has(dockCcd) ||
+          NUCLEIC_ACID_RESNAMES.has(dockCcd) ||
+          classifyHetatmCompId(dockCcd) !== 'organic-ligand'
+        ) {
+          issues.push({
+            severity: 'error',
+            code: 'gnina-non-organic-dock-ccd',
+            nodeId: node.id,
+            message: `${node.label ?? 'GNINA 1.3'} Ligand CCD "${dockCcd}" is not an organic small-molecule ligand (monoatomic ions, waters, buffers, and standard residues cannot be docked as small molecules).`,
+          });
+        }
+      }
       if (!structEdge) {
         issues.push({
           severity: 'error',
@@ -2349,17 +2654,98 @@ export function validateBioCapabilities(
             ligandNames = liveStruct.diagnostics.ligandNames ?? [];
             knownApo = true;
           } else if (src.adapterId === 'pdb-input') {
+            const srcMode = String(src.params.mode ?? 'demo-bundle');
             const rawText = String(src.params.pdbText ?? '').trim();
-            if (rawText) {
+            const cropSpec = srcMode === 'demo-bundle' ? '' : String(src.params.cropSegments ?? '').trim();
+            if (srcMode === 'demo-bundle') {
+              ligandNames = [];
+              knownApo = true;
+            } else if (rawText) {
               try {
-                ligandNames = getCachedStructureBioSummary(rawText).diagnostics.ligandNames;
+                ligandNames = getCachedStructureBioSummary(rawText, cropSpec).diagnostics.ligandNames;
                 knownApo = true;
               } catch {
                 ligandNames = null;
               }
-            } else if (String(src.params.mode ?? 'demo-bundle') === 'demo-bundle') {
+            } else if (cropSpec) {
+              const cropHints = summarizeCropSegments(cropSpec);
+              if (cropHints.valid && cropHints.hasExplicitTokens) {
+                ligandNames = cropHints.ligandNames;
+                knownApo = true;
+              }
+            } else if (srcMode === 'pdb-id') {
+              const srcBenchId = String(src.params.benchmarkId ?? '').trim();
+              const srcBench = srcBenchId ? getBenchmarkById(srcBenchId) : undefined;
+              if (srcBench && !srcBench.entities.includes('ligand')) {
+                ligandNames = [];
+                knownApo = true;
+              } else if (srcBench?.cropSegments) {
+                const benchHints = summarizeCropSegments(srcBench.cropSegments);
+                if (benchHints.valid && benchHints.hasExplicitTokens) {
+                  ligandNames = benchHints.ligandNames;
+                  knownApo = true;
+                }
+              }
+            }
+          } else if (src.adapterId === 'localfold-af2') {
+            const modelId = String(src.params.model ?? 'monomer');
+            const meta =
+              LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
+            const supportsHolo = meta.family === 'af3' || meta.family === 'esmfold2';
+            ligandNames = supportsHolo
+              ? resolveLocalFoldEffectiveConfig({ modelKey: modelId, params: src.params }).ligandCcdCodes
+              : [];
+            knownApo = true;
+          } else if (src.adapterId === 'rfd4-proteina') {
+            const up = inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
+            if (!up.entities.has('ligand')) {
               ligandNames = [];
               knownApo = true;
+            } else if (
+              String(src.params.mode ?? 'unconditional') === 'preset' &&
+              LIGAND_RFD4_PRESETS.has(String(src.params.presetId ?? ''))
+            ) {
+              ligandNames = ['SAM'];
+              knownApo = true;
+            } else if (!String(src.params.customSpecYaml ?? '').trim()) {
+              const tplEdge = graph.edges.find((e) => e.toNode === src.id && e.toPort === 'structure');
+              const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
+              if (tplNode) {
+                const tplInfo = resolveTemplateArtifactsAndEntities({
+                  contig: String(src.params.contig ?? '').trim(),
+                  hbondSelection: String(src.params.hbondSelection ?? '').trim(),
+                  tplNode,
+                  outputsByNode,
+                });
+                const tplHasLiveOrText =
+                  Boolean((outputsByNode?.[tplNode.id]?.structure as StructureArtifact | undefined)?.diagnostics) ||
+                  (tplNode.adapterId === 'pdb-input' && Boolean(String(tplNode.params.pdbText ?? '').trim()));
+                if (tplHasLiveOrText) {
+                  ligandNames = tplInfo.retainedLigands;
+                  knownApo = true;
+                } else if (tplNode.adapterId === 'pdb-input') {
+                  const tplMode = String(tplNode.params.mode ?? 'demo-bundle');
+                  const tplCrop =
+                    tplMode === 'demo-bundle' ? '' : String(tplNode.params.cropSegments ?? '').trim();
+                  if (tplCrop) {
+                    const cropHints = summarizeCropSegments(tplCrop);
+                    if (cropHints.valid && cropHints.hasExplicitTokens) {
+                      ligandNames = cropHints.ligandNames;
+                      knownApo = true;
+                    }
+                  } else {
+                    const tplBenchId = String(tplNode.params.benchmarkId ?? '').trim();
+                    const tplBench = tplBenchId ? getBenchmarkById(tplBenchId) : undefined;
+                    if (tplBench?.cropSegments) {
+                      const benchHints = summarizeCropSegments(tplBench.cropSegments);
+                      if (benchHints.valid && benchHints.hasExplicitTokens) {
+                        ligandNames = benchHints.ligandNames;
+                        knownApo = true;
+                      }
+                    }
+                  }
+                }
+              }
             }
           } else {
             const up = inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
@@ -2369,7 +2755,15 @@ export function validateBioCapabilities(
             }
           }
           if (knownApo && ligandNames !== null) {
-            const organic = ligandNames.filter((c) => classifyHetatmCompId(c) === 'organic-ligand');
+            const organic = ligandNames.filter((c) => {
+              const code = c.trim().toUpperCase();
+              return (
+                /^[A-Z0-9]{1,5}$/.test(code) &&
+                !STANDARD_AA_RESNAMES.has(code) &&
+                !NUCLEIC_ACID_RESNAMES.has(code) &&
+                classifyHetatmCompId(code) === 'organic-ligand'
+              );
+            });
             if (hasExternalLig || hasDockCcd) {
               if (taskMode === 'dock' && organic.length === 0 && !hasPocketSpec) {
                 issues.push({
@@ -2407,10 +2801,6 @@ export function validateBioCapabilities(
     }
 
     if (node.adapterId === 'localfold-af2') {
-      const edge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'sequences');
-      const src = edge ? graph.nodes.find((n) => n.id === edge.fromNode) : null;
-      if (!src) continue;
-      const up = inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
       const modelId = String(node.params.model ?? 'monomer');
       const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
       const nodeName = node.label ?? 'LocalFold';
@@ -2418,11 +2808,25 @@ export function validateBioCapabilities(
         ? nodeName
         : `${nodeName} (${meta.shortLabel})`;
       const supportsHolo = meta.family === 'af3' || meta.family === 'esmfold2';
-      const hasExplicitAf3NonProt =
-        supportsHolo &&
-        (String(node.params.ligandCcdCodes ?? '').trim().length > 0 ||
-          String(node.params.dnaSequences ?? '').trim().length > 0 ||
-          String(node.params.rnaSequences ?? '').trim().length > 0);
+      const lfCfg = supportsHolo
+        ? resolveLocalFoldEffectiveConfig({ modelKey: modelId, params: node.params })
+        : null;
+      const hasExplicitAf3NonProt = Boolean(lfCfg?.hasHoloContext);
+      if (lfCfg) {
+        const invalidCcds = lfCfg.ligandCcdCodes.filter((c) => !/^[A-Z0-9]{1,5}$/.test(c));
+        if (invalidCcds.length > 0) {
+          issues.push({
+            severity: 'error',
+            code: 'localfold-invalid-ligand-ccd',
+            nodeId: node.id,
+            message: `${modelDisplay} has invalid Ligand CCD code(s): ${invalidCcds.join(', ')} (expected 1–5 alphanumeric characters, e.g. ZN, DHZ, ATP).`,
+          });
+        }
+      }
+      const edge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'sequences');
+      const src = edge ? graph.nodes.find((n) => n.id === edge.fromNode) : null;
+      if (!src) continue;
+      const up = inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
       const nonProtEntities = new Set<BioEntityKind>([
         ...[...up.entities].filter((e) => e !== 'protein'),
         ...(up.strippedNonProtein ?? []),
