@@ -104,6 +104,7 @@
   import {
     authenticateRemoteServerSession,
     checkRemoteServerHealth,
+    COLAB_NOTEBOOK_URL,
     DEFAULT_HOST_MAX_FOLD_RESIDUES,
     defaultComputeBackendConfig,
     formatHostGpuDetail,
@@ -118,7 +119,6 @@
     saveComputeBackendConfig,
     shouldRouteNodeToRemote,
     type ComputeBackendConfig,
-    type ComputeRoutingMode,
     type RemoteServerHealth,
   } from '$lib/engine/compute-backend';
   import type { BioFoldLimitOptions } from '$lib/engine/bio-capabilities';
@@ -166,6 +166,18 @@
   let remoteChecking = $state(false);
   let sameOriginHostDetected = $state<RemoteServerHealth | null>(null);
   let acknowledgedRemoteOrigins = $state<Set<string>>(new Set());
+  let lastSelfHostUrl = '';
+  let lastColabUrl = '';
+  const isOnColabOrigin = $derived(
+    typeof window !== 'undefined' && window.location.hostname.endsWith('.trycloudflare.com'),
+  );
+  const activeComputeChoice = $derived<'local' | 'colab' | 'self-host'>(
+    computeBackend.mode === 'local'
+      ? 'local'
+      : computeBackend.remotePreset === 'colab'
+        ? 'colab'
+        : 'self-host',
+  );
 
   function buildFoldLimitOpts(
     cfg: ComputeBackendConfig = computeBackend,
@@ -245,6 +257,29 @@
     syncSchedulerRemoteExecutor(computeBackend);
   }
 
+  function selectComputeChoice(choice: 'local' | 'colab' | 'self-host') {
+    if (choice === activeComputeChoice) return;
+    if (choice === 'local') {
+      updateComputeBackend({ mode: 'local' });
+      return;
+    }
+    if (choice === 'colab') {
+      if (computeBackend.remotePreset !== 'colab') {
+        lastSelfHostUrl = computeBackend.serverUrl;
+      }
+      const nextUrl = isOnColabOrigin ? '' : lastColabUrl;
+      remoteHealth = null;
+      updateComputeBackend({ mode: 'remote', remotePreset: 'colab', serverUrl: nextUrl });
+      return;
+    }
+    if (computeBackend.remotePreset === 'colab') {
+      lastColabUrl = computeBackend.serverUrl;
+    }
+    const nextUrl = lastSelfHostUrl;
+    remoteHealth = null;
+    updateComputeBackend({ mode: 'remote', remotePreset: 'self-host', serverUrl: nextUrl });
+  }
+
   function updateComputeBackend(patch: Partial<ComputeBackendConfig>) {
     const prevOrigin = resolveRemoteBackendOrigin(computeBackend.serverUrl);
     const nextRaw: ComputeBackendConfig = { ...computeBackend, ...patch };
@@ -255,12 +290,23 @@
       ? { ...nextRaw, apiToken: patch.apiToken ?? '' }
       : nextRaw;
     computeBackend = nextCfg;
+    if (nextCfg.remotePreset === 'colab') {
+      lastColabUrl = nextCfg.serverUrl;
+    } else if (nextCfg.mode !== 'local') {
+      lastSelfHostUrl = nextCfg.serverUrl;
+    }
     if (originChanged) {
       remoteHealth = null;
     }
     saveComputeBackendConfig(computeBackend);
     syncSchedulerRemoteExecutor(computeBackend);
-    if (computeBackend.mode !== 'local' && !originChanged) {
+    const waitingForColabUrl =
+      computeBackend.remotePreset === 'colab' &&
+      !computeBackend.serverUrl.trim() &&
+      !isOnColabOrigin;
+    const canProbeSameOriginSwitch =
+      originChanged && !computeBackend.serverUrl.trim() && !waitingForColabUrl;
+    if (computeBackend.mode !== 'local' && !waitingForColabUrl && (!originChanged || canProbeSameOriginSwitch)) {
       void probeRemoteBackend(computeBackend);
     }
   }
@@ -1089,8 +1135,17 @@
     // Load saved self-hosted compute backend config & probe same-origin server (H8: keep discovery informational, never silently upload)
     const loadedBackend = loadComputeBackendConfig();
     computeBackend = loadedBackend;
+    if (loadedBackend.remotePreset === 'colab') {
+      lastColabUrl = loadedBackend.serverUrl;
+    } else {
+      lastSelfHostUrl = loadedBackend.serverUrl;
+    }
     syncSchedulerRemoteExecutor(loadedBackend);
-    if (loadedBackend.mode !== 'local') {
+    const loadedWaitingForColabUrl =
+      loadedBackend.remotePreset === 'colab' &&
+      !loadedBackend.serverUrl.trim() &&
+      !isOnColabOrigin;
+    if (loadedBackend.mode !== 'local' && !loadedWaitingForColabUrl) {
       void probeRemoteBackend(loadedBackend);
     } else if (typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
       void checkRemoteServerHealth('', '', fetch, 1500).then((health) => {
@@ -3521,7 +3576,7 @@
       <button
         type="button"
         class="hdr-pill"
-        class:ok={((computeBackend.mode !== 'local' && remoteHealth?.ok) || (webgpuSupported && !webgpuIsFallback)) && !activeGpuWorker}
+        class:ok={((computeBackend.mode !== 'local' && remoteHealth?.ok) || (computeBackend.mode === 'local' && webgpuSupported && !webgpuIsFallback)) && !activeGpuWorker}
         class:warn={computeBackend.mode === 'local' && webgpuSupported && webgpuIsFallback && !activeGpuWorker}
         class:bad={(computeBackend.mode === 'local' && webgpuSupported === false) || (computeBackend.mode !== 'local' && remoteHealth?.ok === false)}
         class:gpu={Boolean(activeGpuWorker)}
@@ -3532,22 +3587,26 @@
           const nextOpen = !sysMenuOpen;
           if (nextOpen && sysWrapEl) {
             const rect = sysWrapEl.getBoundingClientRect();
-            sysPopAlignLeft = rect.right < 300;
+            sysPopAlignLeft = rect.right < 330;
           }
           sysMenuOpen = nextOpen;
-          if (nextOpen && computeBackend.mode !== 'local') {
+          const waitingForColabUrl =
+            computeBackend.remotePreset === 'colab' &&
+            !computeBackend.serverUrl.trim() &&
+            !isOnColabOrigin;
+          if (nextOpen && computeBackend.mode !== 'local' && !waitingForColabUrl) {
             void probeRemoteBackend(computeBackend);
           }
         }}
         title={computeBackend.mode !== 'local' && remoteHealth?.ok
-          ? `${formatHostGpuDetail(remoteHealth)} (Host WebGPU · click for compute settings)`
-          : 'WebGPU & Self-Hosted GPU backend, VRAM & weight cache'}
+          ? `${formatHostGpuDetail(remoteHealth)} (${activeComputeChoice === 'colab' ? 'Colab' : 'Self-Host'} WebGPU · click for compute settings)`
+          : 'WebGPU, Google Colab & Self-Hosted GPU compute settings'}
       >
         <span class="status-dot"></span>
         {activeGpuWorkerLabel
           ? `GPU: ${activeGpuWorkerLabel}`
           : computeBackend.mode !== 'local'
-            ? formatHostGpuPillLabel(remoteHealth, computeBackend.mode)
+            ? formatHostGpuPillLabel(remoteHealth, computeBackend.mode, computeBackend.remotePreset)
             : webgpuIsFallback
               ? 'WebGPU (SW)'
               : 'WebGPU'}
@@ -3581,8 +3640,8 @@
           {/if}
           {#if webgpuIsFallback && computeBackend.mode === 'local'}
             <div class="pop-warn-note">
-              Software WebGPU fallback detected. Switch Compute to <b>Host GPU</b> or launch Linux Chrome
-              with <code>--enable-features=Vulkan</code>.
+              Software WebGPU fallback detected. Switch Compute to <b>Colab</b> or <b>Self-Host</b>,
+              or launch Linux Chrome with <code>--enable-features=Vulkan</code>.
             </div>
           {/if}
 
@@ -3590,26 +3649,31 @@
           <div class="pop-compute-sec">
             <div class="pop-row">
               <span class="pop-k">Compute</span>
-              <div class="compute-seg" role="group" aria-label="Compute backend mode">
-                {#each [['local', 'Browser'], ['remote', 'Host GPU']] as [mVal, mLbl] (mVal)}
-                  <button
-                    type="button"
-                    class="compute-seg-btn"
-                    class:active={mVal === 'remote'
-                      ? computeBackend.mode !== 'local'
-                      : computeBackend.mode === 'local'}
-                    disabled={isRunning || activeRunState.leaseHeld}
-                    onclick={() => updateComputeBackend({ mode: mVal as ComputeRoutingMode })}
-                  >
-                    {mLbl}
-                  </button>
-                {/each}
-              </div>
+              <span class="pop-mode-hint">
+                {activeComputeChoice === 'local'
+                  ? 'Local WebGPU'
+                  : activeComputeChoice === 'colab'
+                    ? 'Experimental'
+                    : 'Your GPU'}
+              </span>
+            </div>
+            <div class="compute-seg" role="group" aria-label="Compute backend mode">
+              {#each [['local', 'Browser'], ['colab', 'Colab'], ['self-host', 'Self-Host']] as [cVal, cLbl] (cVal)}
+                <button
+                  type="button"
+                  class="compute-seg-btn"
+                  class:active={activeComputeChoice === cVal}
+                  disabled={isRunning || activeRunState.leaseHeld}
+                  onclick={() => selectComputeChoice(cVal as 'local' | 'colab' | 'self-host')}
+                >
+                  {cLbl}
+                </button>
+              {/each}
             </div>
 
-            {#if computeBackend.mode === 'local' && sameOriginHostDetected?.ok}
+            {#if activeComputeChoice === 'local' && sameOriginHostDetected?.ok}
               <div class="pop-row">
-                <span class="pop-k" title="Same-origin self-hosted GPU detected">
+                <span class="pop-k" title="Same-origin GPU server detected">
                   {formatHostGpuDetail(sameOriginHostDetected)}
                 </span>
                 <button
@@ -3618,14 +3682,127 @@
                   disabled={isRunning || activeRunState.leaseHeld}
                   onclick={() => {
                     remoteHealth = sameOriginHostDetected;
-                    updateComputeBackend({ mode: 'remote', serverUrl: '' });
+                    updateComputeBackend({
+                      mode: 'remote',
+                      remotePreset: isOnColabOrigin ? 'colab' : 'self-host',
+                      serverUrl: '',
+                    });
                   }}
                 >
-                  Use Host GPU
+                  {isOnColabOrigin ? 'Use Colab GPU' : 'Use Self-Host'}
                 </button>
               </div>
             {/if}
-            {#if computeBackend.mode !== 'local'}
+
+            {#if activeComputeChoice === 'colab'}
+              <div class="pop-colab-card">
+                <div class="pop-colab-head">
+                  <span class="pop-colab-title">Google Colab GPU</span>
+                  <span class="pop-colab-badge">T4 · L4 · A100</span>
+                </div>
+                <p class="pop-colab-desc">
+                  Run all 3 cells in Colab, then open the printed <code>trycloudflare.com</code> link or paste it below.
+                </p>
+                <a
+                  class="pop-colab-launch"
+                  href={COLAB_NOTEBOOK_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Launch Colab Notebook ↗
+                </a>
+              </div>
+              <label class="pop-field">
+                <span>Colab Tunnel URL {isOnColabOrigin ? '(blank = same origin)' : ''}</span>
+                <input
+                  type="text"
+                  value={computeBackend.serverUrl}
+                  placeholder="https://xxxx.trycloudflare.com"
+                  disabled={isRunning}
+                  onchange={(e) => updateComputeBackend({ serverUrl: (e.currentTarget as HTMLInputElement).value })}
+                />
+              </label>
+              {#if !computeBackend.serverUrl.trim() && isOnColabOrigin && remoteHealth?.ok && remoteHealth.authenticatedBy === 'cookie'}
+                <div class="pop-row">
+                  <span class="pop-k">Session</span>
+                  <span class="pop-v ok-t">Signed in (cookie)</span>
+                  <button
+                    type="button"
+                    class="pop-action"
+                    disabled={isRunning || activeRunState.leaseHeld}
+                    onclick={() => void signOutRemoteBackend()}
+                  >
+                    Sign out
+                  </button>
+                </div>
+              {:else}
+                <label class="pop-field">
+                  <span>API Token (from Colab cell output)</span>
+                  <input
+                    type="password"
+                    value={computeBackend.apiToken}
+                    placeholder="dnv_..."
+                    disabled={isRunning}
+                    oninput={(e) => {
+                      computeBackend = {
+                        ...computeBackend,
+                        apiToken: (e.currentTarget as HTMLInputElement).value,
+                      };
+                    }}
+                    onchange={(e) => updateComputeBackend({ apiToken: (e.currentTarget as HTMLInputElement).value })}
+                    onkeydown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void probeRemoteBackend(computeBackend);
+                      }
+                    }}
+                  />
+                </label>
+              {/if}
+              <div class="pop-row">
+                <span
+                  class="pop-v"
+                  class:ok-t={remoteHealth?.ok}
+                  class:bad-t={remoteHealth?.ok === false}
+                  style="text-align: left; overflow: hidden; text-overflow: ellipsis;"
+                  title={remoteHealth?.error || remoteHealth?.gpu?.description || ''}
+                >
+                  {#if remoteChecking}
+                    Checking Colab GPU…
+                  {:else if remoteHealth?.ok}
+                    {formatHostGpuDetail(remoteHealth)}
+                    {(remoteHealth.queueDepth ?? 0) > 0 ? ` · q=${remoteHealth.queueDepth}` : ''}
+                  {:else if remoteHealth?.error}
+                    Offline: {remoteHealth.error}
+                  {:else if !computeBackend.serverUrl.trim() && !isOnColabOrigin}
+                    Paste Colab tunnel URL
+                  {:else}
+                    Not tested yet
+                  {/if}
+                </span>
+                <button
+                  type="button"
+                  class="pop-action"
+                  disabled={remoteChecking || (!computeBackend.serverUrl.trim() && !isOnColabOrigin)}
+                  onclick={() => void probeRemoteBackend(computeBackend)}
+                >
+                  {!computeBackend.serverUrl.trim() && isOnColabOrigin && computeBackend.apiToken.trim() ? 'Sign in' : 'Test'}
+                </button>
+              </div>
+              {#if remoteHealth?.ok && remoteHealth.activeAdapter}
+                <div class="pop-row">
+                  <span class="pop-k">Colab VRAM</span>
+                  <button
+                    type="button"
+                    class="pop-action"
+                    disabled={isRunning || activeRunState.leaseHeld}
+                    onclick={freeRemoteVram}
+                  >
+                    Free ({remoteHealth.activeAdapter})
+                  </button>
+                </div>
+              {/if}
+            {:else if activeComputeChoice === 'self-host'}
               <label class="pop-field">
                 <span>Host Server URL (blank = same origin)</span>
                 <input
@@ -3675,10 +3852,10 @@
               {/if}
               {#if !remoteHealth?.ok}
                 <div class="pop-help-note">
-                  Run all GPU blocks on your workstation (CPU &amp; 3D stay local):
+                  Run GPU blocks on your workstation or cluster (SSH / Tailscale):
                   <code>node server/selfhost-server.mjs</code> ·
                   <a
-                    href="https://github.com/ramithuh/ProteinDesignSpace/blob/main/server/README.md"
+                    href="https://github.com/ramithuh/ProteinDesignSpace/blob/feat/unifying-engine/server/README.md"
                     target="_blank"
                     rel="noopener noreferrer"
                   >Self-host guide ↗</a>
@@ -3729,7 +3906,7 @@
             <div class="pop-row">
               <span
                 class="pop-k"
-                title="Maximum total residues allowed in LocalFold (AF3, Boltz, Protenix, AF2, ESMFold2). Auto uses 512/768 in Browser mode and the host GPU ceiling on self-hosted servers."
+                title="Maximum total residues allowed in LocalFold (AF3, Boltz, Protenix, AF2, ESMFold2). Auto uses 512/768 in Browser mode and the host GPU ceiling on Colab or self-hosted servers."
               >
                 Max fold len
               </span>
@@ -3744,9 +3921,11 @@
                   })}
               >
                 <option value="auto">
-                  {computeBackend.mode === 'local'
+                  {activeComputeChoice === 'local'
                     ? 'Auto (512 / 768)'
-                    : `Auto (Host ${remoteHealth?.maxFoldResidues ?? DEFAULT_HOST_MAX_FOLD_RESIDUES})`}
+                    : activeComputeChoice === 'colab'
+                      ? `Auto (Colab ${remoteHealth?.maxFoldResidues ?? DEFAULT_HOST_MAX_FOLD_RESIDUES})`
+                      : `Auto (Host ${remoteHealth?.maxFoldResidues ?? DEFAULT_HOST_MAX_FOLD_RESIDUES})`}
                 </option>
                 <option value="512">512 aa</option>
                 <option value="768">768 aa</option>
@@ -5351,7 +5530,7 @@
     box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35), var(--node-shadow);
   }
   .sys-pop {
-    width: min(300px, calc(100vw - 24px));
+    width: min(324px, calc(100vw - 24px));
     padding: 10px 12px;
     display: flex;
     flex-direction: column;
@@ -5368,22 +5547,34 @@
     flex-direction: column;
     gap: 7px;
   }
+  .pop-mode-hint {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
   .compute-seg {
-    display: inline-flex;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    width: 100%;
     border: 1px solid var(--border);
-    border-radius: 6px;
-    overflow: hidden;
+    border-radius: 7px;
+    padding: 2px;
+    gap: 2px;
     background: var(--bg-surface-2);
+    box-sizing: border-box;
   }
   .compute-seg-btn {
     border: none;
     background: transparent;
     color: var(--text-muted);
-    font-size: 10px;
+    font-size: 10.5px;
     font-weight: 600;
-    padding: 3px 7px;
+    padding: 4px 6px;
+    border-radius: 5px;
     cursor: pointer;
     font-family: inherit;
+    white-space: nowrap;
+    transition: background 0.12s ease, color 0.12s ease;
   }
   .compute-seg-btn:hover:not(:disabled) {
     color: var(--text-primary);
@@ -5391,6 +5582,62 @@
   .compute-seg-btn.active {
     background: var(--accent);
     color: #fff;
+  }
+  .pop-colab-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 8px 9px;
+  }
+  .pop-colab-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .pop-colab-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .pop-colab-badge {
+    font-size: 9.5px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    color: var(--text-muted);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  .pop-colab-desc {
+    margin: 0;
+    font-size: 10px;
+    line-height: 1.4;
+    color: var(--text-muted);
+  }
+  .pop-colab-desc code {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    color: var(--text-primary);
+  }
+  .pop-colab-launch {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 5px 8px;
+    border-radius: 5px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: opacity 0.12s ease;
+  }
+  .pop-colab-launch:hover {
+    opacity: 0.9;
   }
   .pop-field {
     display: flex;
@@ -5445,7 +5692,7 @@
     .sys-pop {
       left: 0;
       right: auto;
-      width: min(260px, calc(100vw - 24px));
+      width: min(290px, calc(100vw - 24px));
     }
   }
   @media (max-width: 640px) {
