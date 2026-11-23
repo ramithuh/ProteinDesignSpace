@@ -448,9 +448,9 @@ describe('page-state-helpers (R5, R3 auto-seed, QA #1/#2, QA #5)', () => {
       length: number;
     }> = [
       { unsupportedBenchId: 'rfd4_7m5w_bdna', pdbId: '7M5W', length: 90 },
-      { unsupportedBenchId: 'ame_1ctt_cda', pdbId: '1CTT', length: 150 },
+      { unsupportedBenchId: 'ame_1ctt_cda', pdbId: '1CTT', length: 180 },
       { unsupportedBenchId: 'sm_7c7m_sam', pdbId: '7C7M', length: 110 },
-      { unsupportedBenchId: 'ame_1os7_taud', pdbId: '1OS7', length: 165 },
+      { unsupportedBenchId: 'ame_1os7_taud', pdbId: '1OS7', length: 180 },
     ];
 
     for (const { unsupportedBenchId, pdbId, length } of unsupportedCollisions) {
@@ -633,7 +633,7 @@ describe('page-state-helpers (R5, R3 auto-seed, QA #1/#2, QA #5)', () => {
     expect(genieHop2?.[genieNode0.id]?.contig).toBe('A17-132,/0,60-60');
     expect(genieHop2?.[genieNode0.id]?.userEditedLength).toBe(true);
 
-    // (b) compileWorkflowPlanToGraph 150 aa rfd4-proteina across pdl1_5o45 -> ame_1ctt_cda -> mdm2_1ycr
+    // (b) compileWorkflowPlanToGraph 180 aa rfd4-proteina across pdl1_5o45 -> ame_1ctt_cda -> mdm2_1ycr
     const rfd4Plan = compileWorkflowPlanToGraph({
       kind: 'conditioned_design',
       designTask: 'binder',
@@ -641,7 +641,7 @@ describe('page-state-helpers (R5, R3 auto-seed, QA #1/#2, QA #5)', () => {
       pdbId: '5O45',
       crop: null,
       generators: ['rfd4-proteina'],
-      length: 150,
+      length: 180,
       numDesigns: 1,
       sequenceDesigners: ['web-protein-mpnn'],
       numSequences: 1,
@@ -650,25 +650,25 @@ describe('page-state-helpers (R5, R3 auto-seed, QA #1/#2, QA #5)', () => {
       foldModels: [],
       score: false,
       stabilityScan: false,
-      summary: '5O45 150aa rfd4 binder',
+      summary: '5O45 180aa rfd4 binder',
     });
     const rfd4Node0 = rfd4Plan.graph.nodes.find((n) => n.adapterId === 'rfd4-proteina')!;
-    expect(rfd4Node0.params.length).toBe(150);
-    expect(rfd4Node0.params.contig).toBe('A17-132,/0,150-150');
+    expect(rfd4Node0.params.length).toBe(180);
+    expect(rfd4Node0.params.contig).toBe('A17-132,/0,180-180');
 
     const rfd4Hop1 = computeBenchmarkAutoSeedPatches(
       switchBenchmark(rfd4Plan.graph, 'rfd4-proteina', 'ame_1ctt_cda', '1CTT', rfd4Node0.params),
     );
-    expect(rfd4Hop1?.[rfd4Node0.id]?.length).toBe(150);
-    expect(rfd4Hop1?.[rfd4Node0.id]?.contig).toBe('150-150');
+    expect(rfd4Hop1?.[rfd4Node0.id]?.length).toBe(180);
+    expect(rfd4Hop1?.[rfd4Node0.id]?.contig).toBe('180-180');
     expect(rfd4Hop1?.[rfd4Node0.id]?.userEditedLength).toBe(true);
     expect(rfd4Hop1?.[rfd4Node0.id]?.autoSeededLength).toBeUndefined();
 
     const rfd4Hop2 = computeBenchmarkAutoSeedPatches(
       switchBenchmark(rfd4Plan.graph, 'rfd4-proteina', 'mdm2_1ycr', '1YCR', rfd4Hop1![rfd4Node0.id]),
     );
-    expect(rfd4Hop2?.[rfd4Node0.id]?.length).toBe(150);
-    expect(rfd4Hop2?.[rfd4Node0.id]?.contig).toBe('A25-109,/0,150-150');
+    expect(rfd4Hop2?.[rfd4Node0.id]?.length).toBe(180);
+    expect(rfd4Hop2?.[rfd4Node0.id]?.contig).toBe('A25-109,/0,180-180');
     expect(rfd4Hop2?.[rfd4Node0.id]?.userEditedLength).toBe(true);
 
     // (c) autoSeededLength: 0 on supported pdl1_5o45 (70 -> mdm2_1ycr 60) and unsupported rfd4_7m5w_bdna (90 -> mdm2_1ycr 90)

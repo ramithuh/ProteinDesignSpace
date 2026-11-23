@@ -3,11 +3,15 @@
 // AND safely editing/appending/removing/updating onto the user's current canvas (`edit_current`).
 
 import {
-  adaptBenchmarkContigForLength,
   BENCHMARK_TARGETS,
   getBenchmarkById,
   type BenchmarkTargetMeta,
 } from './benchmarks';
+import {
+  UI_TRACKING_PARAM_KEYS,
+  applyPlannerBenchmarkSeedingToNode,
+  isResidueSpecDisjointFromBenchmark,
+} from './benchmark-sync';
 import { extractUpstreamHoloHints, validateBioCapabilities } from './bio-capabilities';
 import { autoLayoutGraph, defaultParamsForAdapter, validateConnection, validateGraph } from './graph-utils';
 import { sanitizeEvoDiffFixedSequence } from './param-validation';
@@ -1681,13 +1685,6 @@ const CONTROLLED_METADATA_KEYS_BY_ADAPTER: Record<string, ReadonlySet<string>> =
   genie3: new Set(['benchmarkId']),
 };
 
-const UI_TRACKING_PARAM_KEYS = new Set([
-  'autoSeededBenchmarkId',
-  'autoSeededLength',
-  'userEditedLength',
-  'userEditedTask',
-]);
-
 function isBroadChainCrop(crop: unknown): boolean {
   return /^[A-Za-z](?:\s*,\s*[A-Za-z])*$/.test(String(crop ?? '').trim());
 }
@@ -1942,6 +1939,15 @@ const PASS2_GENERATOR_ADAPTERS = new Set([
   'foldflow2',
 ]);
 
+const CA_ONLY_GENERATORS = new Set(['genie3', 'genie2', 'proteina', 'sid-protein']);
+
+const ALL_ATOM_GENERATORS = new Set([
+  'rfd4-proteina',
+  'rfdiffusion',
+  'boltzgen',
+  'protpardelle',
+]);
+
 const PASS2_AF3_MODELS = new Set(
   LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af3').map((m) => m.id),
 );
@@ -2073,52 +2079,30 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
       if (bm.cropSegments && (!curCrop || (bm.category === 'binder' && isBroadChainCrop(curCrop)))) {
         node.params.cropSegments = bm.cropSegments;
       }
-      const cp = bm.conditionParams;
       for (const gen of downstreamGens) {
-        if (gen.adapterId === 'rfd4-proteina') {
-          if (!gen.params.mode || gen.params.mode === 'unconditional') {
-            gen.params.mode = bm.category === 'binder' ? 'binder' : 'motif';
-          }
-          if (bm.category === 'binder' && !gen.params.hotspots && cp.hotspots) {
-            gen.params.hotspots = cp.hotspots;
-          }
-          if (!gen.params.motifSpan && cp.motifSpan) {
-            gen.params.motifSpan = cp.motifSpan;
-          }
-          if (cp.unindexedMotif && gen.params.unindexedMotif !== true) {
-            gen.params.unindexedMotif = true;
-          }
-          if (!gen.params.contig && cp.contig) {
-            const reqLen = typeof gen.params.length === 'number' ? gen.params.length : null;
-            gen.params.contig = reqLen
-              ? adaptBenchmarkContigForLength(cp.contig, reqLen, bm.category)
-              : cp.contig;
-          }
-        } else if (gen.adapterId === 'genie3') {
-          if (!gen.params.taskMode || gen.params.taskMode === 'unconditional') {
-            gen.params.taskMode = bm.category === 'binder' ? 'binder' : 'motif';
-          }
-          if (bm.category === 'binder' && !gen.params.hotspots && cp.hotspots) {
-            gen.params.hotspots = cp.hotspots;
-          }
-          if (!gen.params.motifSpan && cp.motifSpan) {
-            gen.params.motifSpan = cp.motifSpan;
-          }
-          if (!gen.params.contig && cp.contig) {
-            const reqLen = typeof gen.params.length === 'number' ? gen.params.length : null;
-            gen.params.contig = reqLen
-              ? adaptBenchmarkContigForLength(cp.contig, reqLen, bm.category)
-              : cp.contig;
-          }
-        } else if (gen.adapterId === 'protpardelle') {
-          if (!gen.params.taskMode || gen.params.taskMode === 'unconditional') {
-            gen.params.taskMode = 'motif';
-          }
-          if (!gen.params.motifSelection && cp.motifSpan) {
-            gen.params.motifSelection = cp.motifSpan;
-          }
+        const { repairedHallucination } = applyPlannerBenchmarkSeedingToNode(gen, bm);
+        if (repairedHallucination) {
+          notes.push(`Aligned ${gen.label ?? gen.id} conditioning with ${bm.shortLabel}.`);
         }
       }
+    }
+  }
+
+  // 1a. Ensure web-protein-mpnn downstream of all-atom generators defaults to SolubleMPNN (not Cα-only)
+  for (const edge of cloned.edges) {
+    const fn = nodeByIdInit.get(edge.fromNode);
+    const tn = nodeByIdInit.get(edge.toNode);
+    if (
+      fn &&
+      ALL_ATOM_GENERATORS.has(fn.adapterId) &&
+      tn?.adapterId === 'web-protein-mpnn' &&
+      String(tn.params.family ?? '').trim().toLowerCase() === 'ca'
+    ) {
+      tn.params.family = 'solublempnn';
+      if (!tn.label || /c[αa]/i.test(tn.label)) {
+        tn.label = 'SolubleMPNN';
+      }
+      notes.push(`Switched ${tn.label ?? tn.id} from Cα-ProteinMPNN to SolubleMPNN for all-atom ${fn.label ?? fn.id} output.`);
     }
   }
 
@@ -2221,7 +2205,6 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
             ? tplNode.params.benchmarkId
             : '';
         const bm = bmId ? getBenchmarkById(bmId) : undefined;
-        const cp = bm?.conditionParams;
         const reqLen = typeof prevParams.length === 'number' ? prevParams.length : undefined;
         node.adapterId = 'rfd4-proteina';
         node.label = 'RFD4-Proteina';
@@ -2230,13 +2213,12 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
           mode: bm?.category === 'binder' ? 'binder' : 'motif',
           ...(reqLen !== undefined ? { length: reqLen } : {}),
           ...(prevParams.numDesigns !== undefined ? { numDesigns: prevParams.numDesigns } : {}),
-          ...(cp?.motifSpan ? { motifSpan: cp.motifSpan } : {}),
-          ...(cp?.unindexedMotif ? { unindexedMotif: true } : {}),
-          ...(cp?.hotspots && bm?.category === 'binder' ? { hotspots: cp.hotspots } : {}),
-          ...(cp?.contig
-            ? { contig: reqLen ? adaptBenchmarkContigForLength(cp.contig, reqLen, bm!.category) : cp.contig }
-            : {}),
         };
+        if (bm) {
+          applyPlannerBenchmarkSeedingToNode(node, bm, {
+            explicitLength: reqLen !== undefined && reqLen !== 80 ? reqLen : null,
+          });
+        }
         notes.push(`Switched ${targetId} from Genie 3 to RFD4-Proteina for all-atom ligand/DNA conditioning.`);
         changed = true;
       } else if (issue.code === 'mpnn-non-protein-stripped' && node.adapterId === 'web-protein-mpnn') {
@@ -2659,49 +2641,6 @@ function compileBlockGraphPlan(
     throw new Error('Block-graph workflow plan contained no valid blocks.');
   }
 
-  // Benchmark auto-seeding onto downstream generators (motifSpan / hotspots / length)
-  const pdbWithBm = nodes.find(
-    (n) => n.adapterId === 'pdb-input' && typeof n.params.benchmarkId === 'string' && n.params.benchmarkId,
-  );
-  if (pdbWithBm) {
-    const bm = getBenchmarkById(String(pdbWithBm.params.benchmarkId));
-    if (bm) {
-      const cp = bm.conditionParams;
-      for (const node of nodes) {
-        if (node.adapterId === 'rfd4-proteina') {
-          if (!node.params.mode || node.params.mode === 'unconditional') {
-            node.params.mode = bm.category === 'binder' ? 'binder' : 'motif';
-          }
-          if (bm.category === 'binder' && !node.params.hotspots && cp.hotspots) {
-            node.params.hotspots = cp.hotspots;
-          }
-          if (!node.params.motifSpan && cp.motifSpan) {
-            node.params.motifSpan = cp.motifSpan;
-          }
-          if (cp.unindexedMotif && node.params.unindexedMotif !== true) {
-            node.params.unindexedMotif = true;
-          }
-          if (!node.params.contig && cp.contig) {
-            const reqLen = typeof node.params.length === 'number' ? node.params.length : null;
-            node.params.contig = reqLen
-              ? adaptBenchmarkContigForLength(cp.contig, reqLen, bm.category)
-              : cp.contig;
-          }
-        } else if (node.adapterId === 'genie3') {
-          if (!node.params.taskMode || node.params.taskMode === 'unconditional') {
-            node.params.taskMode = bm.category === 'binder' ? 'binder' : 'motif';
-          }
-          if (bm.category === 'binder' && !node.params.hotspots && cp.hotspots) {
-            node.params.hotspots = cp.hotspots;
-          }
-          if (!node.params.motifSpan && cp.motifSpan) {
-            node.params.motifSpan = cp.motifSpan;
-          }
-        }
-      }
-    }
-  }
-
   const edges: WorkflowEdge[] = [];
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
   for (const [fromId, toId] of (plan.edges ?? []).slice(0, MAX_BLOCK_GRAPH_EDGES)) {
@@ -2719,20 +2658,25 @@ function compileBlockGraphPlan(
     }
   }
 
-  // Ensure Cα-only generators -> web-protein-mpnn use family='ca' unless explicitly overridden
-  const CA_ONLY_GENS = new Set(['genie3', 'genie2', 'proteina', 'sid-protein']);
+  // Ensure Cα-only generators -> web-protein-mpnn use family='ca' unless explicitly overridden,
+  // and all-atom generators -> web-protein-mpnn default to family='solublempnn' (not 'ca').
   for (const e of edges) {
     const fn = nodeById.get(e.fromNode);
     const tn = nodeById.get(e.toNode);
-    if (
-      fn &&
-      CA_ONLY_GENS.has(fn.adapterId) &&
-      tn?.adapterId === 'web-protein-mpnn' &&
-      !explicitFamilyNodeIds.has(tn.id)
-    ) {
+    if (!fn || tn?.adapterId !== 'web-protein-mpnn') continue;
+    if (CA_ONLY_GENERATORS.has(fn.adapterId) && !explicitFamilyNodeIds.has(tn.id)) {
       tn.params.family = 'ca';
       if (!tn.label || tn.label === 'ProteinMPNN' || tn.label === 'SolubleMPNN') {
         tn.label = 'Cα-ProteinMPNN';
+      }
+    } else if (
+      ALL_ATOM_GENERATORS.has(fn.adapterId) &&
+      (!explicitFamilyNodeIds.has(tn.id) ||
+        String(tn.params.family ?? '').trim().toLowerCase() === 'ca')
+    ) {
+      tn.params.family = 'solublempnn';
+      if (!tn.label || /c[αa]/i.test(tn.label)) {
+        tn.label = 'SolubleMPNN';
       }
     }
   }
@@ -2990,14 +2934,11 @@ export function compileWorkflowPlanToGraph(
     ).slice(0, MAX_SEQUENCE_DESIGNERS);
     const boundedFoldModels = (plan.foldModels ?? []).slice(0, MAX_FOLD_MODELS);
     const multiBranch = gens.length > 1;
-    const cp = bench?.conditionParams;
-    const effectiveContig =
-      !isPartial && cp?.contig
-        ? plan.length && bench
-          ? adaptBenchmarkContigForLength(cp.contig, plan.length, bench.category)
-          : cp.contig
-        : undefined;
     const partialFrac = clampPartialFraction(plan.partialFraction);
+    const explicitPlanLength =
+      typeof plan.length === 'number' && Number.isFinite(plan.length) && plan.length > 0
+        ? plan.length
+        : null;
 
     for (const genId of gens) {
       const branchTag = multiBranch
@@ -3013,33 +2954,13 @@ export function compileWorkflowPlanToGraph(
           : Math.max(1, Math.min(16, Math.round(plan.numDesigns || 1)));
       let paramsOverride: Record<string, unknown>;
 
-      if (genId === 'genie3') {
-        const taskMode =
-          plan.designTask === 'binder' || bench?.category === 'binder' ? 'binder' : 'motif';
+      if (genId === 'protpardelle' && isPartial) {
         paramsOverride = {
-          taskMode,
+          taskMode: 'partial',
+          rewindSteps: Math.max(5, Math.min(200, Math.round(partialFrac * 100))),
           numDesigns: genNumDesigns,
-          ...(plan.length ? { length: plan.length } : {}),
-          ...(effectiveContig ? { contig: effectiveContig } : {}),
-          ...(cp?.motifSpan ? { motifSpan: cp.motifSpan } : {}),
-          ...(cp?.lockChain ? { lockChain: cp.lockChain } : {}),
-          ...(cp?.hotspots ? { hotspots: cp.hotspots } : {}),
-          ...(bench ? { autoSeededBenchmarkId: bench.id } : {}),
         };
-      } else if (genId === 'protpardelle') {
-        paramsOverride = isPartial
-          ? {
-              taskMode: 'partial',
-              rewindSteps: Math.max(5, Math.min(200, Math.round(partialFrac * 100))),
-              numDesigns: genNumDesigns,
-            }
-          : {
-              taskMode: 'motif',
-              numDesigns: genNumDesigns,
-              ...(plan.length ? { length: plan.length } : {}),
-              ...(cp?.motifSpan ? { motifSelection: cp.motifSpan } : {}),
-            };
-      } else if (isPartial) {
+      } else if (genId === 'rfd4-proteina' && isPartial) {
         paramsOverride = {
           mode: 'partial',
           partialFraction: partialFrac,
@@ -3047,21 +2968,34 @@ export function compileWorkflowPlanToGraph(
           ...(bench ? { autoSeededBenchmarkId: bench.id } : {}),
         };
       } else {
-        const mode =
-          plan.designTask === 'binder' || bench?.category === 'binder' ? 'binder' : 'motif';
-        paramsOverride = {
-          mode,
-          numDesigns: genNumDesigns,
-          ...(plan.length ? { length: plan.length } : {}),
-          ...(effectiveContig ? { contig: effectiveContig } : {}),
-          ...(cp?.motifSpan ? { motifSpan: cp.motifSpan } : {}),
-          ...(cp?.lockChain ? { lockChain: cp.lockChain } : {}),
-          ...(cp?.hotspots ? { hotspots: cp.hotspots } : {}),
-          ...(cp?.unindexedMotif ? { unindexedMotif: true } : {}),
-          ...(cp?.hbondMode ? { hbondMode: cp.hbondMode } : {}),
-          ...(cp?.hbondSelection ? { hbondSelection: cp.hbondSelection } : {}),
-          ...(bench ? { autoSeededBenchmarkId: bench.id } : {}),
+        const draftNode: WorkflowNode = {
+          id: '__draft__',
+          adapterId: genId,
+          params:
+            genId === 'genie3'
+              ? {
+                  taskMode: plan.designTask === 'binder' || bench?.category === 'binder' ? 'binder' : 'motif',
+                  numDesigns: genNumDesigns,
+                  ...(explicitPlanLength !== null ? { length: explicitPlanLength } : {}),
+                }
+              : genId === 'protpardelle'
+                ? {
+                    taskMode: 'motif',
+                    numDesigns: genNumDesigns,
+                    ...(explicitPlanLength !== null ? { length: explicitPlanLength } : {}),
+                  }
+                : {
+                    mode: plan.designTask === 'binder' || bench?.category === 'binder' ? 'binder' : 'motif',
+                    numDesigns: genNumDesigns,
+                    ...(explicitPlanLength !== null ? { length: explicitPlanLength } : {}),
+                  },
         };
+        if (bench) {
+          applyPlannerBenchmarkSeedingToNode(draftNode, bench, {
+            explicitLength: explicitPlanLength,
+          });
+        }
+        paramsOverride = draftNode.params;
       }
 
       attachGeneratorBranch({
@@ -4443,6 +4377,99 @@ function reconcileBlockGraphPlan(
         } else if (n.adapter === 'protpardelle' && !chooseBinder) {
           if (!n.params.taskMode || n.params.taskMode === 'unconditional') {
             n.params.taskMode = 'motif';
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Guard curated benchmark conditioning against LLM hallucinated residue spans (e.g. `1PRW` `motifSpan: "A1-10"`)
+  const hasExplicitPromptResidues =
+    /\b[A-Za-z]\d+\s*[-–]\s*\d+\b/.test(trimmed) ||
+    /\b(?:residues?|positions?|res|hotspots?|sites?|motif)\s*[:=]?\s*[A-Za-z]?\d+/i.test(trimmed) ||
+    /\b[A-Z]\d{2,4}\b/.test(trimmed);
+  const blockEdges = Array.isArray(plan.edges) ? plan.edges : [];
+  const blockNodeById = new Map(clonedNodes.map((n) => [n.id, n]));
+  for (const pdbNode of pdbNodes) {
+    const rawBmId = String(pdbNode.params?.benchmarkId ?? '').trim();
+    const rawPdbId = String(pdbNode.params?.pdbId ?? '').trim().toUpperCase();
+    let bm = rawBmId ? getBenchmarkById(rawBmId) : undefined;
+    if (!bm && rawPdbId) {
+      const matches = BENCHMARK_TARGETS.filter((b) => b.pdbId === rawPdbId);
+      if (matches.length === 1) {
+        bm = matches[0];
+        if (!pdbNode.params) pdbNode.params = {};
+        pdbNode.params.benchmarkId = bm.id;
+      }
+    }
+    if (!bm) continue;
+
+    const wiredGens = blockEdges
+      .filter(([fromId]) => fromId === pdbNode.id)
+      .map(([, toId]) => blockNodeById.get(toId))
+      .filter((n): n is NonNullable<typeof n> => Boolean(n && PASS2_GENERATOR_ADAPTERS.has(n.adapter)));
+    const targetGens =
+      wiredGens.length > 0
+        ? wiredGens
+        : pdbNodes.length === 1
+          ? clonedNodes.filter((n) => PASS2_GENERATOR_ADAPTERS.has(n.adapter))
+          : [];
+
+    const bp = bm.conditionParams;
+    for (const gen of targetGens) {
+      if (!gen.params) gen.params = {};
+      if (gen.adapter === 'rfd4-proteina' || gen.adapter === 'genie3') {
+        const curMotif = String(gen.params.motifSpan ?? '').trim();
+        if (
+          curMotif &&
+          (!hasExplicitPromptResidues || isResidueSpecDisjointFromBenchmark(curMotif, bm))
+        ) {
+          if (bp.motifSpan) gen.params.motifSpan = bp.motifSpan;
+          else delete gen.params.motifSpan;
+        }
+        const curHotspots = String(gen.params.hotspots ?? '').trim();
+        if (
+          curHotspots &&
+          bm.category === 'binder' &&
+          (!hasExplicitPromptResidues || isResidueSpecDisjointFromBenchmark(curHotspots, bm))
+        ) {
+          if (bp.hotspots) gen.params.hotspots = bp.hotspots;
+          else delete gen.params.hotspots;
+        }
+        const curContig = String(gen.params.contig ?? '').trim();
+        if (
+          curContig &&
+          (!hasExplicitPromptResidues || isResidueSpecDisjointFromBenchmark(curContig, bm))
+        ) {
+          delete gen.params.contig;
+        }
+      } else if (gen.adapter === 'protpardelle') {
+        const curSel = String(gen.params.motifSelection ?? '').trim();
+        if (
+          curSel &&
+          bp.motifSpan &&
+          (!hasExplicitPromptResidues || isResidueSpecDisjointFromBenchmark(curSel, bm))
+        ) {
+          gen.params.motifSelection = bp.motifSpan;
+        }
+      }
+    }
+  }
+
+  // 5. All-atom generators -> web-protein-mpnn default to SolubleMPNN unless Cα-ProteinMPNN was explicitly asked for
+  const wantsCaMpnn = /\b(?:c[αa][\s-]*(?:protein\s*)?mpnn|c-?alpha[\s-]*(?:protein\s*)?mpnn)\b/i.test(
+    trimmed,
+  );
+  if (!wantsCaMpnn) {
+    for (const [fromId, toId] of blockEdges) {
+      const fn = blockNodeById.get(fromId);
+      const tn = blockNodeById.get(toId);
+      if (fn && ALL_ATOM_GENERATORS.has(fn.adapter) && tn?.adapter === 'web-protein-mpnn') {
+        if (!tn.params) tn.params = {};
+        if (String(tn.params.family ?? '').trim().toLowerCase() === 'ca') {
+          tn.params.family = 'solublempnn';
+          if (!tn.label || /c[αa]/i.test(tn.label)) {
+            tn.label = 'SolubleMPNN';
           }
         }
       }

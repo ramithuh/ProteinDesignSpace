@@ -1237,4 +1237,127 @@ describe('WorkflowPlan R1–R4 regressions & Q1–Q10 reconciliation', () => {
     expect(realSeq.kind).toBe('sequence');
     expect(realSeq.sequences).toEqual(['MKTEAL', 'GGGGSVVVVV']);
   });
+
+  it('Wave 1C: repairs Gemma hallucinated 1PRW motifSpan A1-10, defaults all-atom generators to SolubleMPNN, and unifies planner benchmark seeding (WF-05)', () => {
+    // 1. Live bug regression: "scaffold 1PRW motif with RFD4 and refold with ESMFold2"
+    //    Gemma hallucinated motifSpan: "A1-10" and web-protein-mpnn family: "ca"
+    const hallucinated1prwPlan: WorkflowPlan = {
+      kind: 'block_graph',
+      mode: 'new',
+      nodes: [
+        { id: 'pdb_1', adapter: 'pdb-input', label: 'PDB Input', params: { pdbId: '1PRW' } },
+        {
+          id: 'rfd_1',
+          adapter: 'rfd4-proteina',
+          label: 'RFD4-Proteina',
+          params: { mode: 'motif', motifSpan: 'A1-10', length: 70 },
+        },
+        {
+          id: 'mpnn_1',
+          adapter: 'web-protein-mpnn',
+          label: 'Cα-ProteinMPNN',
+          params: { family: 'ca', numSequences: 2 },
+        },
+        {
+          id: 'fold_1',
+          adapter: 'localfold-af2',
+          label: 'ESMFold2',
+          params: { model: 'ef2-fast-300m' },
+        },
+      ],
+      edges: [
+        ['pdb_1', 'rfd_1'],
+        ['rfd_1', 'mpnn_1'],
+        ['mpnn_1', 'fold_1'],
+      ],
+      summary: 'Scaffold 1PRW motif with RFD4 and refold with ESMFold2',
+    };
+
+    const reconciled1prw = reconcilePlannedWorkflow(
+      hallucinated1prwPlan,
+      'scaffold 1PRW motif with RFD4 and refold with ESMFold2',
+    );
+    const compiled1prw = compileWorkflowPlanToGraph(reconciled1prw).graph;
+    expect(validateGraph(compiled1prw)).toEqual([]);
+    const pdb1 = compiled1prw.nodes.find((n) => n.id === 'pdb_1')!;
+    const rfd1 = compiled1prw.nodes.find((n) => n.id === 'rfd_1')!;
+    const mpnn1 = compiled1prw.nodes.find((n) => n.id === 'mpnn_1')!;
+
+    expect(pdb1.params.benchmarkId).toBe('rfd_1prw_efhand');
+    expect(pdb1.params.cropSegments).toBe('A16-35, A52-71');
+    expect(rfd1.params.motifSpan).toBe('A16-35, A52-71');
+    expect(rfd1.params.contig).toBe('10-10,A16-35,16-16,A52-71,10-10');
+    expect(rfd1.params.length).toBe(76);
+    expect(rfd1.params.autoSeededBenchmarkId).toBe('rfd_1prw_efhand');
+    expect(rfd1.params.autoSeededLength).toBe(76);
+    expect(mpnn1.params.family).toBe('solublempnn');
+    expect(mpnn1.label).toBe('SolubleMPNN');
+
+    // 2. Direct compileWorkflowPlanToGraph (without reconcilePlannedWorkflow) STILL repairs disjoint A1-10 & family: 'ca'
+    const directCompiled = compileWorkflowPlanToGraph(hallucinated1prwPlan).graph;
+    expect(directCompiled.nodes.find((n) => n.id === 'rfd_1')!.params.motifSpan).toBe('A16-35, A52-71');
+    expect(directCompiled.nodes.find((n) => n.id === 'mpnn_1')!.params.family).toBe('solublempnn');
+
+    // 3. All-atom generators (rfd4-proteina, rfdiffusion, boltzgen, protpardelle) -> SolubleMPNN,
+    //    while Cα-only generators (genie3, genie2, proteina, sid-protein) keep family: 'ca'
+    for (const allAtomGen of ['rfd4-proteina', 'rfdiffusion', 'boltzgen', 'protpardelle'] as const) {
+      const g = compileWorkflowPlanToGraph({
+        kind: 'block_graph',
+        mode: 'new',
+        nodes: [
+          { id: 'gen', adapter: allAtomGen, label: allAtomGen, params: {} },
+          { id: 'mpnn', adapter: 'web-protein-mpnn', label: 'Cα-ProteinMPNN', params: { family: 'ca' } },
+        ],
+        edges: [['gen', 'mpnn']],
+        summary: `${allAtomGen} -> MPNN`,
+      }).graph;
+      expect(g.nodes.find((n) => n.id === 'mpnn')!.params.family).toBe('solublempnn');
+    }
+
+    // 4. Explicit user sub-motif overlapping 1PRW (A16-35) is preserved when prompted
+    const explicitSubMotif = compileWorkflowPlanToGraph(
+      reconcilePlannedWorkflow(
+        {
+          kind: 'block_graph',
+          mode: 'new',
+          nodes: [
+            { id: 'pdb_1', adapter: 'pdb-input', label: 'PDB Input', params: { pdbId: '1PRW' } },
+            {
+              id: 'rfd_1',
+              adapter: 'rfd4-proteina',
+              label: 'RFD4',
+              params: { mode: 'motif', motifSpan: 'A16-35' },
+            },
+          ],
+          edges: [['pdb_1', 'rfd_1']],
+          summary: 'Scaffold A16-35 of 1PRW',
+        },
+        'Scaffold A16-35 of 1PRW with RFD4',
+      ),
+    ).graph;
+    expect(explicitSubMotif.nodes.find((n) => n.id === 'rfd_1')!.params.motifSpan).toBe('A16-35');
+
+    // 5. WF-05: SAM H-bond benchmark seeds hbondMode/hbondSelection + autoSeededBenchmarkId + autoSeededLength
+    //    and multi-branch block_graph seeding stays edge-scoped (no bleed onto unwired generator)
+    const samGraph = compileWorkflowPlanToGraph({
+      kind: 'block_graph',
+      mode: 'new',
+      nodes: [
+        { id: 'pdb_sam', adapter: 'pdb-input', label: '7C7M', params: { pdbId: '7C7M', benchmarkId: 'sm_7c7m_sam' } },
+        { id: 'rfd_sam', adapter: 'rfd4-proteina', label: 'RFD4 SAM', params: {} },
+        { id: 'rfd_free', adapter: 'rfd4-proteina', label: 'RFD4 Free', params: { mode: 'unconditional', length: 90 } },
+      ],
+      edges: [['pdb_sam', 'rfd_sam']],
+      summary: 'SAM pocket + unrelated de novo branch',
+    }).graph;
+    const rfdSam = samGraph.nodes.find((n) => n.id === 'rfd_sam')!;
+    const rfdFree = samGraph.nodes.find((n) => n.id === 'rfd_free')!;
+    expect(rfdSam.params.hbondMode).toBe('ACCEPTOR');
+    expect(rfdSam.params.hbondSelection).toBe('A/SAM/*/*');
+    expect(rfdSam.params.autoSeededBenchmarkId).toBe('sm_7c7m_sam');
+    expect(rfdSam.params.autoSeededLength).toBe(110);
+    expect(rfdFree.params.mode).toBe('unconditional');
+    expect(rfdFree.params.autoSeededBenchmarkId).toBeUndefined();
+    expect(rfdFree.params.hbondMode).toBe('none');
+  });
 });

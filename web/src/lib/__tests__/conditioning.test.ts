@@ -321,7 +321,7 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
     const cttCompiled = compileConditionToRfd4(cttIntent, cttCtx);
 
     // Remapped label_seq_ids (98, 100, 125, 128) + ligand chains B296, C295 injected into contig!
-    expect(cttCompiled.contig).toBe('150-150,A98,A100,A125,A128,/0,B296,/0,C295');
+    expect(cttCompiled.contig).toBe('180-180,A98,A100,A125,A128,/0,B296,/0,C295');
     expect(cttCompiled.conditions.C_CRDGRP).toEqual({
       1: [{ select: "sel('A/*/[98,100,125,128]/*') | sel('B/*/*/*') | sel('C/*/*/*')" }],
     });

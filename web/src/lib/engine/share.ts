@@ -4,7 +4,10 @@
 import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
 import { autoLayoutGraph, defaultParamsForAdapter, validateGraph } from './graph-utils';
 import { computeUploadDigest, isValidSha256Hex } from './param-validation';
+import { UI_TRACKING_PARAM_HINTS } from './benchmark-sync';
 import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
+
+export { UI_TRACKING_PARAM_HINTS };
 
 const ADAPTER_TO_SHORT: Record<string, string> = {
   'pdb-input': 'p',
@@ -144,6 +147,7 @@ const PARAM_TYPE_HINTS: Record<string, unknown> = {
   expectedPdbSha256: '',
   expectedFilename: '',
   missingUpload: false,
+  ...UI_TRACKING_PARAM_HINTS,
 };
 
 function formatUnresolvedIssueEntry(raw: unknown): string {

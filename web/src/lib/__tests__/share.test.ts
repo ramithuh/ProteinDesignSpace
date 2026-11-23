@@ -753,4 +753,29 @@ describe('engine/share', () => {
     expect(roundTripped!.nodes).toHaveLength(7);
     expect(roundTripped!.edges).toEqual(fullDecoded!.edges);
   });
+
+  it('WF-11: #p= share decode restores numeric/boolean/string types for UI tracking keys while keeping mode-scoped pdb-input filtering intact', async () => {
+    const preset = structuredClone(WORKFLOW_PRESETS.find((p) => p.id === 'rfd4-refold-native')!.graph);
+    preset.nodes[0].params.autoSeededLength = 180;
+    preset.nodes[0].params.autoSeededBenchmarkId = 'ame_1ctt_cda';
+    preset.nodes[0].params.autoSeededFromBenchmark = 'ame_1ctt_cda';
+    preset.nodes[0].params.userEditedTask = false;
+    preset.nodes[0].params.userEditedLength = true;
+
+    const encoded = await encodeGraphToHash(preset);
+    expect(encoded.mode).toBe('preset-diff');
+    const decoded = await decodeHashToGraph(encoded.hash);
+    expect(decoded).not.toBeNull();
+    const gen = decoded!.nodes[0].params;
+    expect(gen.autoSeededLength).toBe(180);
+    expect(typeof gen.autoSeededLength).toBe('number');
+    expect(gen.userEditedTask).toBe(false);
+    expect(typeof gen.userEditedTask).toBe('boolean');
+    expect(gen.userEditedLength).toBe(true);
+    expect(typeof gen.userEditedLength).toBe('boolean');
+    expect(gen.autoSeededBenchmarkId).toBe('ame_1ctt_cda');
+    expect(typeof gen.autoSeededBenchmarkId).toBe('string');
+    expect(gen.autoSeededFromBenchmark).toBe('ame_1ctt_cda');
+    expect(typeof gen.autoSeededFromBenchmark).toBe('string');
+  });
 });
