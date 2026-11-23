@@ -1596,7 +1596,6 @@ export function validateBioCapabilities(
     if (node.adapterId === 'rfd4-proteina') {
       const mode = String(node.params.mode ?? 'unconditional');
       const hasTpl = graph.edges.some((e) => e.toNode === node.id && e.toPort === 'structure');
-      const hasYaml = String(node.params.customSpecYaml ?? '').trim().length > 0;
       if (
         (mode === 'motif' || mode === 'binder' || mode === 'partial' || mode === 'inverse-folding') &&
         !hasTpl
@@ -1606,18 +1605,6 @@ export function validateBioCapabilities(
           code: 'rfd4-missing-template',
           nodeId: node.id,
           message: `${node.label ?? 'RFD4-Proteina'} (${mode} mode) requires a wired input structure (e.g. from PDB Input) on its "structure" port.`,
-        });
-      } else if (hasTpl && mode === 'unconditional' && !hasYaml) {
-        issues.push({
-          severity: 'warning',
-          code: 'rfd4-unused-template',
-          nodeId: node.id,
-          message: `${node.label ?? 'RFD4-Proteina'} has a wired input structure but is set to Unconditional mode (the structure will be ignored). Pick a task in RFD4 Parameters (Motif, Binder, or Partial Diffusion).`,
-          fix: {
-            label: 'Switch to Partial Diffusion',
-            nodeId: node.id,
-            paramsPatch: { mode: 'partial' },
-          },
         });
       } else if (hasTpl && mode === 'preset') {
         issues.push({
@@ -1674,6 +1661,86 @@ export function validateBioCapabilities(
             },
           });
         }
+      }
+    }
+
+    // #63: Generic wired-template unconditional guard covering all multi-mode template generators
+    // (`rfd4-proteina`, `genie3`, `protpardelle`, `boltzgen`, `rfdiffusion`).
+    if (
+      node.adapterId === 'rfd4-proteina' ||
+      node.adapterId === 'genie3' ||
+      node.adapterId === 'protpardelle' ||
+      node.adapterId === 'boltzgen' ||
+      node.adapterId === 'rfdiffusion'
+    ) {
+      const modeKey = node.adapterId === 'rfd4-proteina' ? 'mode' : 'taskMode';
+      const activeMode = String(node.params[modeKey] ?? 'unconditional').trim().toLowerCase();
+      const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
+      const hasYaml =
+        node.adapterId === 'rfd4-proteina' &&
+        String(node.params.customSpecYaml ?? '').trim().length > 0;
+      if (tplEdge && activeMode === 'unconditional' && !hasYaml) {
+        const displayName = node.label ?? manifest?.shortName ?? node.adapterId;
+        const tplNode = graph.nodes.find((n) => n.id === tplEdge.fromNode);
+        const tplBenchId =
+          tplNode?.adapterId === 'pdb-input' ? String(tplNode.params.benchmarkId ?? '').trim() : '';
+        const tplBench = tplBenchId ? getBenchmarkById(tplBenchId) : undefined;
+
+        let code: string;
+        let availableTasks: string;
+        let targetMode: string;
+        let fixLabel: string;
+
+        if (node.adapterId === 'rfd4-proteina') {
+          code = 'rfd4-unused-template';
+          availableTasks = 'Motif, Binder, or Partial Diffusion';
+          targetMode = 'partial';
+          fixLabel = 'Switch to Partial Diffusion';
+        } else if (node.adapterId === 'protpardelle') {
+          code = 'protpardelle-unused-template';
+          availableTasks = 'Motif Scaffolding or Partial Diffusion';
+          const hasMotifSel =
+            String(node.params.motifSelection ?? '').trim().length > 0 ||
+            tplBench?.category === 'motif';
+          targetMode = hasMotifSel ? 'motif' : 'partial';
+          fixLabel = hasMotifSel ? 'Switch to Motif Scaffolding' : 'Switch to Partial Diffusion';
+        } else if (node.adapterId === 'rfdiffusion') {
+          code = 'rfdiffusion-unused-template';
+          availableTasks = 'Motif Scaffolding';
+          targetMode = 'motif';
+          fixLabel = 'Switch to Motif Scaffolding';
+        } else if (node.adapterId === 'boltzgen') {
+          code = 'boltzgen-unused-template';
+          availableTasks = 'Binder Design or Motif Scaffolding';
+          const preferBinder =
+            String(node.params.hotspots ?? '').trim().length > 0 ||
+            tplBench?.category === 'binder';
+          targetMode = preferBinder ? 'binder' : 'motif';
+          fixLabel = preferBinder ? 'Switch to Binder Design' : 'Switch to Motif Scaffolding';
+        } else {
+          // genie3
+          code = 'genie3-unused-template';
+          availableTasks = 'Motif Scaffolding or Binder Design';
+          const hasMotifCue =
+            (String(node.params.motifSpan ?? '').trim().length > 0 ||
+              String(node.params.contig ?? '').trim().length > 0) &&
+            !String(node.params.contig ?? '').includes('/0') &&
+            !String(node.params.lockChain ?? '').trim();
+          targetMode = hasMotifCue ? 'motif' : 'binder';
+          fixLabel = hasMotifCue ? 'Switch to Motif Scaffolding' : 'Switch to Binder Design';
+        }
+
+        issues.push({
+          severity: 'warning',
+          code,
+          nodeId: node.id,
+          message: `${displayName} has a wired input structure but is set to Unconditional mode (the structure will be ignored). Pick a conditioned task (${availableTasks}).`,
+          fix: {
+            label: fixLabel,
+            nodeId: node.id,
+            paramsPatch: { [modeKey]: targetMode },
+          },
+        });
       }
     }
 

@@ -2080,6 +2080,12 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
         node.params.cropSegments = bm.cropSegments;
       }
       for (const gen of downstreamGens) {
+        if (
+          (gen.adapterId === 'protpardelle' || gen.adapterId === 'rfd4-proteina') &&
+          String(gen.params.taskMode ?? gen.params.mode ?? '').trim().toLowerCase() === 'partial'
+        ) {
+          continue;
+        }
         const { repairedHallucination } = applyPlannerBenchmarkSeedingToNode(gen, bm);
         if (repairedHallucination) {
           notes.push(`Aligned ${gen.label ?? gen.id} conditioning with ${bm.shortLabel}.`);
@@ -2624,6 +2630,13 @@ function compileBlockGraphPlan(
 
   // mode === 'new'
   const rawNodes = (plan.nodes ?? []).slice(0, MAX_BLOCK_GRAPH_NODES);
+  const rawEdges = (plan.edges ?? []).slice(0, MAX_BLOCK_GRAPH_EDGES);
+  const incomingNodeIds = new Set<string>(rawEdges.map(([, toId]) => toId));
+  const summaryText = typeof plan.summary === 'string' ? plan.summary : '';
+  const summaryWantsPartial =
+    /\b(?:partial|refine|refinement|refining|rewind|rewinding|re-?diffuse)\b/i.test(summaryText);
+  const summaryWantsMotif = /\b(?:motif|scaffold|scaffolding)\b/i.test(summaryText);
+  const { length: summaryLength } = extractPromptNumDesignsAndLength(summaryText);
   const nodes: WorkflowNode[] = [];
   const seenIds = new Set<string>();
   const explicitFamilyNodeIds = new Set<string>();
@@ -2645,11 +2658,42 @@ function compileBlockGraphPlan(
     ) {
       explicitFamilyNodeIds.add(id);
     }
+    let effectiveRawParams = spec.params ? { ...spec.params } : undefined;
+    if (spec.adapter === 'protpardelle' && incomingNodeIds.has(rawId)) {
+      const rawTaskMode = String(effectiveRawParams?.taskMode ?? effectiveRawParams?.mode ?? '')
+        .trim()
+        .toLowerCase();
+      if (!rawTaskMode || rawTaskMode === 'unconditional') {
+        if (summaryWantsPartial) {
+          effectiveRawParams = { ...(effectiveRawParams ?? {}), taskMode: 'partial' };
+          delete effectiveRawParams.mode;
+        } else if (summaryWantsMotif) {
+          effectiveRawParams = { ...(effectiveRawParams ?? {}), taskMode: 'motif' };
+          delete effectiveRawParams.mode;
+        }
+      }
+    } else if (spec.adapter === 'rfdiffusion' && summaryLength !== null) {
+      const rawLen = effectiveRawParams?.length;
+      const rawTaskMode = String(effectiveRawParams?.taskMode ?? effectiveRawParams?.mode ?? '')
+        .trim()
+        .toLowerCase();
+      if (
+        rawLen === undefined ||
+        rawLen === null ||
+        rawLen === '' ||
+        (rawTaskMode === 'symmetry' && Number(rawLen) === 80 && summaryLength !== 80)
+      ) {
+        effectiveRawParams = {
+          ...(effectiveRawParams ?? {}),
+          length: Math.max(16, Math.min(256, summaryLength)),
+        };
+      }
+    }
     nodes.push({
       id,
       adapterId: spec.adapter,
       label: sanitizeDisplayText(spec.label, ADAPTER_REGISTRY[spec.adapter].shortName, 64),
-      params: sanitizeBlockNodeParams(spec.adapter, spec.params),
+      params: sanitizeBlockNodeParams(spec.adapter, effectiveRawParams),
     });
   }
 
@@ -3885,10 +3929,28 @@ function extractPromptNumDesignsAndLength(prompt: string): {
       const len = Number(lenMatch[1]);
       if (Number.isInteger(len) && len >= 10) length = Math.min(512, len);
     } else {
-      const lenWordMatch = /\blength\s*(?:=|of|to)?\s*(\d+)\b/i.exec(prompt);
-      if (lenWordMatch) {
-        const len = Number(lenWordMatch[1]);
-        if (Number.isInteger(len) && len >= 10) length = Math.min(512, len);
+      const resMatch = /\b(\d+)\s*-?\s*residues?\b/i.exec(prompt);
+      if (resMatch) {
+        const before = prompt.slice(Math.max(0, resMatch.index - 16), resMatch.index).toLowerCase();
+        const after = prompt.slice(
+          resMatch.index + resMatch[0].length,
+          resMatch.index + resMatch[0].length + 12,
+        );
+        const isSpanOrOrdinal =
+          /\b(?:first|last|top|bottom|next|previous)\s+$/.test(before) ||
+          /[-–]\s*$/.test(before) ||
+          /^\s*[-–]\s*\d+/.test(after);
+        if (!isSpanOrOrdinal) {
+          const len = Number(resMatch[1]);
+          if (Number.isInteger(len) && len >= 10) length = Math.min(512, len);
+        }
+      }
+      if (length === null) {
+        const lenWordMatch = /\blength\s*(?:=|of|to)?\s*(\d+)\b/i.exec(prompt);
+        if (lenWordMatch) {
+          const len = Number(lenWordMatch[1]);
+          if (Number.isInteger(len) && len >= 10) length = Math.min(512, len);
+        }
       }
     }
   }
@@ -4488,6 +4550,68 @@ function reconcileBlockGraphPlan(
             tn.label = 'SolubleMPNN';
           }
         }
+      }
+    }
+  }
+
+  // 6. #63: ProtPardelle wired to an upstream structure — infer 'partial' or 'motif' from prompt
+  // so omitting `taskMode` never leaves ProtPardelle silently running `unconditional`.
+  const promptWantsPartial =
+    /\b(?:partial|refine|refinement|refining|rewind|rewinding|re-?diffuse)\b/i.test(trimmed);
+  const promptWantsMotif = /\b(?:motif|scaffold|scaffolding)\b/i.test(trimmed);
+  for (const n of clonedNodes) {
+    if (n.adapter !== 'protpardelle') continue;
+    const isWiredToStruct = blockEdges.some(([fromId, toId]) => {
+      if (toId !== n.id) return false;
+      const src = blockNodeById.get(fromId);
+      if (!src) return false;
+      const srcManifest = ADAPTER_REGISTRY[src.adapter];
+      return Boolean(
+        srcManifest &&
+          Object.values(srcManifest.outputs).some((o) => o.type === 'StructureArtifact'),
+      );
+    });
+    if (!isWiredToStruct) continue;
+    if (!n.params) n.params = {};
+    const curTaskMode = String(n.params.taskMode ?? n.params.mode ?? '').trim().toLowerCase();
+    if (!curTaskMode || curTaskMode === 'unconditional') {
+      if (promptWantsPartial) {
+        n.params.taskMode = 'partial';
+        delete n.params.mode;
+      } else if (promptWantsMotif) {
+        n.params.taskMode = 'motif';
+        delete n.params.mode;
+      }
+    }
+  }
+
+  // 7. #63: RFdiffusion symmetry & explicit prompt length repair (e.g. "C3 symmetric 72aa oligomer")
+  const { length: promptLength } = extractPromptNumDesignsAndLength(trimmed);
+  const promptSymMatch =
+    /\b([cd][2346])\s*(?:[-–]?\s*(?:fold\s+)?)?(?:symmetr(?:y|ic)|oligomer|homomer|trimer|dimer|tetramer|hexamer)\b|\bsymmetr(?:y|ic)\s*(?:group\s*)?(?:of\s*)?([cd][2346])\b/i.exec(
+      trimmed,
+    );
+  const promptSym = (promptSymMatch?.[1] ?? promptSymMatch?.[2] ?? '').toLowerCase() || null;
+  for (const n of clonedNodes) {
+    if (n.adapter !== 'rfdiffusion') continue;
+    if (!n.params) n.params = {};
+    const isWiredToStruct = blockEdges.some(([, toId]) => toId === n.id);
+    const curMode = String(n.params.taskMode ?? n.params.mode ?? '').trim().toLowerCase();
+    if (promptSym && !isWiredToStruct && (!curMode || curMode === 'unconditional')) {
+      n.params.taskMode = 'symmetry';
+      delete n.params.mode;
+      if (!n.params.symmetry) n.params.symmetry = promptSym;
+    }
+    const effMode = String(n.params.taskMode ?? n.params.mode ?? '').trim().toLowerCase();
+    if (effMode === 'symmetry' && promptSym && !n.params.symmetry) {
+      n.params.symmetry = promptSym;
+    }
+    if (promptLength !== null) {
+      const clampedLen = Math.max(16, Math.min(256, promptLength));
+      const hasExplicitLen =
+        n.params.length !== undefined && n.params.length !== null && n.params.length !== '';
+      if (effMode === 'symmetry' || !hasExplicitLen) {
+        n.params.length = clampedLen;
       }
     }
   }
