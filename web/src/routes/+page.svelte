@@ -82,6 +82,11 @@
     type LabelUndoMarker,
     type ParamUndoMarker,
   } from '$lib/ui/page-state-helpers';
+  import {
+    BENCHMARK_SYNC_ADAPTER_IDS,
+    extractFirstContiguousMotifRange,
+    formatRfdiffusionContig,
+  } from '$lib/engine/benchmark-sync';
   import { computeUpstreamLockSummary } from '$lib/ui/node-display-helpers';
   import { compileNodeInputPreview } from '$lib/engine/input-preview';
   import {
@@ -1649,7 +1654,7 @@
       .filter(
         (n) =>
           n.id !== nodeId &&
-          (n.adapterId === 'genie3' || n.adapterId === 'rfd4-proteina') &&
+          BENCHMARK_SYNC_ADAPTER_IDS.has(n.adapterId) &&
           graph.edges.some(
             (e) =>
               e.fromNode === structEdge.fromNode &&
@@ -1668,12 +1673,22 @@
 
     const sp = src.params ?? {};
     const srcMode =
-      src.adapterId === 'genie3'
-        ? String(sp.taskMode ?? 'unconditional')
-        : String(sp.mode ?? 'unconditional');
+      src.adapterId === 'rfd4-proteina'
+        ? String(sp.mode ?? 'unconditional')
+        : src.adapterId === 'genie2'
+          ? String(sp.motifRange ?? '').trim()
+            ? 'motif'
+            : 'unconditional'
+          : String(sp.taskMode ?? 'unconditional');
     const parsedLen = parseLengthFromContig(String(sp.contig ?? ''));
-    const syncLen = Number(sp.length ?? parsedLen ?? (src.adapterId === 'genie3' ? 80 : 70));
-    const unsupportedGenie3Labels: string[] = [];
+    const defaultSrcLen =
+      src.adapterId === 'boltzgen' ? 48 : src.adapterId === 'rfd4-proteina' ? 70 : 80;
+    const syncLen = Number(sp.length ?? parsedLen ?? defaultSrcLen);
+    const srcMotif = String(sp.motifSpan ?? sp.motifSelection ?? sp.motifRange ?? '').trim();
+    const srcHotspots = String(sp.hotspots ?? '').trim();
+    const srcContig = String(sp.contig ?? '').trim();
+    const srcLockChain = String(sp.lockChain ?? '').trim();
+    const unsupportedSiblingLabels: string[] = [];
 
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
     pushGraphUndo(prevSnapshot);
@@ -1685,16 +1700,16 @@
         if (!siblingIds.has(n.id)) return n;
         const shared = {
           length: syncLen,
-          contig: String(sp.contig ?? ''),
-          lockChain: String(sp.lockChain ?? ''),
-          hotspots: String(sp.hotspots ?? ''),
-          motifSpan: String(sp.motifSpan ?? ''),
+          contig: srcContig,
+          lockChain: srcLockChain,
+          hotspots: srcHotspots,
+          motifSpan: srcMotif,
           userEditedTask: true,
         };
         if (n.adapterId === 'genie3') {
           const isSupported = srcMode === 'binder' || srcMode === 'motif' || srcMode === 'unconditional';
           if (!isSupported) {
-            unsupportedGenie3Labels.push(n.label ?? 'Genie 3');
+            unsupportedSiblingLabels.push(n.label ?? 'Genie 3');
             return {
               ...n,
               params: {
@@ -1726,6 +1741,89 @@
           }
           return { ...n, params: { ...n.params, ...shared, taskMode: srcMode } };
         }
+        if (n.adapterId === 'boltzgen') {
+          const clampedLen = Math.max(16, Math.min(160, Math.round(syncLen)));
+          const isSupported = srcMode === 'binder' || srcMode === 'motif' || srcMode === 'unconditional';
+          if (!isSupported) {
+            unsupportedSiblingLabels.push(n.label ?? 'BoltzGen-1');
+            return {
+              ...n,
+              params: { ...n.params, taskMode: 'unconditional', length: clampedLen, hotspots: '', userEditedTask: true },
+            };
+          }
+          return {
+            ...n,
+            params: {
+              ...n.params,
+              taskMode: srcMode,
+              length: clampedLen,
+              hotspots: srcMode === 'binder' ? srcHotspots : '',
+              userEditedTask: true,
+            },
+          };
+        }
+        if (n.adapterId === 'protpardelle') {
+          const clampedLen = Math.max(20, Math.min(256, Math.round(syncLen)));
+          const isSupported = srcMode === 'motif' || srcMode === 'unconditional';
+          if (!isSupported) {
+            unsupportedSiblingLabels.push(n.label ?? 'ProtPardelle-1c');
+            return {
+              ...n,
+              params: { ...n.params, taskMode: 'unconditional', length: clampedLen, motifSelection: '', userEditedTask: true },
+            };
+          }
+          return {
+            ...n,
+            params: {
+              ...n.params,
+              taskMode: srcMode,
+              length: clampedLen,
+              motifSelection: srcMode === 'motif' ? srcMotif : '',
+              userEditedTask: true,
+            },
+          };
+        }
+        if (n.adapterId === 'rfdiffusion') {
+          const clampedLen = Math.max(16, Math.min(256, Math.round(syncLen)));
+          const isSupported = srcMode === 'motif' || srcMode === 'unconditional';
+          if (!isSupported) {
+            unsupportedSiblingLabels.push(n.label ?? 'RFdiffusion');
+            return {
+              ...n,
+              params: { ...n.params, taskMode: 'unconditional', length: clampedLen, contig: '', userEditedTask: true },
+            };
+          }
+          return {
+            ...n,
+            params: {
+              ...n.params,
+              taskMode: srcMode,
+              length: clampedLen,
+              contig: srcMode === 'motif' ? formatRfdiffusionContig(srcContig) : '',
+              userEditedTask: true,
+            },
+          };
+        }
+        if (n.adapterId === 'genie2') {
+          const clampedLen = Math.max(20, Math.min(256, Math.round(syncLen)));
+          const isSupported = srcMode === 'motif' || srcMode === 'unconditional';
+          if (!isSupported) {
+            unsupportedSiblingLabels.push(n.label ?? 'Genie 2');
+            return {
+              ...n,
+              params: { ...n.params, length: clampedLen, motifRange: '', userEditedTask: true },
+            };
+          }
+          return {
+            ...n,
+            params: {
+              ...n.params,
+              length: clampedLen,
+              motifRange: srcMode === 'motif' ? extractFirstContiguousMotifRange(srcMotif) : '',
+              userEditedTask: true,
+            },
+          };
+        }
         return {
           ...n,
           params: {
@@ -1749,9 +1847,9 @@
     graph = nextGraph;
     scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
     invalidateNodes(getDownstreamNodeIds(nextGraph, siblingIds));
-    if (unsupportedGenie3Labels.length > 0) {
+    if (unsupportedSiblingLabels.length > 0) {
       showToastMessage(
-        `${unsupportedGenie3Labels.join(', ')} does not support RFD4 "${srcMode}" mode — reset to unconditional (${syncLen} aa) and cleared incompatible constraints.`,
+        `${unsupportedSiblingLabels.join(', ')} does not support "${srcMode}" mode — reset to unconditional (${syncLen} aa) and cleared incompatible constraints.`,
         4500,
       );
     } else {
@@ -4356,7 +4454,7 @@
                   (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
                 )}
                 siblingGeneratorIds={
-                  selectedNode.adapterId === 'genie3' || selectedNode.adapterId === 'rfd4-proteina'
+                  BENCHMARK_SYNC_ADAPTER_IDS.has(selectedNode.adapterId)
                     ? getSiblingGeneratorIds(selectedNode.id)
                     : []
                 }
@@ -4492,7 +4590,7 @@
                   (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
                 )}
                 siblingGeneratorIds={
-                  selectedNode.adapterId === 'genie3' || selectedNode.adapterId === 'rfd4-proteina'
+                  BENCHMARK_SYNC_ADAPTER_IDS.has(selectedNode.adapterId)
                     ? getSiblingGeneratorIds(selectedNode.id)
                     : []
                 }

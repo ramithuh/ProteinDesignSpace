@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { modalFocusTrap } from './modal-focus-trap';
 
   interface Props {
     onClose: () => void;
@@ -281,6 +282,7 @@
     role="dialog"
     aria-modal="true"
     aria-labelledby="credits-title"
+    use:modalFocusTrap
   >
     <div class="modal-hdr">
       <div class="hdr-top">

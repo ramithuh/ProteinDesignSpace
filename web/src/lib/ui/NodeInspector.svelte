@@ -32,8 +32,11 @@
   import { resolveMotifSourceResidues, type SelectedMotifSourceResidue } from '$lib/engine/conditioning';
   import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
   import {
+    BENCHMARK_SYNC_ADAPTER_IDS,
     buildBenchmarkPdbParams,
+    buildResetToBenchmarkParams,
     detectQuickPdbBenchmarkMatch,
+    isBenchmarkSupportedForAdapter,
   } from '$lib/engine/benchmark-sync';
   import { MAX_DESIGNS } from '$lib/engine/work-plan';
   import NumericInput from './NumericInput.svelte';
@@ -301,17 +304,17 @@
     );
   });
 
-  // Provenance pill & 1-click reset for benchmark-seeded downstream generators (`WF-04`)
+  // Provenance pill & 1-click reset for benchmark-seeded downstream generators (`WF-04`, `WF-06`)
   let benchmarkSyncInfo = $derived.by((): {
     benchId: string;
     benchLabel: string;
     state: 'synced' | 'edited';
     canReset: boolean;
   } | null => {
-    if (node.adapterId !== 'rfd4-proteina' && node.adapterId !== 'genie3') return null;
+    if (!BENCHMARK_SYNC_ADAPTER_IDS.has(node.adapterId)) return null;
     const upstreamBench = upstreamBenchmarkId ? getBenchmarkById(upstreamBenchmarkId) : undefined;
     const applicableUpstream =
-      upstreamBench && (node.adapterId !== 'genie3' || upstreamBench.supportsGenie3)
+      upstreamBench && isBenchmarkSupportedForAdapter(node.adapterId, upstreamBench)
         ? upstreamBench
         : undefined;
     const seededId = String(
@@ -341,33 +344,8 @@
   });
 
   function handleResetToBenchmark() {
-    if (node.adapterId !== 'rfd4-proteina' && node.adapterId !== 'genie3') return;
-    const next: Record<string, unknown> = { ...node.params };
-    delete next.userEditedTask;
-    delete next.userEditedLength;
-    delete next.autoSeededBenchmarkId;
-    delete next.autoSeededFromBenchmark;
-    delete next.autoSeededLength;
-    if (node.adapterId === 'rfd4-proteina') {
-      next.mode = 'unconditional';
-      next.length = 70;
-      next.contig = '';
-      next.lockChain = '';
-      next.hotspots = '';
-      next.motifSpan = '';
-      next.unindexedMotif = false;
-      next.hbondMode = 'none';
-      next.hbondSelection = '';
-      next.cathCode = '';
-    } else {
-      next.taskMode = 'unconditional';
-      next.length = 80;
-      next.contig = '';
-      next.lockChain = '';
-      next.hotspots = '';
-      next.motifSpan = '';
-    }
-    onUpdate(node.id, next);
+    if (!BENCHMARK_SYNC_ADAPTER_IDS.has(node.adapterId)) return;
+    onUpdate(node.id, buildResetToBenchmarkParams(node.adapterId, node.params));
   }
 
   let titleDraft = $state('');
@@ -624,12 +602,26 @@
 
   function setParam(key: string, value: unknown) {
     const next: Record<string, unknown> = { ...node.params, [key]: value };
-    if (node.adapterId === 'rfd4-proteina' || node.adapterId === 'genie3') {
+    if (BENCHMARK_SYNC_ADAPTER_IDS.has(node.adapterId)) {
       if (key === 'length') {
         next.userEditedLength = true;
       }
       if (
-        ['mode', 'taskMode', 'contig', 'lockChain', 'hotspots', 'motifSpan', 'unindexedMotif', 'hbondMode', 'hbondSelection', 'cathCode', 'presetId'].includes(key)
+        [
+          'mode',
+          'taskMode',
+          'contig',
+          'lockChain',
+          'hotspots',
+          'motifSpan',
+          'motifSelection',
+          'motifRange',
+          'unindexedMotif',
+          'hbondMode',
+          'hbondSelection',
+          'cathCode',
+          'presetId',
+        ].includes(key)
       ) {
         next.userEditedTask = true;
       }
@@ -2553,6 +2545,9 @@
             onchange={(e) => {
               const nextMode = e.currentTarget.value;
               const sanitized = sanitizeParamsOnModeSwitch(node.adapterId, node.params, nextMode);
+              if (BENCHMARK_SYNC_ADAPTER_IDS.has(node.adapterId)) {
+                sanitized.userEditedTask = true;
+              }
               onUpdate(node.id, sanitized);
             }}
           >
@@ -2564,6 +2559,38 @@
             <span class="field-hint">{schemaActiveMode.description}</span>
           {/if}
         </label>
+      {/if}
+      {#if benchmarkSyncInfo}
+        <div class="bench-sync-pill full" class:is-edited={benchmarkSyncInfo.state === 'edited'} role="status">
+          <span class="bench-sync-lbl">
+            {benchmarkSyncInfo.state === 'synced'
+              ? `Synced from ${benchmarkSyncInfo.benchLabel}`
+              : `Custom task · ${benchmarkSyncInfo.benchLabel}`}
+          </span>
+          {#if benchmarkSyncInfo.canReset}
+            <button
+              type="button"
+              class="bench-reset-btn"
+              {disabled}
+              onclick={handleResetToBenchmark}
+              title={`Reset task parameters and re-sync from ${benchmarkSyncInfo.benchLabel}`}
+            >
+              ↺ Reset to benchmark
+            </button>
+          {/if}
+        </div>
+      {/if}
+      {#if siblingGeneratorIds.length > 0 && onSyncTaskToSiblings}
+        <div class="full">
+          <button
+            type="button"
+            class="sync-sib-btn"
+            {disabled}
+            onclick={() => onSyncTaskToSiblings?.(node.id)}
+          >
+            ⇄ Apply task to {siblingGeneratorIds.length} sibling generator{siblingGeneratorIds.length > 1 ? 's' : ''}
+          </button>
+        </div>
       {/if}
       {#if upstreamLockSummary}
         <div

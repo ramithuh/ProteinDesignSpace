@@ -20,6 +20,7 @@
   let format = $state<'yaml' | 'json'>('yaml');
   let editorText = $state('');
   let dirty = $state(false);
+  let canvasChangedWhileDirty = $state(false);
   let parseErr = $state<string | null>(null);
   let pendingSwitchFormat = $state<'yaml' | 'json' | null>(null);
   let shareStatus = $state<string | null>(null);
@@ -27,6 +28,11 @@
   let textareaEl: HTMLTextAreaElement | null = $state(null);
   let statusTimer: ReturnType<typeof setTimeout> | null = null;
   let lastGraphId = '';
+  let lastSyncedCanvasText = '';
+
+  function serializeCanvas(g: WorkflowGraph, fmt: 'yaml' | 'json'): string {
+    return fmt === 'yaml' ? graphToYamlRecipe(g) : serializeWorkflowJson(g);
+  }
 
   function clearStatus() {
     shareStatus = null;
@@ -51,16 +57,40 @@
 
   $effect(() => {
     const gid = graph.id;
+    const plain = $state.snapshot(graph) as WorkflowGraph;
+    const latestCanvasText = serializeCanvas(plain, format);
     if (gid !== lastGraphId) {
       lastGraphId = gid;
       dirty = false;
+      canvasChangedWhileDirty = false;
       parseErr = null;
       pendingSwitchFormat = null;
+      lastSyncedCanvasText = latestCanvasText;
+      editorText = latestCanvasText;
+      return;
     }
-    if (dirty) return;
-    const plain = $state.snapshot(graph) as WorkflowGraph;
-    editorText = format === 'yaml' ? graphToYamlRecipe(plain) : serializeWorkflowJson(plain);
+    if (dirty) {
+      if (latestCanvasText !== lastSyncedCanvasText) {
+        canvasChangedWhileDirty = true;
+      }
+      return;
+    }
+    canvasChangedWhileDirty = false;
+    lastSyncedCanvasText = latestCanvasText;
+    editorText = latestCanvasText;
   });
+
+  function reloadFromCanvas() {
+    const plain = $state.snapshot(graph) as WorkflowGraph;
+    const latestCanvasText = serializeCanvas(plain, format);
+    dirty = false;
+    canvasChangedWhileDirty = false;
+    parseErr = null;
+    pendingSwitchFormat = null;
+    lastSyncedCanvasText = latestCanvasText;
+    editorText = latestCanvasText;
+    flashStatus('Reloaded recipe from canvas', 2000);
+  }
 
   function switchFormat(next: 'yaml' | 'json') {
     if (next === format) return;
@@ -261,10 +291,24 @@
       <button class="d-btn" onclick={copyText}>Copy {format.toUpperCase()}</button>
       <button class="d-btn primary" onclick={copyShareUrl}>🔗 Copy Short Link</button>
       {#if dirty}
+        <button class="d-btn" onclick={reloadFromCanvas} title="Discard text edits and reload current canvas">
+          ↺ Reload
+        </button>
         <button class="d-btn apply" {disabled} onclick={applyEdits}>Apply to Canvas</button>
       {/if}
     </div>
   </div>
+
+  {#if dirty && canvasChangedWhileDirty}
+    <div class="discard-warn" role="status">
+      <span>Canvas changed since you started editing this recipe.</span>
+      <div class="discard-actions">
+        <button type="button" class="d-btn" onclick={reloadFromCanvas}>
+          ↻ Reload from canvas
+        </button>
+      </div>
+    </div>
+  {/if}
 
   <textarea
     bind:this={textareaEl}
@@ -273,7 +317,8 @@
     value={editorText}
     oninput={(e) => {
       editorText = e.currentTarget.value;
-      dirty = true;
+      const matchesCanvas = editorText === lastSyncedCanvasText && !canvasChangedWhileDirty;
+      dirty = !matchesCanvas;
       parseErr = null;
       pendingSwitchFormat = null;
       clearStatus();

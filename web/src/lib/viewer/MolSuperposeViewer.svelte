@@ -2395,10 +2395,12 @@
   }
   .style-panel {
     pointer-events: auto;
-    width: 230px;
+    width: 252px;
+    max-width: calc(100% - 20px);
     max-height: min(420px, calc(100vh - 120px));
     min-height: 0;
     overflow-y: auto;
+    overflow-x: hidden;
     box-sizing: border-box;
     background: color-mix(in srgb, var(--bg-surface) 95%, transparent);
     border: 1px solid var(--border-strong);
@@ -2415,6 +2417,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    min-width: 0;
   }
   .sp-field > span {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -2425,6 +2428,10 @@
     font-weight: 600;
   }
   .sp-field select {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
     background: var(--bg-input);
     color: var(--text-primary);
     border: 1px solid var(--border-strong);
@@ -2474,18 +2481,20 @@
     color: #fff;
   }
   .sp-actions {
-    display: grid;
-    grid-template-columns: 1.2fr 0.85fr 0.95fr;
+    display: flex;
+    flex-wrap: wrap;
     gap: 5px;
     padding-top: 2px;
     border-top: 1px solid var(--border-subtle);
   }
   .sp-actions button {
+    flex: 1 1 auto;
+    min-width: 0;
     background: var(--bg-surface);
     color: var(--text-secondary);
     border: 1px solid var(--border);
     border-radius: 5px;
-    padding: 4px 5px;
+    padding: 4px 6px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10px;
     cursor: pointer;

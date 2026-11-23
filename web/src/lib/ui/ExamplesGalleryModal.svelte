@@ -1,6 +1,7 @@
 <script lang="ts">
   import { PAPER_INSIGHT_EXAMPLES, type PaperInsightExample } from '$lib/engine/paper-gallery';
   import { WORKFLOW_PRESETS } from '$lib/engine/registry';
+  import { modalFocusTrap } from './modal-focus-trap';
 
   interface Props {
     open: boolean;
@@ -39,7 +40,7 @@
       if (ev.target === ev.currentTarget) onClose();
     }}
   >
-    <div class="gal-modal" role="dialog" aria-modal="true" aria-labelledby="gal-title">
+    <div class="gal-modal" role="dialog" aria-modal="true" aria-labelledby="gal-title" use:modalFocusTrap>
       <div class="gal-header">
         <h2 id="gal-title">Examples</h2>
         <button type="button" class="gal-close" onclick={onClose} aria-label="Close examples">

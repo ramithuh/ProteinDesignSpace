@@ -2009,18 +2009,241 @@ export function validateBioCapabilities(
       }
     }
 
-    // #82: Gentle Dyna-1 calibration warning when running in sequence-only mode
+    // Wave 2 / CT-10: RFdiffusion symmetry rounding & protein-only HETATM policy notices
+    if (node.adapterId === 'rfdiffusion') {
+      const taskMode = String(node.params.taskMode ?? 'unconditional').trim().toLowerCase();
+      if (taskMode === 'symmetry') {
+        const SYM_COPIES: Record<string, number> = { c2: 2, c3: 3, c4: 4, c6: 6, d2: 4, d3: 6 };
+        const sym = String(node.params.symmetry ?? 'c3').trim().toLowerCase();
+        const copies = SYM_COPIES[sym] ?? 3;
+        const rawLen = Math.max(16, Math.min(256, Math.round(Number(node.params.length ?? 80))));
+        const effectiveLen = Math.max(copies * 8, Math.round(rawLen / copies) * copies);
+        if (effectiveLen !== rawLen) {
+          issues.push({
+            severity: 'warning',
+            code: 'rfdiffusion-symmetry-length-adjust',
+            nodeId: node.id,
+            message: `${node.label ?? 'RFdiffusion'} (${sym.toUpperCase()}, ${copies} copies) adjusts length ${rawLen} aa → ${effectiveLen} aa (minimum ${copies * 8} aa, multiple of ${copies}).`,
+            fix: {
+              label: `Set length to ${effectiveLen} aa`,
+              nodeId: node.id,
+              paramsPatch: { length: effectiveLen },
+            },
+          });
+        }
+      }
+      if (taskMode === 'motif') {
+        const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
+        const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
+        if (tplNode) {
+          const tplProfile = inferNodeOutputProfile(tplNode, graph, cache, visiting, outputsByNode);
+          const bench =
+            tplNode.adapterId === 'pdb-input' && tplNode.params.benchmarkId
+              ? getBenchmarkById(String(tplNode.params.benchmarkId))
+              : undefined;
+          const liveStruct = outputsByNode?.[tplNode.id]?.structure as StructureArtifact | undefined;
+          const rawPdbText =
+            tplNode.adapterId === 'pdb-input' ? String(tplNode.params.pdbText ?? '').trim() : '';
+          const cropSpec =
+            tplNode.adapterId === 'pdb-input' ? String(tplNode.params.cropSegments ?? '').trim() : '';
+          let parsedSummary: CachedStructureBioSummary | null = null;
+          if (!liveStruct && rawPdbText) {
+            try {
+              parsedSummary = getCachedStructureBioSummary(rawPdbText, cropSpec);
+            } catch {
+              parsedSummary = null;
+            }
+          }
+          const pdbId =
+            (tplNode.adapterId === 'pdb-input' ? String(tplNode.params.pdbId ?? '').trim() : '') ||
+            bench?.pdbId ||
+            (/\b([0-9][A-Za-z0-9]{3})\b/.exec(liveStruct?.label ?? '')?.[1] ?? '');
+          const diag = liveStruct?.diagnostics ?? parsedSummary?.diagnostics;
+          const policy = evaluateProteinOnlyStructurePolicy({
+            modelName: node.label ?? 'RFdiffusion',
+            benchmark: bench,
+            pdbId,
+            proteinResidueCount: liveStruct
+              ? liveStruct.length
+              : parsedSummary
+                ? parsedSummary.nResidues
+                : undefined,
+            ligandNames: diag?.ligandNames,
+            nucleicAcidChains: diag?.nucleicAcidChains,
+            hasLigands: diag ? diag.hasLigands : tplProfile.entities.has('ligand'),
+            hasNucleicAcids: diag
+              ? diag.hasNucleicAcids
+              : tplProfile.entities.has('dna') || tplProfile.entities.has('rna'),
+          });
+          if (policy.action === 'hard-block') {
+            issues.push({
+              severity: policy.reason === 'insufficient-protein' ? 'error' : 'warning',
+              code: 'rfdiffusion-unsupported-entities',
+              nodeId: node.id,
+              message: policy.message!,
+            });
+          } else if (policy.action === 'warn') {
+            issues.push({
+              severity: 'warning',
+              code: 'rfdiffusion-unsupported-entities',
+              nodeId: node.id,
+              message: policy.message!,
+            });
+          }
+        }
+      }
+    }
+
+    // Wave 2 / CT-10: Genie 2 motifRange template requirement & protein-only HETATM policy notice
+    if (node.adapterId === 'genie2') {
+      const motifRange = String(node.params.motifRange ?? '').trim();
+      const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'template');
+      const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
+      if (motifRange && !tplNode) {
+        issues.push({
+          severity: 'error',
+          code: 'genie2-missing-template',
+          nodeId: node.id,
+          message: `${node.label ?? 'Genie 2'} has motifRange "${motifRange}" set but no connected "template" structure.`,
+        });
+      } else if (tplNode) {
+        const tplProfile = inferNodeOutputProfile(tplNode, graph, cache, visiting, outputsByNode);
+        const bench =
+          tplNode.adapterId === 'pdb-input' && tplNode.params.benchmarkId
+            ? getBenchmarkById(String(tplNode.params.benchmarkId))
+            : undefined;
+        const liveStruct = outputsByNode?.[tplNode.id]?.structure as StructureArtifact | undefined;
+        const rawPdbText =
+          tplNode.adapterId === 'pdb-input' ? String(tplNode.params.pdbText ?? '').trim() : '';
+        const cropSpec =
+          tplNode.adapterId === 'pdb-input' ? String(tplNode.params.cropSegments ?? '').trim() : '';
+        let parsedSummary: CachedStructureBioSummary | null = null;
+        if (!liveStruct && rawPdbText) {
+          try {
+            parsedSummary = getCachedStructureBioSummary(rawPdbText, cropSpec);
+          } catch {
+            parsedSummary = null;
+          }
+        }
+        const pdbId =
+          (tplNode.adapterId === 'pdb-input' ? String(tplNode.params.pdbId ?? '').trim() : '') ||
+          bench?.pdbId ||
+          (/\b([0-9][A-Za-z0-9]{3})\b/.exec(liveStruct?.label ?? '')?.[1] ?? '');
+        const diag = liveStruct?.diagnostics ?? parsedSummary?.diagnostics;
+        const policy = evaluateProteinOnlyStructurePolicy({
+          modelName: node.label ?? 'Genie 2',
+          benchmark: bench,
+          pdbId,
+          proteinResidueCount: liveStruct
+            ? liveStruct.length
+            : parsedSummary
+              ? parsedSummary.nResidues
+              : undefined,
+          ligandNames: diag?.ligandNames,
+          nucleicAcidChains: diag?.nucleicAcidChains,
+          hasLigands: diag ? diag.hasLigands : tplProfile.entities.has('ligand'),
+          hasNucleicAcids: diag
+            ? diag.hasNucleicAcids
+            : tplProfile.entities.has('dna') || tplProfile.entities.has('rna'),
+        });
+        if (policy.action === 'hard-block') {
+          issues.push({
+            severity: policy.reason === 'insufficient-protein' ? 'error' : 'warning',
+            code: 'genie2-unsupported-entities',
+            nodeId: node.id,
+            message: policy.message!,
+          });
+        } else if (policy.action === 'warn') {
+          issues.push({
+            severity: 'warning',
+            code: 'genie2-unsupported-entities',
+            nodeId: node.id,
+            message: policy.message!,
+          });
+        }
+      }
+    }
+
+    // Wave 2 / CT-10: FoldFlow 2 single-candidate & single-chain conditioning notices
+    if (node.adapterId === 'foldflow2') {
+      const seqEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'sequences');
+      const seqSrc = seqEdge ? graph.nodes.find((n) => n.id === seqEdge.fromNode) : null;
+      if (seqSrc) {
+        const up = inferNodeOutputProfile(seqSrc, graph, cache, visiting, outputsByNode);
+        const liveSeqs = outputsByNode?.[seqSrc.id]?.sequences as SequenceSet | undefined;
+        const candCount = liveSeqs?.candidates?.length
+          ?? (seqSrc.adapterId === 'web-protein-mpnn' ||
+              seqSrc.adapterId === 'ligandmpnn' ||
+              seqSrc.adapterId === 'lasermpnn' ||
+              seqSrc.adapterId === 'antifold-esmif1' ||
+              seqSrc.adapterId === 'evodiff'
+            ? Math.max(1, Math.round(Number(seqSrc.params.numSequences ?? 1)))
+            : seqSrc.adapterId === 'sequence-input'
+              ? Math.max(
+                  1,
+                  String(seqSrc.params.sequence ?? '')
+                    .split(/\r?\n/)
+                    .filter((l) => l.trim().startsWith('>')).length || 1,
+                )
+              : 1);
+        if (candCount > 1) {
+          issues.push({
+            severity: 'warning',
+            code: 'foldflow2-first-candidate-only',
+            nodeId: node.id,
+            message: `${node.label ?? 'FoldFlow 2'} conditions only on the first sequence candidate from "${seqSrc.label ?? seqSrc.id}" (${candCount} candidates upstream; remaining ${candCount - 1} are ignored).`,
+          });
+        }
+        const firstSeqStr =
+          liveSeqs?.candidates?.[0]?.sequence ??
+          (seqSrc.adapterId === 'sequence-input' ? String(seqSrc.params.sequence ?? '') : '');
+        if (up.chainCount > 1 || firstSeqStr.includes(':')) {
+          issues.push({
+            severity: 'warning',
+            code: 'foldflow2-multichain-collapsed',
+            nodeId: node.id,
+            message: `${node.label ?? 'FoldFlow 2'} is a monomer SE(3) generator and strips ":" chain breaks from multi-chain sequence inputs, collapsing them into a single continuous chain.`,
+          });
+        }
+      }
+    }
+
+    // Wave 2 / CT-10: ESM-C requires at least one of sequences or structure
+    if (node.adapterId === 'esmc') {
+      const hasInput = graph.edges.some(
+        (e) => e.toNode === node.id && (e.toPort === 'sequences' || e.toPort === 'structure'),
+      );
+      if (!hasInput) {
+        issues.push({
+          severity: 'error',
+          code: 'esmc-missing-input',
+          nodeId: node.id,
+          message: `${node.label ?? 'ESM-C 300M'} requires a wired "sequences" or "structure" input.`,
+        });
+      }
+    }
+
+    // #82 + Wave 2 / CT-10: Dyna-1 required input presence & seq-only calibration warning
     if (node.adapterId === 'dyna1') {
       const inputMode = String(node.params.inputMode ?? 'auto').trim().toLowerCase();
       const structEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
       const seqEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'sequences');
+      if (!structEdge && !seqEdge) {
+        issues.push({
+          severity: 'error',
+          code: 'dyna1-missing-input',
+          nodeId: node.id,
+          message: `${node.label ?? 'Dyna-1'} requires a wired "structure" or "sequences" input.`,
+        });
+      }
       const structSrc = structEdge ? graph.nodes.find((n) => n.id === structEdge.fromNode) : null;
       const structProf = structSrc
         ? inferNodeOutputProfile(structSrc, graph, cache, visiting, outputsByNode)
         : null;
       const willRunSeqOnly =
-        inputMode === 'seq-only' ||
-        (inputMode === 'auto' && Boolean(seqEdge) && (!structSrc || Boolean(structProf?.isCaOnly)));
+        (Boolean(structEdge) || Boolean(seqEdge)) &&
+        (inputMode === 'seq-only' ||
+          (inputMode === 'auto' && Boolean(seqEdge) && (!structSrc || Boolean(structProf?.isCaOnly))));
       if (willRunSeqOnly) {
         issues.push({
           severity: 'warning',
@@ -2362,6 +2585,34 @@ export function validateRuntimeNodeInputs(
         warnings.push(
           `Upstream structure has ${cov.missingBackboneCount} residue(s) missing backbone atoms; ${consumerName} requires full backbone coordinates.`,
         );
+      }
+    }
+  }
+
+  if (node.adapterId === 'rfdiffusion' || node.adapterId === 'genie2') {
+    const tpl = (
+      node.adapterId === 'genie2' ? inputs.template : inputs.structure
+    ) as StructureArtifact | undefined;
+    if (tpl) {
+      const bench = tpl.benchmarkId ? getBenchmarkById(tpl.benchmarkId) : undefined;
+      const inferredPdbId =
+        bench?.pdbId ??
+        (/\b([0-9][A-Za-z0-9]{3})\b/.exec(tpl.label ?? '')?.[1]?.toUpperCase() || undefined);
+      const policy = evaluateProteinOnlyStructurePolicy({
+        modelName: node.label ?? (node.adapterId === 'genie2' ? 'Genie 2' : 'RFdiffusion'),
+        benchmark: bench,
+        pdbId: inferredPdbId,
+        proteinResidueCount: tpl.length,
+        ligandNames: tpl.diagnostics?.ligandNames,
+        nucleicAcidChains: tpl.diagnostics?.nucleicAcidChains,
+        hasLigands: tpl.diagnostics?.hasLigands,
+        hasNucleicAcids: tpl.diagnostics?.hasNucleicAcids,
+      });
+      if (policy.action === 'hard-block') {
+        throw new Error(policy.message);
+      }
+      if (policy.action === 'warn' && policy.message) {
+        warnings.push(policy.message);
       }
     }
   }

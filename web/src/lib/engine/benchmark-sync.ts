@@ -27,6 +27,116 @@ export const UI_TRACKING_PARAM_KEYS: ReadonlySet<string> = new Set(
   Object.keys(UI_TRACKING_PARAM_HINTS),
 );
 
+/** All template-conditioned generator adapters participating in symmetric benchmark sync (`WF-06`). */
+export const BENCHMARK_SYNC_ADAPTER_IDS: ReadonlySet<string> = new Set([
+  'rfd4-proteina',
+  'genie3',
+  'boltzgen',
+  'protpardelle',
+  'rfdiffusion',
+  'genie2',
+]);
+
+/** Return whether a curated benchmark can be auto-seeded onto `adapterId`. */
+export function isBenchmarkSupportedForAdapter(
+  adapterId: string,
+  bench: BenchmarkTargetMeta,
+): boolean {
+  switch (adapterId) {
+    case 'rfd4-proteina':
+      return true;
+    case 'genie3':
+      return Boolean(bench.supportsGenie3);
+    case 'boltzgen':
+      return bench.category === 'binder' || bench.category === 'motif';
+    case 'protpardelle':
+      return bench.category === 'motif';
+    case 'rfdiffusion':
+      return (
+        bench.category === 'motif' &&
+        Boolean(bench.supportsGenie3) &&
+        !bench.conditionParams.unindexedMotif
+      );
+    case 'genie2':
+      return bench.category === 'motif' && Boolean(bench.supportsGenie3);
+    default:
+      return false;
+  }
+}
+
+/** Convert comma-separated motif contigs (`10-10,A16-35,10-10`) to RFdiffusion `/`-delimited syntax. */
+export function formatRfdiffusionContig(contig: string | undefined): string {
+  const raw = String(contig ?? '').trim();
+  if (!raw) return '';
+  return raw
+    .split(/[\s,]+/)
+    .map((t) => t.trim())
+    .filter((t) => Boolean(t) && t !== '/0' && t !== '0')
+    .join('/');
+}
+
+/** Extract the first single contiguous chain-residue span for Genie 2's single-motif `motifRange`. */
+export function extractFirstContiguousMotifRange(spec: string | undefined): string {
+  const raw = String(spec ?? '').trim();
+  if (!raw) return '';
+  const tokens = raw.split(/[,;\s]+/).filter(Boolean);
+  for (const tok of tokens) {
+    if (/^(?:([A-Za-z]):?)?(-?\d+)(?:-(-?\d+))?$/.test(tok)) {
+      return tok;
+    }
+  }
+  return '';
+}
+
+/** Build cleared task parameters for `"↺ Reset to benchmark"` in the inspector (`WF-04`, `WF-06`). */
+export function buildResetToBenchmarkParams(
+  adapterId: string,
+  prevParams: Record<string, unknown>,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...prevParams };
+  delete next.userEditedTask;
+  delete next.userEditedLength;
+  delete next.autoSeededBenchmarkId;
+  delete next.autoSeededFromBenchmark;
+  delete next.autoSeededLength;
+  const defLen = getAdapterDefaultLength(adapterId);
+  if (adapterId === 'rfd4-proteina') {
+    next.mode = 'unconditional';
+    next.length = defLen;
+    next.contig = '';
+    next.lockChain = '';
+    next.hotspots = '';
+    next.motifSpan = '';
+    next.unindexedMotif = false;
+    next.hbondMode = 'none';
+    next.hbondSelection = '';
+    next.cathCode = '';
+  } else if (adapterId === 'genie3') {
+    next.taskMode = 'unconditional';
+    next.length = defLen;
+    next.contig = '';
+    next.lockChain = '';
+    next.hotspots = '';
+    next.motifSpan = '';
+  } else if (adapterId === 'boltzgen') {
+    next.taskMode = 'unconditional';
+    next.length = defLen;
+    next.hotspots = '';
+  } else if (adapterId === 'protpardelle') {
+    next.taskMode = 'unconditional';
+    next.length = defLen;
+    next.motifSelection = '';
+  } else if (adapterId === 'rfdiffusion') {
+    next.taskMode = 'unconditional';
+    next.length = defLen;
+    next.contig = '';
+  } else if (adapterId === 'genie2') {
+    next.length = defLen;
+    next.motifRange = '';
+  }
+  return next;
+}
+
 export interface BenchmarkReconcileResult {
   graph: WorkflowGraph;
   changedNodeIds: string[];
@@ -218,7 +328,9 @@ function getSeededBenchmarkId(cp: Record<string, unknown>): string {
 }
 
 function getAdapterDefaultLength(adapterId: string): number {
-  return adapterId === 'genie3' ? 80 : 70;
+  if (adapterId === 'boltzgen') return 48;
+  if (adapterId === 'rfd4-proteina') return 70;
+  return 80;
 }
 
 function resolvePrevAutoLength(
@@ -228,7 +340,7 @@ function resolvePrevAutoLength(
 ): number | null {
   const prevBench = seededId ? getBenchmarkById(seededId) : undefined;
   const prevBenchValidForAdapter =
-    Boolean(prevBench) && (adapterId !== 'genie3' || prevBench!.supportsGenie3);
+    Boolean(prevBench) && isBenchmarkSupportedForAdapter(adapterId, prevBench!);
   const prevBenchLen = prevBenchValidForAdapter
     ? (parseLengthFromContig(prevBench!.conditionParams.contig) ?? prevBench!.approxTokens)
     : null;
@@ -240,8 +352,9 @@ function resolvePrevAutoLength(
 }
 
 /**
- * Compute benchmark auto-seed AND symmetric teardown patches for `rfd4-proteina` / `genie3`
- * nodes across a `WorkflowGraph`:
+ * Compute benchmark auto-seed AND symmetric teardown patches for template-conditioned generator
+ * nodes (`rfd4-proteina`, `genie3`, `boltzgen`, `protpardelle`, `rfdiffusion`, `genie2`)
+ * across a `WorkflowGraph`:
  * - Forward seeding: seeds unconfigured or previously auto-seeded nodes wired to a benchmark `pdb-input`,
  *   adapting the benchmark contig whenever a custom/planned `length` is already present.
  * - Symmetric teardown (`WF-02`): when a previously auto-seeded node (`autoSeededBenchmarkId` set
@@ -256,7 +369,7 @@ export function computeBenchmarkAutoSeedPatches(
   let patches: Record<string, Record<string, unknown>> | null = null;
 
   for (const node of graph.nodes) {
-    if (node.adapterId !== 'genie3' && node.adapterId !== 'rfd4-proteina') {
+    if (!BENCHMARK_SYNC_ADAPTER_IDS.has(node.adapterId)) {
       continue;
     }
     const cp = node.params ?? {};
@@ -330,6 +443,93 @@ export function computeBenchmarkAutoSeedPatches(
           lockChain: '',
           hotspots: '',
           motifSpan: '',
+          ...(shouldResetLen ? { length: adapterDefaultLen } : {}),
+        };
+        delete nextPatch.autoSeededBenchmarkId;
+        delete nextPatch.autoSeededFromBenchmark;
+        delete nextPatch.autoSeededLength;
+        if (!shouldResetLen && Number.isFinite(curLen) && curLen > 0) {
+          nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      } else if (node.adapterId === 'boltzgen') {
+        const shouldResetLen =
+          !cp.userEditedLength &&
+          (!Number.isFinite(curLen) ||
+            curLen <= 0 ||
+            curLen === prevAutoLen ||
+            curLen === adapterDefaultLen);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          taskMode: 'unconditional',
+          hotspots: '',
+          ...(shouldResetLen ? { length: adapterDefaultLen } : {}),
+        };
+        delete nextPatch.autoSeededBenchmarkId;
+        delete nextPatch.autoSeededFromBenchmark;
+        delete nextPatch.autoSeededLength;
+        if (!shouldResetLen && Number.isFinite(curLen) && curLen > 0) {
+          nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      } else if (node.adapterId === 'protpardelle') {
+        const curMode = String(cp.taskMode ?? 'unconditional').trim() || 'unconditional';
+        if (curMode === 'partial') continue;
+        const shouldResetLen =
+          !cp.userEditedLength &&
+          (!Number.isFinite(curLen) ||
+            curLen <= 0 ||
+            curLen === prevAutoLen ||
+            curLen === adapterDefaultLen);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          taskMode: 'unconditional',
+          motifSelection: '',
+          ...(shouldResetLen ? { length: adapterDefaultLen } : {}),
+        };
+        delete nextPatch.autoSeededBenchmarkId;
+        delete nextPatch.autoSeededFromBenchmark;
+        delete nextPatch.autoSeededLength;
+        if (!shouldResetLen && Number.isFinite(curLen) && curLen > 0) {
+          nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      } else if (node.adapterId === 'rfdiffusion') {
+        const curMode = String(cp.taskMode ?? 'unconditional').trim() || 'unconditional';
+        if (curMode === 'symmetry') continue;
+        const shouldResetLen =
+          !cp.userEditedLength &&
+          (!Number.isFinite(curLen) ||
+            curLen <= 0 ||
+            curLen === prevAutoLen ||
+            curLen === adapterDefaultLen);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          taskMode: 'unconditional',
+          contig: '',
+          ...(shouldResetLen ? { length: adapterDefaultLen } : {}),
+        };
+        delete nextPatch.autoSeededBenchmarkId;
+        delete nextPatch.autoSeededFromBenchmark;
+        delete nextPatch.autoSeededLength;
+        if (!shouldResetLen && Number.isFinite(curLen) && curLen > 0) {
+          nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      } else if (node.adapterId === 'genie2') {
+        const shouldResetLen =
+          !cp.userEditedLength &&
+          (!Number.isFinite(curLen) ||
+            curLen <= 0 ||
+            curLen === prevAutoLen ||
+            curLen === adapterDefaultLen);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          motifRange: '',
           ...(shouldResetLen ? { length: adapterDefaultLen } : {}),
         };
         delete nextPatch.autoSeededBenchmarkId;
@@ -452,6 +652,198 @@ export function computeBenchmarkAutoSeedPatches(
           lockChain: '',
           hotspots: '',
           motifSpan: '',
+          autoSeededBenchmarkId: bench.id,
+          ...(shouldResetLen ? { length: adapterDefaultLen, autoSeededLength: adapterDefaultLen } : {}),
+        };
+        delete nextPatch.autoSeededFromBenchmark;
+        if (!shouldResetLen) {
+          delete nextPatch.autoSeededLength;
+          nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      }
+    } else if (node.adapterId === 'boltzgen') {
+      if (isBenchmarkSupportedForAdapter('boltzgen', bench)) {
+        const curTaskMode = String(cp.taskMode ?? 'unconditional').trim() || 'unconditional';
+        if (!seededId && curTaskMode !== 'unconditional') continue;
+        if (!seededId && String(cp.hotspots ?? '').trim()) continue;
+        const bp = bench.conditionParams;
+        const parsedLen = parseLengthFromContig(bp.contig);
+        const clampedParsedLen =
+          parsedLen !== null ? Math.max(16, Math.min(160, parsedLen)) : null;
+        const nextLength = hasCustomLength ? Math.round(curLen) : clampedParsedLen;
+        const nextTaskMode = bench.category === 'binder' ? 'binder' : 'motif';
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          taskMode: nextTaskMode,
+          ...(nextLength !== null ? { length: nextLength } : {}),
+          hotspots: nextTaskMode === 'binder' ? (bp.hotspots ?? '') : '',
+          autoSeededBenchmarkId: bench.id,
+        };
+        delete nextPatch.autoSeededFromBenchmark;
+        if (!hasCustomLength && nextLength !== null) {
+          nextPatch.autoSeededLength = nextLength;
+        } else {
+          delete nextPatch.autoSeededLength;
+          if (hasCustomLength) nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      } else if (seededId) {
+        const shouldResetLen =
+          !cp.userEditedLength &&
+          (!Number.isFinite(curLen) ||
+            curLen <= 0 ||
+            curLen === prevAutoLen ||
+            curLen === adapterDefaultLen);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          taskMode: 'unconditional',
+          hotspots: '',
+          autoSeededBenchmarkId: bench.id,
+          ...(shouldResetLen ? { length: adapterDefaultLen, autoSeededLength: adapterDefaultLen } : {}),
+        };
+        delete nextPatch.autoSeededFromBenchmark;
+        if (!shouldResetLen) {
+          delete nextPatch.autoSeededLength;
+          nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      }
+    } else if (node.adapterId === 'protpardelle') {
+      const curTaskMode = String(cp.taskMode ?? 'unconditional').trim() || 'unconditional';
+      if (curTaskMode === 'partial') continue;
+      if (isBenchmarkSupportedForAdapter('protpardelle', bench)) {
+        if (!seededId && curTaskMode !== 'unconditional') continue;
+        if (!seededId && String(cp.motifSelection ?? '').trim()) continue;
+        const bp = bench.conditionParams;
+        const parsedLen = parseLengthFromContig(bp.contig);
+        const clampedParsedLen =
+          parsedLen !== null ? Math.max(20, Math.min(256, parsedLen)) : null;
+        const nextLength = hasCustomLength ? Math.round(curLen) : clampedParsedLen;
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          taskMode: 'motif',
+          ...(nextLength !== null ? { length: nextLength } : {}),
+          motifSelection: bp.motifSpan ?? '',
+          autoSeededBenchmarkId: bench.id,
+        };
+        delete nextPatch.autoSeededFromBenchmark;
+        if (!hasCustomLength && nextLength !== null) {
+          nextPatch.autoSeededLength = nextLength;
+        } else {
+          delete nextPatch.autoSeededLength;
+          if (hasCustomLength) nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      } else if (seededId) {
+        const shouldResetLen =
+          !cp.userEditedLength &&
+          (!Number.isFinite(curLen) ||
+            curLen <= 0 ||
+            curLen === prevAutoLen ||
+            curLen === adapterDefaultLen);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          taskMode: 'unconditional',
+          motifSelection: '',
+          autoSeededBenchmarkId: bench.id,
+          ...(shouldResetLen ? { length: adapterDefaultLen, autoSeededLength: adapterDefaultLen } : {}),
+        };
+        delete nextPatch.autoSeededFromBenchmark;
+        if (!shouldResetLen) {
+          delete nextPatch.autoSeededLength;
+          nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      }
+    } else if (node.adapterId === 'rfdiffusion') {
+      const curTaskMode = String(cp.taskMode ?? 'unconditional').trim() || 'unconditional';
+      if (curTaskMode === 'symmetry') continue;
+      if (isBenchmarkSupportedForAdapter('rfdiffusion', bench)) {
+        if (!seededId && curTaskMode !== 'unconditional') continue;
+        if (!seededId && String(cp.contig ?? '').trim()) continue;
+        const bp = bench.conditionParams;
+        const parsedLen = parseLengthFromContig(bp.contig);
+        const nextLength = hasCustomLength ? Math.round(curLen) : parsedLen;
+        const adapted =
+          hasCustomLength && nextLength !== null
+            ? adaptBenchmarkContigForLength(bp.contig, nextLength, bench.category)
+            : bp.contig;
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          taskMode: 'motif',
+          ...(nextLength !== null ? { length: nextLength } : {}),
+          contig: formatRfdiffusionContig(adapted),
+          autoSeededBenchmarkId: bench.id,
+        };
+        delete nextPatch.autoSeededFromBenchmark;
+        if (!hasCustomLength && nextLength !== null) {
+          nextPatch.autoSeededLength = nextLength;
+        } else {
+          delete nextPatch.autoSeededLength;
+          if (hasCustomLength) nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      } else if (seededId) {
+        const shouldResetLen =
+          !cp.userEditedLength &&
+          (!Number.isFinite(curLen) ||
+            curLen <= 0 ||
+            curLen === prevAutoLen ||
+            curLen === adapterDefaultLen);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          taskMode: 'unconditional',
+          contig: '',
+          autoSeededBenchmarkId: bench.id,
+          ...(shouldResetLen ? { length: adapterDefaultLen, autoSeededLength: adapterDefaultLen } : {}),
+        };
+        delete nextPatch.autoSeededFromBenchmark;
+        if (!shouldResetLen) {
+          delete nextPatch.autoSeededLength;
+          nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      }
+    } else if (node.adapterId === 'genie2') {
+      if (isBenchmarkSupportedForAdapter('genie2', bench)) {
+        if (!seededId && String(cp.motifRange ?? '').trim()) continue;
+        const bp = bench.conditionParams;
+        const parsedLen = parseLengthFromContig(bp.contig);
+        const nextLength = hasCustomLength ? Math.round(curLen) : parsedLen;
+        const firstRange = extractFirstContiguousMotifRange(bp.motifSpan);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          ...(nextLength !== null ? { length: nextLength } : {}),
+          motifRange: firstRange,
+          autoSeededBenchmarkId: bench.id,
+        };
+        delete nextPatch.autoSeededFromBenchmark;
+        if (!hasCustomLength && nextLength !== null) {
+          nextPatch.autoSeededLength = nextLength;
+        } else {
+          delete nextPatch.autoSeededLength;
+          if (hasCustomLength) nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      } else if (seededId) {
+        const shouldResetLen =
+          !cp.userEditedLength &&
+          (!Number.isFinite(curLen) ||
+            curLen <= 0 ||
+            curLen === prevAutoLen ||
+            curLen === adapterDefaultLen);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          motifRange: '',
           autoSeededBenchmarkId: bench.id,
           ...(shouldResetLen ? { length: adapterDefaultLen, autoSeededLength: adapterDefaultLen } : {}),
         };
@@ -687,6 +1079,9 @@ export function applyPlannerBenchmarkSeedingToNode(
   } else if (gen.adapterId === 'protpardelle') {
     const curMode = String(params.taskMode ?? 'unconditional').trim() || 'unconditional';
     if (curMode === 'partial') return { repairedHallucination: false };
+    if (!isBenchmarkSupportedForAdapter('protpardelle', bench)) {
+      return { repairedHallucination: false };
+    }
     if (!params.taskMode || params.taskMode === 'unconditional') {
       params.taskMode = 'motif';
     }
@@ -697,6 +1092,116 @@ export function applyPlannerBenchmarkSeedingToNode(
         if (curSel && curSel !== bp.motifSpan) repairedHallucination = true;
         params.motifSelection = bp.motifSpan;
       }
+    }
+    const parsedBenchLen = parseLengthFromContig(bp.contig);
+    const curLen = typeof params.length === 'number' && Number.isFinite(params.length) ? params.length : null;
+    const explicitLen =
+      opts?.explicitLength !== undefined
+        ? opts.explicitLength
+        : curLen !== null && curLen !== getAdapterDefaultLength('protpardelle')
+          ? curLen
+          : null;
+    const targetLen = explicitLen ?? parsedBenchLen;
+    if (targetLen !== null) params.length = Math.max(20, Math.min(256, targetLen));
+    params.autoSeededBenchmarkId = bench.id;
+    if (explicitLen === null && parsedBenchLen !== null) {
+      params.autoSeededLength = Math.max(20, Math.min(256, parsedBenchLen));
+    } else if (explicitLen !== null) {
+      delete params.autoSeededLength;
+    }
+  } else if (gen.adapterId === 'boltzgen') {
+    if (!isBenchmarkSupportedForAdapter('boltzgen', bench)) {
+      return { repairedHallucination: false };
+    }
+    if (!params.taskMode || params.taskMode === 'unconditional') {
+      params.taskMode = bench.category === 'binder' ? 'binder' : 'motif';
+    }
+    const curHotspots = String(params.hotspots ?? '').trim();
+    if (bench.category === 'binder' && bp.hotspots) {
+      const disjoint = curHotspots && isResidueSpecDisjointFromBenchmark(curHotspots, bench);
+      if (!curHotspots || disjoint || (opts?.overwriteUnpromptedResidues && curHotspots !== bp.hotspots)) {
+        if (curHotspots && curHotspots !== bp.hotspots) repairedHallucination = true;
+        params.hotspots = bp.hotspots;
+      }
+    }
+    const parsedBenchLen = parseLengthFromContig(bp.contig);
+    const curLen = typeof params.length === 'number' && Number.isFinite(params.length) ? params.length : null;
+    const explicitLen =
+      opts?.explicitLength !== undefined
+        ? opts.explicitLength
+        : curLen !== null && curLen !== getAdapterDefaultLength('boltzgen')
+          ? curLen
+          : null;
+    const targetLen = explicitLen ?? parsedBenchLen;
+    if (targetLen !== null) params.length = Math.max(16, Math.min(160, targetLen));
+    params.autoSeededBenchmarkId = bench.id;
+    if (explicitLen === null && parsedBenchLen !== null) {
+      params.autoSeededLength = Math.max(16, Math.min(160, parsedBenchLen));
+    } else if (explicitLen !== null) {
+      delete params.autoSeededLength;
+    }
+  } else if (gen.adapterId === 'rfdiffusion') {
+    const curMode = String(params.taskMode ?? 'unconditional').trim() || 'unconditional';
+    if (curMode === 'symmetry' || !isBenchmarkSupportedForAdapter('rfdiffusion', bench)) {
+      return { repairedHallucination: false };
+    }
+    if (!params.taskMode || params.taskMode === 'unconditional') {
+      params.taskMode = 'motif';
+    }
+    const parsedBenchLen = parseLengthFromContig(bp.contig);
+    const curLen = typeof params.length === 'number' && Number.isFinite(params.length) ? params.length : null;
+    const explicitLen =
+      opts?.explicitLength !== undefined
+        ? opts.explicitLength
+        : curLen !== null && curLen !== getAdapterDefaultLength('rfdiffusion')
+          ? curLen
+          : null;
+    const targetLen = explicitLen ?? parsedBenchLen;
+    const curContig = String(params.contig ?? '').trim();
+    const contigDisjoint = curContig && isResidueSpecDisjointFromBenchmark(curContig, bench);
+    if (bp.contig && (!curContig || contigDisjoint || opts?.overwriteUnpromptedResidues)) {
+      if (contigDisjoint) repairedHallucination = true;
+      const adapted =
+        explicitLen !== null
+          ? adaptBenchmarkContigForLength(bp.contig, explicitLen, bench.category)
+          : bp.contig;
+      params.contig = formatRfdiffusionContig(adapted);
+    }
+    if (targetLen !== null) params.length = targetLen;
+    params.autoSeededBenchmarkId = bench.id;
+    if (explicitLen === null && parsedBenchLen !== null) {
+      params.autoSeededLength = parsedBenchLen;
+    } else if (explicitLen !== null) {
+      delete params.autoSeededLength;
+    }
+  } else if (gen.adapterId === 'genie2') {
+    if (!isBenchmarkSupportedForAdapter('genie2', bench)) {
+      return { repairedHallucination: false };
+    }
+    const firstRange = extractFirstContiguousMotifRange(bp.motifSpan);
+    const curRange = String(params.motifRange ?? '').trim();
+    if (firstRange) {
+      const disjoint = curRange && isResidueSpecDisjointFromBenchmark(curRange, bench);
+      if (!curRange || disjoint || (opts?.overwriteUnpromptedResidues && curRange !== firstRange)) {
+        if (curRange && curRange !== firstRange) repairedHallucination = true;
+        params.motifRange = firstRange;
+      }
+    }
+    const parsedBenchLen = parseLengthFromContig(bp.contig);
+    const curLen = typeof params.length === 'number' && Number.isFinite(params.length) ? params.length : null;
+    const explicitLen =
+      opts?.explicitLength !== undefined
+        ? opts.explicitLength
+        : curLen !== null && curLen !== getAdapterDefaultLength('genie2')
+          ? curLen
+          : null;
+    const targetLen = explicitLen ?? parsedBenchLen;
+    if (targetLen !== null) params.length = targetLen;
+    params.autoSeededBenchmarkId = bench.id;
+    if (explicitLen === null && parsedBenchLen !== null) {
+      params.autoSeededLength = parsedBenchLen;
+    } else if (explicitLen !== null) {
+      delete params.autoSeededLength;
     }
   }
 

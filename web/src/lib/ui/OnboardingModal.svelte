@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
   import type { WorkflowGraph } from '$lib/engine/types';
+  import { modalFocusTrap } from './modal-focus-trap';
 
   interface Props {
     graph: WorkflowGraph;
@@ -434,6 +435,7 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby="onb-title"
+      use:modalFocusTrap
     >
       <div class="onb-hero">
         <svg class="onb-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" aria-hidden="true">

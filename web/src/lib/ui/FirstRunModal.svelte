@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { formatApproxSize, type RunPreflightSummary } from '$lib/engine/run-preflight';
+  import { modalFocusTrap } from './modal-focus-trap';
 
   interface Props {
     preflight: RunPreflightSummary;
@@ -51,6 +52,7 @@
     role="dialog"
     aria-modal="true"
     aria-labelledby="first-run-title"
+    use:modalFocusTrap
   >
     <div class="modal-hdr">
       <div class="hdr-badge">{hasRemoteMsa ? 'EXTERNAL MSA + LOCAL GPU RUN' : 'LOCAL BROWSER RUN'}</div>

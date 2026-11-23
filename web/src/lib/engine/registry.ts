@@ -1777,6 +1777,16 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         step: 1,
       },
     ],
+    crossValidate: (p) => {
+      const errs: string[] = [];
+      const motifRange = String(p.motifRange ?? '').trim();
+      if (motifRange && !/^(?:([A-Za-z]):?)?(-?\d+)(?:-(-?\d+))?$/.test(motifRange)) {
+        errs.push(
+          `Invalid Genie 2 motifRange "${motifRange}" (expected a single contiguous range like A10-25 or 10-25).`,
+        );
+      }
+      return errs;
+    },
   },
   frameflow: {
     id: 'frameflow',
