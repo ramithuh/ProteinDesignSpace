@@ -316,6 +316,77 @@ describe('Self-hosted WebGPU security hardening (Astra 6.2 audit gates)', () => 
       });
       expect(JSON.parse(swHealth.body).ok).toBe(false);
       expect(JSON.parse(swHealth.body).error).toMatch(/software WebGPU/i);
+
+      // HttpOnly SameSite=Strict session cookie auth + logout + rate limiting
+      const badAuth = await rawHttpRequest({
+        port,
+        method: 'POST',
+        path: '/api/auth',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-Proto': 'https' },
+        body: JSON.stringify({ token: 'wrong_token' }),
+      });
+      expect(badAuth.status).toBe(401);
+
+      const goodAuth = await rawHttpRequest({
+        port,
+        method: 'POST',
+        path: '/api/auth',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-Proto': 'https' },
+        body: JSON.stringify({ token: TOKEN }),
+      });
+      expect(goodAuth.status).toBe(200);
+      const setCookieRaw = Array.isArray(goodAuth.headers['set-cookie'])
+        ? goodAuth.headers['set-cookie'][0]
+        : String(goodAuth.headers['set-cookie'] ?? '');
+      expect(setCookieRaw).toContain('denovo_session=');
+      expect(setCookieRaw).toContain('HttpOnly');
+      expect(setCookieRaw).toContain('SameSite=Strict');
+      expect(setCookieRaw).toContain('Path=/api');
+      expect(setCookieRaw).toContain('Secure');
+      // Raw API token must NOT appear verbatim in the cookie value (HMAC-derived)
+      expect(setCookieRaw).not.toContain(TOKEN);
+
+      const cookiePair = setCookieRaw.split(';')[0];
+      const cookieHealth = await rawHttpRequest({
+        port,
+        path: '/api/health',
+        headers: { Cookie: cookiePair },
+      });
+      expect(cookieHealth.status).toBe(200);
+      expect(JSON.parse(cookieHealth.body).authenticatedBy).toBe('cookie');
+
+      const logoutResp = await rawHttpRequest({
+        port,
+        method: 'POST',
+        path: '/api/logout',
+        headers: { 'Content-Type': 'application/json', Cookie: cookiePair },
+        body: '{}',
+      });
+      expect(logoutResp.status).toBe(200);
+      const clearCookie = Array.isArray(logoutResp.headers['set-cookie'])
+        ? logoutResp.headers['set-cookie'][0]
+        : String(logoutResp.headers['set-cookie'] ?? '');
+      expect(clearCookie).toContain('Max-Age=0');
+
+      // Rate-limit brute-force failures on /api/auth (>10/min -> 429)
+      for (let i = 0; i < 10; i++) {
+        const fail = await rawHttpRequest({
+          port,
+          method: 'POST',
+          path: '/api/auth',
+          headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '203.0.113.9' },
+          body: JSON.stringify({ token: 'nope' }),
+        });
+        expect(fail.status).toBe(401);
+      }
+      const limited = await rawHttpRequest({
+        port,
+        method: 'POST',
+        path: '/api/auth',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '203.0.113.9' },
+        body: JSON.stringify({ token: TOKEN }),
+      });
+      expect(limited.status).toBe(429);
     } finally {
       await new Promise<void>((r) => inst.server.close(() => r()));
       fs.rmSync(root, { recursive: true, force: true });

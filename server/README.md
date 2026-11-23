@@ -19,9 +19,24 @@ node server/selfhost-server.mjs
 
 Open **`http://127.0.0.1:8787`**, click the top-right **GPU pill**, and select **Host GPU** (lightweight CPU and 3D visualization blocks always stay local in your browser automatically).
 
+## Cluster / HPC Access (SSH Port Forwarding)
+
+On a university or lab GPU cluster where Tailscale is not available, bind to loopback with a token (so other users on the same node cannot access your server) and forward the port over SSH:
+
+```bash
+# On the GPU node
+export DENOVO_API_TOKEN="dnv_$(openssl rand -hex 18)"
+HOST=127.0.0.1 PORT=8790 DENOVO_API_TOKEN="$DENOVO_API_TOKEN" node server/selfhost-server.mjs
+
+# On your laptop
+ssh -L 8790:127.0.0.1:8790 user@gpu-node
+```
+
+Open **`http://127.0.0.1:8790`**, paste your token once in the GPU pill, and click **Sign in**. The server sets an **`HttpOnly; SameSite=Strict`** session cookie so refreshes and restarts stay signed in without storing your token in `localStorage`.
+
 ## Secure Remote Access (Tailscale HTTPS / Lab Server)
 
-For non-loopback access, **always** set a high-entropy `DENOVO_API_TOKEN` and terminate TLS (e.g., via Tailscale Serve or Caddy) while keeping Node bound to `127.0.0.1`:
+For non-loopback access, **always** set a high-entropy `DENOVO_API_TOKEN` and terminate TLS (e.g., via Tailscale Serve or Caddy) while keeping Node bound to `127.0.0.1`. Never expose plain `http://` directly on a public IP.
 
 ```bash
 # Generate a strong Bearer token
@@ -32,7 +47,7 @@ HOST=127.0.0.1 PORT=8790 DENOVO_API_TOKEN="$DENOVO_API_TOKEN" node server/selfho
 sudo tailscale serve --bg --https=8790 http://127.0.0.1:8790
 ```
 
-> Binding `HOST=0.0.0.0` without `DENOVO_API_TOKEN` is rejected by default.
+> Binding `HOST=0.0.0.0` without `DENOVO_API_TOKEN` is rejected by default. Same-origin visitors sign in once via `POST /api/auth` (`HttpOnly; Secure; SameSite=Strict` cookie); cross-origin clients authenticate via `Authorization: Bearer <token>`.
 
 ## Environment Variables
 
@@ -54,7 +69,9 @@ sudo tailscale serve --bg --https=8790 http://127.0.0.1:8790
 
 ## API Endpoints
 
-- `GET /api/health` — host GPU hardware info, busy state, queue depth, `maxFoldResidues`
+- `POST /api/auth` — exchanges `{ token }` for a 30-day `HttpOnly; SameSite=Strict` HMAC session cookie (rate-limited per IP; sets `Secure` on HTTPS/non-loopback)
+- `POST /api/logout` — clears the `HttpOnly` session cookie
+- `GET /api/health` — host GPU hardware info, busy state, queue depth, `maxFoldResidues`, `authenticatedBy`
 - `POST /api/run-node` — executes one validated GPU workflow node (`Content-Type: application/json`, returns `text/event-stream` starting with `event: started` containing `{ jobId, cancelToken }`)
 - `POST /api/cancel` — cancels a queued or running job using its owner `{ jobId, cancelToken }`
 - `POST /api/release-gpu` — frees idle host GPU VRAM

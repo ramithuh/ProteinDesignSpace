@@ -102,12 +102,14 @@
     type WebGpuAdapterInfoSnapshot,
   } from '$lib/engine/webgpu-device';
   import {
+    authenticateRemoteServerSession,
     checkRemoteServerHealth,
     DEFAULT_HOST_MAX_FOLD_RESIDUES,
     defaultComputeBackendConfig,
     formatHostGpuDetail,
     formatHostGpuPillLabel,
     loadComputeBackendConfig,
+    logoutRemoteServerSession,
     releaseRemoteServerGpu,
     resolveNodeFoldLimitOptions,
     resolveRemoteBackendOrigin,
@@ -211,11 +213,36 @@
   async function probeRemoteBackend(cfg: ComputeBackendConfig = computeBackend) {
     remoteChecking = true;
     try {
-      remoteHealth = await checkRemoteServerHealth(cfg.serverUrl, cfg.apiToken);
+      let activeCfg = cfg;
+      // On same-origin self-hosted URLs (Tailscale / SSH tunnel), exchange a pasted API token
+      // once for an HttpOnly SameSite=Strict session cookie and purge the raw token from JS memory.
+      if (!cfg.serverUrl.trim() && cfg.apiToken.trim()) {
+        const authRes = await authenticateRemoteServerSession('', cfg.apiToken);
+        if (!authRes.ok) {
+          remoteHealth = { ok: false, error: authRes.error || 'Authentication failed' };
+          syncSchedulerRemoteExecutor(computeBackend);
+          return;
+        }
+        if (authRes.authMode === 'cookie') {
+          activeCfg = { ...cfg, apiToken: '' };
+          computeBackend = activeCfg;
+          saveComputeBackendConfig(activeCfg);
+        }
+      }
+      remoteHealth = await checkRemoteServerHealth(activeCfg.serverUrl, activeCfg.apiToken);
       syncSchedulerRemoteExecutor(computeBackend);
     } finally {
       remoteChecking = false;
     }
+  }
+
+  async function signOutRemoteBackend() {
+    if (isRunning || activeRunState.leaseHeld) return;
+    await logoutRemoteServerSession(computeBackend.serverUrl);
+    computeBackend = { ...computeBackend, apiToken: '' };
+    saveComputeBackendConfig(computeBackend);
+    remoteHealth = { ok: false, error: 'Signed out' };
+    syncSchedulerRemoteExecutor(computeBackend);
   }
 
   function updateComputeBackend(patch: Partial<ComputeBackendConfig>) {
@@ -3609,16 +3636,43 @@
                   onchange={(e) => updateComputeBackend({ serverUrl: (e.currentTarget as HTMLInputElement).value })}
                 />
               </label>
-              <label class="pop-field">
-                <span>API Token (optional)</span>
-                <input
-                  type="password"
-                  value={computeBackend.apiToken}
-                  placeholder="Bearer token if set"
-                  disabled={isRunning}
-                  onchange={(e) => updateComputeBackend({ apiToken: (e.currentTarget as HTMLInputElement).value })}
-                />
-              </label>
+              {#if !computeBackend.serverUrl.trim() && remoteHealth?.ok && remoteHealth.authenticatedBy === 'cookie'}
+                <div class="pop-row">
+                  <span class="pop-k">Session</span>
+                  <span class="pop-v ok-t">Signed in (cookie)</span>
+                  <button
+                    type="button"
+                    class="pop-action"
+                    disabled={isRunning || activeRunState.leaseHeld}
+                    onclick={() => void signOutRemoteBackend()}
+                  >
+                    Sign out
+                  </button>
+                </div>
+              {:else}
+                <label class="pop-field">
+                  <span>API Token {!computeBackend.serverUrl.trim() ? '(saved via HttpOnly cookie)' : '(session only)'}</span>
+                  <input
+                    type="password"
+                    value={computeBackend.apiToken}
+                    placeholder="Bearer token if set"
+                    disabled={isRunning}
+                    oninput={(e) => {
+                      computeBackend = {
+                        ...computeBackend,
+                        apiToken: (e.currentTarget as HTMLInputElement).value,
+                      };
+                    }}
+                    onchange={(e) => updateComputeBackend({ apiToken: (e.currentTarget as HTMLInputElement).value })}
+                    onkeydown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void probeRemoteBackend(computeBackend);
+                      }
+                    }}
+                  />
+                </label>
+              {/if}
               {#if !remoteHealth?.ok}
                 <div class="pop-help-note">
                   Run all GPU blocks on your workstation (CPU &amp; 3D stay local):
@@ -3655,7 +3709,7 @@
                   disabled={remoteChecking}
                   onclick={() => void probeRemoteBackend(computeBackend)}
                 >
-                  Test
+                  {!computeBackend.serverUrl.trim() && computeBackend.apiToken.trim() ? 'Sign in' : 'Test'}
                 </button>
               </div>
               {#if remoteHealth?.ok && remoteHealth.activeAdapter}

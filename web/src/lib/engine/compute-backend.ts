@@ -44,10 +44,13 @@ export interface RemoteServerHealth {
   queueDepth?: number;
   busy?: boolean;
   maxFoldResidues?: number;
+  authRequired?: boolean;
+  authenticatedBy?: 'cookie' | 'bearer' | 'none';
   error?: string;
 }
 
 export const COMPUTE_BACKEND_STORAGE_KEY = 'denovo.computeBackend.v1';
+const COMPUTE_SESSION_TOKEN_KEY = 'denovo.computeBackend.sessionToken.v1';
 export const DEFAULT_HYBRID_THRESHOLD_MB = 40;
 export const DEFAULT_HOST_MAX_FOLD_RESIDUES = 2048;
 export const MIN_CUSTOM_FOLD_RESIDUES = 512;
@@ -151,6 +154,40 @@ export function resolveRemoteBackendOrigin(serverUrl: string): string {
   return check.ok ? check.origin : normalizeServerBaseUrl(serverUrl).toLowerCase();
 }
 
+function readCrossOriginSessionToken(serverUrl: string): string {
+  if (!serverUrl.trim() || typeof sessionStorage === 'undefined') return '';
+  try {
+    const raw = sessionStorage.getItem(COMPUTE_SESSION_TOKEN_KEY);
+    if (!raw) return '';
+    const parsed = JSON.parse(raw) as { origin?: string; token?: string };
+    const expectedOrigin = resolveRemoteBackendOrigin(serverUrl);
+    if (parsed.origin === expectedOrigin && typeof parsed.token === 'string') {
+      return parsed.token;
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+function writeCrossOriginSessionToken(serverUrl: string, apiToken: string): void {
+  if (typeof sessionStorage === 'undefined') return;
+  try {
+    const trimmedUrl = normalizeServerBaseUrl(serverUrl);
+    const trimmedTok = apiToken.trim();
+    if (!trimmedUrl || !trimmedTok) {
+      sessionStorage.removeItem(COMPUTE_SESSION_TOKEN_KEY);
+      return;
+    }
+    sessionStorage.setItem(
+      COMPUTE_SESSION_TOKEN_KEY,
+      JSON.stringify({ origin: resolveRemoteBackendOrigin(trimmedUrl), token: trimmedTok }),
+    );
+  } catch {
+    /* ignore storage quota / private mode */
+  }
+}
+
 export function loadComputeBackendConfig(): ComputeBackendConfig {
   const base = defaultComputeBackendConfig();
   if (typeof localStorage === 'undefined') return base;
@@ -161,11 +198,14 @@ export function loadComputeBackendConfig(): ComputeBackendConfig {
     const mode: ComputeRoutingMode =
       parsed.mode === 'remote' || parsed.mode === 'hybrid' ? parsed.mode : 'local';
     const threshold = Number(parsed.hybridThresholdMB);
+    const serverUrl =
+      typeof parsed.serverUrl === 'string' ? normalizeServerBaseUrl(parsed.serverUrl) : '';
     const cfg: ComputeBackendConfig = {
       mode,
-      serverUrl: typeof parsed.serverUrl === 'string' ? normalizeServerBaseUrl(parsed.serverUrl) : '',
-      // M5: Never hydrate reusable Bearer tokens from localStorage
-      apiToken: '',
+      serverUrl,
+      // M5: Never hydrate reusable Bearer tokens from localStorage;
+      // cross-origin refreshes may reuse tab-scoped sessionStorage (cleared on tab close).
+      apiToken: readCrossOriginSessionToken(serverUrl),
       hybridThresholdMB:
         Number.isFinite(threshold) && threshold >= 0 && threshold <= 2000
           ? Math.round(threshold)
@@ -183,9 +223,10 @@ export function loadComputeBackendConfig(): ComputeBackendConfig {
 }
 
 export function saveComputeBackendConfig(cfg: ComputeBackendConfig): void {
+  writeCrossOriginSessionToken(cfg.serverUrl, cfg.apiToken);
   if (typeof localStorage === 'undefined') return;
   try {
-    // M5: Persist non-secret routing preferences only — apiToken remains strictly in memory
+    // M5: Persist non-secret routing preferences only — apiToken is never saved to localStorage
     localStorage.setItem(
       COMPUTE_BACKEND_STORAGE_KEY,
       JSON.stringify({
@@ -338,6 +379,68 @@ async function readBoundedText(resp: Response, maxBytes: number): Promise<string
   }
 }
 
+function fetchCredentialsMode(serverUrl: string): RequestCredentials {
+  return normalizeServerBaseUrl(serverUrl) ? 'omit' : 'same-origin';
+}
+
+export async function authenticateRemoteServerSession(
+  serverUrl: string,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ ok: boolean; authMode?: 'cookie' | 'none'; error?: string }> {
+  const urlCheck = validateRemoteServerUrl(serverUrl);
+  if (!urlCheck.ok) return { ok: false, error: urlCheck.error };
+  try {
+    const resp = await fetchImpl(buildApiUrl(serverUrl, '/api/auth'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: fetchCredentialsMode(serverUrl),
+      redirect: 'error',
+      body: JSON.stringify({ token: token.trim() }),
+    });
+    const text = await readBoundedText(resp, MAX_HEALTH_RESPONSE_BYTES);
+    let json: Record<string, unknown> | null = null;
+    try {
+      json = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      json = null;
+    }
+    if (!resp.ok || !json?.ok) {
+      return {
+        ok: false,
+        error:
+          (typeof json?.error === 'string' && json.error) ||
+          `Authentication failed (HTTP ${resp.status}).`,
+      };
+    }
+    return {
+      ok: true,
+      authMode: json.authMode === 'cookie' ? 'cookie' : 'none',
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export async function logoutRemoteServerSession(
+  serverUrl: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const urlCheck = validateRemoteServerUrl(serverUrl);
+  if (!urlCheck.ok) return;
+  try {
+    await fetchImpl(buildApiUrl(serverUrl, '/api/logout'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: fetchCredentialsMode(serverUrl),
+      redirect: 'error',
+      body: '{}',
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
 export async function checkRemoteServerHealth(
   serverUrl: string,
   apiToken = '',
@@ -354,6 +457,7 @@ export async function checkRemoteServerHealth(
     const resp = await fetchImpl(buildApiUrl(serverUrl, '/api/health'), {
       method: 'GET',
       headers: buildAuthHeaders(apiToken),
+      credentials: fetchCredentialsMode(serverUrl),
       redirect: 'error',
       signal: ctrl.signal,
     });
@@ -381,6 +485,13 @@ export async function checkRemoteServerHealth(
       queueDepth: typeof json.queueDepth === 'number' ? json.queueDepth : 0,
       busy: Boolean(json.busy),
       maxFoldResidues: sanitizeMaxFoldResidues(json.maxFoldResidues) ?? undefined,
+      authRequired: typeof json.authRequired === 'boolean' ? json.authRequired : undefined,
+      authenticatedBy:
+        json.authenticatedBy === 'cookie' ||
+        json.authenticatedBy === 'bearer' ||
+        json.authenticatedBy === 'none'
+          ? json.authenticatedBy
+          : undefined,
       error: typeof json.error === 'string' ? json.error : undefined,
     };
   } catch (err) {
@@ -401,6 +512,7 @@ export async function releaseRemoteServerGpu(
   await fetchImpl(buildApiUrl(serverUrl, '/api/release-gpu'), {
     method: 'POST',
     headers: buildAuthHeaders(apiToken, { 'Content-Type': 'application/json' }),
+    credentials: fetchCredentialsMode(serverUrl),
     redirect: 'error',
     body: '{}',
   });
@@ -448,6 +560,7 @@ export async function runNodeOnRemoteServer(opts: {
     void fetchImpl(buildApiUrl(serverUrl, '/api/cancel'), {
       method: 'POST',
       headers: buildAuthHeaders(apiToken, { 'Content-Type': 'application/json' }),
+      credentials: fetchCredentialsMode(serverUrl),
       redirect: 'error',
       body: JSON.stringify({ jobId: serverJobId, cancelToken: serverCancelToken }),
     }).catch(() => {});
@@ -463,6 +576,7 @@ export async function runNodeOnRemoteServer(opts: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
       }),
+      credentials: fetchCredentialsMode(serverUrl),
       redirect: 'error',
       body: JSON.stringify({
         node: plainNode,

@@ -75,6 +75,10 @@ const MIME_TYPES = {
 const VALID_HOST_HEADER_RE = /^[a-zA-Z0-9._\-:[\]]{1,255}$/;
 const MAX_CONTROL_BODY_BYTES = 64 * 1024;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const SESSION_COOKIE_NAME = 'denovo_session';
+const SESSION_COOKIE_MAX_AGE_SEC = 30 * 24 * 60 * 60;
+const AUTH_RATE_LIMIT_WINDOW_MS = 60_000;
+const AUTH_RATE_LIMIT_MAX_FAILURES = 10;
 
 function parseFiniteInt(raw, fallback, min, max) {
   if (raw === undefined || raw === null || raw === '') return fallback;
@@ -491,13 +495,87 @@ export function createSelfhostServer(options = {}) {
     return { allowed: true, grantedOrigin: originHeader };
   }
 
-  /** L1: Constant-time Bearer token verification. */
-  function isAuthorized(req) {
-    if (!apiToken) return true;
+  /** Derive a non-reversible HMAC session cookie value from apiToken (rotates automatically if apiToken changes). */
+  const expectedSessionCookie = apiToken
+    ? crypto.createHmac('sha256', apiToken).update('denovo-selfhost-session/v1').digest('hex')
+    : '';
+
+  /** Per-client-IP sliding-window failed auth tracker (prevents brute-force on /api/auth). */
+  const authFailuresByIp = new Map();
+
+  function getClientIpKey(req) {
+    const xff = typeof req.headers['x-forwarded-for'] === 'string' ? req.headers['x-forwarded-for'].split(',')[0].trim() : '';
+    return xff || String(req.socket?.remoteAddress || 'unknown');
+  }
+
+  function isAuthRateLimited(ipKey, now = Date.now()) {
+    const list = authFailuresByIp.get(ipKey);
+    if (!list) return false;
+    const recent = list.filter((ts) => now - ts < AUTH_RATE_LIMIT_WINDOW_MS);
+    if (recent.length === 0) {
+      authFailuresByIp.delete(ipKey);
+      return false;
+    }
+    authFailuresByIp.set(ipKey, recent);
+    return recent.length >= AUTH_RATE_LIMIT_MAX_FAILURES;
+  }
+
+  function recordAuthFailure(ipKey, now = Date.now()) {
+    const prev = authFailuresByIp.get(ipKey) || [];
+    const recent = prev.filter((ts) => now - ts < AUTH_RATE_LIMIT_WINDOW_MS);
+    recent.push(now);
+    authFailuresByIp.set(ipKey, recent);
+  }
+
+  function parseCookieValue(req, name) {
+    const raw = typeof req.headers.cookie === 'string' ? req.headers.cookie : '';
+    if (!raw) return '';
+    for (const part of raw.split(';')) {
+      const eq = part.indexOf('=');
+      if (eq <= 0) continue;
+      const k = part.slice(0, eq).trim();
+      if (k === name) return part.slice(eq + 1).trim();
+    }
+    return '';
+  }
+
+  function shouldUseSecureCookie(req) {
+    const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+    if (proto === 'https' || req.socket?.encrypted) return true;
+    const rawHost = typeof req.headers.host === 'string' ? req.headers.host.trim() : '';
+    const hostname = rawHost.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+    return Boolean(hostname) && !isLoopbackHost(hostname);
+  }
+
+  function buildSessionCookieHeader(value, maxAgeSec, secure) {
+    const parts = [
+      `${SESSION_COOKIE_NAME}=${value}`,
+      'HttpOnly',
+      'SameSite=Strict',
+      'Path=/api',
+      `Max-Age=${maxAgeSec}`,
+    ];
+    if (secure) parts.push('Secure');
+    return parts.join('; ');
+  }
+
+  /** L1: Constant-time Bearer token OR HttpOnly HMAC session cookie verification. */
+  function getAuthMethod(req) {
+    if (!apiToken) return 'none';
     const auth = String(req.headers.authorization || '');
-    if (!auth.startsWith('Bearer ')) return false;
-    const provided = auth.slice(7).trim();
-    return constantTimeEquals(provided, apiToken);
+    if (auth.startsWith('Bearer ')) {
+      const provided = auth.slice(7).trim();
+      if (constantTimeEquals(provided, apiToken)) return 'bearer';
+    }
+    const cookieVal = parseCookieValue(req, SESSION_COOKIE_NAME);
+    if (cookieVal && constantTimeEquals(cookieVal, expectedSessionCookie)) {
+      return 'cookie';
+    }
+    return null;
+  }
+
+  function isAuthorized(req) {
+    return getAuthMethod(req) !== null;
   }
 
   let activeUploads = 0;
@@ -907,17 +985,68 @@ export function createSelfhostServer(options = {}) {
           return;
         }
 
-        if (!isAuthorized(req)) {
-          sendJson(res, 401, { ok: false, error: 'Unauthorized: invalid or missing Bearer token.' });
-          return;
-        }
-
         if (req.method === 'POST') {
           const ct = String(req.headers['content-type'] || '').toLowerCase();
           if (!ct.includes('application/json')) {
             sendJson(res, 415, { ok: false, error: 'Content-Type must be application/json.' });
             return;
           }
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/auth') {
+          const ipKey = getClientIpKey(req);
+          if (isAuthRateLimited(ipKey)) {
+            res.setHeader('Retry-After', '60');
+            sendJson(res, 429, {
+              ok: false,
+              error: 'Too many failed authentication attempts. Wait 60 seconds and try again.',
+            });
+            return;
+          }
+          let body;
+          try {
+            body = await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
+          } catch (err) {
+            const code = typeof err?.statusCode === 'number' ? err.statusCode : 400;
+            sendJson(res, code, { ok: false, error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+          if (!apiToken) {
+            sendJson(res, 200, { ok: true, authRequired: false, authMode: 'none' });
+            return;
+          }
+          const bearer = String(req.headers.authorization || '').startsWith('Bearer ')
+            ? String(req.headers.authorization || '').slice(7).trim()
+            : '';
+          const provided = typeof body?.token === 'string' && body.token.trim() ? body.token.trim() : bearer;
+          if (!constantTimeEquals(provided, apiToken)) {
+            recordAuthFailure(ipKey);
+            sendJson(res, 401, { ok: false, error: 'Unauthorized: invalid API token.' });
+            return;
+          }
+          authFailuresByIp.delete(ipKey);
+          const secure = shouldUseSecureCookie(req);
+          res.setHeader('Set-Cookie', buildSessionCookieHeader(expectedSessionCookie, SESSION_COOKIE_MAX_AGE_SEC, secure));
+          sendJson(res, 200, { ok: true, authRequired: true, authMode: 'cookie' });
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/logout') {
+          try {
+            await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
+          } catch {
+            /* ignore empty/invalid logout body */
+          }
+          const secure = shouldUseSecureCookie(req);
+          res.setHeader('Set-Cookie', buildSessionCookieHeader('', 0, secure));
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        const authMethod = getAuthMethod(req);
+        if (!authMethod) {
+          sendJson(res, 401, { ok: false, error: 'Unauthorized: invalid or missing Bearer token.' });
+          return;
         }
 
         if (req.method === 'GET' && url.pathname === '/api/health') {
@@ -933,6 +1062,8 @@ export function createSelfhostServer(options = {}) {
             queueDepth: jobQueue.length + (runningJob ? 1 : 0),
             busy: Boolean(runningJob),
             maxFoldResidues,
+            authRequired: Boolean(apiToken),
+            authenticatedBy: authMethod,
             ...(admission.error ? { error: admission.error } : {}),
           });
           return;

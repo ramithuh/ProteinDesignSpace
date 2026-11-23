@@ -67,11 +67,16 @@ node server/selfhost-server.mjs
 
 Then open `http://127.0.0.1:8787`, click the top-right **GPU pill**, and switch **Compute** to **Host GPU**.
 
-For remote / lab access over HTTPS (e.g. Tailscale Serve), generate a Bearer API token and plug it into the **API Token** field in the GPU pill:
+For remote / lab access over HTTPS (e.g. Tailscale Serve) or a shared HPC cluster via SSH port forwarding, set a Bearer API token — on same-origin URLs you only enter it once and the server stores an `HttpOnly; SameSite=Strict` session cookie:
 
 ```bash
+# On the GPU host / cluster node
 export DENOVO_API_TOKEN="dnv_$(openssl rand -hex 18)"
 HOST=127.0.0.1 PORT=8790 DENOVO_API_TOKEN="$DENOVO_API_TOKEN" node server/selfhost-server.mjs
+
+# On your laptop (HPC / cluster SSH port-forwarding)
+ssh -L 8790:127.0.0.1:8790 user@gpu-node
+# Then open http://127.0.0.1:8790
 ```
 
 See [**server/README.md**](server/README.md) for Tailscale HTTPS setup, CORS (`DENOVO_ALLOWED_ORIGINS`), residue ceilings, and all server environment variables.
