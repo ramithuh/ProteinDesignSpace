@@ -466,6 +466,20 @@ export function snapNodePositionToPorts(
 }
 
 /**
+ * Estimate rendered pixel height of a `ProteinNode` card from its input/output port count
+ * so multi-port cards (e.g. 4-output `ESM-C 300M`) receive generous vertical clearance in `autoLayoutGraph`.
+ */
+export function estimateNodeCardHeight(node: WorkflowNode): number {
+  const manifest = Object.hasOwn(ADAPTER_REGISTRY, node.adapterId)
+    ? ADAPTER_REGISTRY[node.adapterId]
+    : undefined;
+  const inputCount = manifest ? Object.keys(manifest.inputs).length : 1;
+  const outputCount = manifest ? Object.keys(manifest.outputs).length : 1;
+  const maxPorts = Math.max(1, inputCount, outputCount);
+  return 132 + maxPorts * PORT_STEP;
+}
+
+/**
  * Compute clean, crossing-minimized, handle-aligned left-to-right layout:
  * 1. Longest-path column assignment.
  * 2. Barycenter + output-port-index ordering inside each column (no branch crossings).
@@ -526,7 +540,7 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
   const TOP_Y = 24;
   // Leave clean top headroom whenever any skip-edge arches over the main row
   const MAIN_Y = spannedCols.size > 0 ? 84 : TOP_Y + 36;
-  const ROW_GAP = 188;
+  const ROW_MARGIN = 24;
 
   const posMap = new Map<string, { x: number; y: number }>();
 
@@ -585,7 +599,7 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
           }
         }
         posMap.set(n.id, { x, y: Math.round(idealY) });
-        cursorY = idealY + ROW_GAP;
+        cursorY = idealY + estimateNodeCardHeight(n) + ROW_MARGIN;
       }
     }
   }

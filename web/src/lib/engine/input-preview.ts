@@ -15,7 +15,9 @@ import {
   type ParsedStructure,
 } from '$lib/protein-ops/pdb';
 import { normalizePdbId } from '$lib/protein-ops/rcsb';
-import { validateSequenceText } from './param-validation';
+import { evaluateProteinOnlyStructurePolicy } from '$lib/protein-ops/hetatm-policy';
+import { getBenchmarkById } from './benchmarks';
+import { sanitizeEvoDiffFixedSequence, validateSequenceText } from './param-validation';
 import {
   selectFoldWorkItems,
   splitMultiChainSequence,
@@ -565,6 +567,39 @@ function tryMaterializeLocalPdbInput(node: WorkflowNode): StructureArtifact | nu
   };
 }
 
+function tryMaterializeLocalPdbInputSequences(
+  node: WorkflowNode,
+  existingStruct?: StructureArtifact,
+): SequenceSet | null {
+  const struct = existingStruct ?? tryMaterializeLocalPdbInput(node);
+  if (!struct || struct.length <= 0) return null;
+  const seq = struct.sequence.trim().toUpperCase();
+  if (!seq) return null;
+  const candidateId = struct.label.replace(/\s+\([^)]*\)$/, '').trim() || struct.id;
+  const chainLengths =
+    struct.chainLengths && struct.chainLengths.length > 0 ? [...struct.chainLengths] : [seq.length];
+  return {
+    kind: 'SequenceSet',
+    id: `pdbseq-${fnv1a(`${struct.id}:${seq}`)}`,
+    parentStructureId: struct.id,
+    sourceStructureId: struct.id,
+    sourceModelId: 'pdb-input',
+    collectionKind: 'independent-candidates',
+    candidates: [
+      {
+        id: candidateId,
+        key: candidateId,
+        sequence: seq,
+        ...(chainLengths.length > 1 ? { chainLengths } : {}),
+        score: null,
+        globalScore: null,
+        sourceModelId: 'pdb-input',
+        sourceStructureId: struct.id,
+      },
+    ],
+  };
+}
+
 function tryMaterializeLocalSequenceInput(node: WorkflowNode): SequenceSet | null {
   const raw = String(node.params.sequence ?? '').trim();
   if (!raw) return null;
@@ -1045,6 +1080,11 @@ export function compileNodeInputPreview(
       const srcNode = nodeById.get(edge.fromNode);
       if (srcNode?.adapterId === 'pdb-input' && edge.fromPort === 'structure') {
         art = tryMaterializeLocalPdbInput(srcNode) ?? undefined;
+      } else if (srcNode?.adapterId === 'pdb-input' && edge.fromPort === 'sequences') {
+        const cachedStruct = outputsByNode[edge.fromNode]?.structure as
+          | StructureArtifact
+          | undefined;
+        art = tryMaterializeLocalPdbInputSequences(srcNode, cachedStruct) ?? undefined;
       } else if (srcNode?.adapterId === 'sequence-input' && edge.fromPort === 'sequences') {
         art = tryMaterializeLocalSequenceInput(srcNode) ?? undefined;
       }
@@ -3622,6 +3662,1124 @@ export function compileNodeInputPreview(
           message: err instanceof Error ? err.message : String(err),
         });
       }
+    }
+  } else if (node.adapterId === 'genie2') {
+    const length = Math.max(20, Math.min(256, Math.round(Number(node.params.length ?? 80))));
+    const steps = Math.max(10, Math.min(1000, Math.round(Number(node.params.steps ?? 1000))));
+    const scale = Math.max(0.1, Math.min(1.0, Number(node.params.scale ?? 0.6)));
+    const precision = String(node.params.precision ?? 'fp16').trim().toLowerCase() === 'int8' ? 'int8' : 'fp16';
+    const motifRange = String(node.params.motifRange ?? '').trim();
+    const numDesigns = Math.max(1, Math.min(8, Math.round(Number(node.params.numDesigns ?? 1))));
+    const seed = Math.round(Number(node.params.seed ?? 42));
+    const template = resolvedInputs.template as StructureArtifact | undefined;
+    const missingTplUp = missingUpstreamByPort.get('template');
+
+    if (motifRange && !template) {
+      if (missingTplUp) {
+        availability = 'pending-upstream';
+        missingUpstreamNodeIds = [missingTplUp];
+      } else {
+        availability = 'error';
+      }
+      payload = {
+        format: 'genie3-spec',
+        headline: missingTplUp
+          ? `Genie 2 (Motif ${motifRange}) · waiting for upstream template`
+          : `Genie 2 (Motif ${motifRange}) · connect a template structure`,
+        compiledSummary: {
+          precision,
+          length,
+          steps,
+          scale,
+          motifRange,
+          numDesigns,
+          atomGranularity: 'ca-only',
+          seed,
+        },
+        rawSpecText: JSON.stringify(
+          { precision, length, steps, scale, motifRange, numDesigns, seed },
+          null,
+          2,
+        ),
+      };
+    } else if (template) {
+      runRuntimeValidation();
+      const rawText = template.pdbText || template.cifText || '';
+      const tplEntry = rawText ? getOrParseCachedStructure(template.id, rawText) : undefined;
+      const parsed = tplEntry?.parsed;
+      const rawLigands = [
+        ...new Set(
+          [
+            ...(template.diagnostics?.ligandNames ?? []),
+            ...(parsed?.diagnostics.ligandNames ?? []),
+          ]
+            .map((l) => l.trim().toUpperCase())
+            .filter(Boolean),
+        ),
+      ];
+      const rawNucleic = [
+        ...new Set(
+          [
+            ...(template.diagnostics?.nucleicAcidChains ?? []),
+            ...(parsed?.diagnostics.nucleicAcidChains ?? []),
+          ]
+            .map((c) => c.trim())
+            .filter(Boolean),
+        ),
+      ];
+      const bench = template.benchmarkId ? getBenchmarkById(template.benchmarkId) : undefined;
+      const inferredPdbId =
+        bench?.pdbId ??
+        (/\b([0-9][A-Za-z0-9]{3})\b/.exec(template.label ?? '')?.[1]?.toUpperCase() || undefined);
+      const policy = evaluateProteinOnlyStructurePolicy({
+        modelName: nodeLabel,
+        benchmark: bench,
+        pdbId: inferredPdbId,
+        proteinResidueCount: parsed?.nResidues ?? template.length,
+        ligandNames: rawLigands,
+        nucleicAcidChains: rawNucleic,
+        hasLigands: template.diagnostics?.hasLigands ?? rawLigands.length > 0,
+        hasNucleicAcids: template.diagnostics?.hasNucleicAcids ?? rawNucleic.length > 0,
+      });
+      if (policy.action === 'hard-block' && policy.message) {
+        availability = 'error';
+        pushIssue({ severity: 'error', source: 'compiler', message: policy.message });
+      } else if (policy.action === 'warn' && policy.message) {
+        pushIssue({ severity: 'warning', source: 'compiler', message: policy.message });
+      }
+
+      // Genie 2 is strictly protein-only Cα diffusion: ALL crystal HETATMs (M3L, CA, ligands, buffers)
+      // and nucleic chains are stripped/ignored — NEVER reported as retained ligands.
+      entities = {
+        includedLigands: [],
+        filteredBuffers: rawLigands,
+        nucleicChains: [],
+      };
+
+      previewStructurePdb = template.pdbText;
+      previewStructureMeta = {
+        label: template.label,
+        atomGranularity: 'ca-only',
+        bfactorSemantics: template.bfactorSemantics,
+        length: parsed?.nResidues ?? template.length,
+      };
+
+      if (motifRange && parsed) {
+        const rangeMatch = motifRange.match(/^(?:([A-Za-z]):?)?(-?\d+)(?:-(-?\d+))?$/);
+        if (!rangeMatch) {
+          availability = 'error';
+          pushIssue({
+            severity: 'error',
+            source: 'compiler',
+            message: `Invalid Genie 2 motifRange "${motifRange}" (expected e.g. A16-35 or 16-35).`,
+          });
+        } else {
+          const chainFilter = rangeMatch[1]?.toUpperCase();
+          const startRes = Number(rangeMatch[2]);
+          const endRes = rangeMatch[3] ? Number(rangeMatch[3]) : startRes;
+          const lo = Math.min(startRes, endRes);
+          const hi = Math.max(startRes, endRes);
+          const picked: number[] = [];
+          for (let i = 0; i < parsed.nResidues; i++) {
+            if (chainFilter && parsed.chainIds[i]?.toUpperCase() !== chainFilter) continue;
+            const r = parsed.resNums[i];
+            if (r >= lo && r <= hi) picked.push(i);
+          }
+          if (picked.length < 3) {
+            availability = 'error';
+            pushIssue({
+              severity: 'error',
+              source: 'compiler',
+              message: `Genie 2 motifRange "${motifRange}" matched only ${picked.length} residue(s) (minimum 3 required).`,
+            });
+          } else if (picked.length >= length) {
+            availability = 'error';
+            pushIssue({
+              severity: 'error',
+              source: 'compiler',
+              message: `Genie 2 motif length (${picked.length} aa) must be smaller than target length (${length} aa).`,
+            });
+          } else {
+            const startOffset = Math.max(0, Math.floor((length - picked.length) / 2));
+            const pickedSet = new Set(picked);
+            const scaffoldResidues: PreviewResidue[] = [];
+            let seq = '';
+            for (let i = 0; i < length; i++) {
+              const motifOffset = i - startOffset;
+              if (motifOffset >= 0 && motifOffset < picked.length) {
+                const tplIdx = picked[motifOffset];
+                const src = parsed.sourceResidues[tplIdx];
+                const aa1 = parsed.sequence[tplIdx] ?? AA3_TO_AA1[src.resName] ?? 'X';
+                seq += aa1;
+                scaffoldResidues.push({
+                  flatIndex: i,
+                  authChain: src.authChainId,
+                  labelChain: 'A',
+                  authSeqId: src.resNum,
+                  insCode: src.insCode,
+                  labelSeqId: i + 1,
+                  token: formatResidueToken(src.authChainId, src.resNum, src.insCode),
+                  aa1,
+                  resName: src.resName,
+                  roles: ['motif', 'fixed-backbone', 'fixed-sequence'],
+                  ...(tplEntry?.bfactors ? { bfactor: tplEntry.bfactors[tplIdx] } : {}),
+                  backboneAtoms: 'CA-only',
+                });
+              } else {
+                seq += '-';
+                scaffoldResidues.push({
+                  flatIndex: i,
+                  authChain: 'A',
+                  labelChain: 'A',
+                  authSeqId: i + 1,
+                  insCode: '',
+                  labelSeqId: i + 1,
+                  token: formatResidueToken('A', i + 1),
+                  aa1: '-',
+                  resName: 'UNK',
+                  roles: ['designable'],
+                });
+              }
+            }
+            chains = [
+              {
+                chainId: 'A',
+                labelChainId: 'A',
+                entityKind: 'protein',
+                roleTag: 'scaffold',
+                sequence: seq,
+                residues: scaffoldResidues,
+              },
+            ];
+            const croppedExtras: Array<{ chain: string; seqId: number; insCode?: string }> = [];
+            for (let i = 0; i < parsed.nResidues; i++) {
+              if (!pickedSet.has(i)) {
+                const src = parsed.sourceResidues[i];
+                croppedExtras.push({
+                  chain: src.authChainId,
+                  seqId: src.resNum,
+                  ...(src.insCode ? { insCode: src.insCode } : {}),
+                });
+              }
+            }
+            highlightLayers = buildHighlightLayersFromResidues(scaffoldResidues, {
+              'cropped-out': croppedExtras,
+            });
+            totalResidues = length;
+            fixedResidues = picked.length;
+            designedResidues = length - picked.length;
+            estimatedTokens = length;
+            fastaEntries = [
+              {
+                id: 'genie2-motif',
+                header: `>Genie2_motif (${length} aa · ${picked.length} motif / ${length - picked.length} design)`,
+                sequence: seq,
+                chainLengths: [length],
+                selected: true,
+              },
+            ];
+          }
+        }
+      } else {
+        // Template wired without motifRange: Genie 2 generates unconditionally at `length`
+        const track = buildSyntheticDesignedChain('A', length, 0, 'scaffold', 'A');
+        chains = [track];
+        totalResidues = length;
+        designedResidues = length;
+        fixedResidues = 0;
+        estimatedTokens = length;
+        fastaEntries = [
+          {
+            id: 'genie2-uncond',
+            header: `>Genie2_unconditional (${length} aa)`,
+            sequence: track.sequence,
+            chainLengths: [length],
+            selected: true,
+          },
+        ];
+      }
+
+      payload = {
+        format: 'genie3-spec',
+        headline: motifRange
+          ? `Genie 2 (Motif ${motifRange}) · ${designedResidues} design / ${fixedResidues} fixed · L=${length} aa`
+          : `Genie 2 (Unconditional) · L=${length} aa (${steps} steps)`,
+        compiledSummary: {
+          mode: motifRange ? 'motif' : 'unconditional',
+          precision,
+          length,
+          designedResidues,
+          fixedResidues,
+          steps,
+          scale,
+          ...(motifRange ? { motifRange } : {}),
+          numDesigns,
+          atomGranularity: 'ca-only',
+          ...(rawLigands.length > 0 ? { strippedHetatms: rawLigands } : {}),
+          ...(rawNucleic.length > 0 ? { strippedNucleicChains: rawNucleic } : {}),
+          seed,
+        },
+        rawSpecText: JSON.stringify(
+          {
+            adapter: 'genie2',
+            mode: motifRange ? 'motif' : 'unconditional',
+            precision,
+            length,
+            designedResidues,
+            fixedResidues,
+            steps,
+            scale,
+            motifRange: motifRange || null,
+            strippedHetatms: rawLigands,
+            strippedNucleicChains: rawNucleic,
+            numDesigns,
+            seed,
+          },
+          null,
+          2,
+        ),
+      };
+    } else {
+      runRuntimeValidation();
+      const track = buildSyntheticDesignedChain('A', length, 0, 'scaffold', 'A');
+      chains = [track];
+      totalResidues = length;
+      designedResidues = length;
+      fixedResidues = 0;
+      estimatedTokens = length;
+      fastaEntries = [
+        {
+          id: 'genie2-uncond',
+          header: `>Genie2_unconditional (${length} aa)`,
+          sequence: track.sequence,
+          chainLengths: [length],
+          selected: true,
+        },
+      ];
+      payload = {
+        format: 'genie3-spec',
+        headline: `Genie 2 (Unconditional) · L=${length} aa (${steps} steps)`,
+        compiledSummary: {
+          mode: 'unconditional',
+          precision,
+          length,
+          steps,
+          scale,
+          numDesigns,
+          atomGranularity: 'ca-only',
+          seed,
+        },
+        rawSpecText: JSON.stringify(
+          { adapter: 'genie2', mode: 'unconditional', precision, length, steps, scale, numDesigns, seed },
+          null,
+          2,
+        ),
+      };
+    }
+  } else if (node.adapterId === 'protpardelle') {
+    const PROTPARDELLE_ALLATOM_CHECKPOINTS = new Set([
+      'cc91_epoch383',
+      'cc91_tip_epoch480',
+      'cc94_epoch3100',
+    ]);
+    const rawTask = String(node.params.taskMode ?? 'unconditional').trim().toLowerCase();
+    const taskMode: 'unconditional' | 'motif' | 'partial' =
+      rawTask === 'motif' || rawTask === 'partial' ? rawTask : 'unconditional';
+    const checkpoint = String(node.params.checkpoint ?? 'cc91_epoch383').trim();
+    const precision = String(node.params.precision ?? 'int8').trim().toLowerCase() === 'fp16' ? 'fp16' : 'int8';
+    const length = Math.max(20, Math.min(256, Math.round(Number(node.params.length ?? 80))));
+    const numDesigns = Math.max(1, Math.min(8, Math.round(Number(node.params.numDesigns ?? 1))));
+    const numSteps = Math.max(20, Math.min(500, Math.round(Number(node.params.numSteps ?? 100))));
+    const isAllAtomCkpt = PROTPARDELLE_ALLATOM_CHECKPOINTS.has(checkpoint);
+    const sidechainMode = Boolean(node.params.sidechainMode ?? true) && isAllAtomCkpt;
+    const motifSelection = String(node.params.motifSelection ?? '').trim();
+    const motifGuidance = String(node.params.motifGuidance ?? 'replacement').trim();
+    const rewindSteps = Math.max(5, Math.min(numSteps - 1, Math.round(Number(node.params.rewindSteps ?? 40))));
+    const stepScale = Number(node.params.stepScale ?? 1.2);
+    const temperature = Number(node.params.temperature ?? 0.1);
+    const seed = Math.max(0, Math.round(Number(node.params.seed ?? 42)));
+    const miniMpnnNote = sidechainMode
+      ? `MiniMPNN sidechain/sequence co-design enabled (~${precision === 'fp16' ? '28' : '14'} MB weights loaded on run)`
+      : undefined;
+
+    const structure = resolvedInputs.structure as StructureArtifact | undefined;
+    const missingStructUp = missingUpstreamByPort.get('structure');
+
+    if ((taskMode === 'motif' || taskMode === 'partial') && !structure) {
+      if (missingStructUp) {
+        availability = 'pending-upstream';
+        missingUpstreamNodeIds = [missingStructUp];
+      } else {
+        availability = 'error';
+      }
+      payload = {
+        format: 'raw-input',
+        headline: missingStructUp
+          ? `ProtPardelle-1c (${taskMode}) · waiting for upstream structure`
+          : `ProtPardelle-1c (${taskMode}) · connect a StructureArtifact input`,
+        compiledSummary: {
+          taskMode,
+          checkpoint,
+          precision,
+          ...(taskMode === 'partial' ? { rewindSteps } : { length }),
+          numSteps,
+          sidechainMode,
+          ...(miniMpnnNote ? { miniMpnnNote } : {}),
+          numDesigns,
+          seed,
+        },
+        rawSpecText: JSON.stringify(
+          { taskMode, checkpoint, precision, length, numSteps, rewindSteps, sidechainMode, miniMpnnNote, numDesigns, seed },
+          null,
+          2,
+        ),
+      };
+    } else if (taskMode === 'partial' && structure) {
+      runRuntimeValidation();
+      const rawText = structure.pdbText || structure.cifText || '';
+      const entry = rawText ? getOrParseCachedStructure(structure.id, rawText) : undefined;
+      const parsed = entry?.parsed;
+      const rawLigands = [
+        ...new Set(
+          [
+            ...(structure.diagnostics?.ligandNames ?? []),
+            ...(parsed?.diagnostics.ligandNames ?? []),
+          ]
+            .map((l) => l.trim().toUpperCase())
+            .filter(Boolean),
+        ),
+      ];
+      entities = {
+        includedLigands: [],
+        filteredBuffers: rawLigands,
+        nucleicChains: [],
+      };
+      if (parsed) {
+        const chainMap = new Map<string, PreviewChainTrack>();
+        const allRes: PreviewResidue[] = [];
+        for (let i = 0; i < parsed.nResidues; i++) {
+          const src = parsed.sourceResidues[i];
+          let track = chainMap.get(src.authChainId);
+          if (!track) {
+            track = {
+              chainId: src.authChainId,
+              ...(src.labelChainId ? { labelChainId: src.labelChainId } : {}),
+              entityKind: 'protein',
+              roleTag: 'scaffold',
+              sequence: '',
+              residues: [],
+            };
+            chainMap.set(src.authChainId, track);
+          }
+          const aa1 = parsed.sequence[i] ?? AA3_TO_AA1[src.resName] ?? 'X';
+          const pr: PreviewResidue = {
+            flatIndex: i,
+            authChain: src.authChainId,
+            ...(src.labelChainId ? { labelChain: src.labelChainId } : {}),
+            authSeqId: src.resNum,
+            insCode: src.insCode,
+            token: formatResidueToken(src.authChainId, src.resNum, src.insCode),
+            aa1,
+            resName: src.resName,
+            roles: ['designable'],
+            ...(entry?.bfactors ? { bfactor: entry.bfactors[i] } : {}),
+            backboneAtoms: formatBackboneAtoms(parsed.atomPresence[i], structure.atomGranularity),
+          };
+          track.residues.push(pr);
+          track.sequence += aa1;
+          allRes.push(pr);
+        }
+        chains = [...chainMap.values()];
+        highlightLayers = buildHighlightLayersFromResidues(allRes);
+        totalResidues = parsed.nResidues;
+        designedResidues = parsed.nResidues;
+        fixedResidues = 0;
+        estimatedTokens = parsed.nResidues;
+        previewStructurePdb = structure.pdbText;
+        previewStructureMeta = {
+          label: structure.label,
+          atomGranularity: structure.atomGranularity ?? 'all-atom',
+          bfactorSemantics: structure.bfactorSemantics,
+          length: parsed.nResidues,
+        };
+        fastaEntries = [
+          {
+            id: structure.id,
+            header: `>${structure.label} (partial diffusion · rewind ${rewindSteps}/${numSteps} · ${parsed.nResidues} aa refined)`,
+            sequence: parsed.sequence,
+            chainLengths: parsed.diagnostics.chainLengths,
+            selected: true,
+          },
+        ];
+      } else {
+        totalResidues = structure.length;
+        designedResidues = structure.length;
+        fixedResidues = 0;
+        estimatedTokens = structure.length;
+      }
+      payload = {
+        format: 'raw-input',
+        headline: `ProtPardelle-1c (Partial Diffusion · rewind ${rewindSteps}/${numSteps}) · ${designedResidues} aa refined${sidechainMode ? ' · + MiniMPNN' : ''}`,
+        compiledSummary: {
+          taskMode: 'partial',
+          checkpoint,
+          precision,
+          totalResidues,
+          designedResidues,
+          fixedResidues: 0,
+          rewindSteps,
+          numSteps,
+          stepScale,
+          temperature,
+          sidechainMode,
+          ...(miniMpnnNote ? { miniMpnnNote } : {}),
+          ...(rawLigands.length > 0 ? { strippedHetatms: rawLigands } : {}),
+          numDesigns,
+          seed,
+        },
+        rawSpecText: JSON.stringify(
+          {
+            adapter: 'protpardelle',
+            taskMode: 'partial',
+            checkpoint,
+            precision,
+            totalResidues,
+            designedResidues,
+            fixedResidues: 0,
+            rewindSteps,
+            numSteps,
+            stepScale,
+            temperature,
+            sidechainMode,
+            ...(miniMpnnNote ? { miniMpnnNote } : {}),
+            numDesigns,
+            seed,
+          },
+          null,
+          2,
+        ),
+      };
+    } else if (taskMode === 'motif' && structure) {
+      runRuntimeValidation();
+      const rawText = structure.pdbText || structure.cifText || '';
+      const entry = rawText ? getOrParseCachedStructure(structure.id, rawText) : undefined;
+      const parsed = entry?.parsed;
+      const rawLigands = [
+        ...new Set(
+          [
+            ...(structure.diagnostics?.ligandNames ?? []),
+            ...(parsed?.diagnostics.ligandNames ?? []),
+          ]
+            .map((l) => l.trim().toUpperCase())
+            .filter(Boolean),
+        ),
+      ];
+      entities = {
+        includedLigands: [],
+        filteredBuffers: rawLigands,
+        nucleicChains: [],
+      };
+      if (parsed) {
+        let sourceIndices: number[] = [];
+        if (!motifSelection) {
+          sourceIndices = Array.from({ length: parsed.nResidues }, (_, i) => i);
+        } else {
+          const spans = parseResidueRangeTokens(motifSelection);
+          const wholeChains = new Set(
+            motifSelection
+              .split(/[,\s]+/)
+              .map((t) => t.trim())
+              .filter((t) => /^[A-Za-z]$/.test(t))
+              .map((t) => t.toUpperCase()),
+          );
+          for (let i = 0; i < parsed.nResidues; i++) {
+            const src = parsed.sourceResidues[i];
+            const ch = src.authChainId.toUpperCase();
+            if (
+              wholeChains.has(ch) ||
+              spans.some(
+                (s) =>
+                  s.chain.toUpperCase() === ch &&
+                  src.resNum >= Math.min(s.start, s.end) &&
+                  src.resNum <= Math.max(s.start, s.end),
+              )
+            ) {
+              sourceIndices.push(i);
+            }
+          }
+        }
+        if (sourceIndices.length === 0) {
+          availability = 'error';
+          pushIssue({
+            severity: 'error',
+            source: 'compiler',
+            message: `Motif selection "${motifSelection}" matched 0 residues in "${structure.label}".`,
+          });
+        } else {
+          const motifLen = sourceIndices.length;
+          const sampleLen = Math.max(length, motifLen + 10);
+          const padLeft = Math.floor((sampleLen - motifLen) / 2);
+          const selectedSet = new Set(sourceIndices);
+          const scaffoldResidues: PreviewResidue[] = [];
+          let seq = '';
+          for (let i = 0; i < sampleLen; i++) {
+            const motifOffset = i - padLeft;
+            if (motifOffset >= 0 && motifOffset < motifLen) {
+              const tplIdx = sourceIndices[motifOffset];
+              const src = parsed.sourceResidues[tplIdx];
+              const aa1 = parsed.sequence[tplIdx] ?? AA3_TO_AA1[src.resName] ?? 'X';
+              seq += aa1;
+              scaffoldResidues.push({
+                flatIndex: i,
+                authChain: src.authChainId,
+                labelChain: 'A',
+                authSeqId: src.resNum,
+                insCode: src.insCode,
+                labelSeqId: i + 1,
+                token: formatResidueToken(src.authChainId, src.resNum, src.insCode),
+                aa1,
+                resName: src.resName,
+                roles: ['motif', 'fixed-backbone', 'fixed-sequence'],
+                ...(entry?.bfactors ? { bfactor: entry.bfactors[tplIdx] } : {}),
+                backboneAtoms: formatBackboneAtoms(parsed.atomPresence[tplIdx], structure.atomGranularity),
+              });
+            } else {
+              seq += '-';
+              scaffoldResidues.push({
+                flatIndex: i,
+                authChain: 'A',
+                labelChain: 'A',
+                authSeqId: i + 1,
+                insCode: '',
+                labelSeqId: i + 1,
+                token: formatResidueToken('A', i + 1),
+                aa1: '-',
+                resName: 'UNK',
+                roles: ['designable'],
+              });
+            }
+          }
+          chains = [
+            {
+              chainId: 'A',
+              labelChainId: 'A',
+              entityKind: 'protein',
+              roleTag: 'scaffold',
+              sequence: seq,
+              residues: scaffoldResidues,
+            },
+          ];
+          const croppedExtras: Array<{ chain: string; seqId: number; insCode?: string }> = [];
+          for (let i = 0; i < parsed.nResidues; i++) {
+            if (!selectedSet.has(i)) {
+              const src = parsed.sourceResidues[i];
+              croppedExtras.push({
+                chain: src.authChainId,
+                seqId: src.resNum,
+                ...(src.insCode ? { insCode: src.insCode } : {}),
+              });
+            }
+          }
+          highlightLayers = buildHighlightLayersFromResidues(scaffoldResidues, {
+            'cropped-out': croppedExtras,
+          });
+          totalResidues = sampleLen;
+          fixedResidues = motifLen;
+          designedResidues = sampleLen - motifLen;
+          estimatedTokens = sampleLen;
+          previewStructurePdb = structure.pdbText;
+          previewStructureMeta = {
+            label: structure.label,
+            atomGranularity: structure.atomGranularity ?? 'all-atom',
+            bfactorSemantics: structure.bfactorSemantics,
+            length: parsed.nResidues,
+          };
+          fastaEntries = [
+            {
+              id: 'protpardelle-motif',
+              header: `>ProtPardelle_motif (${sampleLen} aa · ${motifLen} motif / ${sampleLen - motifLen} design)`,
+              sequence: seq,
+              chainLengths: [sampleLen],
+              selected: true,
+            },
+          ];
+        }
+      }
+      payload = {
+        format: 'raw-input',
+        headline: `ProtPardelle-1c (Motif) · ${designedResidues} design / ${fixedResidues} motif · L=${totalResidues} aa${sidechainMode ? ' · + MiniMPNN' : ''}`,
+        compiledSummary: {
+          taskMode: 'motif',
+          checkpoint,
+          precision,
+          length: totalResidues || length,
+          designedResidues,
+          fixedResidues,
+          motifSelection: motifSelection || '(all cropped residues)',
+          motifGuidance,
+          numSteps,
+          sidechainMode,
+          ...(miniMpnnNote ? { miniMpnnNote } : {}),
+          ...(rawLigands.length > 0 ? { strippedHetatms: rawLigands } : {}),
+          numDesigns,
+          seed,
+        },
+        rawSpecText: JSON.stringify(
+          {
+            adapter: 'protpardelle',
+            taskMode: 'motif',
+            checkpoint,
+            precision,
+            length: totalResidues || length,
+            designedResidues,
+            fixedResidues,
+            motifSelection: motifSelection || null,
+            motifGuidance,
+            numSteps,
+            sidechainMode,
+            ...(miniMpnnNote ? { miniMpnnNote } : {}),
+            numDesigns,
+            seed,
+          },
+          null,
+          2,
+        ),
+      };
+    } else {
+      runRuntimeValidation();
+      const track = buildSyntheticDesignedChain('A', length, 0, 'scaffold', 'A');
+      chains = [track];
+      totalResidues = length;
+      designedResidues = length;
+      fixedResidues = 0;
+      estimatedTokens = length;
+      fastaEntries = [
+        {
+          id: 'protpardelle-uncond',
+          header: `>ProtPardelle-1c (${length} aa · ${checkpoint})`,
+          sequence: track.sequence,
+          chainLengths: [length],
+          selected: true,
+        },
+      ];
+      payload = {
+        format: 'raw-input',
+        headline: `ProtPardelle-1c (Unconditional) · L=${length} aa${sidechainMode ? ' · + MiniMPNN' : ''}`,
+        compiledSummary: {
+          taskMode: 'unconditional',
+          checkpoint,
+          precision,
+          length,
+          numSteps,
+          sidechainMode,
+          ...(miniMpnnNote ? { miniMpnnNote } : {}),
+          numDesigns,
+          seed,
+        },
+        rawSpecText: JSON.stringify(
+          {
+            adapter: 'protpardelle',
+            taskMode: 'unconditional',
+            checkpoint,
+            precision,
+            length,
+            numSteps,
+            sidechainMode,
+            ...(miniMpnnNote ? { miniMpnnNote } : {}),
+            numDesigns,
+            seed,
+          },
+          null,
+          2,
+        ),
+      };
+    }
+  } else if (node.adapterId === 'evodiff') {
+    const taskMode = String(node.params.taskMode ?? 'unconditional').trim().toLowerCase() === 'infill'
+      ? 'infill'
+      : 'unconditional';
+    const precision = String(node.params.precision ?? 'int8').trim().toLowerCase() === 'fp16' ? 'fp16' : 'int8';
+    const length = Math.max(12, Math.min(512, Math.round(Number(node.params.length ?? 64))));
+    const numSequences = Math.max(1, Math.min(8, Math.round(Number(node.params.numSequences ?? 2))));
+    const rawFixedSeq = sanitizeEvoDiffFixedSequence(node.params.fixedSequence);
+    const rawMaskPositions = String(node.params.maskPositions ?? '').trim();
+    const seed = Math.max(0, Math.round(Number(node.params.seed ?? 42)));
+    const seqArt = resolvedInputs.sequences as SequenceSet | undefined;
+    const missingSeqUp = missingUpstreamByPort.get('sequences');
+
+    if (taskMode === 'infill') {
+      let templateSeq = rawFixedSeq;
+      let templateSource = 'inline fixedSequence';
+      const usedUpstream = !templateSeq && Boolean(seqArt?.candidates?.length);
+      if (usedUpstream && seqArt?.candidates?.length) {
+        const cand0 = seqArt.candidates[0];
+        templateSeq = sanitizeEvoDiffFixedSequence(cand0.sequence).replace(/[:/,-]+/g, '');
+        templateSource = cand0.id || 'upstream sequence';
+      }
+
+      if (!templateSeq) {
+        if (missingSeqUp) {
+          availability = 'pending-upstream';
+          missingUpstreamNodeIds = [missingSeqUp];
+        } else {
+          availability = 'error';
+          pushIssue({
+            severity: 'error',
+            source: 'compiler',
+            message:
+              'EvoDiff in "infill" mode requires either a connected SequenceSet or a Fixed Sequence template (use # for masked positions).',
+          });
+        }
+        payload = {
+          format: 'mpnn-masks',
+          headline: missingSeqUp
+            ? 'EvoDiff-38M (Infill) · waiting for upstream sequence'
+            : 'EvoDiff-38M (Infill) · provide fixedSequence or connect SequenceSet',
+          compiledSummary: {
+            taskMode: 'infill',
+            precision,
+            numSequences,
+            ...(rawMaskPositions ? { maskPositions: rawMaskPositions } : {}),
+            seed,
+          },
+          rawSpecText: JSON.stringify(
+            { adapter: 'evodiff', taskMode: 'infill', precision, numSequences, maskPositions: rawMaskPositions || null, seed },
+            null,
+            2,
+          ),
+        };
+      } else {
+        runRuntimeValidation();
+        const maskSet = new Set<number>();
+        for (let i = 0; i < templateSeq.length; i++) {
+          if (templateSeq[i] === '#') maskSet.add(i);
+        }
+        if (rawMaskPositions) {
+          for (const tok of rawMaskPositions.split(/[,\s]+/).filter(Boolean)) {
+            const m = /^(\d+)(?:-(\d+))?$/.exec(tok);
+            if (!m) {
+              availability = 'error';
+              pushIssue({
+                severity: 'error',
+                source: 'compiler',
+                message: `Invalid mask position "${tok}". Use 1-based numbers or ranges like "1-15, 45-60".`,
+              });
+              continue;
+            }
+            const lo = Number(m[1]);
+            const hi = m[2] ? Number(m[2]) : lo;
+            if (lo < 1 || hi < lo || hi > templateSeq.length) {
+              availability = 'error';
+              pushIssue({
+                severity: 'error',
+                source: 'compiler',
+                message: `Mask position "${tok}" is out of range for a ${templateSeq.length}-aa sequence.`,
+              });
+              continue;
+            }
+            for (let pos = lo; pos <= hi; pos++) {
+              maskSet.add(pos - 1);
+            }
+          }
+        }
+        if (maskSet.size === 0 && availability === 'ready') {
+          availability = 'error';
+          pushIssue({
+            severity: 'error',
+            source: 'compiler',
+            message:
+              'EvoDiff "infill" mode requires "#" mask characters in the template or 1-based Mask Positions (e.g. "1-12, 40-50").',
+          });
+        }
+
+        const residues: PreviewResidue[] = [];
+        let trackSeq = '';
+        for (let i = 0; i < templateSeq.length; i++) {
+          const isMasked = maskSet.has(i);
+          const ch = templateSeq[i];
+          const aa1 = ch === '#' ? '-' : ch;
+          trackSeq += aa1;
+          residues.push({
+            flatIndex: i,
+            authChain: 'A',
+            authSeqId: i + 1,
+            insCode: '',
+            token: formatResidueToken('A', i + 1),
+            aa1,
+            resName: aa1 === '-' ? 'UNK' : (AA1_TO_AA3[aa1] ?? 'UNK'),
+            roles: isMasked ? ['designable'] : ['fixed-sequence'],
+          });
+        }
+
+        chains = [
+          {
+            chainId: 'A',
+            entityKind: 'protein',
+            roleTag: 'scaffold',
+            sequence: trackSeq,
+            residues,
+          },
+        ];
+        highlightLayers = buildHighlightLayersFromResidues(residues);
+        totalResidues = templateSeq.length;
+        designedResidues = maskSet.size;
+        fixedResidues = templateSeq.length - maskSet.size;
+        estimatedTokens = templateSeq.length;
+
+        if (usedUpstream && seqArt?.candidates?.length) {
+          fastaEntries = seqArt.candidates.map((cand, idx) => ({
+            id: cand.id,
+            header: `>${cand.id} (${idx === 0 ? `${designedResidues} masked / ${fixedResidues} fixed` : 'ignored'})`,
+            sequence: idx === 0 ? templateSeq : cand.sequence,
+            ...(cand.chainLengths ? { chainLengths: cand.chainLengths } : {}),
+            selected: idx === 0,
+            ...(idx > 0 ? { scoreLabel: 'ignored (candidate 0 only)' } : {}),
+          }));
+        } else {
+          fastaEntries = [
+            {
+              id: 'evodiff-infill',
+              header: `>EvoDiff_infill (${templateSeq.length} aa · ${designedResidues} masked / ${fixedResidues} fixed)`,
+              sequence: templateSeq,
+              chainLengths: [templateSeq.length],
+              selected: true,
+            },
+          ];
+        }
+
+        payload = {
+          format: 'mpnn-masks',
+          headline: `EvoDiff-38M (Infill) · ${designedResidues} design / ${fixedResidues} fixed · L=${totalResidues} aa`,
+          compiledSummary: {
+            taskMode: 'infill',
+            precision,
+            templateSource,
+            totalResidues,
+            designedResidues,
+            fixedResidues,
+            ...(rawMaskPositions ? { maskPositions: rawMaskPositions } : {}),
+            numSequences,
+            seed,
+          },
+          rawSpecText: JSON.stringify(
+            {
+              adapter: 'evodiff',
+              taskMode: 'infill',
+              precision,
+              templateSource,
+              totalResidues,
+              designedResidues,
+              fixedResidues,
+              maskPositions: rawMaskPositions || null,
+              numSequences,
+              seed,
+            },
+            null,
+            2,
+          ),
+        };
+      }
+    } else {
+      runRuntimeValidation();
+      const track = buildSyntheticDesignedChain('A', length, 0, 'scaffold', 'A');
+      chains = [track];
+      totalResidues = length;
+      designedResidues = length;
+      fixedResidues = 0;
+      estimatedTokens = length;
+      fastaEntries = [
+        {
+          id: 'evodiff-uncond',
+          header: `>EvoDiff-38M unconditional (${length} aa × ${numSequences} seq${numSequences === 1 ? '' : 's'})`,
+          sequence: track.sequence,
+          chainLengths: [length],
+          selected: true,
+        },
+      ];
+      payload = {
+        format: 'raw-input',
+        headline: `EvoDiff-38M (Unconditional) · L=${length} aa × ${numSequences} seq${numSequences === 1 ? '' : 's'}`,
+        compiledSummary: {
+          taskMode: 'unconditional',
+          precision,
+          length,
+          numSequences,
+          seed,
+        },
+        rawSpecText: JSON.stringify(
+          { adapter: 'evodiff', taskMode: 'unconditional', precision, length, numSequences, seed },
+          null,
+          2,
+        ),
+      };
+    }
+  } else if (node.adapterId === 'foldflow2') {
+    const length = Math.max(20, Math.min(256, Math.round(Number(node.params.length ?? 80))));
+    const steps = Math.max(5, Math.min(100, Math.round(Number(node.params.steps ?? 50))));
+    const rotationScaling = Math.max(1, Math.min(20, Number(node.params.rotationScaling ?? 10)));
+    const selfConditioning = node.params.selfConditioning !== false;
+    const precision = String(node.params.precision ?? 'int8').trim().toLowerCase() === 'fp16' ? 'fp16' : 'int8';
+    const numDesigns = Math.max(1, Math.min(6, Math.round(Number(node.params.numDesigns ?? 1))));
+    const seed = Math.round(Number(node.params.seed ?? 42));
+    const seqArt = resolvedInputs.sequences as SequenceSet | undefined;
+    const missingSeqUp = missingUpstreamByPort.get('sequences');
+
+    if (!seqArt && missingSeqUp) {
+      availability = 'pending-upstream';
+      missingUpstreamNodeIds = [missingSeqUp];
+      payload = {
+        format: 'raw-input',
+        headline: 'FoldFlow 2 (Sequence-Conditioned) · waiting for upstream sequence',
+        compiledSummary: {
+          mode: 'sequence-conditioned',
+          precision,
+          steps,
+          rotationScaling,
+          selfConditioning,
+          numDesigns,
+          seed,
+        },
+        rawSpecText: JSON.stringify(
+          { adapter: 'foldflow2', mode: 'sequence-conditioned', precision, steps, rotationScaling, selfConditioning, numDesigns, seed },
+          null,
+          2,
+        ),
+      };
+    } else if (seqArt && seqArt.candidates.length > 0) {
+      runRuntimeValidation();
+      const cand0 = seqArt.candidates[0];
+      const rawSeq = cand0.sequence.trim();
+      const rawHasColonOrSlash = rawSeq.includes(':') || rawSeq.includes('/');
+      const hasMultiChainLengths = Array.isArray(cand0.chainLengths) && cand0.chainLengths.length > 1;
+      const strippedChainBreaks = rawHasColonOrSlash || hasMultiChainLengths;
+      const condSeq = rawSeq.toUpperCase().replace(/[^A-Z]/g, '');
+
+      const residues: PreviewResidue[] = [];
+      for (let i = 0; i < condSeq.length; i++) {
+        const aa1 = condSeq[i];
+        residues.push({
+          flatIndex: i,
+          authChain: 'A',
+          authSeqId: i + 1,
+          insCode: '',
+          token: formatResidueToken('A', i + 1),
+          aa1,
+          resName: AA1_TO_AA3[aa1] ?? 'UNK',
+          roles: ['designable'],
+        });
+      }
+
+      chains = [
+        {
+          chainId: 'A',
+          entityKind: 'protein',
+          roleTag: 'scaffold',
+          sequence: condSeq,
+          residues,
+        },
+      ];
+      totalResidues = condSeq.length;
+      designedResidues = condSeq.length;
+      fixedResidues = 0;
+      estimatedTokens = condSeq.length;
+
+      fastaEntries = seqArt.candidates.map((cand, idx) => ({
+        id: cand.id,
+        header:
+          idx === 0
+            ? `>${cand.id} (${condSeq.length} aa conditioned${strippedChainBreaks ? ' · ":" chain breaks stripped' : ''})`
+            : `>${cand.id} (ignored)`,
+        sequence: idx === 0 ? condSeq : cand.sequence,
+        ...(idx === 0 ? { chainLengths: [condSeq.length] } : cand.chainLengths ? { chainLengths: cand.chainLengths } : {}),
+        selected: idx === 0,
+        ...(idx > 0 ? { scoreLabel: 'ignored (candidate 0 only)' } : {}),
+      }));
+
+      if (strippedChainBreaks && !issues.some((i) => i.message.includes('chain breaks'))) {
+        pushIssue({
+          severity: 'warning',
+          source: 'compiler',
+          message: `${nodeLabel} strips ":" chain breaks from multi-chain input "${cand0.id}" and collapses it into a single ${condSeq.length}-aa monomer chain.`,
+        });
+      }
+
+      payload = {
+        format: 'raw-input',
+        headline: `FoldFlow 2 (Sequence-Conditioned · ${condSeq.length} aa${strippedChainBreaks ? ' · ":" chain breaks stripped' : ''}) · ${steps} steps`,
+        compiledSummary: {
+          mode: 'sequence-conditioned',
+          precision,
+          conditionedCandidate: cand0.id,
+          conditionedLength: condSeq.length,
+          ...(strippedChainBreaks
+            ? {
+                strippedChainBreaks: true,
+                ...(hasMultiChainLengths ? { originalChainLengths: cand0.chainLengths!.map(String) } : {}),
+              }
+            : {}),
+          ...(seqArt.candidates.length > 1 ? { ignoredCandidates: seqArt.candidates.length - 1 } : {}),
+          steps,
+          rotationScaling,
+          selfConditioning,
+          numDesigns,
+          seed,
+        },
+        rawSpecText: JSON.stringify(
+          {
+            adapter: 'foldflow2',
+            mode: 'sequence-conditioned',
+            precision,
+            conditionedCandidate: cand0.id,
+            conditionedLength: condSeq.length,
+            strippedChainBreaks,
+            ...(hasMultiChainLengths ? { originalChainLengths: cand0.chainLengths } : {}),
+            ignoredCandidates: Math.max(0, seqArt.candidates.length - 1),
+            steps,
+            rotationScaling,
+            selfConditioning,
+            numDesigns,
+            seed,
+          },
+          null,
+          2,
+        ),
+      };
+    } else {
+      runRuntimeValidation();
+      const track = buildSyntheticDesignedChain('A', length, 0, 'scaffold', 'A');
+      chains = [track];
+      totalResidues = length;
+      designedResidues = length;
+      fixedResidues = 0;
+      estimatedTokens = length;
+      fastaEntries = [
+        {
+          id: 'foldflow2-uncond',
+          header: `>FoldFlow2_unconditional (${length} aa)`,
+          sequence: track.sequence,
+          chainLengths: [length],
+          selected: true,
+        },
+      ];
+      payload = {
+        format: 'raw-input',
+        headline: `FoldFlow 2 (Unconditional) · L=${length} aa (${steps} steps)`,
+        compiledSummary: {
+          mode: 'unconditional',
+          precision,
+          length,
+          steps,
+          rotationScaling,
+          selfConditioning,
+          numDesigns,
+          seed,
+        },
+        rawSpecText: JSON.stringify(
+          { adapter: 'foldflow2', mode: 'unconditional', precision, length, steps, rotationScaling, selfConditioning, numDesigns, seed },
+          null,
+          2,
+        ),
+      };
     }
   } else {
     const fallback = compileSchemaFallbackPreview({
