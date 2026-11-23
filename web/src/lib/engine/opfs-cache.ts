@@ -2,6 +2,26 @@
 // Runs in both Dedicated Web Workers (where OPFS is fastest) and main thread.
 
 import { ARTIFACT_DB_NAME, clearArtifactDatabase } from './artifact-store';
+import {
+  aggregatePluginCachePolicies,
+  isManagedCacheStorageName,
+} from '$lib/kernel/cache-manager';
+import type { PluginRegistry } from '$lib/kernel/plugin-registry';
+
+let activeCachePluginRegistry: PluginRegistry | null = null;
+
+/** Bind a Layer 1 PluginRegistry so static `plugin.cachePolicy` namespaces join cache stats & clearing. */
+export function setCachePluginRegistry(registry: PluginRegistry | null): void {
+  activeCachePluginRegistry = registry;
+}
+
+function resolveEffectiveCacheNamespaces() {
+  return aggregatePluginCachePolicies(activeCachePluginRegistry, {
+    cacheStorageNames: VENDOR_CACHE_NAMES,
+    cacheStoragePrefixes: VENDOR_CACHE_PREFIXES,
+    opfsDirs: OPFS_WEIGHT_DIRS,
+  });
+}
 
 const CACHE_NAME = 'denovo-run-weights-v1';
 const CACHE_PUT_TIMEOUT_MS = 5000;
@@ -322,11 +342,12 @@ export async function getCacheStats(): Promise<{
       /* ignore */
     }
   }
+  const namespaces = resolveEffectiveCacheNamespaces();
   const opfsFiles: Array<{ name: string; bytes: number }> = [];
   if (typeof navigator !== 'undefined' && navigator.storage?.getDirectory) {
     try {
       const root = await navigator.storage.getDirectory();
-      for (const dirName of OPFS_WEIGHT_DIRS) {
+      for (const dirName of namespaces.opfsDirs) {
         const dir = await root.getDirectoryHandle(dirName, { create: false }).catch(() => null);
         if (!dir) continue;
         try {
@@ -397,11 +418,12 @@ async function deleteIndexedDbSafe(dbName: string): Promise<void> {
 /** Clear all denovo.run OPFS, CacheStorage, and IndexedDB weight/artifact caches across all vendor models.
  *  Note: persistent weight caches are managed independently of ExecutionScheduler's in-memory result-cache byte budget. */
 export async function clearAllModelCaches(options?: { preserveCheckpoints?: boolean }): Promise<void> {
+  const namespaces = resolveEffectiveCacheNamespaces();
   if (typeof navigator !== 'undefined' && navigator.storage?.getDirectory) {
     try {
       const root = await navigator.storage.getDirectory();
       await Promise.all(
-        OPFS_WEIGHT_DIRS.map((dirName) =>
+        namespaces.opfsDirs.map((dirName) =>
           root.removeEntry(dirName, { recursive: true }).catch(() => {}),
         ),
       );
@@ -414,15 +436,16 @@ export async function clearAllModelCaches(options?: { preserveCheckpoints?: bool
       const keys = await caches.keys();
       await Promise.all(
         keys
-          .filter(
-            (k) =>
-              VENDOR_CACHE_NAMES.has(k) ||
-              VENDOR_CACHE_PREFIXES.some((prefix) => k.startsWith(prefix)),
-          )
+          .filter((k) => isManagedCacheStorageName(k, namespaces))
           .map((k) => caches.delete(k)),
       );
     } catch {
       /* ignore */
+    }
+  }
+  for (const { store } of namespaces.customStores) {
+    if (store.clear) {
+      await store.clear().catch(() => {});
     }
   }
 

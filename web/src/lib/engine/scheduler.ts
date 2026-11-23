@@ -52,6 +52,7 @@ import {
 } from './compare';
 import { sha256Hex, type CollectionMember } from './collections';
 import { planTopKFilter } from './work-plan';
+import type { PluginRegistry } from '$lib/kernel/plugin-registry';
 import type {
   ArtifactRef,
   CanonicalArtifact,
@@ -420,6 +421,8 @@ export interface ExecutionSchedulerOptions {
   checkpointStore?: CheckpointStorageAdapter;
   /** Idle delay (ms) after a run completes before auto-releasing the active GPU worker (default 60_000; 0 disables). */
   gpuIdleReleaseMs?: number;
+  /** Optional Layer 1 PluginRegistry for plugin-driven worker spawning, isolation keys, and cooperative abort. */
+  pluginRegistry?: PluginRegistry;
 }
 
 export interface RunResult {
@@ -893,8 +896,10 @@ export type FoldLimitResolver = (
 
 export class ExecutionScheduler {
   private activeGpu: ActiveGpuSlot | null = null;
+  private pluginRegistry: PluginRegistry | null = null;
   private remoteGpuExecutor: RemoteGpuExecutor | null = null;
   private foldLimitResolver: FoldLimitResolver | null = null;
+  private abortPendingPromise: Promise<void> | null = null;
   private gpuDisposalPromise: Promise<void> | null = null;
   private gpuIdleTimer: ReturnType<typeof setTimeout> | null = null;
   private gpuIdleReleaseMs: number;
@@ -942,10 +947,16 @@ export class ExecutionScheduler {
         ? Math.floor(opts.maxRunHistory)
         : DEFAULT_MAX_RUN_HISTORY;
     this.checkpointStore = opts.checkpointStore;
+    this.pluginRegistry = opts.pluginRegistry ?? null;
     this.gpuIdleReleaseMs =
       typeof opts.gpuIdleReleaseMs === 'number' && opts.gpuIdleReleaseMs >= 0
         ? opts.gpuIdleReleaseMs
         : DEFAULT_GPU_IDLE_RELEASE_MS;
+  }
+
+  /** Attach or replace the Layer 1 PluginRegistry used for dynamic worker spawning and cooperative abort. */
+  setPluginRegistry(registry: PluginRegistry | null): void {
+    this.pluginRegistry = registry;
   }
 
   private clearGpuIdleTimer(): void {
@@ -1314,9 +1325,64 @@ export class ExecutionScheduler {
   }
 
   private async waitForPendingGpuDisposal(): Promise<void> {
+    if (this.abortPendingPromise) {
+      await this.abortPendingPromise.catch(() => {});
+    }
     if (this.gpuDisposalPromise) {
       await this.gpuDisposalPromise;
     }
+  }
+
+  /**
+   * Two-phase cooperative abort with run-lease barrier:
+   * sends `{ id, type: 'abort' }`, awaits `{ id, type: 'aborted' }` for `graceMs` (>= 1500 ms),
+   * keeping the warm GPU worker alive on timely settlement or escalating to `releaseActiveGpuInternal()` on timeout.
+   */
+  private requestCooperativeAbort(slot: ActiveGpuSlot, graceMs: number): Promise<void> {
+    const effectiveGraceMs = Math.max(1500, Math.round(graceMs));
+    const prevAbort = this.abortPendingPromise;
+    const abortFlow = (async () => {
+      if (prevAbort) {
+        await prevAbort.catch(() => {});
+      }
+      const settled = await new Promise<boolean>((resolve) => {
+        const abortId = this.reqCounter++;
+        let done = false;
+        const finish = (ok: boolean) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          slot.worker.removeEventListener('message', onMsg);
+          slot.worker.removeEventListener('error', onErr);
+          resolve(ok);
+        };
+        const timer = setTimeout(() => finish(false), effectiveGraceMs);
+        const onMsg = (ev: MessageEvent) => {
+          if (ev.data?.id === abortId && ev.data?.type === 'aborted') {
+            finish(true);
+          }
+        };
+        const onErr = () => finish(false);
+        slot.worker.addEventListener('message', onMsg);
+        slot.worker.addEventListener('error', onErr);
+        try {
+          slot.worker.postMessage({ id: abortId, type: 'abort' });
+        } catch {
+          finish(false);
+        }
+      });
+
+      if (!settled && this.activeGpu === slot) {
+        await this.releaseActiveGpuInternal('Workflow run cancelled');
+      }
+    })();
+
+    this.abortPendingPromise = abortFlow.finally(() => {
+      if (this.abortPendingPromise === abortFlow) {
+        this.abortPendingPromise = null;
+      }
+    });
+    return this.abortPendingPromise;
   }
 
   private async releaseActiveGpuInternal(abortMessage?: string): Promise<void> {
@@ -1378,7 +1444,11 @@ export class ExecutionScheduler {
     await this.gpuDisposalPromise;
   }
 
-  private spawnWorker(adapterId: string): Worker {
+  private async spawnWorker(adapterId: string): Promise<Worker> {
+    const plugin = this.pluginRegistry?.getPlugin(adapterId);
+    if (plugin?.execution.createWorker) {
+      return await plugin.execution.createWorker();
+    }
     switch (adapterId) {
       case 'web-protein-mpnn':
         return new MpnnWorker();
@@ -1458,13 +1528,16 @@ export class ExecutionScheduler {
       throw new Error('Workflow run cancelled');
     }
 
-    // Never spawn or reuse a GPU worker while a prior worker disposal is still completing
+    // Never spawn or reuse a GPU worker while a prior cooperative abort or disposal is settling
     await this.waitForPendingGpuDisposal();
 
-    // LocalFold's ESMFold2 loader retains both bundles for the lifetime of its worker.
-    const isolatedCheckpoint = node.adapterId === 'localfold-af2'
-      ? LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === node.params.model && m.family === 'esmfold2')?.id
-      : undefined;
+    const plugin = this.pluginRegistry?.getPlugin(node.adapterId);
+    // Worker isolation key: plugin hook first, legacy LocalFold ESMFold2 fallback otherwise
+    const isolatedCheckpoint = plugin?.execution.getWorkerIsolationKey
+      ? plugin.execution.getWorkerIsolationKey(node.params)
+      : node.adapterId === 'localfold-af2'
+        ? LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === node.params.model && m.family === 'esmfold2')?.id
+        : undefined;
     if (this.activeGpu && (this.activeGpu.adapterId !== node.adapterId ||
         this.activeGpu.isolatedCheckpoint !== isolatedCheckpoint)) {
       onProgress({
@@ -1490,13 +1563,15 @@ export class ExecutionScheduler {
     });
 
     if (!this.activeGpu) {
-      const worker = this.spawnWorker(node.adapterId);
+      const worker = await this.spawnWorker(node.adapterId);
       this.activeGpu = { adapterId: node.adapterId, isolatedCheckpoint, worker };
     }
 
     const slot = this.activeGpu;
     const worker = slot.worker;
     const id = this.reqCounter++;
+    const supportsCooperativeAbort = Boolean(plugin?.execution.supportsCooperativeAbort);
+    const abortGraceMs = Math.max(1500, plugin?.execution.abortGraceMs ?? 1500);
 
     return await new Promise((resolve, reject) => {
       let settled = false;
@@ -1515,7 +1590,11 @@ export class ExecutionScheduler {
         reject(err);
       };
       const onAbortSignal = () => {
-        void this.releaseActiveGpuInternal('Workflow run cancelled');
+        if (supportsCooperativeAbort) {
+          void this.requestCooperativeAbort(slot, abortGraceMs);
+        } else {
+          void this.releaseActiveGpuInternal('Workflow run cancelled');
+        }
         abort(new Error('Workflow run cancelled'));
       };
       const onMessage = (ev: MessageEvent) => {
