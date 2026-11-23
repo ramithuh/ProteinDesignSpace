@@ -179,7 +179,7 @@ vi.mock('$lib/workers/rfd4.worker?worker', () => ({
     }
   },
 }));
-vi.mock('$lib/workers/mpnn.worker?worker', () => ({
+vi.mock('$lib/plugins/web-protein-mpnn/mpnn.worker?worker', () => ({
   default: class {
     constructor() {
       return new MockWorker();

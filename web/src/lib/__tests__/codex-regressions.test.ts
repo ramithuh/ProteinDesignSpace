@@ -161,7 +161,7 @@ describe('Codex computer-use regression suite', () => {
     expect(fastaSrc).toContain('localHoveredToken');
     expect(fastaSrc).toContain('residueByToken.get(localHoveredToken)');
 
-    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts'), 'utf8');
     expect(mpnnSrc).toContain('logSeverityLevel: 3');
     expect(mpnnSrc).toContain("logLevel = 'error'");
   });

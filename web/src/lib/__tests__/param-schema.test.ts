@@ -30,11 +30,17 @@ import type { AdapterManifest } from '../engine/types';
  */
 function extractWorkerRunParamKeys(workerRelPath: string): string[] {
   const src = readFileSync(resolve(process.cwd(), workerRelPath), 'utf8');
-  const runIdx = src.indexOf("msg.type === 'run'");
-  expect(runIdx, `Expected msg.type === 'run' handler in ${workerRelPath}`).toBeGreaterThan(-1);
+  let runIdx = src.indexOf("msg.type === 'run'");
+  if (runIdx === -1) {
+    runIdx = src.search(/\basync\s+run\s*\(/);
+  }
+  expect(
+    runIdx,
+    `Expected msg.type === 'run' or createWorkerHarness async run(ctx) handler in ${workerRelPath}`,
+  ).toBeGreaterThan(-1);
   const runSlice = src.slice(runIdx);
   const keys = new Set<string>();
-  for (const m of runSlice.matchAll(/\b(?:p|params|msg\.params)\??\.([A-Za-z_][A-Za-z0-9_]*)\b/g)) {
+  for (const m of runSlice.matchAll(/\b(?:p|params|msg\.params|ctx\.params)\??\.([A-Za-z_][A-Za-z0-9_]*)\b/g)) {
     keys.add(m[1]);
   }
   return [...keys].sort();
@@ -255,7 +261,7 @@ describe('declarative ParamSchema & modes single source of truth', () => {
     const WORKER_TARGETS: Array<{ adapterId: string; file: string; extraHelperKeys?: string[] }> = [
       { adapterId: 'rfd4-proteina', file: 'src/lib/workers/rfd4.worker.ts' },
       { adapterId: 'genie3', file: 'src/lib/workers/genie3.worker.ts' },
-      { adapterId: 'web-protein-mpnn', file: 'src/lib/workers/mpnn.worker.ts' },
+      { adapterId: 'web-protein-mpnn', file: 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts' },
       {
         adapterId: 'localfold-af2',
         file: 'src/lib/workers/localfold.worker.ts',

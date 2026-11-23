@@ -170,7 +170,7 @@ describe('Track A + B regressions (#32–#37, #58, catalog & UX)', () => {
     expect(ligandWorker).toContain('/vendor/ligandmpnn/cpu/index.js');
     expect(ligandWorker).toContain('createLigandMpnnCpuEngine');
 
-    const mpnnWorker = readFileSync(resolve(WEB_ROOT, 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    const mpnnWorker = readFileSync(resolve(WEB_ROOT, 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts'), 'utf8');
     expect(mpnnWorker).toContain("executeRun('wasm')");
     expect(mpnnWorker).toContain('isWebGpuDeviceLostError');
   });

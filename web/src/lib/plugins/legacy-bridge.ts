@@ -75,7 +75,6 @@ const LEGACY_CACHE_POLICIES: Readonly<Record<string, PluginCachePolicy>> = {
 };
 
 const LAZY_WORKER_LOADERS: Readonly<Record<string, () => Promise<Worker>>> = {
-  'web-protein-mpnn': async () => new (await import('$lib/workers/mpnn.worker?worker')).default(),
   'localfold-af2': async () => new (await import('$lib/workers/localfold.worker?worker')).default(),
   'rfd4-proteina': async () => new (await import('$lib/workers/rfd4.worker?worker')).default(),
   genie3: async () => new (await import('$lib/workers/genie3.worker?worker')).default(),

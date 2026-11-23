@@ -156,7 +156,7 @@ function makeStructureArtifact(
 
 describe('Single-source-of-truth worker import guards', () => {
   it('mpnn.worker.ts imports directly from mpnn-spec and has zero duplicated parser/lock functions', () => {
-    const src = readFileSync(resolve(process.cwd(), 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    const src = readFileSync(resolve(process.cwd(), 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts'), 'utf8');
     expect(src).toMatch(/from\s+['"]\$lib\/engine\/mpnn-spec['"]/);
     expect(src).toContain('compileMpnnInputSpec');
     expect(src).toContain('applyBackboneNoise');

@@ -214,7 +214,7 @@ describe('parameter validation & numeric sanitization', () => {
   });
 
   it('mpnn.worker.ts supports whole-chain locking, designChains, inherited locks, omitAminoAcids, tiedPositions, and aligned bounds', () => {
-    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts'), 'utf8');
     expect(mpnnSrc).toContain('parseFixedPositionsAndChains');
     expect(mpnnSrc).toContain('structure.lockedChains');
     expect(mpnnSrc).toContain('structure.fixedResidueIndices');
@@ -553,7 +553,7 @@ describe('parameter validation & numeric sanitization', () => {
     expect(genie3Src).toContain('...(lockedChains ? { lockedChains } : {})');
     expect(genie3Src).toContain('...(chainRoles ? { chainRoles } : {})');
 
-    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts'), 'utf8');
     expect(mpnnSrc).toContain('propagatedLockedChains');
     expect(mpnnSrc).toContain('structure.chainRoles');
   });

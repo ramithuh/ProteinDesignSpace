@@ -2,7 +2,7 @@
 // Handles topological execution, content-addressed memoization, Single-Active-GPU-Worker
 // VRAM mutex (dispose -> terminate), CPU nodes, and WebMCP / window.__denovo hooks.
 
-import MpnnWorker from '$lib/workers/mpnn.worker?worker';
+import MpnnWorker from '$lib/plugins/web-protein-mpnn/mpnn.worker?worker';
 import LocalFoldWorker from '$lib/workers/localfold.worker?worker';
 import Rfd4Worker from '$lib/workers/rfd4.worker?worker';
 import Genie3Worker from '$lib/workers/genie3.worker?worker';

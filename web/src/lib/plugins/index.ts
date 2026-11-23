@@ -9,6 +9,7 @@ import { sequenceInputPlugin } from './sequence-input';
 import { topKFilterPlugin } from './top-k-filter';
 import { structureComparePlugin } from './structure-compare';
 import { designabilityScorerPlugin } from './designability-scorer';
+import { webProteinMpnnPlugin } from './web-protein-mpnn';
 
 /**
  * Native Layer 3 ModelPlugins extracted out of legacy switches (populated across Phase 3 Batches 3A-3F).
@@ -20,6 +21,8 @@ export const NATIVE_PLUGINS: readonly ModelPlugin[] = [
   topKFilterPlugin,
   structureComparePlugin,
   designabilityScorerPlugin,
+  // Batch 3B: ort-webgpu (1/1)
+  webProteinMpnnPlugin,
 ];
 
 /**
