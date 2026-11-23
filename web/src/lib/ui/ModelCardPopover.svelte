@@ -12,9 +12,27 @@
     params?: Record<string, unknown>;
     cardId?: string;
     compact?: boolean;
+    iconOnly?: boolean;
   }
 
-  let { adapterId, params = undefined, cardId = undefined, compact = false }: Props = $props();
+  let {
+    adapterId,
+    params = undefined,
+    cardId = undefined,
+    compact = false,
+    iconOnly = false,
+  }: Props = $props();
+
+  function portalToBody(node: HTMLElement) {
+    if (typeof document !== 'undefined' && document.body && node.parentElement !== document.body) {
+      document.body.appendChild(node);
+    }
+    return {
+      destroy() {
+        node.remove();
+      },
+    };
+  }
 
   let open = $state(false);
   let closeBtn = $state<HTMLButtonElement | null>(null);
@@ -67,36 +85,65 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if card && activePrecision}
-  <button
-    type="button"
-    class="mc-pill"
-    class:mc-pill-compact={compact}
-    class:mc-pill-hosted={card.status === 'weights-hosted'}
-    aria-haspopup="dialog"
-    aria-expanded={open}
-    title={`${card.displayName} · ${activePrecision.label} (${formatSizeMB(activePrecision.approxSizeMB)}) — Inspect precision, measured PyTorch FP32 parity & provenance`}
-    onclick={openModal}
-  >
-    <span class="mc-pill-dot" aria-hidden="true"></span>
-    <span class="mc-pill-text">{pillLabel}</span>
-    <svg
-      class="mc-pill-icon"
-      viewBox="0 0 16 16"
-      width="11"
-      height="11"
-      fill="none"
-      aria-hidden="true"
+  {#if iconOnly}
+    <button
+      type="button"
+      class="mc-icon-btn nodrag nopan"
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      aria-label={`${card.displayName} model & parity card`}
+      title={`${card.displayName} · ${activePrecision.label} (${formatSizeMB(activePrecision.approxSizeMB)}) — Inspect precision, measured PyTorch FP32 parity & provenance`}
+      onpointerdown={(ev) => ev.stopPropagation()}
+      onmousedown={(ev) => ev.stopPropagation()}
+      onclick={openModal}
     >
-      <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.35" />
-      <path d="M8 7.2v3.7" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" />
-      <circle cx="8" cy="4.8" r="0.8" fill="currentColor" />
-    </svg>
-  </button>
+      <svg
+        class="mc-pill-icon"
+        viewBox="0 0 16 16"
+        width="12"
+        height="12"
+        fill="none"
+        aria-hidden="true"
+      >
+        <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.4" />
+        <path d="M8 7.2v3.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+        <circle cx="8" cy="4.8" r="0.85" fill="currentColor" />
+      </svg>
+    </button>
+  {:else}
+    <button
+      type="button"
+      class="mc-pill"
+      class:mc-pill-compact={compact}
+      class:mc-pill-hosted={card.status === 'weights-hosted'}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      title={`${card.displayName} · ${activePrecision.label} (${formatSizeMB(activePrecision.approxSizeMB)}) — Inspect precision, measured PyTorch FP32 parity & provenance`}
+      onclick={openModal}
+    >
+      <span class="mc-pill-dot" aria-hidden="true"></span>
+      <span class="mc-pill-text">{pillLabel}</span>
+      <svg
+        class="mc-pill-icon"
+        viewBox="0 0 16 16"
+        width="11"
+        height="11"
+        fill="none"
+        aria-hidden="true"
+      >
+        <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.35" />
+        <path d="M8 7.2v3.7" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" />
+        <circle cx="8" cy="4.8" r="0.8" fill="currentColor" />
+      </svg>
+    </button>
+  {/if}
 
   {#if open}
     <div
+      use:portalToBody
       class="mc-backdrop"
       role="presentation"
+      onpointerdown={(ev) => ev.stopPropagation()}
       onclick={(ev) => {
         ev.stopPropagation();
         if (ev.target === ev.currentTarget) closeModal();
@@ -330,6 +377,39 @@
     display: block;
     opacity: 0.72;
     flex-shrink: 0;
+  }
+
+  .mc-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+
+  .mc-icon-btn .mc-pill-icon {
+    opacity: 0.78;
+  }
+
+  .mc-icon-btn:hover,
+  .mc-icon-btn:focus-visible {
+    background: var(--bg-pill);
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    color: var(--accent-bright);
+    outline: none;
+  }
+
+  .mc-icon-btn:hover .mc-pill-icon,
+  .mc-icon-btn:focus-visible .mc-pill-icon {
+    opacity: 1;
   }
 
   .mc-notes {

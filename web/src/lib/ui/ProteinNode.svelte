@@ -13,6 +13,7 @@
     formatNodeParamSummary,
     type UpstreamLockSummary,
   } from './node-display-helpers';
+  import ModelCardPopover from './ModelCardPopover.svelte';
 
   export interface ProteinNodeData {
     adapterId: string;
@@ -67,6 +68,10 @@
               ?.needsEncoder,
           ));
       return (manifest?.approxWeightsMB ?? 330) + (needsEnc ? 138 : 0);
+    }
+    const precKey = String(data.params?.precision ?? '').trim().toLowerCase();
+    if (precKey && manifest?.precisionWeightsMB && precKey in manifest.precisionWeightsMB) {
+      return manifest.precisionWeightsMB[precKey];
     }
     return manifest?.approxWeightsMB ?? 0;
   });
@@ -320,38 +325,50 @@
     {:else if st?.status === 'error'}
       <div class="status-line err-text" title={st.error}>{st.error ?? 'Error'}</div>
     {:else if outputBadge}
-      <button
-        type="button"
-        class="status-line ok-text probe-footer-btn"
-        title={primaryOutputInfo?.is3D
-          ? 'Click to probe & view this 3D structure in the viewport'
-          : 'Click to inspect this block’s output'}
-        onclick={(e) => {
-          e.stopPropagation();
-          if (primaryOutputInfo) {
-            data.onPeekPort?.(id, 'out', primaryOutputInfo.portName);
-          }
-        }}
-      >
-        <span class="probe-badge-text">
-          {#if st?.status === 'cached'}<span class="cache-tag">CACHED</span>{/if}
-          {outputBadge}
-        </span>
-        <span class="probe-pill" aria-hidden="true">
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-            <path d="M1.5 8C3 4.8 5.3 3.2 8 3.2C10.7 3.2 13 4.8 14.5 8C13 11.2 10.7 12.8 8 12.8C5.3 12.8 3 11.2 1.5 8Z" stroke="currentColor" stroke-width="1.5"/>
-            <circle cx="8" cy="8" r="2.2" fill="currentColor"/>
-          </svg>
-          {primaryOutputInfo?.is3D ? '3D' : 'Peek'}
-        </span>
-      </button>
+      <div class="footer-done-row">
+        <ModelCardPopover adapterId={data.adapterId} params={data.params} iconOnly />
+        <button
+          type="button"
+          class="status-line ok-text probe-footer-btn"
+          title={primaryOutputInfo?.is3D
+            ? 'Click to probe & view this 3D structure in the viewport'
+            : 'Click to inspect this block’s output'}
+          onclick={(e) => {
+            e.stopPropagation();
+            if (primaryOutputInfo) {
+              data.onPeekPort?.(id, 'out', primaryOutputInfo.portName);
+            }
+          }}
+        >
+          <span class="probe-badge-text">
+            {#if st?.status === 'cached'}<span class="cache-tag">CACHED</span>{/if}
+            {outputBadge}
+          </span>
+          <span class="probe-pill" aria-hidden="true">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+              <path d="M1.5 8C3 4.8 5.3 3.2 8 3.2C10.7 3.2 13 4.8 14.5 8C13 11.2 10.7 12.8 8 12.8C5.3 12.8 3 11.2 1.5 8Z" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="8" cy="8" r="2.2" fill="currentColor"/>
+            </svg>
+            {primaryOutputInfo?.is3D ? '3D' : 'Peek'}
+          </span>
+        </button>
+      </div>
     {:else if isNodeQueued}
-      <div class="status-line queued-text">queued…</div>
+      <div class="footer-idle-row">
+        <span class="status-line queued-text">queued…</span>
+        <ModelCardPopover adapterId={data.adapterId} params={data.params} iconOnly />
+      </div>
     {:else if st?.status === 'idle' && st?.detail === 'Cancelled'}
-      <div class="status-line muted">Cancelled</div>
+      <div class="footer-idle-row">
+        <span class="status-line muted">Cancelled</span>
+        <ModelCardPopover adapterId={data.adapterId} params={data.params} iconOnly />
+      </div>
     {:else}
-      <div class="status-line muted">
-        {activeWeightsMB > 0 ? `~${activeWeightsMB} MB` : 'ready'}
+      <div class="footer-idle-row">
+        <span class="status-line muted">
+          {activeWeightsMB > 0 ? `~${activeWeightsMB} MB` : 'ready'}
+        </span>
+        <ModelCardPopover adapterId={data.adapterId} params={data.params} iconOnly />
       </div>
     {/if}
   </div>
@@ -800,6 +817,22 @@
   }
   .footer {
     padding: 6px 10px 7px;
+  }
+  .footer-idle-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+  }
+  .footer-done-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+  }
+  .footer-done-row .probe-footer-btn {
+    flex: 1;
+    min-width: 0;
   }
   .status-line {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
