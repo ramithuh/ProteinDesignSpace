@@ -5,7 +5,10 @@
 
 import { parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
+import { evaluateProteinOnlyStructurePolicy } from '$lib/protein-ops/hetatm-policy';
+import { getBenchmarkById } from '$lib/engine/benchmarks';
 import {
+  buildMotifLineage,
   resolveGenie3CompiledInput,
   resolveGenie3PolyAlaSequence,
 } from '$lib/engine/conditioning';
@@ -195,18 +198,24 @@ self.onmessage = async (ev: MessageEvent) => {
           `Genie 3 "${taskMode}" mode requires a wired structure input (e.g. from PDB Input).`,
         );
       }
-      if (
-        template &&
-        (taskMode !== 'unconditional' || !condArtifact) &&
-        (template.diagnostics?.hasLigands || template.diagnostics?.hasNucleicAcids)
-      ) {
-        const extras = [
-          ...(template.diagnostics.hasLigands ? [`ligands (${template.diagnostics.ligandNames.join(', ')})`] : []),
-          ...(template.diagnostics.hasNucleicAcids ? [`nucleic acid chains (${template.diagnostics.nucleicAcidChains.join(', ')})`] : []),
-        ];
-        throw new Error(
-          `Genie 3 is a protein-only Cα backbone diffusion model and cannot condition on ${extras.join(' and ')}. Use RFD4-Proteina for all-atom ligand/DNA conditioning.`,
-        );
+      if (template && (taskMode !== 'unconditional' || !condArtifact)) {
+        const bench = template.benchmarkId ? getBenchmarkById(template.benchmarkId) : undefined;
+        const inferredPdbId =
+          bench?.pdbId ??
+          (/\b([0-9][A-Za-z0-9]{3})\b/.exec(template.label ?? '')?.[1]?.toUpperCase() || undefined);
+        const policy = evaluateProteinOnlyStructurePolicy({
+          modelName: 'Genie 3',
+          benchmark: bench,
+          pdbId: inferredPdbId,
+          proteinResidueCount: template.length,
+          ligandNames: template.diagnostics?.ligandNames,
+          nucleicAcidChains: template.diagnostics?.nucleicAcidChains,
+          hasLigands: template.diagnostics?.hasLigands,
+          hasNucleicAcids: template.diagnostics?.hasNucleicAcids,
+        });
+        if (policy.action === 'hard-block') {
+          throw new Error(policy.message);
+        }
       }
 
       // Compile conditioning spec via single-source-of-truth resolver BEFORE downloading 45 MB weights
@@ -350,24 +359,19 @@ self.onmessage = async (ev: MessageEvent) => {
           chainRoles = { A: 'scaffold' };
           const fixed1Based: number[] = [];
           const motif0Based: number[] = [];
-          const nativeCoords: number[][] = [];
           for (let i = 0; i < compiledSpec.length; i++) {
             if (compiledSpec.condStructMask[i] > 0.5 || compiledSpec.condSeqMask[i] > 0.5) {
               fixed1Based.push(i + 1);
               if (compiledSpec.condStructMask[i] > 0.5) {
                 motif0Based.push(i);
-                nativeCoords.push([
-                  compiledSpec.gtAtomPositions[i * 3 + 0],
-                  compiledSpec.gtAtomPositions[i * 3 + 1],
-                  compiledSpec.gtAtomPositions[i * 3 + 2],
-                ]);
               }
             }
           }
           if (fixed1Based.length > 0) fixedResidueIndices = fixed1Based;
           if (motif0Based.length > 0) {
-            motifIndices = motif0Based;
-            nativeMotifCoords = nativeCoords;
+            const lineage = buildMotifLineage(motif0Based, motif0Based, compiledSpec.gtAtomPositions);
+            motifIndices = lineage.motifIndices;
+            nativeMotifCoords = lineage.nativeMotifCoords;
           }
         } else {
           chainRoles = { A: 'scaffold' };

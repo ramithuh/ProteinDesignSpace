@@ -4,6 +4,7 @@
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
 import { makeSequenceKey } from '$lib/engine/collections';
+import { buildMotifLineage } from '$lib/engine/conditioning';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type {
@@ -18,6 +19,7 @@ const DEFAULT_BASE_URL = 'https://huggingface.co/ramithuh/protpardelle-webgpu/re
 
 type Precision = 'int8' | 'fp16';
 type TaskMode = 'unconditional' | 'motif' | 'partial';
+type MotifGuidance = 'replacement' | 'replacement+reconstruction' | 'crop-only';
 
 const VALID_CHECKPOINTS = new Set([
   'cc91_epoch383',
@@ -74,6 +76,12 @@ function normalizeTaskMode(raw: unknown): TaskMode {
   const val = String(raw ?? 'unconditional').trim().toLowerCase();
   if (val === 'motif' || val === 'partial') return val;
   return 'unconditional';
+}
+
+function normalizeMotifGuidance(raw: unknown): MotifGuidance {
+  const val = String(raw ?? 'replacement').trim().toLowerCase();
+  if (val === 'replacement+reconstruction' || val === 'crop-only') return val;
+  return 'replacement';
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -248,6 +256,7 @@ self.onmessage = async (ev: MessageEvent) => {
       const numSteps = Math.max(20, Math.min(500, Math.round(Number(p.numSteps ?? 100))));
       const sidechainMode = Boolean(p.sidechainMode ?? true) && ALLATOM_CHECKPOINTS.has(checkpoint);
       const motifSelection = String(p.motifSelection ?? '').trim();
+      const motifGuidance = normalizeMotifGuidance(p.motifGuidance);
       const rewindSteps = Math.max(5, Math.min(numSteps - 1, Math.round(Number(p.rewindSteps ?? 40))));
       const stepScale = Math.max(0.5, Math.min(2.0, Number(p.stepScale ?? 1.2)));
       const temperature = Math.max(0.05, Math.min(2.0, Number(p.temperature ?? 0.1)));
@@ -319,6 +328,7 @@ self.onmessage = async (ev: MessageEvent) => {
           numSteps,
           sidechainMode,
           motifSelection,
+          motifGuidance: taskMode === 'motif' ? motifGuidance : null,
           rewindSteps,
           stepScale,
           temperature,
@@ -328,25 +338,16 @@ self.onmessage = async (ev: MessageEvent) => {
       );
 
       const effectiveStepsRun = taskMode === 'partial' ? Math.min(numSteps, rewindSteps) : numSteps;
-      const motifOneBased =
+      const motifLineage =
         taskMode === 'motif' && targetIndices.length > 0
-          ? targetIndices.map((idx) => idx + 1)
+          ? buildMotifLineage(
+              targetIndices,
+              sourceIndices,
+              upstreamStruct && upstreamStruct.caCoords?.length >= upstreamStruct.length * 3
+                ? upstreamStruct.caCoords
+                : undefined,
+            )
           : undefined;
-      let nativeMotifCoords: number[][] | undefined;
-      if (taskMode === 'motif' && upstreamStruct && sourceIndices.length > 0) {
-        const upCa = upstreamStruct.caCoords;
-        if (upCa && upCa.length >= upstreamStruct.length * 3) {
-          nativeMotifCoords = [];
-          for (let k = 0; k < sourceIndices.length; k++) {
-            const sIdx = sourceIndices[k];
-            nativeMotifCoords.push([
-              upCa[sIdx * 3] ?? 0,
-              upCa[sIdx * 3 + 1] ?? 0,
-              upCa[sIdx * 3 + 2] ?? 0,
-            ]);
-          }
-        }
-      }
 
       try {
         for (let d = 0; d < numDesigns; d++) {
@@ -373,6 +374,11 @@ self.onmessage = async (ev: MessageEvent) => {
                       : sidechainMode
                         ? 'backbone-sidechain'
                         : 'backbone',
+                  },
+                  conditioning: {
+                    crop: true,
+                    replacement: motifGuidance !== 'crop-only',
+                    reconstruction: motifGuidance === 'replacement+reconstruction',
                   },
                 }
               : {}),
@@ -458,8 +464,15 @@ self.onmessage = async (ev: MessageEvent) => {
             observedBackboneMask: parsed.observedBackboneMask,
             atomGranularity: sidechainMode ? 'all-atom' : 'backbone4',
             bfactorSemantics: 'none',
-            ...(motifOneBased ? { fixedResidueIndices: motifOneBased, motifIndices: motifOneBased } : {}),
-            ...(nativeMotifCoords ? { nativeMotifCoords: nativeMotifCoords.map((c) => [...c]) } : {}),
+            ...(motifLineage && motifLineage.motifIndices.length > 0
+              ? {
+                  fixedResidueIndices: motifLineage.fixedResidueIndices,
+                  motifIndices: motifLineage.motifIndices,
+                }
+              : {}),
+            ...(motifLineage?.nativeMotifCoords
+              ? { nativeMotifCoords: motifLineage.nativeMotifCoords.map((c) => [...c]) }
+              : {}),
             diagnostics: parsed.diagnostics,
             geometry,
             designKey,

@@ -6,7 +6,10 @@
 
 import { atom37ToPdb, chainIdsFromLengths, parsePdbBackbone } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
-import { normalizeLocalFoldChainScores } from '$lib/engine/conditioning';
+import {
+  normalizeLocalFoldChainScores,
+  resolveLocalFoldEffectiveConfig,
+} from '$lib/engine/conditioning';
 import { esmfold2Chains, esmfold2ParamIssue } from '$lib/engine/localfold-esmfold2';
 import { computeCandidateIpsae, loadEsmfold2 } from './localfold-esmfold2';
 import { selectFoldWorkItems } from '$lib/engine/bio-capabilities';
@@ -455,22 +458,38 @@ self.onmessage = async (ev: MessageEvent) => {
 
       const p = msg.params ?? {};
       const modelKey = String(p.model ?? 'monomer');
-      const isAf2Mono = AF2_MODELS.has(modelKey);
-      const isAf2Multi = AF2_MULTIMER_MODELS.has(modelKey);
-      const isAf3 = AF3_MODELS.has(modelKey);
-      const isEsmfold2 = ESMFOLD2_MODELS.has(modelKey);
+      const baseConfig = resolveLocalFoldEffectiveConfig({
+        modelKey,
+        params: {
+          model: p.model,
+          recycles: p.recycles,
+          tolerance: p.tolerance,
+          diffusionSteps: p.diffusionSteps,
+          msaMode: p.msaMode,
+          msaA3mText: p.msaA3mText,
+          ligandCcdCodes: p.ligandCcdCodes,
+          dnaSequences: p.dnaSequences,
+          rnaSequences: p.rnaSequences,
+          esmfold2Steps: p.esmfold2Steps,
+        },
+      });
+      const {
+        isAf2Mono,
+        isAf2Multi,
+        isAf3,
+        isEsmfold2,
+        diffusionSteps,
+        msaMode,
+        msaA3mText,
+        ligandCcdCodes,
+        dnaSeqs,
+        rnaSeqs,
+      } = baseConfig;
+      const recycles = clampLocalFoldRecycles(modelKey, baseConfig.recycles, 1);
+      const tolerance = resolveAf2Tolerance(modelKey, baseConfig.tolerance);
       if (!isAf2Mono && !isAf2Multi && !isAf3 && !isEsmfold2) {
         throw new Error(`Unsupported LocalFold model "${modelKey}"`);
       }
-      const recycles = clampLocalFoldRecycles(modelKey, p.recycles, 1);
-      const tolerance = resolveAf2Tolerance(modelKey, p.tolerance);
-      const diffusionSteps = Math.max(10, Math.min(200, Math.round(Number(p.diffusionSteps ?? 25))));
-      const rawMsaMode = String(p.msaMode ?? 'single').trim();
-      const msaMode: MsaMode =
-        rawMsaMode === 'mmseqs2' || rawMsaMode === 'target-only' || rawMsaMode === 'a3m'
-          ? rawMsaMode
-          : 'single';
-      const msaA3mText = typeof p.msaA3mText === 'string' ? p.msaA3mText : '';
       const lockedChains: string[] | undefined = Array.isArray(seqSet.lockedChains)
         ? seqSet.lockedChains
         : Array.isArray(p.lockedChains)
@@ -488,26 +507,7 @@ self.onmessage = async (ev: MessageEvent) => {
         ? Math.max(1, Math.min(64, Math.round(rawMaxTotalFolds)))
         : 16;
       const seed = Number(p.seed ?? 0);
-      const ligandCcdCodes: string[] = Array.isArray(p.ligandCcdCodes)
-        ? (p.ligandCcdCodes as string[]).map((s) => String(s).trim().toUpperCase()).filter(Boolean)
-        : String(p.ligandCcdCodes ?? '')
-            .split(/[,\s]+/)
-            .map((s) => s.trim().toUpperCase())
-            .filter(Boolean);
-      const dnaSeqs: string[] = Array.isArray(p.dnaSequences)
-        ? (p.dnaSequences as string[]).map((s) => String(s).replace(/[^ACGT]/gi, '').toUpperCase()).filter(Boolean)
-        : String(p.dnaSequences ?? '')
-            .split(/[:,;\s]+/)
-            .map((s) => s.replace(/[^ACGT]/gi, '').toUpperCase())
-            .filter(Boolean);
-      const rnaSeqs: string[] = Array.isArray(p.rnaSequences)
-        ? (p.rnaSequences as string[]).map((s) => String(s).replace(/[^ACGU]/gi, '').toUpperCase()).filter(Boolean)
-        : String(p.rnaSequences ?? '')
-            .split(/[:,;\s]+/)
-            .map((s) => s.replace(/[^ACGU]/gi, '').toUpperCase())
-            .filter(Boolean);
 
-      const esmfold2Steps = Number(p.esmfold2Steps ?? 15);
       if (isEsmfold2) {
         const issue = esmfold2ParamIssue(p);
         if (issue) throw new Error(issue);
@@ -632,6 +632,17 @@ self.onmessage = async (ev: MessageEvent) => {
       }
 
       const ef2Chains = isEsmfold2 ? targets.map(({ cand }) => esmfold2Chains(cand)) : [];
+      const maxEf2ResidueLength = isEsmfold2
+        ? ef2Chains.reduce((mx, chs) => Math.max(mx, chs.join('').length), 0)
+        : 0;
+      const effectiveConfig = isEsmfold2
+        ? resolveLocalFoldEffectiveConfig({
+            modelKey,
+            params: p,
+            maxResidueLength: maxEf2ResidueLength,
+          })
+        : baseConfig;
+      const effectiveEsmfold2Steps = effectiveConfig.effectiveEsmfold2Steps;
       await ensureModelLoaded(msg.id, modelKey);
       const folds: FoldedCandidate[] = [];
       const sourceStructureId = seqSet.sourceStructureId ?? seqSet.parentStructureId;
@@ -678,7 +689,7 @@ self.onmessage = async (ev: MessageEvent) => {
             const result = await predictEsmfold2(
               gpuDevice,
               ef2Chains[i],
-              esmfold2Steps,
+              effectiveEsmfold2Steps,
               target.seed,
               controller.signal,
               (progress, stage) => self.postMessage({
@@ -1149,7 +1160,7 @@ self.onmessage = async (ev: MessageEvent) => {
           seqSetId: seqSet.id,
           modelKey,
           recycles: isEsmfold2 ? null : recycles,
-          ...(isEsmfold2 ? { esmfold2Steps } : {}),
+          ...(isEsmfold2 ? { esmfold2Steps: effectiveEsmfold2Steps } : {}),
           tolerance: isAf3 || isEsmfold2 ? null : tolerance,
           diffusionSteps: isAf3 ? diffusionSteps : null,
           maxSequences: maxSeqs,
@@ -1179,7 +1190,7 @@ self.onmessage = async (ev: MessageEvent) => {
 
       const out: FoldedStructure = {
         kind: 'FoldedStructure',
-        id: `folds-${modelKey}-${seqSet.id}-${isEsmfold2 ? `d${esmfold2Steps}` : `r${recycles}`}-${runHash}`,
+        id: `folds-${modelKey}-${seqSet.id}-${isEsmfold2 ? `d${effectiveEsmfold2Steps}` : `r${recycles}`}-${runHash}`,
         parentStructureId: seqSet.parentStructureId,
         sourceStructureId,
         collectionKind,

@@ -885,6 +885,21 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Comma-separated residue spans from the connected structure to scaffold.',
       },
       {
+        key: 'motifGuidance',
+        label: 'Motif guidance',
+        kind: 'select',
+        tier: 'advanced',
+        defaultValue: 'replacement',
+        modes: ['motif'],
+        options: [
+          { value: 'replacement', label: 'Crop + Replacement (default)' },
+          { value: 'replacement+reconstruction', label: 'Crop + Replacement + Reconstruction' },
+          { value: 'crop-only', label: 'Crop Conditioning Only' },
+        ],
+        description:
+          'Motif conditioning guidance strategy during EDM sampling (replacement enforces motif coordinates; reconstruction adds gradient guidance).',
+      },
+      {
         key: 'rewindSteps',
         label: 'Rewind steps',
         kind: 'integer',
