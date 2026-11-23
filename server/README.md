@@ -1,6 +1,6 @@
 # Self-Hosted WebGPU Server for `denovo.run` (Zero Python)
 
-Run **all 21 WebGPU models** (AlphaFold 3, Boltz-2, Protenix, RFD4, Genie 3, GNINA 1.3, ProteinMPNN, LigandMPNN, etc.) on a **remote GPU workstation or cluster** (RTX 5090, DGX Spark, HPC node) with **zero Python, zero `uv`/conda, and zero CUDA wheel conflicts**.
+Run every WebGPU model in `denovo.run` on a **remote GPU workstation or cluster** (RTX 5090, DGX Spark, HPC node) with **zero Python, zero `uv`/conda, and zero CUDA wheel conflicts**.
 
 > **Do I need this on my own laptop?** No — if you're using Chrome/Edge on a Mac or PC with a GPU, just open [`https://denovo.run`](https://denovo.run) directly in **WebGPU (this computer)** mode. Self-hosting is for offloading heavy jobs (and >512 aa folds) to a **remote GPU**, or using a browser without hardware WebGPU.
 

@@ -57,7 +57,7 @@ Model weights are **never** bundled in `web/build/` — sharded safetensors stre
 
 ## Self-Host on Your Own GPU (Zero Python)
 
-Want to offload heavy GPU models (AlphaFold 3, Boltz-2, Protenix, RFD4, BoltzGen, etc.) and >512 aa folds to a **remote workstation or cluster GPU** (RTX 5090, DGX Spark, HPC node) while keeping the UI, CPU blocks, and 3D Mol\* viewer fast in your laptop browser? Clone and run the zero-Python WebGPU host server on the GPU machine:
+Want to offload heavy GPU models and large folds (>512 aa) to a **remote workstation or cluster GPU** (RTX 5090, DGX Spark, HPC node) while keeping the UI, CPU blocks, and 3D Mol\* viewer fast in your laptop browser? Clone and run the zero-Python WebGPU host server on the GPU machine:
 
 ```bash
 # On the GPU machine (Node.js 22+)
