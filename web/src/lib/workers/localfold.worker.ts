@@ -631,7 +631,12 @@ self.onmessage = async (ev: MessageEvent) => {
         });
       }
 
-      const ef2Chains = isEsmfold2 ? targets.map(({ cand }) => esmfold2Chains(cand)) : [];
+      const rawMaxFoldResidues = Number((msg as { maxFoldResidues?: unknown }).maxFoldResidues);
+      const maxFoldResidues =
+        Number.isFinite(rawMaxFoldResidues) && rawMaxFoldResidues >= 512
+          ? Math.round(rawMaxFoldResidues)
+          : 512;
+      const ef2Chains = isEsmfold2 ? targets.map(({ cand }) => esmfold2Chains(cand, maxFoldResidues)) : [];
       const maxEf2ResidueLength = isEsmfold2
         ? ef2Chains.reduce((mx, chs) => Math.max(mx, chs.join('').length), 0)
         : 0;

@@ -3,12 +3,20 @@ import { decodeWireValue, encodeWireValue } from '$lib/engine/remote-codec';
 import {
   defaultComputeBackendConfig,
   estimateNodeActiveWeightsMB,
+  resolveNodeFoldLimitOptions,
   runNodeOnRemoteServer,
   shouldRouteNodeToRemote,
   type ComputeBackendConfig,
 } from '$lib/engine/compute-backend';
+import { validateBioCapabilities, validateRuntimeNodeInputs } from '$lib/engine/bio-capabilities';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
-import type { CanonicalArtifact, StructureArtifact, WorkflowNode } from '$lib/engine/types';
+import type {
+  CanonicalArtifact,
+  SequenceSet,
+  StructureArtifact,
+  WorkflowGraph,
+  WorkflowNode,
+} from '$lib/engine/types';
 
 describe('self-hosted remote WebGPU backend', () => {
   it('round-trips TypedArrays (Float32Array, Uint8Array) and special numbers cleanly over JSON wire', () => {
@@ -124,5 +132,74 @@ describe('self-hosted remote WebGPU backend', () => {
     expect(outStruct.caCoords).toBeInstanceOf(Float32Array);
     expect(Array.from(outStruct.caCoords)).toEqual([1, 2, 3]);
     expect(res.elapsedMs).toBe(1234);
+  });
+
+  it('unlocks >512 aa AF3 complexes (Issue #90: 588 aa 1CTT homodimer) via Host GPU auto ceiling or Settings override', () => {
+    const dimerSeq = 'A'.repeat(294) + ':' + 'A'.repeat(294);
+    const seqNode: WorkflowNode = {
+      id: 'seq1',
+      adapterId: 'sequence-input',
+      label: 'WT 1CTT Dimer Seq',
+      params: { sequence: `>1CTT_WT_homodimer\n${dimerSeq}` },
+    };
+    const af3Node: WorkflowNode = {
+      id: 'af3_1',
+      adapterId: 'localfold-af2',
+      label: 'AF3: WT Dimer',
+      params: { model: 'af3', msaMode: 'mmseqs2' },
+    };
+    const graph: WorkflowGraph = {
+      id: 'issue-90-dimer',
+      name: 'Issue 90 Dimer',
+      description: '',
+      nodes: [seqNode, af3Node],
+      edges: [{ fromNode: 'seq1', fromPort: 'sequences', toNode: 'af3_1', toPort: 'sequences' }],
+    };
+    const seqSet: SequenceSet = {
+      kind: 'SequenceSet',
+      id: 'seqset-1ctt',
+      parentStructureId: 'none',
+      sourceModelId: 'sequence-input',
+      candidates: [
+        {
+          id: '1CTT_WT_homodimer',
+          sequence: 'A'.repeat(588),
+          chainLengths: [294, 294],
+          score: null,
+          globalScore: null,
+          sourceModelId: 'sequence-input',
+        },
+      ],
+    };
+
+    // 1. Default browser WebGPU mode still blocks 588 aa at 512 aa ceiling with actionable guidance
+    const browserCfg = defaultComputeBackendConfig();
+    const browserOpts = resolveNodeFoldLimitOptions(af3Node, browserCfg);
+    expect(() => validateRuntimeNodeInputs(af3Node, { sequences: seqSet }, browserOpts)).toThrow(
+      /512 residues.*Max fold len/,
+    );
+    expect(
+      validateBioCapabilities(graph, {}, browserOpts).some((i) => i.code === 'webgpu-token-ceiling'),
+    ).toBe(true);
+
+    // 2. Raising Max fold len in Settings (even in local Browser mode) allows 588 aa
+    const customBrowserCfg: ComputeBackendConfig = { ...browserCfg, maxFoldResidues: 1024 };
+    const customBrowserOpts = resolveNodeFoldLimitOptions(af3Node, customBrowserCfg);
+    expect(() => validateRuntimeNodeInputs(af3Node, { sequences: seqSet }, customBrowserOpts)).not.toThrow();
+    expect(
+      validateBioCapabilities(graph, {}, customBrowserOpts).some((i) => i.code === 'webgpu-token-ceiling'),
+    ).toBe(false);
+
+    // 3. Self-hosted Host GPU mode automatically raises the ceiling to host default (2048 aa)
+    const remoteCfg: ComputeBackendConfig = { ...browserCfg, mode: 'remote', serverUrl: 'http://5090:8790' };
+    const hostOpts = resolveNodeFoldLimitOptions(af3Node, remoteCfg, {
+      ok: true,
+      maxFoldResidues: 2048,
+    });
+    expect(hostOpts).toEqual({ maxFoldResidues: 2048, isHostGpu: true });
+    expect(() => validateRuntimeNodeInputs(af3Node, { sequences: seqSet }, hostOpts)).not.toThrow();
+    expect(
+      validateBioCapabilities(graph, {}, hostOpts).some((i) => i.code === 'webgpu-token-ceiling'),
+    ).toBe(false);
   });
 });

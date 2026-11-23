@@ -42,6 +42,10 @@ const DATA_DIR = path.resolve(
 );
 const ALLOW_SOFTWARE_GPU = process.env.DENOVO_ALLOW_SOFTWARE_GPU === '1';
 const MAX_BODY_BYTES = Math.max(4, Number(process.env.DENOVO_MAX_BODY_MB || 128)) * 1024 * 1024;
+const MAX_FOLD_RESIDUES = Math.max(
+  512,
+  Math.min(4096, Math.round(Number(process.env.DENOVO_MAX_FOLD_RESIDUES || 2048) || 2048)),
+);
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -286,13 +290,13 @@ async function pumpQueue() {
     }
 
     const result = await runnerPage.evaluate(
-      async ({ jobId, node, inputs }) => {
+      async ({ jobId, node, inputs, maxFoldResidues }) => {
         if (!window.__denovoHostRunner) {
           throw new Error('Host runner bridge not mounted.');
         }
-        return await window.__denovoHostRunner.runNode(jobId, { node, inputs });
+        return await window.__denovoHostRunner.runNode(jobId, { node, inputs, maxFoldResidues });
       },
-      { jobId: next.jobId, node: next.node, inputs: next.inputs },
+      { jobId: next.jobId, node: next.node, inputs: next.inputs, maxFoldResidues: MAX_FOLD_RESIDUES },
     );
 
     if (!next.cancelled && !next.res.writableEnded) {
@@ -476,6 +480,7 @@ async function main() {
             activeAdapter: runnerHealth.activeAdapter,
             queueDepth: jobQueue.length + (runningJob ? 1 : 0),
             runningJobId: runningJob?.jobId ?? null,
+            maxFoldResidues: MAX_FOLD_RESIDUES,
             ...(runnerHealth.error ? { error: runnerHealth.error } : {}),
           }),
         );

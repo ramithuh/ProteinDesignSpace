@@ -16,7 +16,7 @@
     };
     runNode: (
       jobId: string,
-      payload: { node: WorkflowNode; inputs: unknown },
+      payload: { node: WorkflowNode; inputs: unknown; maxFoldResidues?: number },
     ) => Promise<{ outputs: unknown; elapsedMs: number }>;
     cancel: (jobId: string) => Promise<void>;
     releaseGpu: () => Promise<void>;
@@ -53,7 +53,7 @@
         activeAdapter: scheduler.getActiveGpuAdapter(),
         error: initError,
       }),
-      runNode: async (jobId: string, payload: { node: WorkflowNode; inputs: unknown }) => {
+      runNode: async (jobId: string, payload: { node: WorkflowNode; inputs: unknown; maxFoldResidues?: number }) => {
         const ctrl = new AbortController();
         activeAborts.set(jobId, ctrl);
         try {
@@ -72,6 +72,7 @@
               });
             },
             ctrl.signal,
+            payload.maxFoldResidues,
           );
           return {
             outputs: encodeWireValue(res.outputs),

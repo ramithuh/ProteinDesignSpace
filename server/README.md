@@ -43,6 +43,7 @@ Open `http://<your-host>:8787` from any machine on your network or Tailnet — t
 | `DENOVO_CHROME_PATH` | *(auto-detected)* | Explicit Chrome/Chromium binary path |
 | `DENOVO_ALLOW_SOFTWARE_GPU` | `0` | Set to `1` to allow software WebGPU fallback on CPU-only hosts |
 | `DENOVO_MAX_BODY_MB` | `128` | Max JSON request payload size in MB |
+| `DENOVO_MAX_FOLD_RESIDUES` | `2048` | Default LocalFold (AF3 / Boltz / AF2 / ESMFold2) residue ceiling advertised to connected clients (512–4096) |
 
 ## API Endpoints
 

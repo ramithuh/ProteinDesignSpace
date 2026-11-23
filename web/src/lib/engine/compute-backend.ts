@@ -19,6 +19,11 @@ export interface ComputeBackendConfig {
   apiToken: string;
   /** In 'hybrid' mode, models whose active weight download exceeds this MB threshold run on host GPU. */
   hybridThresholdMB: number;
+  /**
+   * Optional user override for maximum LocalFold residue ceiling (512–4096).
+   * `null` = Auto (512 AF3 / 768 AF2 in local browser; server ceiling / 2048 on Host GPU).
+   */
+  maxFoldResidues: number | null;
 }
 
 export interface RemoteServerHealth {
@@ -34,11 +39,22 @@ export interface RemoteServerHealth {
   activeAdapter?: string | null;
   queueDepth?: number;
   runningJobId?: string | null;
+  maxFoldResidues?: number;
   error?: string;
 }
 
 export const COMPUTE_BACKEND_STORAGE_KEY = 'denovo.computeBackend.v1';
 export const DEFAULT_HYBRID_THRESHOLD_MB = 40;
+export const DEFAULT_HOST_MAX_FOLD_RESIDUES = 2048;
+export const MIN_CUSTOM_FOLD_RESIDUES = 512;
+export const MAX_CUSTOM_FOLD_RESIDUES = 4096;
+
+export function sanitizeMaxFoldResidues(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === '' || raw === 'auto') return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(MIN_CUSTOM_FOLD_RESIDUES, Math.min(MAX_CUSTOM_FOLD_RESIDUES, Math.round(n)));
+}
 
 export function defaultComputeBackendConfig(): ComputeBackendConfig {
   return {
@@ -46,6 +62,7 @@ export function defaultComputeBackendConfig(): ComputeBackendConfig {
     serverUrl: '',
     apiToken: '',
     hybridThresholdMB: DEFAULT_HYBRID_THRESHOLD_MB,
+    maxFoldResidues: null,
   };
 }
 
@@ -72,6 +89,7 @@ export function loadComputeBackendConfig(): ComputeBackendConfig {
         Number.isFinite(threshold) && threshold >= 0 && threshold <= 2000
           ? Math.round(threshold)
           : DEFAULT_HYBRID_THRESHOLD_MB,
+      maxFoldResidues: sanitizeMaxFoldResidues(parsed.maxFoldResidues),
     };
   } catch {
     return base;
@@ -88,11 +106,35 @@ export function saveComputeBackendConfig(cfg: ComputeBackendConfig): void {
         serverUrl: normalizeServerBaseUrl(cfg.serverUrl),
         apiToken: cfg.apiToken.trim(),
         hybridThresholdMB: cfg.hybridThresholdMB,
+        maxFoldResidues: sanitizeMaxFoldResidues(cfg.maxFoldResidues),
       }),
     );
   } catch {
     /* ignore storage quota / private mode */
   }
+}
+
+/** Resolve the effective folding residue ceiling for a node given Settings + Host GPU routing. */
+export function resolveNodeFoldLimitOptions(
+  node: WorkflowNode,
+  config: ComputeBackendConfig,
+  remoteHealth?: RemoteServerHealth | null,
+  opts?: { localWebGpuAvailable?: boolean; localWebGpuFallback?: boolean },
+): { maxFoldResidues?: number; isHostGpu: boolean } {
+  const isHostGpu = shouldRouteNodeToRemote(node, config, opts);
+  const userOverride = sanitizeMaxFoldResidues(config.maxFoldResidues);
+  if (isHostGpu) {
+    const hostDefault =
+      sanitizeMaxFoldResidues(remoteHealth?.maxFoldResidues) ?? DEFAULT_HOST_MAX_FOLD_RESIDUES;
+    return {
+      maxFoldResidues: userOverride ?? hostDefault,
+      isHostGpu: true,
+    };
+  }
+  return {
+    ...(userOverride !== null ? { maxFoldResidues: userOverride } : {}),
+    isHostGpu: false,
+  };
 }
 
 /** Estimate active weight size (MB) for routing decisions in hybrid mode. */
@@ -190,6 +232,7 @@ export async function checkRemoteServerHealth(
       activeAdapter: typeof json.activeAdapter === 'string' ? json.activeAdapter : null,
       queueDepth: typeof json.queueDepth === 'number' ? json.queueDepth : 0,
       runningJobId: typeof json.runningJobId === 'string' ? json.runningJobId : null,
+      maxFoldResidues: sanitizeMaxFoldResidues(json.maxFoldResidues) ?? undefined,
       error: typeof json.error === 'string' ? json.error : undefined,
     };
   } catch (err) {

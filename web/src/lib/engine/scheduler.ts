@@ -887,9 +887,14 @@ export type RemoteGpuExecutor = (
   signal?: AbortSignal,
 ) => Promise<{ outputs: Record<string, CanonicalArtifact>; elapsedMs: number }> | null;
 
+export type FoldLimitResolver = (
+  node: WorkflowNode,
+) => { maxFoldResidues?: number | null; isHostGpu?: boolean } | undefined;
+
 export class ExecutionScheduler {
   private activeGpu: ActiveGpuSlot | null = null;
   private remoteGpuExecutor: RemoteGpuExecutor | null = null;
+  private foldLimitResolver: FoldLimitResolver | null = null;
   private gpuDisposalPromise: Promise<void> | null = null;
   private gpuIdleTimer: ReturnType<typeof setTimeout> | null = null;
   private gpuIdleReleaseMs: number;
@@ -986,6 +991,13 @@ export class ExecutionScheduler {
   }
 
   /**
+   * Register an optional per-node folding residue ceiling resolver (e.g. from GPU Settings or Host GPU).
+   */
+  setFoldLimitResolver(resolver: FoldLimitResolver | null): void {
+    this.foldLimitResolver = resolver;
+  }
+
+  /**
    * Execute a single GPU node directly on local WebGPU workers (used by the hidden /runner
    * host harness inside server/selfhost-server.mjs so all 22 workers & VRAM lifecycle are reused).
    */
@@ -994,10 +1006,11 @@ export class ExecutionScheduler {
     inputs: Record<string, CanonicalArtifact>,
     onProgress: (ev: NodeProgressEvent) => void,
     signal?: AbortSignal,
+    maxFoldResidues?: number,
   ): Promise<{ outputs: Record<string, CanonicalArtifact>; elapsedMs: number }> {
     this.clearGpuIdleTimer();
     try {
-      return await this.runLocalGpuNode(node, inputs, onProgress, signal);
+      return await this.runLocalGpuNode(node, inputs, onProgress, signal, maxFoldResidues);
     } finally {
       this.scheduleGpuIdleRelease();
     }
@@ -1439,6 +1452,7 @@ export class ExecutionScheduler {
     inputs: Record<string, CanonicalArtifact>,
     onProgress: (ev: NodeProgressEvent) => void,
     signal?: AbortSignal,
+    explicitMaxFoldResidues?: number,
   ): Promise<{ outputs: Record<string, CanonicalArtifact>; elapsedMs: number }> {
     if (signal?.aborted) {
       throw new Error('Workflow run cancelled');
@@ -1555,7 +1569,16 @@ export class ExecutionScheduler {
       try {
         // Plain-object clone strips any reactive Proxy (e.g. Svelte 5 $state) before postMessage.
         const plainParams = JSON.parse(JSON.stringify(node.params ?? {}));
-        worker.postMessage({ id, type: 'run', params: plainParams, inputs });
+        const resolvedLimit = explicitMaxFoldResidues ?? this.foldLimitResolver?.(node)?.maxFoldResidues ?? undefined;
+        worker.postMessage({
+          id,
+          type: 'run',
+          params: plainParams,
+          inputs,
+          ...(typeof resolvedLimit === 'number' && Number.isFinite(resolvedLimit)
+            ? { maxFoldResidues: Math.round(resolvedLimit) }
+            : {}),
+        });
       } catch (err) {
         abort(err instanceof Error ? err : new Error(String(err)));
       }
@@ -2991,7 +3014,8 @@ export class ExecutionScheduler {
               elapsedMs = performance.now() - nStart;
             } else {
               // Layer 2 biological capability guard before launching GPU worker / downloading weights
-              const guard = validateRuntimeNodeInputs(node, inputs);
+              const foldOpts = this.foldLimitResolver?.(node);
+              const guard = validateRuntimeNodeInputs(node, inputs, foldOpts);
               if (guard.warnings.length > 0) {
                 console.warn(`[denovo.run] ${node.label ?? node.adapterId}:`, guard.warnings.join(' | '));
               }

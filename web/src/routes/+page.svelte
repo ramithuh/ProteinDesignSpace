@@ -97,16 +97,20 @@
   } from '$lib/engine/webgpu-device';
   import {
     checkRemoteServerHealth,
+    DEFAULT_HOST_MAX_FOLD_RESIDUES,
     defaultComputeBackendConfig,
     loadComputeBackendConfig,
     releaseRemoteServerGpu,
+    resolveNodeFoldLimitOptions,
     runNodeOnRemoteServer,
+    sanitizeMaxFoldResidues,
     saveComputeBackendConfig,
     shouldRouteNodeToRemote,
     type ComputeBackendConfig,
     type ComputeRoutingMode,
     type RemoteServerHealth,
   } from '$lib/engine/compute-backend';
+  import type { BioFoldLimitOptions } from '$lib/engine/bio-capabilities';
 
   const scheduler = new ExecutionScheduler({
     checkpointStore: createIndexedDbCheckpointStore(),
@@ -145,7 +149,26 @@
   let remoteHealth = $state<RemoteServerHealth | null>(null);
   let remoteChecking = $state(false);
 
+  function buildFoldLimitOpts(
+    cfg: ComputeBackendConfig = computeBackend,
+    health: RemoteServerHealth | null = remoteHealth,
+  ): BioFoldLimitOptions {
+    return {
+      resolveNodeFoldLimits: (node) =>
+        resolveNodeFoldLimitOptions(node, cfg, health, {
+          localWebGpuAvailable: webgpuSupported !== false,
+          localWebGpuFallback: webgpuIsFallback,
+        }),
+    };
+  }
+
   function syncSchedulerRemoteExecutor(cfg: ComputeBackendConfig) {
+    scheduler.setFoldLimitResolver((node) =>
+      resolveNodeFoldLimitOptions(node, cfg, remoteHealth, {
+        localWebGpuAvailable: webgpuSupported !== false,
+        localWebGpuFallback: webgpuIsFallback,
+      }),
+    );
     if (cfg.mode === 'local') {
       scheduler.setRemoteGpuExecutor(null);
       return;
@@ -171,6 +194,7 @@
     remoteChecking = true;
     try {
       remoteHealth = await checkRemoteServerHealth(cfg.serverUrl, cfg.apiToken);
+      syncSchedulerRemoteExecutor(computeBackend);
     } finally {
       remoteChecking = false;
     }
@@ -1709,8 +1733,17 @@
   });
   let inputPreviewErrors = $derived(Object.values(inputPreviewErrorsByNode));
   let validationErrors = $derived([...graphValidationErrors, ...inputPreviewErrors]);
+  let bioFoldLimitOpts = $derived.by(() =>
+    buildFoldLimitOpts(computeBackend, remoteHealth),
+  );
   let previewChecks = $derived(
-    computePreviewChecks(graph, activeDraftPreview, outputsByNode, inputPreviewErrorsByNode),
+    computePreviewChecks(
+      graph,
+      activeDraftPreview,
+      outputsByNode,
+      inputPreviewErrorsByNode,
+      bioFoldLimitOpts,
+    ),
   );
   let displayedValidationErrors = $derived(previewChecks.displayedValidationErrors);
   let bioIssues = $derived(previewChecks.bioIssues);
@@ -2961,7 +2994,7 @@
   let studioOpen = $derived(expandedPane === 'studio' && Boolean(selectedNode));
   let studioPreview = $derived.by(() => {
     if (!studioOpen || !selectedNode) return null;
-    return compileNodeInputPreview(graph, selectedNode.id, outputsByNode);
+    return compileNodeInputPreview(graph, selectedNode.id, outputsByNode, bioFoldLimitOpts);
   });
   let studioInputViewerActive = $derived(
     studioOpen && studioTab === 'input' && Boolean(studioPreview?.previewStructurePdb),
@@ -3795,6 +3828,37 @@
                 </div>
               {/if}
             {/if}
+            <div class="pop-row">
+              <span
+                class="pop-k"
+                title="Maximum total residues allowed in LocalFold (AF3, Boltz, Protenix, AF2, ESMFold2). Auto uses 512/768 in Browser mode and the host GPU ceiling on self-hosted servers."
+              >
+                Max fold len
+              </span>
+              <select
+                class="pop-select"
+                aria-label="Maximum folding residue ceiling"
+                value={computeBackend.maxFoldResidues === null ? 'auto' : String(computeBackend.maxFoldResidues)}
+                disabled={isRunning || activeRunState.leaseHeld}
+                onchange={(e) =>
+                  updateComputeBackend({
+                    maxFoldResidues: sanitizeMaxFoldResidues((e.currentTarget as HTMLSelectElement).value),
+                  })}
+              >
+                <option value="auto">
+                  {computeBackend.mode === 'local'
+                    ? 'Auto (512 / 768)'
+                    : `Auto (Host ${remoteHealth?.maxFoldResidues ?? DEFAULT_HOST_MAX_FOLD_RESIDUES})`}
+                </option>
+                <option value="512">512 aa</option>
+                <option value="768">768 aa</option>
+                <option value="1024">1024 aa</option>
+                <option value="1536">1536 aa</option>
+                <option value="2048">2048 aa</option>
+                <option value="3072">3072 aa</option>
+                <option value="4096">4096 aa</option>
+              </select>
+            </div>
           </div>
           <div class="pop-divider"></div>
           {#if webMcpReady}
@@ -5435,7 +5499,8 @@
     color: var(--text-muted);
   }
   .pop-field input,
-  .pop-thresh {
+  .pop-thresh,
+  .pop-select {
     background: var(--bg-input);
     color: var(--text-primary);
     border: 1px solid var(--border);
@@ -5443,6 +5508,12 @@
     padding: 4px 6px;
     font-size: 11px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  .pop-select {
+    font-size: 10.5px;
+    padding: 3px 6px;
+    max-width: 138px;
+    cursor: pointer;
   }
   .pop-thresh {
     width: 66px;
