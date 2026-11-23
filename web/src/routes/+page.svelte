@@ -111,9 +111,14 @@
     type RemoteServerHealth,
   } from '$lib/engine/compute-backend';
   import type { BioFoldLimitOptions } from '$lib/engine/bio-capabilities';
+  import { setCachePluginRegistry } from '$lib/engine/opfs-cache';
+  import { defaultPluginRegistry } from '$lib/plugins';
+
+  setCachePluginRegistry(defaultPluginRegistry);
 
   const scheduler = new ExecutionScheduler({
     checkpointStore: createIndexedDbCheckpointStore(),
+    pluginRegistry: defaultPluginRegistry,
   });
 
   let rightPanelTab = $state<'params' | 'peek'>('params');

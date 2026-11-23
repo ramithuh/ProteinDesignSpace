@@ -3,6 +3,8 @@
   // Reuses ExecutionScheduler's exact 22 WebGPU workers + single-slot VRAM lifecycle + OPFS weight cache.
   import { onMount } from 'svelte';
   import { ExecutionScheduler } from '$lib/engine/scheduler';
+  import { setCachePluginRegistry } from '$lib/engine/opfs-cache';
+  import { defaultPluginRegistry } from '$lib/plugins';
   import { decodeWireValue, encodeWireValue } from '$lib/engine/remote-codec';
   import { formatWebGpuAdapterSummary, requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
   import type { CanonicalArtifact, NodeProgressEvent, WorkflowNode } from '$lib/engine/types';
@@ -32,7 +34,11 @@
 
   onMount(() => {
     const win = window as unknown as HostWindow;
-    const scheduler = new ExecutionScheduler({ gpuIdleReleaseMs: 120_000 });
+    setCachePluginRegistry(defaultPluginRegistry);
+    const scheduler = new ExecutionScheduler({
+      gpuIdleReleaseMs: 120_000,
+      pluginRegistry: defaultPluginRegistry,
+    });
     let gpuInfo: { vendor: string; architecture: string; description: string; fallback: boolean } | null = null;
     let initError: string | null = null;
     let ready = false;
