@@ -11,15 +11,9 @@ import { decodeWireValue, encodeWireValue } from './remote-codec';
 import type { CanonicalArtifact, NodeProgressEvent, WorkflowNode } from './types';
 
 export type ComputeRoutingMode = 'local' | 'remote' | 'hybrid';
-export type RemoteComputePreset = 'self-host' | 'colab';
-
-export const COLAB_NOTEBOOK_URL =
-  'https://colab.research.google.com/github/ramithuh/ProteinDesignSpace/blob/feat/unifying-engine/colab/denovo_host_gpu.ipynb';
 
 export interface ComputeBackendConfig {
   mode: ComputeRoutingMode;
-  /** Selected remote UI preset: user's own workstation/cluster ('self-host') or Google Colab ('colab'). */
-  remotePreset?: RemoteComputePreset;
   /** Base URL of self-hosted server (empty string = same origin when served by selfhost-server.mjs). */
   serverUrl: string;
   /** Optional Bearer API token (kept in memory only; never saved to localStorage). */
@@ -75,7 +69,6 @@ export function sanitizeMaxFoldResidues(raw: unknown): number | null {
 export function defaultComputeBackendConfig(): ComputeBackendConfig {
   return {
     mode: 'local',
-    remotePreset: 'self-host',
     serverUrl: '',
     apiToken: '',
     hybridThresholdMB: DEFAULT_HYBRID_THRESHOLD_MB,
@@ -204,14 +197,11 @@ export function loadComputeBackendConfig(): ComputeBackendConfig {
     const parsed = JSON.parse(raw) as Partial<ComputeBackendConfig>;
     const mode: ComputeRoutingMode =
       parsed.mode === 'remote' || parsed.mode === 'hybrid' ? parsed.mode : 'local';
-    const remotePreset: RemoteComputePreset =
-      parsed.remotePreset === 'colab' ? 'colab' : 'self-host';
     const threshold = Number(parsed.hybridThresholdMB);
     const serverUrl =
       typeof parsed.serverUrl === 'string' ? normalizeServerBaseUrl(parsed.serverUrl) : '';
     const cfg: ComputeBackendConfig = {
       mode,
-      remotePreset,
       serverUrl,
       // M5: Never hydrate reusable Bearer tokens from localStorage;
       // cross-origin refreshes may reuse tab-scoped sessionStorage (cleared on tab close).
@@ -241,7 +231,6 @@ export function saveComputeBackendConfig(cfg: ComputeBackendConfig): void {
       COMPUTE_BACKEND_STORAGE_KEY,
       JSON.stringify({
         mode: cfg.mode,
-        remotePreset: cfg.remotePreset === 'colab' ? 'colab' : 'self-host',
         serverUrl: normalizeServerBaseUrl(cfg.serverUrl),
         hybridThresholdMB: cfg.hybridThresholdMB,
         maxFoldResidues: sanitizeMaxFoldResidues(cfg.maxFoldResidues),
@@ -252,13 +241,12 @@ export function saveComputeBackendConfig(cfg: ComputeBackendConfig): void {
   }
 }
 
-/** Format a compact GPU label for the header status pill (e.g. "Host · RTX 5090" or "Colab · Tesla T4"). */
+/** Format a compact GPU label for the header status pill (e.g. "Host · RTX 5090"). */
 export function formatHostGpuPillLabel(
   health: RemoteServerHealth | null,
   mode: ComputeRoutingMode,
-  remotePreset: RemoteComputePreset = 'self-host',
 ): string {
-  const prefix = mode === 'hybrid' ? 'Hybrid' : remotePreset === 'colab' ? 'Colab' : 'Host';
+  const prefix = mode === 'hybrid' ? 'Hybrid' : 'Host';
   if (!health?.ok) return `${prefix} GPU (!)`;
   const short = health.gpu?.shortName?.trim() || health.gpu?.name?.trim() || '';
   if (short) return `${prefix} · ${short}`;

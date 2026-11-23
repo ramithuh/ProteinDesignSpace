@@ -1,15 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { decodeWireValue, encodeWireValue } from '$lib/engine/remote-codec';
 import {
-  COMPUTE_BACKEND_STORAGE_KEY,
   defaultComputeBackendConfig,
   estimateNodeActiveWeightsMB,
   formatHostGpuDetail,
   formatHostGpuPillLabel,
-  loadComputeBackendConfig,
   resolveNodeFoldLimitOptions,
   runNodeOnRemoteServer,
-  saveComputeBackendConfig,
   shouldRouteNodeToRemote,
   type ComputeBackendConfig,
 } from '$lib/engine/compute-backend';
@@ -222,47 +219,8 @@ describe('self-hosted remote WebGPU backend', () => {
       },
     };
     expect(formatHostGpuPillLabel(rtx5090Health, 'remote')).toBe('Host · RTX 5090');
-    expect(formatHostGpuPillLabel(rtx5090Health, 'remote', 'self-host')).toBe('Host · RTX 5090');
-    expect(formatHostGpuPillLabel(rtx5090Health, 'remote', 'colab')).toBe('Colab · RTX 5090');
     expect(formatHostGpuPillLabel(rtx5090Health, 'hybrid')).toBe('Hybrid · RTX 5090');
     expect(formatHostGpuDetail(rtx5090Health)).toBe('NVIDIA GeForce RTX 5090 · 32 GB');
     expect(formatHostGpuPillLabel({ ok: false, error: 'Unauthorized' }, 'remote')).toBe('Host GPU (!)');
-    expect(formatHostGpuPillLabel({ ok: false, error: 'Offline' }, 'remote', 'colab')).toBe('Colab GPU (!)');
-  });
-
-  it('persists remotePreset (colab vs self-host) without leaking apiToken to localStorage', () => {
-    const store = new Map<string, string>();
-    const origLs = globalThis.localStorage;
-    Object.defineProperty(globalThis, 'localStorage', {
-      configurable: true,
-      value: {
-        getItem: (k: string) => store.get(k) ?? null,
-        setItem: (k: string, v: string) => {
-          store.set(k, v);
-        },
-        removeItem: (k: string) => {
-          store.delete(k);
-        },
-      },
-    });
-    try {
-      saveComputeBackendConfig({
-        ...defaultComputeBackendConfig(),
-        mode: 'remote',
-        remotePreset: 'colab',
-        serverUrl: 'https://demo-tunnel.trycloudflare.com',
-        apiToken: 'dnv_never_persist_in_ls',
-      });
-      const raw = store.get(COMPUTE_BACKEND_STORAGE_KEY) ?? '';
-      expect(raw).not.toContain('dnv_never_persist_in_ls');
-      expect(JSON.parse(raw).remotePreset).toBe('colab');
-
-      const reloaded = loadComputeBackendConfig();
-      expect(reloaded.mode).toBe('remote');
-      expect(reloaded.remotePreset).toBe('colab');
-      expect(reloaded.serverUrl).toBe('https://demo-tunnel.trycloudflare.com');
-    } finally {
-      Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: origLs });
-    }
   });
 });
