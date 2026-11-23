@@ -57,29 +57,31 @@ Model weights are **never** bundled in `web/build/` — sharded safetensors stre
 
 ## Self-Host on Your Own GPU (Zero Python)
 
-Want to offload heavy GPU models (AlphaFold 3, Boltz-2, Protenix, RFD4, BoltzGen, etc.) to a dedicated workstation or lab GPU (RTX 5090, DGX Spark, Apple Silicon) while keeping the UI, CPU blocks, and 3D Mol\* viewer fast in your browser? You can run the zero-Python WebGPU host server in 3 commands:
+Want to offload heavy GPU models (AlphaFold 3, Boltz-2, Protenix, RFD4, BoltzGen, etc.) and >512 aa folds to a **remote workstation or cluster GPU** (RTX 5090, DGX Spark, HPC node) while keeping the UI, CPU blocks, and 3D Mol\* viewer fast in your laptop browser? Clone and run the zero-Python WebGPU host server on the GPU machine:
 
 ```bash
+# On the GPU machine (Node.js 22+)
+git clone https://github.com/ramithuh/ProteinDesignSpace.git
+cd ProteinDesignSpace
 npm --prefix web ci && npm --prefix web run build
-npm --prefix server install playwright-core && npx --prefix server playwright-core install chromium
-node server/selfhost-server.mjs
+npm install --no-save playwright-core && npx playwright-core install chromium
+
+# Start privately on loopback with a Bearer token
+export DENOVO_API_TOKEN="dnv_$(openssl rand -hex 18)"
+echo "API token: $DENOVO_API_TOKEN"
+HOST=127.0.0.1 PORT=8790 DENOVO_API_TOKEN="$DENOVO_API_TOKEN" node server/selfhost-server.mjs
 ```
 
-Then open `http://127.0.0.1:8787`, click the top-right **GPU pill**, and switch **Compute** to **Host GPU**.
-
-For remote / lab access over HTTPS (e.g. Tailscale Serve) or a shared HPC cluster via SSH port forwarding, set a Bearer API token — on same-origin URLs you only enter it once and the server stores an `HttpOnly; SameSite=Strict` session cookie:
+Then connect from your laptop via **SSH port forwarding** (or **Tailscale Serve** HTTPS):
 
 ```bash
-# On the GPU host / cluster node
-export DENOVO_API_TOKEN="dnv_$(openssl rand -hex 18)"
-HOST=127.0.0.1 PORT=8790 DENOVO_API_TOKEN="$DENOVO_API_TOKEN" node server/selfhost-server.mjs
-
-# On your laptop (HPC / cluster SSH port-forwarding)
+# On your laptop (cluster / HPC)
 ssh -L 8790:127.0.0.1:8790 user@gpu-node
-# Then open http://127.0.0.1:8790
 ```
 
-See [**server/README.md**](server/README.md) for Tailscale HTTPS setup, CORS (`DENOVO_ALLOWED_ORIGINS`), residue ceilings, and all server environment variables.
+Open **`http://127.0.0.1:8790`**, switch the top-right toggle to **Self-Hosted (remote machine)**, leave URL blank, paste your token once, and click **Sign in** (saved via an `HttpOnly; SameSite=Strict` session cookie).
+
+See [**server/README.md**](server/README.md) for Tailscale HTTPS setup, weight cache directory (`DENOVO_DATA_DIR`), Ubuntu 24.04 AppArmor troubleshooting, and all server environment variables.
 
 ---
 

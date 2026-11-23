@@ -2,59 +2,100 @@
 
 Run **all 21 WebGPU models** (AlphaFold 3, Boltz-2, Protenix, RFD4, Genie 3, GNINA 1.3, ProteinMPNN, LigandMPNN, etc.) on a **remote GPU workstation or cluster** (RTX 5090, DGX Spark, HPC node) with **zero Python, zero `uv`/conda, and zero CUDA wheel conflicts**.
 
-> **Do I need this on my own laptop?** No — if you're using Chrome/Edge on a Mac or PC with a GPU, just open `https://denovo.run` directly in **WebGPU (this computer)** mode. Self-hosting is primarily for offloading heavy jobs to a **remote GPU** (or using Firefox/Safari / Linux desktops where your daily browser lacks hardware WebGPU).
+> **Do I need this on my own laptop?** No — if you're using Chrome/Edge on a Mac or PC with a GPU, just open [`https://denovo.run`](https://denovo.run) directly in **WebGPU (this computer)** mode. Self-hosting is for offloading heavy jobs (and >512 aa folds) to a **remote GPU**, or using a browser without hardware WebGPU.
 
-## 1. Build Once on the GPU Machine
+## Prerequisites (on the GPU Machine)
+
+- **Node.js 22+** (`node -v`) — install via `nvm`, system package manager, or a standalone Node tarball (no root required on HPC).
+- **GPU drivers with Vulkan** (Linux NVIDIA/AMD), Metal (macOS), or Direct3D 12 (Windows). You do **not** need a desktop GUI or monitor on the GPU machine — the server runs headless Chromium under the hood, and you view the UI in your regular browser on your laptop.
+
+## 1. Clone & Build Once on the GPU Machine
 
 ```bash
-# 1. Build the static web app
+git clone https://github.com/ramithuh/ProteinDesignSpace.git
+cd ProteinDesignSpace
+
+# Build the static web app -> web/build/
 npm --prefix web ci
 npm --prefix web run build
 
-# 2. Install Playwright Chromium (headless WebGPU runtime)
+# Install Playwright Chromium (headless WebGPU runtime for the server)
 npm install --no-save playwright-core
 npx playwright-core install chromium
 ```
 
-> **Note (Ubuntu 24.04 AppArmor):** If Playwright's bundled Chromium fails with `No usable sandbox!`, either pass your system Chrome (`DENOVO_CHROME_PATH=/usr/bin/google-chrome DENOVO_DISABLE_GPU_SANDBOX=1`) or run with `DENOVO_DISABLE_SANDBOX=1`.
+> **Model weights:** Weights are **not** downloaded during install. The first time you run a model, the server downloads its sharded safetensors once from Hugging Face into `DENOVO_DATA_DIR` (default `~/.cache/denovo-selfhost/profile`) and reuses them across all future browser sessions and restarts.
 
-## 2. Cluster / HPC Access (SSH Port Forwarding — Recommended)
+## 2. Start on the GPU Machine
 
-Bind to loopback (`127.0.0.1`) on the GPU node with a token (so the server is never exposed to the LAN/internet and other users on the node cannot access it), then forward the port over SSH:
+Pick **Option A (HPC / Cluster via SSH)** or **Option B (Private Workstation via Tailscale HTTPS)**. Both keep Node bound privately to `127.0.0.1` so it is never exposed to the public internet or LAN.
+
+### Option A: Cluster / HPC Access (SSH Port Forwarding — Recommended)
 
 ```bash
 # On the GPU node
 export DENOVO_API_TOKEN="dnv_$(openssl rand -hex 18)"
+echo "Your API token: $DENOVO_API_TOKEN"
 HOST=127.0.0.1 PORT=8790 DENOVO_API_TOKEN="$DENOVO_API_TOKEN" node server/selfhost-server.mjs
+```
 
-# On your laptop
+Then, in a terminal **on your laptop**:
+
+```bash
 ssh -L 8790:127.0.0.1:8790 user@gpu-node
 ```
 
-Open **`http://127.0.0.1:8790`**, switch the top-right toggle to **Self-Hosted (remote machine)**, leave URL blank, paste your token once, and click **Sign in**. The server sets an **`HttpOnly; SameSite=Strict`** session cookie so refreshes stay signed in without storing your token in `localStorage`.
+Open **`http://127.0.0.1:8790`** in your laptop browser.
 
-## 3. Tailscale HTTPS / Private Lab Server
-
-Keep Node bound to `127.0.0.1` and terminate TLS with Tailscale Serve (or Caddy). Always set a high-entropy `DENOVO_API_TOKEN`; never expose plain `http://` directly on a public IP.
+### Option B: Private Lab Workstation (Tailscale HTTPS)
 
 ```bash
-# Generate a strong Bearer token
+# On the GPU workstation
 export DENOVO_API_TOKEN="dnv_$(openssl rand -hex 18)"
-
-# Keep the server bound to loopback + expose via Tailscale HTTPS
+echo "Your API token: $DENOVO_API_TOKEN"
 HOST=127.0.0.1 PORT=8790 DENOVO_API_TOKEN="$DENOVO_API_TOKEN" node server/selfhost-server.mjs
+
+# In another terminal (persists across reboots)
 sudo tailscale serve --bg --https=8790 http://127.0.0.1:8790
 ```
 
-> Binding `HOST=0.0.0.0` without `DENOVO_API_TOKEN` is rejected by default. Same-origin visitors sign in once via `POST /api/auth` (`HttpOnly; Secure; SameSite=Strict` cookie); cross-origin clients authenticate via `Authorization: Bearer <token>`.
+Open the `https://<machine>.<tailnet>.ts.net:8790` URL printed by `tailscale serve`.
 
-## 4. Local Workstation Only (Optional)
+> Binding `HOST=0.0.0.0` without `DENOVO_API_TOKEN` is rejected by default. Never expose plain `http://` directly on a public IP.
 
-If your daily browser lacks hardware WebGPU (e.g., Firefox, Safari, or Linux Chrome falling back to SwiftShader), you can also run the server locally on loopback and open `http://127.0.0.1:8787` in any browser:
+## 3. Connect in Your Browser
+
+1. Open the URL from Step 2 (`http://127.0.0.1:8790` for SSH, or your `https://...ts.net:8790` Tailscale URL).
+2. Click **`Self-Hosted (remote machine)`** in the top-right header toggle.
+3. Leave **Host Server URL** blank (`same origin`), paste your `DENOVO_API_TOKEN` once, and click **Sign in**.
+4. The server verifies your token and sets an **`HttpOnly; SameSite=Strict`** session cookie (30 days) — refreshes and new tabs stay signed in automatically without storing the token in `localStorage`.
+
+> Lightweight CPU blocks and the 3D Mol\* viewer always run locally in your browser; all GPU blocks automatically stream to your remote GPU.
+
+## Updating Later
 
 ```bash
-node server/selfhost-server.mjs
+cd ProteinDesignSpace
+git pull
+npm --prefix web run build
 ```
+
+Then restart `node server/selfhost-server.mjs` if `server/selfhost-server.mjs` changed (your cached model weights in `~/.cache/denovo-selfhost/profile` are preserved).
+
+## Troubleshooting
+
+- **Ubuntu 24.04 AppArmor (`No usable sandbox!`):** Playwright's bundled Chromium may be blocked by Ubuntu 24.04 user-namespace AppArmor rules. Either point to system Chrome:
+  ```bash
+  DENOVO_CHROME_PATH=/usr/bin/google-chrome DENOVO_DISABLE_GPU_SANDBOX=1 \
+    HOST=127.0.0.1 PORT=8790 DENOVO_API_TOKEN="$DENOVO_API_TOKEN" node server/selfhost-server.mjs
+  ```
+  or pass `DENOVO_DISABLE_SANDBOX=1` inside containers/HPC nodes without user-namespace sandboxing.
+- **Software fallback (`SwiftShader`) on Linux:** Make sure NVIDIA/AMD Vulkan ICD libraries are installed (`ls /usr/share/vulkan/icd.d/`). The server refuses SwiftShader by default unless `DENOVO_ALLOW_SOFTWARE_GPU=1` is set.
+- **Custom weight cache location (e.g. HPC scratch/work storage):** Set `DENOVO_DATA_DIR=/cluster/work/$USER/denovo-profile`.
+
+## Optional: Local Workstation Only
+
+If your daily browser lacks hardware WebGPU (e.g., Safari, Firefox, or Linux Chrome falling back to SwiftShader), you can run `node server/selfhost-server.mjs` locally and open `http://127.0.0.1:8787` in any browser.
 
 ## Environment Variables
 
