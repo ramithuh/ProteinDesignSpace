@@ -61,6 +61,7 @@ export type EditActionId =
   | 'insert_top_k'
   | 'add_esmc'
   | 'add_dyna1'
+  | 'add_gnina'
   | 'remove_nodes'
   | 'update_params';
 
@@ -1519,6 +1520,32 @@ function applyEditCurrentPlan(
           fromPort: 'sequences',
           toNode: tkId,
           toPort: 'sequences',
+        });
+      }
+    } else if (op.action === 'add_gnina') {
+      let target = resolveNode(op.attachToNodeId);
+      if (!target || !hasOutputPort(target, 'structure')) {
+        for (const aid of ['localfold-af2', 'pdb-input', 'lasermpnn', 'rfd4-proteina', 'protpardelle']) {
+          const matches = nodes.filter((n) => n.adapterId === aid && hasOutputPort(n, 'structure'));
+          if (matches.length > 0) {
+            target = matches[matches.length - 1];
+            break;
+          }
+        }
+      }
+      if (target) {
+        const gnId = nextId('gnina');
+        nodes.push({
+          id: gnId,
+          adapterId: 'gnina',
+          label: 'GNINA 1.3',
+          params: { ...defaultParamsForAdapter('gnina') },
+        });
+        edges.push({
+          fromNode: target.id,
+          fromPort: 'structure',
+          toNode: gnId,
+          toPort: 'structure',
         });
       }
     } else if (op.action === 'add_esmc' || op.action === 'add_dyna1') {
