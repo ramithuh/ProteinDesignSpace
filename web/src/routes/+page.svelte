@@ -3454,7 +3454,7 @@
           ? 'Confirm clearing canvas'
           : 'denovo.run — start a clean empty canvas'}
       >
-        <span class="accent">denovo</span>.run{#if brandClearConfirmPending}<span class="brand-confirm-pill">Clear? Confirm</span>{/if}
+        <span class="brand-wordmark"><span class="accent">denovo</span>.run</span>{#if brandClearConfirmPending}<span class="brand-confirm-pill">Clear? Confirm</span>{/if}
       </button>
     </h1>
 
@@ -4758,25 +4758,35 @@
     margin: 0;
     font-size: 18px;
     font-weight: 700;
+    line-height: 1;
     letter-spacing: -0.4px;
     color: var(--text-primary);
     white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
   }
   .brand-logo-btn {
     margin: 0;
-    padding: 2px 4px;
-    margin-left: -4px;
+    padding: 4px 6px;
+    margin-left: -6px;
     border: 1px solid transparent;
     border-radius: 6px;
     background: transparent;
     color: inherit;
     font: inherit;
+    line-height: 1;
     letter-spacing: inherit;
     cursor: pointer;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    justify-content: center;
+    gap: 8px;
     transition: opacity 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+  }
+  .brand-wordmark {
+    display: inline-flex;
+    align-items: baseline;
+    line-height: 1;
   }
   .brand-logo-btn:hover:not(:disabled) {
     background: var(--bg-surface-hover);
@@ -4784,9 +4794,12 @@
   .brand-logo-btn.confirm-danger {
     border-color: var(--err-border);
     background: var(--err-bg);
-    padding: 2px 7px;
+    padding: 4px 8px;
   }
   .brand-confirm-pill {
+    display: inline-flex;
+    align-items: center;
+    line-height: 1;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10.5px;
     font-weight: 600;
