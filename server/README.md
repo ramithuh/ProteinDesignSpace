@@ -17,7 +17,7 @@ npx --prefix server playwright-core install chromium
 node server/selfhost-server.mjs
 ```
 
-Open **`http://127.0.0.1:8787`**, click the top-right **GPU pill**, and select **Host GPU** (or **Hybrid**).
+Open **`http://127.0.0.1:8787`**, click the top-right **GPU pill**, and select **Host GPU** (lightweight CPU and 3D visualization blocks always stay local in your browser automatically).
 
 ## Secure Remote Access (Tailscale HTTPS / Lab Server)
 

@@ -3564,11 +3564,13 @@
             <div class="pop-row">
               <span class="pop-k">Compute</span>
               <div class="compute-seg" role="group" aria-label="Compute backend mode">
-                {#each [['local', 'Browser'], ['hybrid', 'Hybrid'], ['remote', 'Host GPU']] as [mVal, mLbl] (mVal)}
+                {#each [['local', 'Browser'], ['remote', 'Host GPU']] as [mVal, mLbl] (mVal)}
                   <button
                     type="button"
                     class="compute-seg-btn"
-                    class:active={computeBackend.mode === mVal}
+                    class:active={mVal === 'remote'
+                      ? computeBackend.mode !== 'local'
+                      : computeBackend.mode === 'local'}
                     disabled={isRunning || activeRunState.leaseHeld}
                     onclick={() => updateComputeBackend({ mode: mVal as ComputeRoutingMode })}
                   >
@@ -3617,22 +3619,15 @@
                   onchange={(e) => updateComputeBackend({ apiToken: (e.currentTarget as HTMLInputElement).value })}
                 />
               </label>
-              {#if computeBackend.mode === 'hybrid'}
-                <div class="pop-row">
-                  <span class="pop-k">Offload &gt; {computeBackend.hybridThresholdMB} MB</span>
-                  <input
-                    class="pop-thresh"
-                    type="number"
-                    min="0"
-                    max="1000"
-                    step="10"
-                    value={computeBackend.hybridThresholdMB}
-                    disabled={isRunning}
-                    onchange={(e) =>
-                      updateComputeBackend({
-                        hybridThresholdMB: Math.max(0, Math.min(1000, Number((e.currentTarget as HTMLInputElement).value) || 40)),
-                      })}
-                  />
+              {#if !remoteHealth?.ok}
+                <div class="pop-help-note">
+                  Run all GPU blocks on your workstation (CPU &amp; 3D stay local):
+                  <code>node server/selfhost-server.mjs</code> ·
+                  <a
+                    href="https://github.com/ramithuh/ProteinDesignSpace/blob/main/server/README.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >Self-host guide ↗</a>
                 </div>
               {/if}
               <div class="pop-row">
@@ -5351,7 +5346,6 @@
     color: var(--text-muted);
   }
   .pop-field input,
-  .pop-thresh,
   .pop-select {
     background: var(--bg-input);
     color: var(--text-primary);
@@ -5367,9 +5361,27 @@
     max-width: 138px;
     cursor: pointer;
   }
-  .pop-thresh {
-    width: 66px;
-    text-align: right;
+  .pop-help-note {
+    font-size: 10px;
+    line-height: 1.45;
+    color: var(--text-muted);
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+  }
+  .pop-help-note code {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    color: var(--text-primary);
+  }
+  .pop-help-note a {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+  }
+  .pop-help-note a:hover {
+    text-decoration: underline;
   }
   .sys-pop.align-left {
     left: 0;

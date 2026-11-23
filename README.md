@@ -55,6 +55,29 @@ Model weights are **never** bundled in `web/build/` — sharded safetensors stre
 
 ---
 
+## Self-Host on Your Own GPU (Zero Python)
+
+Want to offload heavy GPU models (AlphaFold 3, Boltz-2, Protenix, RFD4, BoltzGen, etc.) to a dedicated workstation or lab GPU (RTX 5090, DGX Spark, Apple Silicon) while keeping the UI, CPU blocks, and 3D Mol\* viewer fast in your browser? You can run the zero-Python WebGPU host server in 3 commands:
+
+```bash
+npm --prefix web ci && npm --prefix web run build
+npm --prefix server install playwright-core && npx --prefix server playwright-core install chromium
+node server/selfhost-server.mjs
+```
+
+Then open `http://127.0.0.1:8787`, click the top-right **GPU pill**, and switch **Compute** to **Host GPU**.
+
+For remote / lab access over HTTPS (e.g. Tailscale Serve), generate a Bearer API token and plug it into the **API Token** field in the GPU pill:
+
+```bash
+export DENOVO_API_TOKEN="dnv_$(openssl rand -hex 18)"
+HOST=127.0.0.1 PORT=8790 DENOVO_API_TOKEN="$DENOVO_API_TOKEN" node server/selfhost-server.mjs
+```
+
+See [**server/README.md**](server/README.md) for Tailscale HTTPS setup, CORS (`DENOVO_ALLOWED_ORIGINS`), residue ceilings, and all server environment variables.
+
+---
+
 ## Credits
 
 Huge thanks to **Martin Steinegger** ([`alphafold2-webgpu`](https://github.com/martin-steinegger/alphafold2-webgpu)) and **Sergey Ovchinnikov** ([`localfold`](https://github.com/sokrypton/localfold), [`rfd4-proteina-webgpu`](https://github.com/sokrypton/rfd4-proteina-webgpu)) for pioneering browser-native WebGPU protein models, to the **Ben Murrell Lab** ([`webProteinMPNN`](https://github.com/MurrellGroup/webProteinMPNN)), and to all the open-source protein science authors whose models power this workbench.
