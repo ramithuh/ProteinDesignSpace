@@ -11,6 +11,7 @@
   } from '$lib/engine/scheduler';
   import { clearRcsbCache, isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
   import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from '$lib/engine/registry';
+  import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
   import { autoLayoutGraph, defaultParamsForAdapter, insertBlockSmart, validateGraph } from '$lib/engine/graph-utils';
   import {
     extractSubgraphUpTo,
@@ -751,6 +752,11 @@
         runError = 'Fix invalid numeric parameter(s) before running.';
         return;
       }
+      if (hasBioErrors) {
+        ev.preventDefault();
+        runError = bioErrorIssues.map((i) => i.message).join('\n');
+        return;
+      }
       if (!isRunning && validationErrors.length === 0) {
         ev.preventDefault();
         void runWorkflow(false);
@@ -814,6 +820,11 @@
       if (hasAnyInvalidNumericInput()) {
         ev.preventDefault();
         runError = 'Fix invalid numeric parameter(s) before running.';
+        return;
+      }
+      if (hasBioErrors) {
+        ev.preventDefault();
+        runError = bioErrorIssues.map((i) => i.message).join('\n');
         return;
       }
       if (!isRunning && validationErrors.length === 0) {
@@ -1610,6 +1621,8 @@
   );
   let displayedValidationErrors = $derived(previewChecks.displayedValidationErrors);
   let bioIssues = $derived(previewChecks.bioIssues);
+  let bioErrorIssues = $derived(bioIssues.filter((i) => i.severity === 'error'));
+  let hasBioErrors = $derived(bioErrorIssues.length > 0);
 
   // Instant CPU/fetch preview for starting inputs (PDB Input & Sequence Input) so users can
   // inspect structures in 3D or compare PDBs immediately without needing to click Run.
@@ -2082,6 +2095,13 @@
       runError = errs.join('\n');
       return;
     }
+    const targetBioErrors = validateBioCapabilities(targetGraph, outputsByNode).filter(
+      (i) => i.severity === 'error',
+    );
+    if (targetBioErrors.length > 0) {
+      runError = targetBioErrors.map((i) => i.message).join('\n');
+      return;
+    }
     if (!confirmed) {
       const preflight = estimateRunRequirements(targetGraph);
       const hasRemoteMsa = (preflight.remoteMsaTransfers?.length ?? 0) > 0;
@@ -2373,10 +2393,17 @@
       activePaperInsight = null;
       showPaperWalkthrough = false;
     }
+    if (expandedPane === 'studio') {
+      expandedPane = 'none';
+      studioHoveredToken = null;
+      studioFocusToken = null;
+      studioActiveBrush = null;
+    }
     const withDefaults = mergeAdapterDefaults(next);
-    const laid = withDefaults.nodes.some((n) => !n.position)
-      ? autoLayoutGraph(withDefaults)
-      : withDefaults;
+    const { graph: reconciled } = reconcileBenchmarkSeeding(withDefaults, { teardown: false });
+    const laid = reconciled.nodes.some((n) => !n.position)
+      ? autoLayoutGraph(reconciled)
+      : reconciled;
     graphUndoStack = [];
     graphRedoStack = [];
     lastParamUndo = null;
@@ -3829,7 +3856,7 @@
             type="button"
             class="menu-item"
             role="menuitem"
-            disabled={isRunning || validationErrors.length > 0 || hasInvalidNumeric}
+            disabled={isRunning || validationErrors.length > 0 || hasInvalidNumeric || hasBioErrors}
             onclick={() => runWorkflow(true)}
           >
             <span>Re-run Fresh</span>
@@ -3866,11 +3893,13 @@
       class="btn-primary"
       class:is-running={isRunning}
       data-tour="run-btn"
-      disabled={isRunning || validationErrors.length > 0 || hasInvalidNumeric}
+      disabled={isRunning || validationErrors.length > 0 || hasInvalidNumeric || hasBioErrors}
       onclick={() => runWorkflow(false)}
       title={hasInvalidNumeric
         ? 'Fix invalid numeric parameter(s) before running'
-        : 'Run workflow (R or ⌘↵ / Ctrl+Enter)'}
+        : hasBioErrors
+          ? `Biological compatibility error: ${bioErrorIssues[0].message}`
+          : 'Run workflow (R or ⌘↵ / Ctrl+Enter)'}
     >
       {#if isRunning}
         <span class="run-pulse"></span>
@@ -4352,6 +4381,7 @@
             spin={viewerSpin && !isRunning && !isCanonicalViewerLayout}
             canonicalCamera={isCanonicalViewerLayout}
             expanded={expandedPane === 'viewer' || studioOpen}
+            defaultStyleMenuOpen={expandedPane === 'viewer' && !studioOpen}
             {theme}
             height={expandedPane === 'viewer' || studioOpen ? '100%' : splitMode === 'horizontal' ? 350 : 460}
             label={isCompareMode
@@ -5478,7 +5508,7 @@
   }
   .canvas-top-spine {
     position: absolute;
-    top: 12px;
+    top: 46px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 40;
@@ -5486,7 +5516,7 @@
     flex-direction: column;
     align-items: center;
     gap: 6px;
-    max-width: min(640px, calc(100% - 170px));
+    max-width: min(640px, calc(100% - 24px));
     pointer-events: none;
   }
   .share-toast {

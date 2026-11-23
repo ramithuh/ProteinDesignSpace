@@ -870,7 +870,7 @@
       ondblclick={handleTrackDblClick}
     >
       {#if visibleWindow.topPad > 0}
-        <div style="height: {visibleWindow.topPad}px" aria-hidden="true"></div>
+        <div class="seq-spacer" style="height: {visibleWindow.topPad}px; flex-shrink: 0;" aria-hidden="true"></div>
       {/if}
 
       {#each flatRows.slice(visibleWindow.start, visibleWindow.end) as item (item.key)}
@@ -957,7 +957,7 @@
       {/each}
 
       {#if visibleWindow.bottomPad > 0}
-        <div style="height: {visibleWindow.bottomPad}px" aria-hidden="true"></div>
+        <div class="seq-spacer" style="height: {visibleWindow.bottomPad}px; flex-shrink: 0;" aria-hidden="true"></div>
       {/if}
     </div>
   {/if}
@@ -1269,9 +1269,13 @@
   .seq-scroll.can-paint {
     cursor: crosshair;
   }
+  .seq-spacer {
+    flex-shrink: 0;
+  }
   .chain-head {
     display: flex;
     flex-direction: column;
+    flex-shrink: 0;
     gap: 5px;
     padding: 6px 8px;
     margin-top: 4px;
@@ -1350,6 +1354,7 @@
   .seq-row {
     display: flex;
     flex-wrap: nowrap;
+    flex-shrink: 0;
     align-items: flex-end;
     padding: 3px 4px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
