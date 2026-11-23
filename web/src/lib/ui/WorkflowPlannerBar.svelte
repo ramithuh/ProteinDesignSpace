@@ -746,20 +746,20 @@
     gap: 8px;
     padding: 5px 11px 5px 6px;
     border-radius: 10px;
-    border: 1px solid var(--border-strong);
-    background: color-mix(in srgb, var(--bg-surface) 95%, transparent);
+    border: 1px solid rgba(251, 146, 60, 0.42);
+    background: color-mix(in srgb, #f97316 12%, color-mix(in srgb, var(--bg-surface) 95%, transparent));
     -webkit-backdrop-filter: blur(10px);
     backdrop-filter: blur(10px);
-    color: var(--text-secondary);
+    color: var(--text-body);
     font-size: 11.5px;
     line-height: 1.35;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+    box-shadow: 0 4px 14px rgba(234, 88, 12, 0.14);
     max-width: min(560px, calc(100vw - 28px));
     text-align: left;
   }
   .draft-notice.is-ai {
-    border-color: color-mix(in srgb, var(--warn-border) 60%, var(--border-strong));
-    background: color-mix(in srgb, var(--warn-bg) 32%, var(--bg-surface));
+    border-color: rgba(249, 115, 22, 0.62);
+    background: color-mix(in srgb, #ea580c 16%, color-mix(in srgb, var(--bg-surface) 95%, transparent));
   }
   .draft-badge {
     display: inline-flex;
@@ -767,8 +767,9 @@
     gap: 4px;
     padding: 2px 7px;
     border-radius: 6px;
-    background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface-2));
-    color: var(--accent-bright, var(--accent));
+    background: rgba(249, 115, 22, 0.18);
+    border: 1px solid rgba(251, 146, 60, 0.36);
+    color: #fdba74;
     font-size: 10.5px;
     font-weight: 600;
     letter-spacing: 0.01em;
@@ -776,12 +777,34 @@
     flex-shrink: 0;
   }
   .draft-badge.is-ai {
-    background: color-mix(in srgb, var(--warn-bg) 90%, transparent);
-    border: 1px solid color-mix(in srgb, var(--warn-border) 65%, transparent);
-    color: var(--warn-text);
+    background: rgba(234, 88, 12, 0.24);
+    border-color: rgba(251, 146, 60, 0.5);
+    color: #fed7aa;
   }
   .draft-copy {
-    color: var(--text-secondary);
+    color: var(--text-body);
+  }
+  :global([data-theme='light']) .draft-notice {
+    border-color: #fdba74;
+    background: rgba(255, 247, 237, 0.94);
+    box-shadow: 0 4px 14px rgba(234, 88, 12, 0.1);
+  }
+  :global([data-theme='light']) .draft-notice.is-ai {
+    border-color: #fb923c;
+    background: rgba(255, 237, 213, 0.96);
+  }
+  :global([data-theme='light']) .draft-badge {
+    background: #ffedd5;
+    border-color: #fdba74;
+    color: #c2410c;
+  }
+  :global([data-theme='light']) .draft-badge.is-ai {
+    background: #fed7aa;
+    border-color: #fb923c;
+    color: #9a3412;
+  }
+  :global([data-theme='light']) .draft-copy {
+    color: #7c2d12;
   }
   .warn-pill {
     display: inline-flex;
