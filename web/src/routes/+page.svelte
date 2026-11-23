@@ -3981,10 +3981,12 @@
               </span>
             </div>
           {:else if appliedDraftNotice && !activeDraftPreview && !isRunning && graph.nodes.length > 0}
-            <div class="ai-draft-warning" role="status">
-              <span class="adw-icon" aria-hidden="true">⚠</span>
-              <span>
-                <strong>{appliedDraftNotice.isAiDraft ? 'AI-drafted (gemma-4)' : 'Auto-drafted workflow'}</strong> — double-check each step's inputs, residue ranges &amp; parameters before running.
+            <div class="ai-draft-warning" class:is-ai={appliedDraftNotice.isAiDraft} role="status">
+              <span class="adw-badge" class:is-ai={appliedDraftNotice.isAiDraft} aria-hidden="true">
+                {appliedDraftNotice.isAiDraft ? '⚠ AI draft' : '✦ Draft'}
+              </span>
+              <span class="adw-copy">
+                Double-check inputs, residue ranges &amp; parameters before running.
               </span>
               <button
                 type="button"
@@ -5567,37 +5569,90 @@
     pointer-events: auto;
     display: inline-flex;
     align-items: center;
-    gap: 7px;
-    padding: 5px 10px 5px 12px;
-    border-radius: 999px;
-    background: var(--warn-bg);
-    border: 1px solid var(--warn-border);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+    gap: 8px;
+    padding: 5px 8px 5px 6px;
+    border-radius: 10px;
+    border: 1px solid rgba(251, 146, 60, 0.42);
+    background: color-mix(in srgb, #f97316 12%, color-mix(in srgb, var(--bg-surface) 95%, transparent));
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 4px 14px rgba(234, 88, 12, 0.14);
     font-size: 11.5px;
     line-height: 1.35;
-    color: var(--warn-text);
+    color: var(--text-body);
     max-width: 100%;
   }
-  .ai-draft-warning strong {
-    font-weight: 600;
+  .ai-draft-warning.is-ai {
+    border-color: rgba(249, 115, 22, 0.62);
+    background: color-mix(in srgb, #ea580c 16%, color-mix(in srgb, var(--bg-surface) 95%, transparent));
   }
-  .adw-icon {
+  .adw-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: rgba(249, 115, 22, 0.18);
+    border: 1px solid rgba(251, 146, 60, 0.36);
+    color: #fdba74;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
     flex-shrink: 0;
-    font-size: 12px;
+  }
+  .adw-badge.is-ai {
+    background: rgba(234, 88, 12, 0.24);
+    border-color: rgba(251, 146, 60, 0.5);
+    color: #fed7aa;
+  }
+  .adw-copy {
+    color: var(--text-body);
   }
   .adw-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
     background: none;
     border: none;
     color: inherit;
-    opacity: 0.72;
+    opacity: 0.68;
     cursor: pointer;
     font-size: 14px;
     line-height: 1;
-    padding: 0 2px;
+    padding: 0;
     flex-shrink: 0;
+    transition: opacity 0.12s ease, background 0.12s ease;
   }
   .adw-dismiss:hover {
     opacity: 1;
+    background: rgba(249, 115, 22, 0.16);
+  }
+  :global([data-theme='light']) .ai-draft-warning {
+    border-color: #fdba74;
+    background: rgba(255, 247, 237, 0.94);
+    box-shadow: 0 4px 14px rgba(234, 88, 12, 0.1);
+  }
+  :global([data-theme='light']) .ai-draft-warning.is-ai {
+    border-color: #fb923c;
+    background: rgba(255, 237, 213, 0.96);
+  }
+  :global([data-theme='light']) .adw-badge {
+    background: #ffedd5;
+    border-color: #fdba74;
+    color: #c2410c;
+  }
+  :global([data-theme='light']) .adw-badge.is-ai {
+    background: #fed7aa;
+    border-color: #fb923c;
+    color: #9a3412;
+  }
+  :global([data-theme='light']) .adw-copy,
+  :global([data-theme='light']) .adw-dismiss {
+    color: #7c2d12;
   }
   .studio-brush-tag {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
