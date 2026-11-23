@@ -259,21 +259,21 @@ describe('declarative ParamSchema & modes single source of truth', () => {
     };
 
     const WORKER_TARGETS: Array<{ adapterId: string; file: string; extraHelperKeys?: string[] }> = [
-      { adapterId: 'rfd4-proteina', file: 'src/lib/workers/rfd4.worker.ts' },
-      { adapterId: 'genie3', file: 'src/lib/workers/genie3.worker.ts' },
+      { adapterId: 'rfd4-proteina', file: 'src/lib/plugins/rfd4-proteina/rfd4.worker.ts' },
+      { adapterId: 'genie3', file: 'src/lib/plugins/genie3/genie3.worker.ts' },
       { adapterId: 'web-protein-mpnn', file: 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts' },
       {
         adapterId: 'localfold-af2',
-        file: 'src/lib/workers/localfold.worker.ts',
+        file: 'src/lib/plugins/localfold-af2/localfold.worker.ts',
         extraHelperKeys: ['maxSequences'], // read inside selectFoldWorkItems(seqSet, p)
       },
-      { adapterId: 'thermompnn', file: 'src/lib/workers/thermompnn.worker.ts' },
-      { adapterId: 'ligandmpnn', file: 'src/lib/workers/ligandmpnn.worker.ts' },
-      { adapterId: 'lasermpnn', file: 'src/lib/workers/lasermpnn.worker.ts' },
-      { adapterId: 'antifold-esmif1', file: 'src/lib/workers/antifold.worker.ts' },
-      { adapterId: 'protpardelle', file: 'src/lib/workers/protpardelle.worker.ts' },
-      { adapterId: 'esmc', file: 'src/lib/workers/esmc.worker.ts' },
-      { adapterId: 'dyna1', file: 'src/lib/workers/dyna1.worker.ts' },
+      { adapterId: 'thermompnn', file: 'src/lib/plugins/thermompnn/thermompnn.worker.ts' },
+      { adapterId: 'ligandmpnn', file: 'src/lib/plugins/ligandmpnn/ligandmpnn.worker.ts' },
+      { adapterId: 'lasermpnn', file: 'src/lib/plugins/lasermpnn/lasermpnn.worker.ts' },
+      { adapterId: 'antifold-esmif1', file: 'src/lib/plugins/antifold-esmif1/antifold.worker.ts' },
+      { adapterId: 'protpardelle', file: 'src/lib/plugins/protpardelle/protpardelle.worker.ts' },
+      { adapterId: 'esmc', file: 'src/lib/plugins/esmc/esmc.worker.ts' },
+      { adapterId: 'dyna1', file: 'src/lib/plugins/dyna1/dyna1.worker.ts' },
     ];
 
     for (const target of WORKER_TARGETS) {

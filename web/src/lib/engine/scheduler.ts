@@ -1,28 +1,8 @@
 // Headless DAG ExecutionScheduler (zero Svelte/DOM dependencies).
 // Handles topological execution, content-addressed memoization, Single-Active-GPU-Worker
 // VRAM mutex (dispose -> terminate), CPU nodes, and WebMCP / window.__denovo hooks.
+// All 21 GPU workers are dynamically lazy-loaded via PluginRegistry (zero static `?worker` imports).
 
-import MpnnWorker from '$lib/plugins/web-protein-mpnn/mpnn.worker?worker';
-import LocalFoldWorker from '$lib/workers/localfold.worker?worker';
-import Rfd4Worker from '$lib/workers/rfd4.worker?worker';
-import Genie3Worker from '$lib/workers/genie3.worker?worker';
-import ThermoMpnnWorker from '$lib/workers/thermompnn.worker?worker';
-import LigandMpnnWorker from '$lib/workers/ligandmpnn.worker?worker';
-import LaserMpnnWorker from '$lib/workers/lasermpnn.worker?worker';
-import AntiFoldWorker from '$lib/workers/antifold.worker?worker';
-import ProtPardelleWorker from '$lib/workers/protpardelle.worker?worker';
-import RfdiffusionWorker from '$lib/workers/rfdiffusion.worker?worker';
-import BoltzGenWorker from '$lib/workers/boltzgen.worker?worker';
-import EvoDiffWorker from '$lib/workers/evodiff.worker?worker';
-import LaProteinaWorker from '$lib/workers/laproteina.worker?worker';
-import ProteinaWorker from '$lib/workers/proteina.worker?worker';
-import Genie2Worker from '$lib/workers/genie2.worker?worker';
-import FrameFlowWorker from '$lib/workers/frameflow.worker?worker';
-import FoldFlow2Worker from '$lib/workers/foldflow2.worker?worker';
-import SidProteinWorker from '$lib/workers/sidprotein.worker?worker';
-import EsmcWorker from '$lib/workers/esmc.worker?worker';
-import Dyna1Worker from '$lib/workers/dyna1.worker?worker';
-import GninaWorker from '$lib/workers/gnina.worker?worker';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS, WORKFLOW_PRESETS } from './registry';
 import { validateGraph } from './graph-utils';
 import { validateNodeParams } from './param-validation';
@@ -1140,56 +1120,16 @@ export class ExecutionScheduler {
   }
 
   private async spawnWorker(adapterId: string): Promise<Worker> {
-    const plugin = this.pluginRegistry?.getPlugin(adapterId);
+    let registry = this.pluginRegistry ?? getActivePluginRegistry();
+    if (!registry) {
+      const { defaultPluginRegistry } = await import('$lib/plugins');
+      registry = defaultPluginRegistry;
+    }
+    const plugin = registry.getPlugin(adapterId);
     if (plugin?.execution.createWorker) {
       return await plugin.execution.createWorker();
     }
-    switch (adapterId) {
-      case 'web-protein-mpnn':
-        return new MpnnWorker();
-      case 'localfold-af2':
-        return new LocalFoldWorker();
-      case 'rfd4-proteina':
-        return new Rfd4Worker();
-      case 'genie3':
-        return new Genie3Worker();
-      case 'thermompnn':
-        return new ThermoMpnnWorker();
-      case 'ligandmpnn':
-        return new LigandMpnnWorker();
-      case 'lasermpnn':
-        return new LaserMpnnWorker();
-      case 'antifold-esmif1':
-        return new AntiFoldWorker();
-      case 'protpardelle':
-        return new ProtPardelleWorker();
-      case 'rfdiffusion':
-        return new RfdiffusionWorker();
-      case 'boltzgen':
-        return new BoltzGenWorker();
-      case 'evodiff':
-        return new EvoDiffWorker();
-      case 'la-proteina':
-        return new LaProteinaWorker();
-      case 'proteina':
-        return new ProteinaWorker();
-      case 'genie2':
-        return new Genie2Worker();
-      case 'frameflow':
-        return new FrameFlowWorker();
-      case 'foldflow2':
-        return new FoldFlow2Worker();
-      case 'sid-protein':
-        return new SidProteinWorker();
-      case 'esmc':
-        return new EsmcWorker();
-      case 'dyna1':
-        return new Dyna1Worker();
-      case 'gnina':
-        return new GninaWorker();
-      default:
-        throw new Error(`No GPU worker registered for adapter "${adapterId}"`);
-    }
+    throw new Error(`No GPU worker registered for adapter "${adapterId}"`);
   }
 
   private async runGpuNode(

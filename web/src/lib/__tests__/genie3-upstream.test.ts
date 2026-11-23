@@ -6,7 +6,7 @@ import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from '$lib/engine/registry';
 import { defaultParamsForAdapter, validateGraph } from '$lib/engine/graph-utils';
 
 const VENDOR_DIR = resolve(process.cwd(), 'static/vendor/genie3');
-const WORKER_PATH = resolve(process.cwd(), 'src/lib/workers/genie3.worker.ts');
+const WORKER_PATH = resolve(process.cwd(), 'src/lib/plugins/genie3/genie3.worker.ts');
 
 describe('Genie 3 WebGPU integration', () => {
   it('registers genie3 adapter and valid genie3-mpnn-af2 preset', () => {
@@ -57,7 +57,7 @@ describe('Genie 3 WebGPU integration', () => {
     expect(failFastIdx).toBeLessThan(ensureLoadedIdx);
 
     // Verify RFD4 & LocalFold workers also carry Wave-2 VRAM cleanup & fail-fast / transferables
-    const rfd4WorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/rfd4.worker.ts'), 'utf8');
+    const rfd4WorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/rfd4-proteina/rfd4.worker.ts'), 'utf8');
     expect(rfd4WorkerSrc).toContain('releaseActivations');
     expect(rfd4WorkerSrc).toContain('collectOwnedTransferables');
     const rfdFailFastIdx = rfd4WorkerSrc.indexOf('requires a wired structure input');
@@ -65,7 +65,7 @@ describe('Genie 3 WebGPU integration', () => {
     expect(rfdFailFastIdx).toBeGreaterThan(-1);
     expect(rfdFailFastIdx).toBeLessThan(rfdEnsureIdx);
 
-    const lfWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/localfold.worker.ts'), 'utf8');
+    const lfWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/localfold-af2/localfold.worker.ts'), 'utf8');
     expect(lfWorkerSrc).toContain('releaseAllWeights');
     expect(lfWorkerSrc).toContain('resolveLocalFoldMemoryBudgetBytes');
     expect(lfWorkerSrc).toContain('collectOwnedTransferables');

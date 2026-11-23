@@ -151,7 +151,7 @@ describe('Security audit hardening regressions', () => {
     expect(mpnnWorker).toContain('/vendor/ort/');
 
     // M2: rfd4.worker.ts rejects arbitrary http/https URLs and .. traversal in fetchExampleCifBytes
-    const rfd4Worker = readFileSync(resolve(WEB_ROOT, 'src/lib/workers/rfd4.worker.ts'), 'utf8');
+    const rfd4Worker = readFileSync(resolve(WEB_ROOT, 'src/lib/plugins/rfd4-proteina/rfd4.worker.ts'), 'utf8');
     expect(rfd4Worker).toContain('SAFE_EXAMPLE_CIF_RE');
   });
 });

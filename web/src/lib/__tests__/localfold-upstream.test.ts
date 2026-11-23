@@ -148,7 +148,7 @@ describe('upstream localfold multi-model integration', () => {
     // Verify localfold.worker.ts wires mergeChainA3ms, iptmIsMonomerApprox, dynamic recycles clamp,
     // MSA resolution + af3BatchFromA3m, fail-loud CCD ligands, provenance/bfactorSemantics/atomGranularity,
     // shared selectFoldWorkItems, and multimer-aware selectLocalFoldRepresentative.
-    const workerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/localfold.worker.ts'), 'utf8');
+    const workerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/localfold-af2/localfold.worker.ts'), 'utf8');
     expect(workerSrc).toContain('mergeChainA3ms');
     expect(workerSrc).toContain('iptmIsMonomerApprox');
     expect(workerSrc).toContain('clampLocalFoldRecycles');

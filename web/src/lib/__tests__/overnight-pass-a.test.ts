@@ -12,7 +12,7 @@ import { exportCollectionCsv } from '$lib/engine/export-collection';
 import { selectFoldWorkItems } from '$lib/engine/bio-capabilities';
 import { extractRfd4TemplateContext, resolveRfd4CompiledInput } from '$lib/engine/conditioning';
 import { computeUpstreamLockSummary } from '$lib/ui/node-display-helpers';
-import { formatRfd4AuthorRunLabel } from '$lib/workers/rfd4.worker';
+import { formatRfd4AuthorRunLabel } from '$lib/plugins/rfd4-proteina/rfd4.worker';
 import { applyTransformToPdb, computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { parsePdbBackbone, type SourceResidueId } from '$lib/protein-ops/pdb';
 import type {
@@ -279,7 +279,7 @@ describe('Overnight Pass A — Issue #84 (3D Compare heterodimer target-chain Ka
 
 describe('Overnight Pass A — Issue #85 (EvoDiff designKey & EF2/Scorer Campaign CSV consistency)', () => {
   it('evodiff.worker.ts shares one designKey across candidates so LocalFold strictly honors maxSequences=1', () => {
-    const evoSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/evodiff.worker.ts'), 'utf8');
+    const evoSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/evodiff/evodiff.worker.ts'), 'utf8');
     expect(evoSrc).toContain("const designKey = 'evodiff';");
     expect(evoSrc).not.toContain('const designKey = `evodiff-${s + 1}`');
 

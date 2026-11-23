@@ -538,7 +538,7 @@ describe('parameter validation & numeric sanitization', () => {
     ).toMatch(/ipsaeThreshold/);
 
     // 5. Worker fidelity & metadata contracts (RFD4, Genie 3, MPNN)
-    const rfd4Src = readFileSync(resolve(process.cwd(), 'src/lib/workers/rfd4.worker.ts'), 'utf8');
+    const rfd4Src = readFileSync(resolve(process.cwd(), 'src/lib/plugins/rfd4-proteina/rfd4.worker.ts'), 'utf8');
     expect(rfd4Src).toContain("mode === 'inverse-folding' ? false : requestedEarlyStop");
     expect(rfd4Src).toContain("bfactorSemantics: mode === 'partial' || mode === 'inverse-folding' ? 'crystal-b' : 'none'");
     expect(rfd4Src).toContain("atomGranularity: 'all-atom'");
@@ -547,7 +547,7 @@ describe('parameter validation & numeric sanitization', () => {
     expect(rfd4Src).toContain('designMeta.lockedChains');
     expect(rfd4Src).toContain('designMeta.chainRoles');
 
-    const genie3Src = readFileSync(resolve(process.cwd(), 'src/lib/workers/genie3.worker.ts'), 'utf8');
+    const genie3Src = readFileSync(resolve(process.cwd(), 'src/lib/plugins/genie3/genie3.worker.ts'), 'utf8');
     expect(genie3Src).toContain("bfactorSemantics: 'none'");
     expect(genie3Src).toContain("atomGranularity: 'ca-only'");
     expect(genie3Src).toContain('...(lockedChains ? { lockedChains } : {})');

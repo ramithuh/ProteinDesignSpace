@@ -363,7 +363,7 @@ describe('Codex computer-use regression suite', () => {
     expect(totalDesignable).toBe(13);
 
     // Worker contract: fixedByTarget must never be gated on regionList.length === 0
-    const workerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/antifold.worker.ts'), 'utf8');
+    const workerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/antifold-esmif1/antifold.worker.ts'), 'utf8');
     expect(workerSrc).toContain('const fixedByTarget = Boolean(explicitTarget) && r.chain !== explicitTarget;');
     expect(workerSrc).not.toContain('regionList.length === 0 && r.chain !== explicitTarget');
   });
@@ -439,7 +439,7 @@ describe('Codex computer-use regression suite', () => {
     expect(pdbPrev.issues.some((i) => i.severity === 'warning' && /BEN/.test(i.message) && /CA/.test(i.message))).toBe(true);
 
     // LigandMPNN worker must check actual ligand/NA presence instead of blindly reporting "(holo context)"
-    const ligWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/ligandmpnn.worker.ts'), 'utf8');
+    const ligWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/ligandmpnn/ligandmpnn.worker.ts'), 'utf8');
     expect(ligWorkerSrc).toContain('hasNonProteinContext');
     expect(ligWorkerSrc).toContain('(apo — 0 ligands in input)');
 

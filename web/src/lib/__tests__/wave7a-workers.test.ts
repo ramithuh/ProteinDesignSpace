@@ -18,11 +18,17 @@ function collectFiles(dir: string): string[] {
 
 function extractWorkerRunParamKeys(workerRelPath: string): string[] {
   const src = readFileSync(resolve(process.cwd(), workerRelPath), 'utf8');
-  const runIdx = src.indexOf("msg.type === 'run'");
-  expect(runIdx, `Expected msg.type === 'run' handler in ${workerRelPath}`).toBeGreaterThan(-1);
+  let runIdx = src.indexOf("msg.type === 'run'");
+  if (runIdx === -1) {
+    runIdx = src.search(/\basync\s+run\s*\(/);
+  }
+  expect(
+    runIdx,
+    `Expected msg.type === 'run' or createWorkerHarness async run(ctx) handler in ${workerRelPath}`,
+  ).toBeGreaterThan(-1);
   const runSlice = src.slice(runIdx);
   const keys = new Set<string>();
-  for (const m of runSlice.matchAll(/\b(?:p|params|msg\.params)\??\.([A-Za-z_][A-Za-z0-9_]*)\b/g)) {
+  for (const m of runSlice.matchAll(/\b(?:p|params|msg\.params|ctx\.params)\??\.([A-Za-z_][A-Za-z0-9_]*)\b/g)) {
     keys.add(m[1]);
   }
   return [...keys].sort();
@@ -32,7 +38,7 @@ const WAVE7A_SPECS = [
   {
     name: 'ThermoMPNN',
     vendorDir: 'static/vendor/thermompnn',
-    workerFile: 'src/lib/workers/thermompnn.worker.ts',
+    workerFile: 'src/lib/plugins/thermompnn/thermompnn.worker.ts',
     factoryExport: 'createThermoMPNNEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/thermompnn-webgpu/resolve/main/default',
     expectedParamKeys: ['bfactorAggregate', 'chain', 'precision'],
@@ -40,7 +46,7 @@ const WAVE7A_SPECS = [
   {
     name: 'LigandMPNN',
     vendorDir: 'static/vendor/ligandmpnn',
-    workerFile: 'src/lib/workers/ligandmpnn.worker.ts',
+    workerFile: 'src/lib/plugins/ligandmpnn/ligandmpnn.worker.ts',
     factoryExport: 'createLigandMpnnEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/ligandmpnn-webgpu/resolve/main',
     expectedParamKeys: [
@@ -59,7 +65,7 @@ const WAVE7A_SPECS = [
   {
     name: 'LASErMPNN',
     vendorDir: 'static/vendor/lasermpnn',
-    workerFile: 'src/lib/workers/lasermpnn.worker.ts',
+    workerFile: 'src/lib/plugins/lasermpnn/lasermpnn.worker.ts',
     factoryExport: 'createLaserMpnnEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/lasermpnn-webgpu/resolve/main',
     expectedParamKeys: [
@@ -75,7 +81,7 @@ const WAVE7A_SPECS = [
   {
     name: 'AntiFold / ESM-IF1',
     vendorDir: 'static/vendor/antifold-esmif1',
-    workerFile: 'src/lib/workers/antifold.worker.ts',
+    workerFile: 'src/lib/plugins/antifold-esmif1/antifold.worker.ts',
     factoryExport: 'createGVPTransformerEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/antifold-esmif1-webgpu/resolve/main',
     expectedParamKeys: [
@@ -95,7 +101,7 @@ const WAVE7A_SPECS = [
   {
     name: 'ProtPardelle-1c',
     vendorDir: 'static/vendor/protpardelle',
-    workerFile: 'src/lib/workers/protpardelle.worker.ts',
+    workerFile: 'src/lib/plugins/protpardelle/protpardelle.worker.ts',
     factoryExport: 'createProtpardelleEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/protpardelle-webgpu/resolve/main',
     expectedParamKeys: [
@@ -117,7 +123,7 @@ const WAVE7A_SPECS = [
   {
     name: 'ESM-C 300M',
     vendorDir: 'static/vendor/esmc',
-    workerFile: 'src/lib/workers/esmc.worker.ts',
+    workerFile: 'src/lib/plugins/esmc/esmc.worker.ts',
     factoryExport: 'createEsmcEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/esmc-webgpu/resolve/main/esmc-300m',
     expectedParamKeys: ['maskPositions', 'maxSequences', 'mode', 'precision'],
@@ -125,7 +131,7 @@ const WAVE7A_SPECS = [
   {
     name: 'Dyna-1',
     vendorDir: 'static/vendor/dyna1',
-    workerFile: 'src/lib/workers/dyna1.worker.ts',
+    workerFile: 'src/lib/plugins/dyna1/dyna1.worker.ts',
     factoryExport: 'createDyna1Engine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/dyna1-webgpu/resolve/main',
     expectedParamKeys: ['inputMode', 'maxSequences', 'precision'],
@@ -133,7 +139,7 @@ const WAVE7A_SPECS = [
   {
     name: 'GNINA 1.3',
     vendorDir: 'static/vendor/gnina',
-    workerFile: 'src/lib/workers/gnina.worker.ts',
+    workerFile: 'src/lib/plugins/gnina/gnina.worker.ts',
     factoryExport: 'createGninaEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/gnina-webgpu/resolve/main/default',
     expectedParamKeys: [
@@ -158,7 +164,7 @@ const WAVE7A_SPECS = [
   {
     name: 'RFdiffusion (Base)',
     vendorDir: 'static/vendor/rfdiffusion',
-    workerFile: 'src/lib/workers/rfdiffusion.worker.ts',
+    workerFile: 'src/lib/plugins/rfdiffusion/rfdiffusion.worker.ts',
     factoryExport: 'createRFdiffusionEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/rfdiffusion-webgpu/resolve/main',
     expectedParamKeys: ['contig', 'length', 'numDesigns', 'numSteps', 'precision', 'seed', 'symmetry', 'taskMode'],
@@ -166,7 +172,7 @@ const WAVE7A_SPECS = [
   {
     name: 'BoltzGen-1',
     vendorDir: 'static/vendor/boltzgen',
-    workerFile: 'src/lib/workers/boltzgen.worker.ts',
+    workerFile: 'src/lib/plugins/boltzgen/boltzgen.worker.ts',
     factoryExport: 'createBoltzGenEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/boltzgen-webgpu/resolve/main',
     expectedParamKeys: ['hotspots', 'length', 'motifOffset', 'numDesigns', 'numSteps', 'precision', 'recyclingSteps', 'seed', 'taskMode', 'variant'],
@@ -174,7 +180,7 @@ const WAVE7A_SPECS = [
   {
     name: 'EvoDiff-Seq (38M)',
     vendorDir: 'static/vendor/evodiff',
-    workerFile: 'src/lib/workers/evodiff.worker.ts',
+    workerFile: 'src/lib/plugins/evodiff/evodiff.worker.ts',
     factoryExport: 'createEvoDiffEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/evodiff-webgpu/resolve/main/oa_dm_38m',
     expectedParamKeys: ['fixedSequence', 'length', 'maskPositions', 'numSequences', 'precision', 'seed', 'taskMode'],
@@ -182,7 +188,7 @@ const WAVE7A_SPECS = [
   {
     name: 'La-Proteina (LD1 + AE1)',
     vendorDir: 'static/vendor/la-proteina',
-    workerFile: 'src/lib/workers/laproteina.worker.ts',
+    workerFile: 'src/lib/plugins/la-proteina/laproteina.worker.ts',
     factoryExport: 'createLaProteinaEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/la-proteina-webgpu/resolve/main',
     expectedParamKeys: ['length', 'mode', 'numDesigns', 'precision', 'seed', 'steps'],
@@ -190,7 +196,7 @@ const WAVE7A_SPECS = [
   {
     name: 'Proteina v1.2 (200M)',
     vendorDir: 'static/vendor/proteina',
-    workerFile: 'src/lib/workers/proteina.worker.ts',
+    workerFile: 'src/lib/plugins/proteina/proteina.worker.ts',
     factoryExport: 'createProteinaEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/proteina-webgpu/resolve/main/v1.2_200m_notri',
     expectedParamKeys: ['length', 'mode', 'noiseScale', 'numDesigns', 'precision', 'seed', 'selfCondition', 'steps'],
@@ -198,7 +204,7 @@ const WAVE7A_SPECS = [
   {
     name: 'SiD-Protein (16-Step Distilled)',
     vendorDir: 'static/vendor/sid-protein',
-    workerFile: 'src/lib/workers/sidprotein.worker.ts',
+    workerFile: 'src/lib/plugins/sid-protein/sidprotein.worker.ts',
     factoryExport: 'createSidProteinEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/sid-protein-webgpu/resolve/main/distilled_16step',
     expectedParamKeys: ['length', 'noiseScale', 'numDesigns', 'precision', 'seed', 'steps'],
@@ -206,7 +212,7 @@ const WAVE7A_SPECS = [
   {
     name: 'Genie 2',
     vendorDir: 'static/vendor/genie2',
-    workerFile: 'src/lib/workers/genie2.worker.ts',
+    workerFile: 'src/lib/plugins/genie2/genie2.worker.ts',
     factoryExport: 'createGenie2Engine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/genie2-webgpu/resolve/main/base',
     expectedParamKeys: ['length', 'motifRange', 'numDesigns', 'precision', 'scale', 'seed', 'steps'],
@@ -214,7 +220,7 @@ const WAVE7A_SPECS = [
   {
     name: 'FrameFlow',
     vendorDir: 'static/vendor/frameflow',
-    workerFile: 'src/lib/workers/frameflow.worker.ts',
+    workerFile: 'src/lib/plugins/frameflow/frameflow.worker.ts',
     factoryExport: 'createFrameFlowEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/frameflow-webgpu/resolve/main/published',
     expectedParamKeys: ['expRate', 'length', 'numDesigns', 'precision', 'schedule', 'seed', 'selfCondition', 'steps'],
@@ -222,7 +228,7 @@ const WAVE7A_SPECS = [
   {
     name: 'FoldFlow 2 (ReFT + ESM-2)',
     vendorDir: 'static/vendor/foldflow2',
-    workerFile: 'src/lib/workers/foldflow2.worker.ts',
+    workerFile: 'src/lib/plugins/foldflow2/foldflow2.worker.ts',
     factoryExport: 'createFoldFlow2Engine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/foldflow2-webgpu/resolve/main/ff2_reft',
     expectedParamKeys: ['length', 'numDesigns', 'precision', 'rotationScaling', 'seed', 'selfConditioning', 'steps'],
@@ -262,11 +268,9 @@ describe('Wave-7A WebGPU vendored engines & workers', () => {
 
       expect(src).toContain(spec.hfBaseUrl);
       expect(src).toContain(spec.factoryExport);
-      expect(src).toContain("msg.type === 'dispose'");
-      expect(src).toContain("type: 'disposed'");
-      expect(src).toContain("msg.type === 'run'");
-      expect(src).toContain("type: 'result'");
-      expect(src).toContain("type: 'error'");
+      expect(src).toContain('createWorkerHarness');
+      expect(src).toMatch(/\basync\s+run\s*\(/);
+      expect(src).toMatch(/\bdispose\s*\(/);
       expect(src).toContain('/* @vite-ignore */');
       expect(src).toContain('engine?.destroy()');
       expect(src.toLowerCase()).not.toContain(legacyBrand);
@@ -277,7 +281,7 @@ describe('Wave-7A WebGPU vendored engines & workers', () => {
   });
 
   it('validates worker-specific scientific contracts (B-factor painting, holo context, all-atom packing, deterministic uniforms)', () => {
-    const thermoSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/thermompnn.worker.ts'), 'utf8');
+    const thermoSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/thermompnn/thermompnn.worker.ts'), 'utf8');
     expect(thermoSrc).toContain('paintStructureBfactors');
     expect(thermoSrc).toContain("bfactorSemantics: 'ddg-stability'");
     expect(thermoSrc).toContain("kind: 'MutationMatrix'");
@@ -286,14 +290,14 @@ describe('Wave-7A WebGPU vendored engines & workers', () => {
     expect(thermoSrc).toContain('makeCachedFetch');
     expect(thermoSrc).toContain('collectOwnedTransferables');
 
-    const ligandSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/ligandmpnn.worker.ts'), 'utf8');
+    const ligandSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/ligandmpnn/ligandmpnn.worker.ts'), 'utf8');
     expect(ligandSrc).toContain('useAtomContext: useLigandContext');
     expect(ligandSrc).toContain('structure.collection');
     expect(ligandSrc).toContain('parseFixedPositionsAndChains');
     expect(ligandSrc).toContain('computeChainLengths');
     expect(ligandSrc).toContain('cache: true');
 
-    const laserSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/lasermpnn.worker.ts'), 'utf8');
+    const laserSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/lasermpnn/lasermpnn.worker.ts'), 'utf8');
     expect(laserSrc).toContain("atomGranularity: 'all-atom'");
     expect(laserSrc).toContain('parseStructureText');
     expect(laserSrc).toContain('computeGeometryStats');
@@ -301,7 +305,7 @@ describe('Wave-7A WebGPU vendored engines & workers', () => {
     expect(laserSrc).toContain('makeCachedFetch');
     expect(laserSrc).toContain('collectOwnedTransferables');
 
-    const antiSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/antifold.worker.ts'), 'utf8');
+    const antiSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/antifold-esmif1/antifold.worker.ts'), 'utf8');
     expect(antiSrc).toContain('mulberry32');
     expect(antiSrc).toContain('sampleIndependent');
     expect(antiSrc).toContain('activeEngine.sample(');
@@ -309,7 +313,7 @@ describe('Wave-7A WebGPU vendored engines & workers', () => {
     expect(antiSrc).toContain('compileAntiFoldDesignPlan');
     expect(antiSrc).toContain('computeChainLengths');
 
-    const ppSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/protpardelle.worker.ts'), 'utf8');
+    const ppSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/protpardelle/protpardelle.worker.ts'), 'utf8');
     expect(ppSrc).toContain('buildMotifLineage');
     expect(ppSrc).toContain('motifGuidance');
     expect(ppSrc).toContain('motifIndices: motifLineage.motifIndices');

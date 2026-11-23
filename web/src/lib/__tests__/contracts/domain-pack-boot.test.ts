@@ -51,12 +51,31 @@ describe('Phase 2 contract: @domain/protein-biopolymer DomainPack & live 26-plug
     expect(lf.execution.getWorkerIsolationKey?.({ model: 'ef2-fast-300m' })).toBe('ef2-fast-300m');
     expect(lf.execution.getWorkerIsolationKey?.({ model: 'af3' })).toBeUndefined();
 
-    // Legacy unmigrated workers must NOT falsely advertise cooperative abort before migrating onto createWorkerHarness (L3)
-    const coopIds = plugins
+    // Migrated createWorkerHarness() workers with cooperative abort support declare supportsCooperativeAbort + abortGraceMs >= 1500
+    const coopPlugins = plugins
       .filter((p) => p.execution.supportsCooperativeAbort)
-      .map((p) => p.id)
-      .sort();
-    expect(coopIds).toEqual([]);
+      .sort((a, b) => a.id.localeCompare(b.id));
+    expect(coopPlugins.map((p) => p.id)).toEqual([
+      'antifold-esmif1',
+      'boltzgen',
+      'dyna1',
+      'esmc',
+      'evodiff',
+      'foldflow2',
+      'frameflow',
+      'genie2',
+      'gnina',
+      'la-proteina',
+      'lasermpnn',
+      'ligandmpnn',
+      'proteina',
+      'protpardelle',
+      'rfdiffusion',
+      'sid-protein',
+    ]);
+    for (const p of coopPlugins) {
+      expect(p.execution.abortGraceMs ?? 0).toBeGreaterThanOrEqual(1500);
+    }
   });
 
   it('aggregates all 17 CacheStorage names, 4 prefixes, and 16 OPFS weight dirs from static plugin policies', () => {

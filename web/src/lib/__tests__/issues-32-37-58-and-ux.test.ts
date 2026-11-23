@@ -67,7 +67,7 @@ describe('Track A + B regressions (#32–#37, #58, catalog & UX)', () => {
     expect(viewerSrc).toContain('non-polymer');
 
     const foldWorkerSrc = readFileSync(
-      resolve(WEB_ROOT, 'src/lib/workers/localfold.worker.ts'),
+      resolve(WEB_ROOT, 'src/lib/plugins/localfold-af2/localfold.worker.ts'),
       'utf8',
     );
     expect(foldWorkerSrc).toContain(".fill('LIG')");
@@ -157,14 +157,14 @@ describe('Track A + B regressions (#32–#37, #58, catalog & UX)', () => {
     }
 
     const thermoWorker = readFileSync(
-      resolve(WEB_ROOT, 'src/lib/workers/thermompnn.worker.ts'),
+      resolve(WEB_ROOT, 'src/lib/plugins/thermompnn/thermompnn.worker.ts'),
       'utf8',
     );
     expect(thermoWorker).toContain('/vendor/thermompnn/cpu/index.js');
     expect(thermoWorker).toContain('createThermoMPNNCPU');
 
     const ligandWorker = readFileSync(
-      resolve(WEB_ROOT, 'src/lib/workers/ligandmpnn.worker.ts'),
+      resolve(WEB_ROOT, 'src/lib/plugins/ligandmpnn/ligandmpnn.worker.ts'),
       'utf8',
     );
     expect(ligandWorker).toContain('/vendor/ligandmpnn/cpu/index.js');
