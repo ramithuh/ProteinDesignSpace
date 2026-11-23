@@ -3,6 +3,8 @@ import { decodeWireValue, encodeWireValue } from '$lib/engine/remote-codec';
 import {
   defaultComputeBackendConfig,
   estimateNodeActiveWeightsMB,
+  formatHostGpuDetail,
+  formatHostGpuPillLabel,
   resolveNodeFoldLimitOptions,
   runNodeOnRemoteServer,
   shouldRouteNodeToRemote,
@@ -201,5 +203,24 @@ describe('self-hosted remote WebGPU backend', () => {
     expect(
       validateBioCapabilities(graph, {}, hostOpts).some((i) => i.code === 'webgpu-token-ceiling'),
     ).toBe(false);
+  });
+
+  it('formats Host GPU pill label & popover detail with hardware model name and VRAM', () => {
+    const rtx5090Health = {
+      ok: true,
+      gpu: {
+        vendor: 'nvidia',
+        architecture: 'blackwell',
+        description: 'NVIDIA GeForce RTX 5090 (32 GB)',
+        name: 'NVIDIA GeForce RTX 5090',
+        shortName: 'RTX 5090',
+        vramMB: 32607,
+        fallback: false,
+      },
+    };
+    expect(formatHostGpuPillLabel(rtx5090Health, 'remote')).toBe('Host · RTX 5090');
+    expect(formatHostGpuPillLabel(rtx5090Health, 'hybrid')).toBe('Hybrid · RTX 5090');
+    expect(formatHostGpuDetail(rtx5090Health)).toBe('NVIDIA GeForce RTX 5090 · 32 GB');
+    expect(formatHostGpuPillLabel({ ok: false, error: 'Unauthorized' }, 'remote')).toBe('Host GPU (!)');
   });
 });

@@ -34,6 +34,9 @@ export interface RemoteServerHealth {
     vendor: string;
     architecture: string;
     description: string;
+    name?: string;
+    shortName?: string;
+    vramMB?: number | null;
     fallback: boolean;
   } | null;
   activeAdapter?: string | null;
@@ -112,6 +115,33 @@ export function saveComputeBackendConfig(cfg: ComputeBackendConfig): void {
   } catch {
     /* ignore storage quota / private mode */
   }
+}
+
+/** Format a compact GPU label for the header status pill (e.g. "Host · RTX 5090"). */
+export function formatHostGpuPillLabel(
+  health: RemoteServerHealth | null,
+  mode: ComputeRoutingMode,
+): string {
+  const prefix = mode === 'hybrid' ? 'Hybrid' : 'Host';
+  if (!health?.ok) return `${prefix} GPU (!)`;
+  const short =
+    health.gpu?.shortName?.trim() ||
+    health.gpu?.name?.trim() ||
+    '';
+  if (short) return `${prefix} · ${short}`;
+  return `${prefix} GPU`;
+}
+
+/** Format a rich GPU summary for the popover status line (e.g. "NVIDIA GeForce RTX 5090 (32 GB)"). */
+export function formatHostGpuDetail(health: RemoteServerHealth | null): string {
+  if (!health?.ok) return health?.error ? `Offline: ${health.error}` : 'Not tested yet';
+  const g = health.gpu;
+  if (!g) return 'Host GPU ready';
+  if (g.name) {
+    const gb = g.vramMB && g.vramMB >= 1024 ? ` · ${Math.round(g.vramMB / 1024)} GB` : '';
+    return `${g.name}${gb}`;
+  }
+  return g.description || g.vendor || 'Host GPU ready';
 }
 
 /** Resolve the effective folding residue ceiling for a node given Settings + Host GPU routing. */

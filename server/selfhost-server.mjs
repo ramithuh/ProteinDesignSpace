@@ -25,6 +25,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
@@ -148,6 +149,100 @@ function detectLinuxVulkanIcd() {
     if (fs.existsSync(icd)) return icd;
   }
   return undefined;
+}
+
+function formatShortGpuName(rawName) {
+  const cleaned = String(rawName || '')
+    .replace(/^NVIDIA\s+GeForce\s+/i, '')
+    .replace(/^NVIDIA\s+/i, '')
+    .replace(/^AMD\s+Radeon\(TM\)\s+/i, '')
+    .replace(/^AMD\s+Radeon\s+/i, '')
+    .replace(/^Intel\(R\)\s+/i, '')
+    .replace(/\s+Laptop\s+GPU$/i, '')
+    .trim();
+  return cleaned.length > 22 ? `${cleaned.slice(0, 21)}…` : cleaned;
+}
+
+function detectHostGpuHardware() {
+  const customLabel = (process.env.DENOVO_GPU_LABEL || '').trim();
+  if (customLabel) {
+    return { name: customLabel, shortName: formatShortGpuName(customLabel), vramMB: null };
+  }
+  // 1. NVIDIA (Linux / Windows) via nvidia-smi
+  try {
+    const out = execFileSync(
+      'nvidia-smi',
+      ['--query-gpu=name,memory.total', '--format=csv,noheader,nounits'],
+      { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+    const firstLine = out.split(/\r?\n/)[0]?.trim();
+    if (firstLine) {
+      const [rawName, rawMem] = firstLine.split(',').map((s) => s.trim());
+      if (rawName) {
+        const memNum = Number(rawMem);
+        const vramMB = Number.isFinite(memNum) && memNum > 0 ? Math.round(memNum) : null;
+        return { name: rawName, shortName: formatShortGpuName(rawName), vramMB };
+      }
+    }
+  } catch {
+    /* nvidia-smi unavailable */
+  }
+  // 2. macOS Apple Silicon / discrete GPU via system_profiler
+  if (process.platform === 'darwin') {
+    try {
+      const out = execFileSync('system_profiler', ['SPDisplaysDataType'], {
+        encoding: 'utf8',
+        timeout: 2000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const m = out.match(/Chipset Model:\s*(.+)/);
+      if (m?.[1]?.trim()) {
+        const name = m[1].trim();
+        return { name, shortName: formatShortGpuName(name), vramMB: null };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  // 3. Linux AMD / Intel fallback via lspci
+  if (process.platform === 'linux') {
+    try {
+      const out = execFileSync('lspci', ['-mm'], {
+        encoding: 'utf8',
+        timeout: 1500,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const line = out
+        .split(/\r?\n/)
+        .find((l) => /VGA compatible controller|3D controller/i.test(l));
+      if (line) {
+        const cols = [...line.matchAll(/"([^"]*)"/g)].map((x) => x[1]);
+        const name = [cols[1], cols[2]].filter(Boolean).join(' ').trim();
+        if (name) return { name, shortName: formatShortGpuName(name), vramMB: null };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
+const HOST_GPU_HW = detectHostGpuHardware();
+
+function enrichGpuInfo(gpu) {
+  if (!gpu) return null;
+  if (!HOST_GPU_HW || gpu.fallback) return gpu;
+  const vramLabel =
+    HOST_GPU_HW.vramMB && HOST_GPU_HW.vramMB >= 1024
+      ? `${Math.round(HOST_GPU_HW.vramMB / 1024)} GB`
+      : null;
+  return {
+    ...gpu,
+    name: HOST_GPU_HW.name,
+    shortName: HOST_GPU_HW.shortName,
+    vramMB: HOST_GPU_HW.vramMB,
+    description: vramLabel ? `${HOST_GPU_HW.name} (${vramLabel})` : HOST_GPU_HW.name,
+  };
 }
 
 function setCorsHeaders(req, res) {
@@ -476,7 +571,7 @@ async function main() {
             ok,
             service: 'denovo-selfhost',
             version: '0.1.0',
-            gpu: runnerHealth.gpu,
+            gpu: enrichGpuInfo(runnerHealth.gpu),
             activeAdapter: runnerHealth.activeAdapter,
             queueDepth: jobQueue.length + (runningJob ? 1 : 0),
             runningJobId: runningJob?.jobId ?? null,

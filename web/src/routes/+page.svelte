@@ -99,6 +99,8 @@
     checkRemoteServerHealth,
     DEFAULT_HOST_MAX_FOLD_RESIDUES,
     defaultComputeBackendConfig,
+    formatHostGpuDetail,
+    formatHostGpuPillLabel,
     loadComputeBackendConfig,
     releaseRemoteServerGpu,
     resolveNodeFoldLimitOptions,
@@ -3682,22 +3684,18 @@
             void probeRemoteBackend(computeBackend);
           }
         }}
-        title="WebGPU & Self-Hosted GPU backend, VRAM & weight cache"
+        title={computeBackend.mode !== 'local' && remoteHealth?.ok
+          ? `${formatHostGpuDetail(remoteHealth)} (Host WebGPU · click for compute settings)`
+          : 'WebGPU & Self-Hosted GPU backend, VRAM & weight cache'}
       >
         <span class="status-dot"></span>
         {activeGpuWorkerLabel
           ? `GPU: ${activeGpuWorkerLabel}`
-          : computeBackend.mode === 'remote'
-            ? remoteHealth?.ok
-              ? 'Host GPU'
-              : 'Host GPU (!)'
-            : computeBackend.mode === 'hybrid'
-              ? remoteHealth?.ok
-                ? 'Hybrid GPU'
-                : 'Hybrid (!)'
-              : webgpuIsFallback
-                ? 'WebGPU (SW)'
-                : 'WebGPU'}
+          : computeBackend.mode !== 'local'
+            ? formatHostGpuPillLabel(remoteHealth, computeBackend.mode)
+            : webgpuIsFallback
+              ? 'WebGPU (SW)'
+              : 'WebGPU'}
       </button>
 
       {#if sysMenuOpen}
@@ -3802,7 +3800,7 @@
                   {#if remoteChecking}
                     Checking host GPU…
                   {:else if remoteHealth?.ok}
-                    {remoteHealth.gpu?.description || remoteHealth.gpu?.vendor || 'Host GPU ready'}
+                    {formatHostGpuDetail(remoteHealth)}
                     {(remoteHealth.queueDepth ?? 0) > 0 ? ` · q=${remoteHealth.queueDepth}` : ''}
                   {:else if remoteHealth?.error}
                     Offline: {remoteHealth.error}
