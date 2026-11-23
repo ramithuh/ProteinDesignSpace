@@ -279,7 +279,7 @@ describe('Phase 1 contract: Layer 1 Core Kernel, PluginRegistry, ArtifactEnvelop
     let activeFakeWorker!: ReturnType<typeof makeFakeWorkerFromRunner>;
 
     const reg = new PluginRegistry();
-    reg.registerDomainPack(makeTestDomainPack('protein-biopolymer', 'StructureArtifact'));
+    reg.registerDomainPack(makeTestDomainPack('protein-biopolymer', 'SequenceSet'));
     reg.registerPlugin({
       id: 'evodiff',
       domainId: 'protein-biopolymer',
@@ -294,7 +294,7 @@ describe('Phase 1 contract: Layer 1 Core Kernel, PluginRegistry, ArtifactEnvelop
         licenseNote: 'MIT',
         description: 'Cooperative abort test plugin',
         inputs: {},
-        outputs: { sequences: { type: 'StructureArtifact' } },
+        outputs: { sequences: { type: 'SequenceSet' } },
       },
       execution: {
         runtime: 'wgsl-custom',
@@ -378,7 +378,7 @@ describe('Phase 1 contract: Layer 1 Core Kernel, PluginRegistry, ArtifactEnvelop
     try {
       let hungWorkerTerminated = false;
       const hungReg = new PluginRegistry();
-      hungReg.registerDomainPack(makeTestDomainPack('protein-biopolymer', 'StructureArtifact'));
+      hungReg.registerDomainPack(makeTestDomainPack('protein-biopolymer', 'SequenceSet'));
       hungReg.registerPlugin({
         ...reg.getPlugin('evodiff')!,
         execution: {

@@ -23,21 +23,12 @@ import SidProteinWorker from '$lib/workers/sidprotein.worker?worker';
 import EsmcWorker from '$lib/workers/esmc.worker?worker';
 import Dyna1Worker from '$lib/workers/dyna1.worker?worker';
 import GninaWorker from '$lib/workers/gnina.worker?worker';
-import {
-  cropRawAllAtomStructure,
-  generateSampleHelixBundlePdb,
-  parseStructureText,
-} from '$lib/protein-ops/pdb';
-import { fetchStructureByPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
-import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/protein-ops/kabsch';
-import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS, WORKFLOW_PRESETS } from './registry';
 import { validateGraph } from './graph-utils';
-import { validateNodeParams, validateSequenceText } from './param-validation';
+import { validateNodeParams } from './param-validation';
 import { normalizeWorkflowGraph } from './share';
 import {
   resolveFoldConfidence,
-  splitMultiChainSequence,
   validateBioCapabilities,
   validateRuntimeNodeInputs,
 } from './bio-capabilities';
@@ -50,276 +41,59 @@ import {
   joinBranchArtifacts,
   joinKeyedCollections,
 } from './compare';
-import { sha256Hex, type CollectionMember } from './collections';
-import { planTopKFilter } from './work-plan';
+import { fnv1a, canonicalJsonStringify } from '$lib/kernel/hash-utils';
 import type { PluginRegistry } from '$lib/kernel/plugin-registry';
+import type { CpuExecutionContext, ModelPlugin, UpstreamGraphQuery } from '$lib/kernel/plugin-types';
 import { getActivePluginRegistry } from '$lib/kernel/active-registry';
-import { hydrateLegacyArtifactToEnvelope } from '$lib/kernel/artifacts';
+import { hydrateLegacyArtifactToEnvelope, type ArtifactEnvelope } from '$lib/kernel/artifacts';
+import {
+  materializePdbInputNode,
+  deriveSequenceSetFromStructure,
+  pdbInputPlugin,
+} from '$lib/plugins/pdb-input';
+import {
+  materializeSequenceInputNode,
+  sequenceInputPlugin,
+} from '$lib/plugins/sequence-input';
+import { topKFilterPlugin } from '$lib/plugins/top-k-filter';
+import { structureComparePlugin } from '$lib/plugins/structure-compare';
+import { designabilityScorerPlugin } from '$lib/plugins/designability-scorer';
 import type {
+  AdapterManifest,
   ArtifactRef,
   CanonicalArtifact,
-  CollectionItemOutcome,
-  DesignabilityMetrics,
-  DesignabilityRow,
-  ExcludedCandidateRecord,
-  FoldedCandidate,
   FoldedStructure,
   NodeProgressEvent,
-  ReferenceRelation,
-  ReferenceResidueMapping,
-  SequenceCandidate,
   SequenceSet,
-  StructureArtifact,
   WorkflowGraph,
   WorkflowNode,
 } from './types';
 
-export { exportJoinedCollectionCsv, joinBranchArtifacts, joinKeyedCollections };
+export {
+  exportJoinedCollectionCsv,
+  joinBranchArtifacts,
+  joinKeyedCollections,
+  materializePdbInputNode,
+  deriveSequenceSetFromStructure,
+  materializeSequenceInputNode,
+};
 export type { CheckpointStorageAdapter };
 
-function fnv1a(str: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(16).padStart(8, '0');
-}
+const BUILTIN_CPU_PLUGINS: Readonly<Record<string, ModelPlugin>> = {
+  'pdb-input': pdbInputPlugin,
+  'sequence-input': sequenceInputPlugin,
+  'top-k-filter': topKFilterPlugin,
+  'structure-compare': structureComparePlugin,
+  'designability-scorer': designabilityScorerPlugin,
+};
 
-/** Deterministic key-sorted JSON serializer so reordered param keys never bust memoization. */
-function canonicalJsonStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((v) => (v === undefined ? 'null' : canonicalJsonStringify(v))).join(',')}]`;
-  }
-  const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
-  const parts: string[] = [];
-  for (const k of keys) {
-    const v = obj[k];
-    if (v === undefined) continue;
-    parts.push(`${JSON.stringify(k)}:${canonicalJsonStringify(v)}`);
-  }
-  return `{${parts.join(',')}}`;
-}
-
-/**
- * Pure CPU/fetch materializer for a `pdb-input` node.
- * Shared by both ExecutionScheduler and instant live 3D preview (no Run needed).
- */
-export async function materializePdbInputNode(
-  node: WorkflowNode,
-  onProgress?: (ev: NodeProgressEvent) => void,
-): Promise<StructureArtifact> {
-  const mode = String(node.params.mode ?? 'demo-bundle');
-  let rawText: string;
-  let filename: string;
-  if (mode === 'pdb-id') {
-    const normId = normalizePdbId(String(node.params.pdbId ?? ''));
-    if (!normId) {
-      throw new Error('PDB Input is in PDB ID mode, but no PDB ID was entered.');
-    }
-    const cachedText = String(node.params.pdbText ?? '').trim();
-    const fetchedFor = normalizePdbId(String(node.params.fetchedPdbId ?? ''));
-    if (cachedText.length > 0 && fetchedFor === normId) {
-      rawText = cachedText;
-      const rawFn = String(node.params.filename ?? '').trim();
-      filename = rawFn && rawFn !== 'demo_3helix_53aa.pdb' ? rawFn : `${normId}.cif`;
-    } else {
-      onProgress?.({
-        nodeId: node.id,
-        status: 'loading',
-        phase: 'fetch',
-        progress: 0.2,
-        detail: `Fetching ${normId} from RCSB PDB...`,
-      });
-      const fetched = await fetchStructureByPdbId(normId);
-      rawText = fetched.text;
-      filename = fetched.filename;
-    }
-  } else if (mode === 'custom' && String(node.params.pdbText ?? '').trim().length > 0) {
-    rawText = String(node.params.pdbText);
-    filename = String(node.params.filename || 'uploaded.pdb');
-  } else {
-    rawText = generateSampleHelixBundlePdb();
-    filename = 'demo_3helix_53aa.pdb';
-  }
-  const cropSpec = mode === 'demo-bundle' ? '' : String(node.params.cropSegments ?? '').trim();
-  const isCropped = cropSpec.length > 0;
-  let effectiveRawText = rawText;
-  let omittedLigands: string[] = [];
-  if (isCropped) {
-    effectiveRawText = cropRawAllAtomStructure(rawText, cropSpec).text;
-  }
-  const parsed = parseStructureText(effectiveRawText);
-  if (isCropped) {
-    try {
-      const fullLigands = parseStructureText(rawText).diagnostics.ligandNames;
-      if (fullLigands.length > 0) {
-        const keptSet = new Set(parsed.diagnostics.ligandNames.map((l) => l.toUpperCase()));
-        omittedLigands = fullLigands.filter((l) => !keptSet.has(l.toUpperCase()));
-      }
-    } catch {
-      omittedLigands = [];
-    }
-  }
-  const diagnostics =
-    omittedLigands.length > 0
-      ? { ...parsed.diagnostics, omittedLigands }
-      : parsed.diagnostics;
-  const hasNonProteinContext = parsed.diagnostics.hasLigands || parsed.diagnostics.hasNucleicAcids;
-  if (parsed.nResidues < 3 && !hasNonProteinContext) {
-    throw new Error('Input PDB/mmCIF must contain at least 3 residues with Cα atoms');
-  }
-  const geometry = computeGeometryStats(
-    parsed.caCoords,
-    parsed.chainIds,
-    parsed.resNums,
-    parsed.insCodes,
-  );
-  const benchmarkId = String(node.params.benchmarkId ?? '').trim() || undefined;
-
-  const summaryParts: string[] = [];
-  if (parsed.nResidues > 0) summaryParts.push(`L=${parsed.nResidues}`);
-  if (parsed.diagnostics.ligandNames.length > 0) summaryParts.push(parsed.diagnostics.ligandNames.join('+'));
-  if (parsed.diagnostics.nucleicAcidChains.length > 0) {
-    summaryParts.push(`DNA(${parsed.diagnostics.nucleicAcidChains.join(',')})`);
-  }
-  const summaryTag = summaryParts.join(' · ') || 'context';
-
-  return {
-    kind: 'StructureArtifact',
-    id: `pdb-${fnv1a(`${rawText}::${cropSpec}${benchmarkId ? `::${benchmarkId}` : ''}`)}`,
-    label: isCropped
-      ? `${filename} [${cropSpec}] (${summaryTag})`
-      : `${filename} (${summaryTag})`,
-    sourceModelId: 'pdb-input',
-    length: parsed.nResidues,
-    sequence: parsed.sequence,
-    caCoords: parsed.caCoords,
-    backbone4Coords: parsed.backbone4Coords,
-    pdbText: parsed.nResidues > 0 ? parsed.pdbText : parsed.format === 'mmcif' ? '' : effectiveRawText,
-    cifText: parsed.format === 'mmcif' ? effectiveRawText : undefined,
-    chainIds: parsed.chainIds,
-    chainLengths: parsed.diagnostics.chainLengths,
-    insCodes: parsed.insCodes,
-    sourceResidues: parsed.sourceResidues,
-    chainIdMap: parsed.chainIdMap,
-    atomPresence: parsed.atomPresence,
-    observedBackboneMask: parsed.observedBackboneMask,
-    diagnostics,
-    ...(benchmarkId ? { benchmarkId } : {}),
-    geometry,
-  };
-}
-
-/**
- * Derive an optional `SequenceSet` from a materialized `pdb-input` `StructureArtifact`
- * so `pdb-input` can directly feed sequence-consuming blocks (`localfold-af2`, `evodiff`, `foldflow2`).
- * Returns `undefined` for non-protein structures (`length <= 0` or empty sequence, e.g. pure DNA).
- */
-export function deriveSequenceSetFromStructure(art: StructureArtifact): SequenceSet | undefined {
-  const seq = art.sequence.trim().toUpperCase();
-  if (art.length <= 0 || !seq) return undefined;
-  const candidateId = art.label.replace(/\s+\([^)]*\)$/, '').trim() || art.id;
-  const chainLengths =
-    art.chainLengths && art.chainLengths.length > 0 ? [...art.chainLengths] : [seq.length];
-  return {
-    kind: 'SequenceSet',
-    id: `pdb-seq-${art.id}`,
-    parentStructureId: art.id,
-    sourceStructureId: art.id,
-    sourceModelId: art.sourceModelId || 'pdb-input',
-    collectionKind: 'independent-candidates',
-    candidates: [
-      {
-        id: candidateId,
-        key: art.id,
-        sequence: seq,
-        score: null,
-        globalScore: null,
-        sourceModelId: art.sourceModelId || 'pdb-input',
-        sourceStructureId: art.id,
-        sampleIndex: 0,
-        chainLengths,
-      },
-    ],
-  };
-}
-
-/**
- * Pure CPU materializer for a `sequence-input` node.
- * Shared by both ExecutionScheduler and instant live preview (no Run needed).
- */
-export function materializeSequenceInputNode(node: WorkflowNode): SequenceSet {
-  const raw = String(node.params.sequence ?? '').trim();
-  if (!raw) throw new Error('Sequence Input is empty');
-  const seqCheck = validateSequenceText(raw);
-  if (seqCheck.status === 'error') {
-    throw new Error(seqCheck.message);
-  }
-  const candidates: Array<{
-    id: string;
-    key: string;
-    sequence: string;
-    chainLengths?: number[];
-    score: null;
-    globalScore: null;
-    sourceModelId: string;
-    sourceStructureId: string;
-  }> = [];
-  if (raw.includes('>')) {
-    const blocks = raw.split(/^\s*>/m).filter((b) => b.trim().length > 0);
-    const seenIds = new Set<string>();
-    blocks.forEach((b, idx) => {
-      const lines = b.split('\n');
-      const baseHeader = lines[0].trim().split(/\s+/)[0] || `seq-${idx + 1}`;
-      const split = splitMultiChainSequence(lines.slice(1).join(''));
-      if (split.concatenated.length >= 5) {
-        let id = baseHeader;
-        let suffix = 2;
-        while (seenIds.has(id)) id = `${baseHeader}_${suffix++}`;
-        seenIds.add(id);
-        candidates.push({
-          id,
-          key: id,
-          sequence: split.concatenated,
-          ...(split.chains.length > 1 ? { chainLengths: split.chainLengths } : {}),
-          score: null,
-          globalScore: null,
-          sourceModelId: 'sequence-input',
-          sourceStructureId: 'none',
-        });
-      }
-    });
-  } else {
-    const split = splitMultiChainSequence(raw);
-    if (split.concatenated.length >= 5) {
-      const id = String(node.params.label || 'custom-seq-1');
-      candidates.push({
-        id,
-        key: id,
-        sequence: split.concatenated,
-        ...(split.chains.length > 1 ? { chainLengths: split.chainLengths } : {}),
-        score: null,
-        globalScore: null,
-        sourceModelId: 'sequence-input',
-        sourceStructureId: 'none',
-      });
-    }
-  }
-  if (candidates.length === 0) throw new Error('No valid amino acid sequences (>= 5 aa) found');
-  return {
-    kind: 'SequenceSet',
-    id: `seqin-${fnv1a(JSON.stringify(candidates))}`,
-    parentStructureId: 'none',
-    sourceStructureId: 'none',
-    sourceModelId: 'sequence-input',
-    collectionKind: 'independent-candidates',
-    candidates,
-  };
+function resolveManifestForAdapter(
+  adapterId: string,
+  registry?: PluginRegistry | null,
+): AdapterManifest | undefined {
+  const fromReg = registry?.getPlugin(adapterId) ?? getActivePluginRegistry()?.getPlugin(adapterId);
+  if (fromReg) return fromReg.manifest as unknown as AdapterManifest;
+  return Object.hasOwn(ADAPTER_REGISTRY, adapterId) ? ADAPTER_REGISTRY[adapterId] : undefined;
 }
 
 function topoSort(graph: WorkflowGraph): WorkflowNode[] {
@@ -503,8 +277,9 @@ const DEFAULT_GPU_IDLE_RELEASE_MS = 60_000; // 60 s idle auto-release for Safari
 export function validateAdapterOutputs(
   node: WorkflowNode,
   outputs: unknown,
+  registry?: PluginRegistry | null,
 ): Record<string, CanonicalArtifact> {
-  const manifest = ADAPTER_REGISTRY[node.adapterId];
+  const manifest = resolveManifestForAdapter(node.adapterId, registry);
   if (!manifest) {
     throw new Error(`Unknown adapter "${node.adapterId}" during output contract validation`);
   }
@@ -516,29 +291,31 @@ export function validateAdapterOutputs(
   const record = outputs as Record<string, unknown>;
   for (const [portName, portSpec] of Object.entries(manifest.outputs)) {
     const required = portSpec.required !== false;
+    const expectedTypes = Array.isArray(portSpec.type) ? portSpec.type : [portSpec.type];
+    const expectedLabel = expectedTypes.join(' | ');
     const value = record[portName];
     if (value === undefined || value === null) {
       if (required) {
         throw new Error(
-          `Output contract violation on node "${node.id}" (${node.adapterId}): missing required output port "${portName}" (expected ${portSpec.type}).`,
+          `Output contract violation on node "${node.id}" (${node.adapterId}): missing required output port "${portName}" (expected ${expectedLabel}).`,
         );
       }
       continue;
     }
     if (typeof value !== 'object' || Array.isArray(value)) {
       throw new Error(
-        `Output contract violation on node "${node.id}" (${node.adapterId}): output port "${portName}" is not a valid artifact object (expected ${portSpec.type}).`,
+        `Output contract violation on node "${node.id}" (${node.adapterId}): output port "${portName}" is not a valid artifact object (expected ${expectedLabel}).`,
       );
     }
     const art = value as Partial<CanonicalArtifact>;
-    if (art.kind !== portSpec.type) {
+    if (!expectedTypes.includes(art.kind as never)) {
       throw new Error(
-        `Output contract violation on node "${node.id}" (${node.adapterId}): output port "${portName}" returned kind "${String(art.kind)}", expected "${portSpec.type}".`,
+        `Output contract violation on node "${node.id}" (${node.adapterId}): output port "${portName}" returned kind "${String(art.kind)}", expected "${expectedLabel}".`,
       );
     }
     if (typeof art.id !== 'string' || art.id.trim().length === 0) {
       throw new Error(
-        `Output contract violation on node "${node.id}" (${node.adapterId}): output port "${portName}" (${portSpec.type}) is missing a non-empty artifact id.`,
+        `Output contract violation on node "${node.id}" (${node.adapterId}): output port "${portName}" (${expectedLabel}) is missing a non-empty artifact id.`,
       );
     }
   }
@@ -673,17 +450,22 @@ export function deserializeCheckpoint(raw: string): SchedulerCheckpoint {
   return parsed as SchedulerCheckpoint;
 }
 
-const COMPARE_DISPLAY_ONLY_PARAM_KEYS = new Set(['layout', 'colorMode', 'alignKabsch']);
-
 function normalizeParamsForComputation(
   adapterId: string,
   params: Record<string, unknown> | undefined,
+  registry?: PluginRegistry | null,
 ): Record<string, unknown> {
   if (!params) return {};
-  if (adapterId !== 'structure-compare') return params;
+  const plugin =
+    registry?.getPlugin(adapterId) ??
+    getActivePluginRegistry()?.getPlugin(adapterId) ??
+    BUILTIN_CPU_PLUGINS[adapterId];
+  const displayOnlyKeys = plugin?.display.displayOnlyParamKeys;
+  if (!displayOnlyKeys || displayOnlyKeys.length === 0) return params;
+  const skipSet = new Set(displayOnlyKeys);
   const filtered: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(params)) {
-    if (!COMPARE_DISPLAY_ONLY_PARAM_KEYS.has(key)) {
+    if (!skipSet.has(key)) {
       filtered[key] = value;
     }
   }
@@ -759,123 +541,6 @@ export function computeInvalidatedNodeIds(
     else validNodeIds.push(n.id);
   }
   return { staleNodeIds, validNodeIds };
-}
-
-function parseReferenceResidueMapping(
-  raw: unknown,
-  foldLen: number,
-  refLen: number,
-): { pairs: Array<[number, number]>; spec: ReferenceResidueMapping } | null {
-  if (raw === undefined || raw === null || raw === '') return null;
-  const pairs: Array<[number, number]> = [];
-  let label: string | undefined;
-
-  const assertStrictInt = (v: unknown, role: string): number => {
-    if (typeof v !== 'number' || !Number.isInteger(v)) {
-      throw new Error(
-        `Invalid residueMapping: ${role} must be a strict finite integer (got ${String(v)}).`,
-      );
-    }
-    return v;
-  };
-
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim();
-    if (!trimmed) return null;
-    for (const tok of trimmed.split(/[,\s;]+/).filter(Boolean)) {
-      const m = /^(\d+)\s*(?::|->|=)\s*(\d+)$/.exec(tok);
-      if (!m) {
-        throw new Error(
-          `Invalid residueMapping entry "${tok}". Expected 0-based "foldIdx:refIdx" pairs (e.g. "0:0,1:1,2:2").`,
-        );
-      }
-      pairs.push([Number(m[1]), Number(m[2])]);
-    }
-  } else if (Array.isArray(raw)) {
-    for (const entry of raw) {
-      if (!Array.isArray(entry) || entry.length < 2) {
-        throw new Error('Invalid residueMapping array: every entry must be a [foldIdx, refIdx] pair.');
-      }
-      pairs.push([
-        assertStrictInt(entry[0], 'fold index'),
-        assertStrictInt(entry[1], 'reference index'),
-      ]);
-    }
-  } else if (typeof raw === 'object') {
-    const obj = raw as ReferenceResidueMapping;
-    label = obj.label;
-    if (Array.isArray(obj.pairs)) {
-      for (const entry of obj.pairs) {
-        if (!Array.isArray(entry) || entry.length < 2) {
-          throw new Error('Invalid residueMapping.pairs: every entry must be a [foldIdx, refIdx] pair.');
-        }
-        pairs.push([
-          assertStrictInt(entry[0], 'fold index'),
-          assertStrictInt(entry[1], 'reference index'),
-        ]);
-      }
-    } else if (Array.isArray(obj.foldIndices) && Array.isArray(obj.referenceIndices)) {
-      if (obj.foldIndices.length !== obj.referenceIndices.length) {
-        throw new Error(
-          `Invalid residueMapping: foldIndices (${obj.foldIndices.length}) and referenceIndices (${obj.referenceIndices.length}) must have equal length.`,
-        );
-      }
-      for (let i = 0; i < obj.foldIndices.length; i++) {
-        pairs.push([
-          assertStrictInt(obj.foldIndices[i], 'fold index'),
-          assertStrictInt(obj.referenceIndices[i], 'reference index'),
-        ]);
-      }
-    } else {
-      throw new Error(
-        'Invalid residueMapping object: provide either "pairs" or both "foldIndices" and "referenceIndices".',
-      );
-    }
-  } else {
-    throw new Error('Invalid residueMapping parameter type.');
-  }
-
-  if (pairs.length < 3) {
-    throw new Error(
-      `Invalid residueMapping: at least 3 mapped residue pairs are required for Kabsch superposition (got ${pairs.length}).`,
-    );
-  }
-  const seenFold = new Set<number>();
-  const seenRef = new Set<number>();
-  for (const [fi, ri] of pairs) {
-    if (fi < 0 || fi >= foldLen) {
-      throw new Error(
-        `Invalid residueMapping: fold index ${fi} is out of bounds for fold length ${foldLen}.`,
-      );
-    }
-    if (ri < 0 || ri >= refLen) {
-      throw new Error(
-        `Invalid residueMapping: reference index ${ri} is out of bounds for reference length ${refLen}.`,
-      );
-    }
-    if (seenFold.has(fi)) {
-      throw new Error(
-        `Invalid residueMapping: duplicate fold index ${fi} (mapping must be 1-to-1 with >= 3 distinct pairs).`,
-      );
-    }
-    if (seenRef.has(ri)) {
-      throw new Error(
-        `Invalid residueMapping: duplicate reference index ${ri} (mapping must be 1-to-1 with >= 3 distinct pairs).`,
-      );
-    }
-    seenFold.add(fi);
-    seenRef.add(ri);
-  }
-
-  return {
-    pairs,
-    spec: {
-      pairs,
-      foldIndices: pairs.map(([fi]) => fi),
-      referenceIndices: pairs.map(([, ri]) => ri),
-      ...(label ? { label } : {}),
-    },
-  };
 }
 
 interface ActiveGpuSlot {
@@ -1694,1088 +1359,40 @@ export class ExecutionScheduler {
     });
   }
 
-  private async runCpuNode(
+  private runCpuNode(
     node: WorkflowNode,
     inputs: Record<string, CanonicalArtifact>,
     onProgress?: (ev: NodeProgressEvent) => void,
-    upstreamLineageHint?: string,
     multiInputs?: Record<string, CanonicalArtifact[]>,
+    upstreamGraph?: UpstreamGraphQuery,
+    upstreamArtifacts?: Readonly<Record<string, Readonly<Record<string, CanonicalArtifact>>>>,
+    abortSignal?: AbortSignal,
   ): Promise<Record<string, CanonicalArtifact>> {
-    if (node.adapterId === 'pdb-input') {
-      const art = await materializePdbInputNode(node, onProgress);
-      const sequences = deriveSequenceSetFromStructure(art);
-      return sequences ? { structure: art, sequences } : { structure: art };
-    }
-
-    if (node.adapterId === 'sequence-input') {
-      const seqSet = materializeSequenceInputNode(node);
-      return { sequences: seqSet };
-    }
-
-    if (node.adapterId === 'structure-compare') {
-      const ref = inputs.reference as StructureArtifact | undefined;
-      const structList = (
-        multiInputs?.structures ?? (inputs.structures ? [inputs.structures] : [])
-      ).filter((a): a is StructureArtifact => a?.kind === 'StructureArtifact');
-      const primary = structList[0] ?? (ref?.kind === 'StructureArtifact' ? ref : undefined);
-      if (!primary) {
-        throw new Error('structure-compare requires at least one upstream StructureArtifact');
-      }
-      const layout = String(node.params.layout ?? 'overlay');
-      const colorMode = String(node.params.colorMode ?? 'by-model');
-      const alignKabsch = node.params.alignKabsch !== false;
-      onProgress?.({
-        nodeId: node.id,
-        status: 'running',
-        phase: 'compare',
-        progress: 0.5,
-        detail: `Comparing structures (${layout}, ${alignKabsch ? 'Kabsch' : 'raw'}, ${colorMode})...`,
-      });
-      const seenIds = new Set<string>();
-      const combinedItems: StructureArtifact[] = [];
-      const addItem = (item: StructureArtifact | undefined) => {
-        if (!item || seenIds.has(item.id)) return;
-        seenIds.add(item.id);
-        combinedItems.push(item);
-      };
-      addItem(ref);
-      for (const s of structList) addItem(s);
-
-      if (combinedItems.length <= 1 && !ref) {
-        return { structure: primary };
-      }
-      const keys = combinedItems.map((item, idx) => item.designKey ?? item.id ?? `item-${idx}`);
-      const outputStructure: StructureArtifact = {
-        ...primary,
-        ...(ref && primary.id !== ref.id ? { parentStructureId: ref.id } : {}),
-        ...(combinedItems.length > 1
-          ? {
-              collection: {
-                kind: 'Collection',
-                schema: 'denovo.collection/v1',
-                id: `${primary.id}::compare-${combinedItems.length}`,
-                collectionKind: 'independent-candidates',
-                requestedCount: combinedItems.length,
-                complete: true,
-                items: combinedItems,
-                keys,
-              },
-            }
-          : {}),
-      };
-      return { structure: outputStructure };
-    }
-
-    if (node.adapterId === 'top-k-filter') {
-      const seqIn = inputs.sequences as SequenceSet | undefined;
-      if (!seqIn || seqIn.kind !== 'SequenceSet') {
-        throw new Error('top-k-filter requires an upstream SequenceSet input');
-      }
-      const modeRaw = String(node.params.mode ?? 'per-backbone');
-      const mode: 'per-backbone' | 'global' = modeRaw === 'global' ? 'global' : 'per-backbone';
-      const rawTopK = Number(node.params.topK ?? 2);
-      const topK = Number.isFinite(rawTopK) ? Math.max(1, Math.min(16, Math.round(rawTopK))) : 2;
-      const rawMaxTotal = Number(node.params.maxTotal ?? 8);
-      const maxTotal = Number.isFinite(rawMaxTotal)
-        ? Math.max(1, Math.min(64, Math.round(rawMaxTotal)))
-        : 8;
-      const metricRaw = String(node.params.metric ?? 'score');
-      const metric: 'score' | 'globalScore' = metricRaw === 'globalScore' ? 'globalScore' : 'score';
-      const directionRaw = String(node.params.direction ?? 'min');
-      const direction: 'asc' | 'desc' =
-        directionRaw === 'max' || directionRaw === 'desc' ? 'desc' : 'asc';
-      const directionParam: 'min' | 'max' = direction === 'desc' ? 'max' : 'min';
-
-      const setParent = (seqIn.sourceStructureId ?? seqIn.parentStructureId ?? '').trim();
-      const hasSetParent = setParent.length > 0 && setParent.toLowerCase() !== 'none';
-      const groupOrder = new Map<string, number>();
-      const origIndexByKey = new Map<string, number>();
-      const origCandByKey = new Map<string, SequenceCandidate>();
-      const usedKeys = new Set<string>();
-
-      const members: CollectionMember<SequenceCandidate>[] = seqIn.candidates.map((cand, idx) => {
-        const rawDesignAnchor = (
-          cand.designKey ??
-          cand.sourceStructureId ??
-          (hasSetParent ? setParent : '')
-        ).trim();
-        const hasDesign = rawDesignAnchor.length > 0 && rawDesignAnchor.toLowerCase() !== 'none';
-        const designKey = hasDesign ? rawDesignAnchor : undefined;
-        let designIndex = cand.designIndex;
-        if (designKey !== undefined && designIndex === undefined) {
-          if (!groupOrder.has(designKey)) groupOrder.set(designKey, groupOrder.size);
-          designIndex = groupOrder.get(designKey);
-        }
-        let memberKey = (cand.sequenceKey ?? cand.key ?? cand.id).trim() || `seq-${idx}`;
-        if (usedKeys.has(memberKey)) {
-          memberKey = `${memberKey}::${idx}`;
-        }
-        usedKeys.add(memberKey);
-        origIndexByKey.set(memberKey, idx);
-        origCandByKey.set(memberKey, cand);
-        const ordinal =
-          typeof cand.sampleIndex === 'number' && Number.isInteger(cand.sampleIndex) && cand.sampleIndex >= 0
-            ? cand.sampleIndex
-            : idx;
-        const candSourceId = (cand.sourceStructureId ?? (hasSetParent ? setParent : '')).trim();
-        const hasSourceId = candSourceId.length > 0 && candSourceId.toLowerCase() !== 'none';
-        return {
-          key: memberKey,
-          ordinal,
-          memberKind: 'SequenceCandidate',
-          lineage: {
-            ...(designKey ? { designKey, designIndex } : {}),
-            sequenceKey: memberKey,
-            sequenceIndex: ordinal,
-            ...(hasSourceId
-              ? {
-                  sourceStructure: {
-                    artifactId: candSourceId,
-                    payloadDigest: '',
-                    ...(designKey ? { designKey } : {}),
-                  },
-                }
-              : {}),
-            parentKeys: designKey ? [designKey] : [],
-          },
-          payload: cand,
-          summary: {
-            label: cand.id,
-            residueCount: cand.sequence.length,
-            sequenceDigest: sha256Hex(cand.sequence),
-            score: cand.score,
-            globalScore: cand.globalScore,
-          },
-        };
-      });
-
-      const plan = planTopKFilter(members, {
-        mode,
-        topK,
-        maxTotal,
-        metric,
-        direction,
-      });
-
-      const selectedCandidates: SequenceCandidate[] = plan.selected.map((s) => s.member.payload!);
-      const excludedCandidates: ExcludedCandidateRecord[] = plan.excluded.map((ex, exIdx) => {
-        const orig = origCandByKey.get(ex.key);
-        return {
-          key: ex.key,
-          id: orig?.id ?? ex.key,
-          index: origIndexByKey.get(ex.key) ?? selectedCandidates.length + exIdx,
-          reason: ex.reason ?? `Excluded by top-k-filter (${mode}, topK=${topK}, maxTotal=${maxTotal})`,
-        };
-      });
-      const itemOutcomes: CollectionItemOutcome[] = [
-        ...plan.selected.map((s): CollectionItemOutcome => ({
-          key: s.key,
-          status: 'completed',
-        })),
-        ...excludedCandidates.map((ex): CollectionItemOutcome => ({
-          key: ex.key,
-          status: 'excluded',
-          reason: ex.reason,
-        })),
-      ];
-
-      const distinctSelectedSources = [
-        ...new Set(
-          selectedCandidates
-            .map((c) => c.sourceStructureId?.trim() ?? '')
-            .filter((id) => id.length > 0 && id.toLowerCase() !== 'none'),
-        ),
-      ];
-
-      const filteredSet: SequenceSet = {
-        kind: 'SequenceSet',
-        id: `topk-${seqIn.id}-${fnv1a(canonicalJsonStringify({ mode, topK, maxTotal, metric, direction, planDigest: plan.planDigest }))}`,
-        parentStructureId: seqIn.parentStructureId,
-        ...(seqIn.sourceStructureId ? { sourceStructureId: seqIn.sourceStructureId } : {}),
-        ...(distinctSelectedSources.length > 1
-          ? { sourceStructureIds: distinctSelectedSources }
-          : seqIn.sourceStructureIds
-            ? { sourceStructureIds: [...seqIn.sourceStructureIds] }
-            : {}),
-        sourceModelId: seqIn.sourceModelId,
-        ...(seqIn.collectionKind ? { collectionKind: seqIn.collectionKind } : {}),
-        ...(seqIn.lockedChains ? { lockedChains: [...seqIn.lockedChains] } : {}),
-        ...(seqIn.chainRoles ? { chainRoles: { ...seqIn.chainRoles } } : {}),
-        ...(excludedCandidates.length > 0 ? { excludedCandidates } : {}),
-        itemOutcomes,
-        filterMetadata: {
-          mode,
-          topK,
-          maxTotal: plan.policy.maxTotal,
-          metric,
-          direction: directionParam,
-          totalInput: plan.summary.totalInput,
-          selectedCount: plan.summary.selectedCount,
-          excludedCount: plan.summary.excludedCount,
-          description: plan.summary.description,
+    const plugin =
+      this.pluginRegistry?.getPlugin(node.adapterId) ??
+      getActivePluginRegistry()?.getPlugin(node.adapterId) ??
+      BUILTIN_CPU_PLUGINS[node.adapterId];
+    if (plugin?.execution.executeCpu) {
+      const ctx: CpuExecutionContext = {
+        node,
+        inputs: inputs as unknown as Record<string, ArtifactEnvelope>,
+        multiInputs: (multiInputs ?? {}) as unknown as CpuExecutionContext['multiInputs'],
+        upstreamGraph: upstreamGraph ?? {
+          getIncomingEdges: () => [],
+          getNode: () => undefined,
+          getNodeOutputs: () => undefined,
         },
-        candidates: selectedCandidates,
+        upstreamArtifacts: (upstreamArtifacts ??
+          {}) as unknown as CpuExecutionContext['upstreamArtifacts'],
+        onProgress: (ev) => onProgress?.({ ...ev, nodeId: node.id }),
+        abortSignal: abortSignal ?? new AbortController().signal,
       };
-      return { sequences: filteredSet };
+      return plugin.execution.executeCpu(ctx) as unknown as Promise<
+        Record<string, CanonicalArtifact>
+      >;
     }
 
-    if (node.adapterId === 'designability-scorer') {
-      const structure = inputs.structure as StructureArtifact | undefined;
-      const folds = inputs.folds as FoldedStructure | undefined;
-      if (!structure || !folds) {
-        throw new Error('designability-scorer requires both structure and folds inputs');
-      }
-      const scThresh = Number(node.params.scRmsdThreshold ?? 2.0);
-      const plddtThresh = Number(node.params.plddtThreshold ?? 70);
-      const motifThresh = Number(node.params.motifRmsdThreshold ?? 1.0);
-      const ipaeThresh = Number(node.params.ipaeThreshold ?? 10.0);
-      const ipsaeThresh = Number(node.params.ipsaeThreshold ?? 0);
-      const targetAlignedBinderThresh = Number(
-        node.params.targetAlignedBinderRmsdThreshold ?? 4.0,
-      );
-
-      const allowExternalReference = Boolean(node.params.allowExternalReference);
-      const strictLineage = Boolean(node.params.strictLineage);
-      const rawMappingParam = node.params.residueMapping;
-
-      const normalizeLineageId = (val: string | undefined | null): string => {
-        const s = String(val ?? '').trim();
-        return s && s.toLowerCase() !== 'none' ? s : '';
-      };
-
-      // Helper: precompute motif pairs, genMotifRmsd, and designedStructureText for a specific reference backbone
-      const prepareRefScoringContext = (ref: StructureArtifact) => {
-        const refLen = Math.floor(ref.caCoords.length / 3);
-        const motifPairs: Array<{ idx: number; coord: [number, number, number] }> = [];
-        if (
-          Array.isArray(ref.motifIndices) &&
-          Array.isArray(ref.nativeMotifCoords) &&
-          ref.motifIndices.length > 0 &&
-          ref.nativeMotifCoords.length > 0
-        ) {
-          const limit = Math.min(ref.motifIndices.length, ref.nativeMotifCoords.length);
-          for (let k = 0; k < limit; k++) {
-            const idx = ref.motifIndices[k];
-            const nc = ref.nativeMotifCoords[k];
-            if (
-              Number.isInteger(idx) &&
-              idx >= 0 &&
-              idx < refLen &&
-              Array.isArray(nc) &&
-              nc.length >= 3 &&
-              Number.isFinite(nc[0]) &&
-              Number.isFinite(nc[1]) &&
-              Number.isFinite(nc[2])
-            ) {
-              motifPairs.push({ idx, coord: [nc[0], nc[1], nc[2]] });
-            }
-          }
-        }
-        let nativeMotifCa: Float32Array | null = null;
-        let genMotifRmsd: number | undefined;
-        if (motifPairs.length >= 3) {
-          nativeMotifCa = new Float32Array(motifPairs.length * 3);
-          const genMotifCa = new Float32Array(motifPairs.length * 3);
-          for (let k = 0; k < motifPairs.length; k++) {
-            const { idx, coord } = motifPairs[k];
-            nativeMotifCa[k * 3 + 0] = coord[0];
-            nativeMotifCa[k * 3 + 1] = coord[1];
-            nativeMotifCa[k * 3 + 2] = coord[2];
-            genMotifCa[k * 3 + 0] = ref.caCoords[idx * 3 + 0];
-            genMotifCa[k * 3 + 1] = ref.caCoords[idx * 3 + 1];
-            genMotifCa[k * 3 + 2] = ref.caCoords[idx * 3 + 2];
-          }
-          const genAlign = kabschAlign(genMotifCa, nativeMotifCa);
-          if (Number.isFinite(genAlign.rmsd)) {
-            genMotifRmsd = genAlign.rmsd;
-          }
-        }
-        const hasNonProtein = Boolean(
-          ref.diagnostics?.hasLigands || ref.diagnostics?.hasNucleicAcids,
-        );
-        const designedStructureText =
-          ref.cifText && (hasNonProtein || !ref.pdbText) ? ref.cifText : ref.pdbText;
-        return {
-          ref,
-          refLen,
-          refDisplayName: ref.label || ref.id,
-          motifPairs,
-          nativeMotifCa,
-          genMotifRmsd,
-          designedStructureText,
-        };
-      };
-
-      // Helper: score a single FoldedCandidate against an already-resolved StructureArtifact reference
-      const scoreFoldAgainstRef = (
-        f: FoldedCandidate,
-        ctx: ReturnType<typeof prepareRefScoringContext>,
-        lineageOpts: {
-          rowLineage: string;
-          rowSelfConsistencyValid: boolean;
-          rowLineageMismatch: boolean;
-          rowReferenceRelation: ReferenceRelation;
-          rowReferenceLabel: string;
-          rowReferenceMode: 'self-consistency' | 'external-reference' | 'lineage-mismatch';
-          parsedMapping: ReturnType<typeof parseReferenceResidueMapping>;
-        },
-      ): DesignabilityRow => {
-        const { ref, refLen, motifPairs, nativeMotifCa, genMotifRmsd, designedStructureText } = ctx;
-        const {
-          rowLineage,
-          rowSelfConsistencyValid,
-          rowLineageMismatch,
-          rowReferenceRelation,
-          rowReferenceLabel,
-          rowReferenceMode,
-          parsedMapping,
-        } = lineageOpts;
-        const foldLen = Math.floor(f.caCoords.length / 3);
-
-        let align;
-        let alignedResidueCount: number;
-        if (parsedMapping) {
-          const nMapped = parsedMapping.pairs.length;
-          const foldMappedCa = new Float32Array(nMapped * 3);
-          const refMappedCa = new Float32Array(nMapped * 3);
-          for (let k = 0; k < nMapped; k++) {
-            const [fi, ri] = parsedMapping.pairs[k];
-            foldMappedCa[k * 3 + 0] = f.caCoords[fi * 3 + 0];
-            foldMappedCa[k * 3 + 1] = f.caCoords[fi * 3 + 1];
-            foldMappedCa[k * 3 + 2] = f.caCoords[fi * 3 + 2];
-            refMappedCa[k * 3 + 0] = ref.caCoords[ri * 3 + 0];
-            refMappedCa[k * 3 + 1] = ref.caCoords[ri * 3 + 1];
-            refMappedCa[k * 3 + 2] = ref.caCoords[ri * 3 + 2];
-          }
-          align = kabschAlign(foldMappedCa, refMappedCa);
-          alignedResidueCount = nMapped;
-        } else {
-          if (f.caCoords.length !== ref.caCoords.length) {
-            throw new Error(
-              `Length mismatch in designability-scorer: refolded "${f.sequenceId}" has ${foldLen} residues, ` +
-                `but designed structure "${ref.label}" has ${refLen} residues.`,
-            );
-          }
-          align = kabschAlign(f.caCoords, ref.caCoords);
-          alignedResidueCount = refLen;
-        }
-        const alignedFoldPdb = applyTransformToPdb(f.pdbText, align.rotation, align.translation);
-
-        let foldResNums: number[] | undefined =
-          f.resNums && f.resNums.length === foldLen ? f.resNums : undefined;
-        let foldChainIds = f.chainIds && f.chainIds.length === foldLen ? f.chainIds : undefined;
-        let foldInsCodes: string[] | undefined;
-        if ((!foldResNums || !foldChainIds) && f.pdbText) {
-          try {
-            const parsedFold = parseStructureText(f.pdbText);
-            if (parsedFold.nResidues === foldLen) {
-              if (!foldResNums) foldResNums = parsedFold.resNums;
-              if (!foldChainIds) foldChainIds = parsedFold.chainIds;
-              foldInsCodes = parsedFold.insCodes;
-            }
-          } catch {
-            /* keep f.chainIds without resNums if pdbText is synthetic */
-          }
-        }
-        const geom = computeGeometryStats(f.caCoords, foldChainIds, foldResNums, foldInsCodes);
-
-        // Multi-chain binder & interface evaluation (#8) — only applicable for full 1:1 equal-length complexes
-        const isFullOneToOne = !parsedMapping && foldLen === refLen;
-        if (isFullOneToOne) {
-          const hasStructChainInfo =
-            (ref.chainLengths && ref.chainLengths.length > 0) ||
-            (ref.chainIds && ref.chainIds.length === refLen);
-          const hasFoldChainInfo =
-            (f.chainLengths && f.chainLengths.length > 0) ||
-            (foldChainIds && foldChainIds.length === foldLen);
-          if (hasStructChainInfo && hasFoldChainInfo) {
-            const structRanges = resolveScorerChainRanges(
-              refLen,
-              ref.chainLengths,
-              ref.chainIds,
-            );
-            const foldRanges = resolveScorerChainRanges(foldLen, f.chainLengths, foldChainIds);
-            const stoichMatches =
-              structRanges.length === foldRanges.length &&
-              structRanges.every((sr, idx) => sr.length === foldRanges[idx].length);
-            if (!stoichMatches) {
-              throw new Error(
-                `Chain stoichiometry mismatch in designability-scorer: refolded "${f.sequenceId}" has ${foldRanges.length} chain(s) [${foldRanges.map((r) => r.length).join(', ')}], ` +
-                  `but reference structure "${ref.label}" has ${structRanges.length} chain(s) [${structRanges.map((r) => r.length).join(', ')}].`,
-              );
-            }
-          }
-        }
-        const chainRanges = isFullOneToOne
-          ? resolveScorerChainRanges(
-              refLen,
-              ref.chainLengths ?? f.chainLengths,
-              ref.chainIds ?? foldChainIds,
-            )
-          : [];
-        let ipae: number | undefined;
-        let ipsae: number | undefined;
-        let ipsaeMin: number | undefined;
-        let binderPlddt: number | undefined;
-        let targetPlddt: number | undefined;
-        let binderScRmsd: number | undefined;
-        let targetAlignedBinderRmsd: number | undefined;
-
-        if (isFullOneToOne && chainRanges.length > 1) {
-          const split = splitBinderAndTargetIndices(
-            chainRanges,
-            ref.chainRoles,
-            ref.lockedChains,
-          );
-          const { binderIndices, targetIndices, explicitRoleSplit } = split;
-
-          if (f.pae && f.pae.length >= refLen * refLen) {
-            const paeDim = Math.round(Math.sqrt(f.pae.length));
-            if (paeDim >= refLen && paeDim * paeDim === f.pae.length) {
-              ipae = computeInterfacePae(
-                f.pae,
-                paeDim,
-                refLen,
-                chainRanges,
-                explicitRoleSplit ? binderIndices : undefined,
-                explicitRoleSplit ? targetIndices : undefined,
-              );
-            }
-          }
-
-          if (explicitRoleSplit) {
-            if (f.plddt.length === refLen) {
-              if (binderIndices.length > 0) {
-                let sum = 0;
-                for (const idx of binderIndices) sum += f.plddt[idx];
-                const mean = sum / binderIndices.length;
-                if (Number.isFinite(mean)) binderPlddt = mean;
-              }
-              if (targetIndices.length > 0) {
-                let sum = 0;
-                for (const idx of targetIndices) sum += f.plddt[idx];
-                const mean = sum / targetIndices.length;
-                if (Number.isFinite(mean)) targetPlddt = mean;
-              }
-            }
-
-            if (binderIndices.length >= 3) {
-              const foldBinderCa = gatherCoordsByIndices(f.caCoords, binderIndices);
-              const structBinderCa = gatherCoordsByIndices(ref.caCoords, binderIndices);
-              const bAlign = kabschAlign(foldBinderCa, structBinderCa);
-              if (Number.isFinite(bAlign.rmsd)) {
-                binderScRmsd = bAlign.rmsd;
-              }
-            }
-
-            if (targetIndices.length >= 3 && binderIndices.length >= 1) {
-              const foldTargetCa = gatherCoordsByIndices(f.caCoords, targetIndices);
-              const structTargetCa = gatherCoordsByIndices(ref.caCoords, targetIndices);
-              const tAlign = kabschAlign(foldTargetCa, structTargetCa);
-              if (Number.isFinite(tAlign.rmsd)) {
-                const { rotation: R, translation: t } = tAlign;
-                let sqSum = 0;
-                for (let k = 0; k < binderIndices.length; k++) {
-                  const off = binderIndices[k] * 3;
-                  const x = f.caCoords[off + 0];
-                  const y = f.caCoords[off + 1];
-                  const z = f.caCoords[off + 2];
-                  const dx = R[0] * x + R[1] * y + R[2] * z + t[0] - ref.caCoords[off + 0];
-                  const dy = R[3] * x + R[4] * y + R[5] * z + t[1] - ref.caCoords[off + 1];
-                  const dz = R[6] * x + R[7] * y + R[8] * z + t[2] - ref.caCoords[off + 2];
-                  sqSum += dx * dx + dy * dy + dz * dz;
-                }
-                const tabRmsd = Math.sqrt(sqSum / binderIndices.length);
-                if (Number.isFinite(tabRmsd)) {
-                  targetAlignedBinderRmsd = tabRmsd;
-                }
-              }
-            }
-          }
-        }
-
-        const ipsaeChainRanges =
-          chainRanges.length > 1
-            ? chainRanges
-            : resolveScorerChainRanges(foldLen, f.chainLengths, foldChainIds);
-        if (ipsaeChainRanges.length > 1 && f.pae && f.pae.length >= foldLen * foldLen) {
-          const proteinPae = sliceProteinPae(f.pae, foldLen);
-          if (proteinPae) {
-            const perResChains = expandChainRangesToIds(ipsaeChainRanges);
-            const ipsaeRes = computeIpsae(proteinPae, perResChains, 10);
-            if (ipsaeRes) {
-              ipsae = ipsaeRes.ipsae;
-              ipsaeMin = ipsaeRes.ipsaeMin;
-            }
-          }
-        }
-        if (ipsae === undefined && typeof f.ipsae === 'number' && Number.isFinite(f.ipsae)) {
-          ipsae = f.ipsae;
-          if (typeof f.ipsaeMin === 'number' && Number.isFinite(f.ipsaeMin)) {
-            ipsaeMin = f.ipsaeMin;
-          }
-        }
-
-        let refoldMotifRmsd: number | undefined;
-        if (isFullOneToOne && nativeMotifCa && motifPairs.length >= 3) {
-          const refoldMotifCa = new Float32Array(motifPairs.length * 3);
-          for (let k = 0; k < motifPairs.length; k++) {
-            const off = motifPairs[k].idx * 3;
-            refoldMotifCa[k * 3 + 0] = f.caCoords[off + 0];
-            refoldMotifCa[k * 3 + 1] = f.caCoords[off + 1];
-            refoldMotifCa[k * 3 + 2] = f.caCoords[off + 2];
-          }
-          const refoldAlign = kabschAlign(refoldMotifCa, nativeMotifCa);
-          if (Number.isFinite(refoldAlign.rmsd)) {
-            refoldMotifRmsd = refoldAlign.rmsd;
-          }
-        }
-
-        const confVal = resolveFoldConfidence(f);
-        const confidenceAvailable = confVal !== null;
-        const effectiveMeanPlddt = confVal !== null ? confVal : Number.NaN;
-
-        const failedGates: string[] = [];
-        if (!rowSelfConsistencyValid || rowLineageMismatch) {
-          failedGates.push('External reference (not self-consistency)');
-        }
-        if (!confidenceAvailable) {
-          failedGates.push('Confidence unavailable (no pLDDT)');
-        } else if (effectiveMeanPlddt < plddtThresh) {
-          failedGates.push(`pLDDT ${effectiveMeanPlddt.toFixed(1)} < ${plddtThresh}`);
-        }
-        if (!Number.isFinite(align.rmsd)) {
-          failedGates.push('scRMSD unavailable');
-        } else if (align.rmsd >= scThresh) {
-          failedGates.push(`scRMSD ${align.rmsd.toFixed(2)} Å ≥ ${scThresh.toFixed(1)} Å`);
-        }
-        if (binderScRmsd !== undefined && binderScRmsd >= scThresh) {
-          failedGates.push(`Binder scRMSD ${binderScRmsd.toFixed(2)} Å ≥ ${scThresh.toFixed(1)} Å`);
-        }
-        if (binderPlddt !== undefined && binderPlddt < plddtThresh) {
-          failedGates.push(`Binder pLDDT ${binderPlddt.toFixed(1)} < ${plddtThresh}`);
-        }
-        if (targetAlignedBinderRmsd !== undefined && targetAlignedBinderRmsd >= targetAlignedBinderThresh) {
-          failedGates.push(
-            `Binder RMSD (target-aligned) ${targetAlignedBinderRmsd.toFixed(2)} Å ≥ ${targetAlignedBinderThresh.toFixed(1)} Å`,
-          );
-        }
-        if (ipae !== undefined && ipae >= ipaeThresh) {
-          failedGates.push(`iPAE ${ipae.toFixed(1)} Å ≥ ${ipaeThresh.toFixed(1)} Å`);
-        }
-        if (
-          Number.isFinite(ipsaeThresh) &&
-          ipsaeThresh > 0 &&
-          ipsae !== undefined &&
-          ipsae < ipsaeThresh
-        ) {
-          failedGates.push(`ipSAE ${ipsae.toFixed(2)} < ${ipsaeThresh.toFixed(2)}`);
-        }
-        if (refoldMotifRmsd !== undefined && refoldMotifRmsd >= motifThresh) {
-          failedGates.push(`Motif RMSD ${refoldMotifRmsd.toFixed(2)} Å ≥ ${motifThresh.toFixed(1)} Å`);
-        }
-        const designable = failedGates.length === 0;
-
-        const designKey = ref.designKey ?? f.designKey;
-        const designIndex = ref.designIndex ?? f.designIndex;
-        const rowChainLengths =
-          f.chainLengths && f.chainLengths.length > 0
-            ? f.chainLengths
-            : ipsaeChainRanges.length > 1
-              ? ipsaeChainRanges.map((r) => r.length)
-              : undefined;
-
-        return {
-          structureId: ref.id,
-          sequenceId: f.sequenceId,
-          candidateKey: f.key ?? f.sequenceId,
-          ...(designKey ? { designKey } : {}),
-          ...(designIndex !== undefined ? { designIndex } : {}),
-          ...(f.sequenceKey ? { sequenceKey: f.sequenceKey } : {}),
-          ...(f.foldKey ? { foldKey: f.foldKey } : {}),
-          ...(rowLineage ? { sourceStructureId: rowLineage } : {}),
-          sequence: f.sequence,
-          ...(rowChainLengths ? { chainLengths: rowChainLengths } : {}),
-          scRmsd: align.rmsd,
-          scTm: align.tmScore,
-          meanPlddt: effectiveMeanPlddt,
-          confidenceAvailable,
-          ptm: f.ptm,
-          iptm: f.iptm ?? null,
-          ...(ipae !== undefined ? { ipae } : {}),
-          ...(ipsae !== undefined ? { ipsae } : {}),
-          ...(ipsaeMin !== undefined ? { ipsaeMin } : {}),
-          ...(binderPlddt !== undefined ? { binderPlddt } : {}),
-          ...(targetPlddt !== undefined ? { targetPlddt } : {}),
-          ...(binderScRmsd !== undefined ? { binderScRmsd } : {}),
-          ...(targetAlignedBinderRmsd !== undefined ? { targetAlignedBinderRmsd } : {}),
-          ...(genMotifRmsd !== undefined ? { genMotifRmsd } : {}),
-          ...(refoldMotifRmsd !== undefined ? { refoldMotifRmsd } : {}),
-          referenceMode: rowReferenceMode,
-          referenceRelation: rowReferenceRelation,
-          referenceLabel: rowReferenceLabel,
-          selfConsistencyValid: rowSelfConsistencyValid,
-          lineageMismatch: rowLineageMismatch,
-          ...(parsedMapping ? { referenceMappingApplied: true } : {}),
-          alignedResidueCount,
-          designable,
-          failedGates,
-          ...(f.msaMode ? { msaMode: f.msaMode } : {}),
-          ...(typeof f.msaDepth === 'number' && Number.isFinite(f.msaDepth) ? { msaDepth: f.msaDepth } : {}),
-          alignedFoldPdb,
-          designedPdb: designedStructureText,
-          pae: f.pae,
-          plddt: f.plddt,
-          geometry: geom,
-          foldElapsedMs: f.elapsedMs,
-        };
-      };
-
-      const collectionItems =
-        structure.collection?.items && structure.collection.items.length > 1
-          ? structure.collection.items
-          : null;
-
-      if (collectionItems) {
-        // Multi-backbone collection scoring: resolve EACH fold strictly against its exact declared parent backbone!
-        // NEVER fall back to collection.items[0], representative, or length matching.
-        const ctxById = new Map<string, ReturnType<typeof prepareRefScoringContext>>();
-        const ctxByDesignKey = new Map<string, ReturnType<typeof prepareRefScoringContext>>();
-        for (const item of collectionItems) {
-          const ctx = prepareRefScoringContext(item);
-          ctxById.set(item.id, ctx);
-          if (item.designKey) ctxByDesignKey.set(item.designKey, ctx);
-        }
-
-        let anyLineageMismatch = false;
-        let mismatchedDetail: string | null = null;
-        let appliedMappingSpec: ReferenceResidueMapping | undefined;
-        const evaluatedDesignIds = new Set<string>();
-        const passingDesignIds = new Set<string>();
-
-        const rows: DesignabilityRow[] = folds.folds.map((f) => {
-          const foldLen = Math.floor(f.caCoords.length / 3);
-          const foldSourceId = normalizeLineageId(f.sourceStructureId);
-          const foldDesignKey = normalizeLineageId(f.designKey);
-          const byIdCtx = foldSourceId ? ctxById.get(foldSourceId) : undefined;
-          const byKeyCtx = foldDesignKey ? ctxByDesignKey.get(foldDesignKey) : undefined;
-
-          let parentError: string | null = null;
-          let resolvedCtx: ReturnType<typeof prepareRefScoringContext> | undefined;
-
-          if (!foldSourceId && !foldDesignKey) {
-            parentError = `Unlinked parent reference for "${f.sequenceId}": fold declares neither sourceStructureId nor designKey (refusing implicit fallback).`;
-          } else if (foldSourceId && foldDesignKey) {
-            if (byKeyCtx && byKeyCtx.ref.id !== foldSourceId) {
-              parentError = `Cross-parent conflict for "${f.sequenceId}": designKey "${foldDesignKey}" belongs to "${byKeyCtx.ref.id}", conflicting with sourceStructureId "${foldSourceId}".`;
-            } else if (byIdCtx && byIdCtx.ref.designKey && byIdCtx.ref.designKey !== foldDesignKey) {
-              parentError = `Cross-parent conflict for "${f.sequenceId}": sourceStructureId "${foldSourceId}" belongs to designKey "${byIdCtx.ref.designKey}", conflicting with declared designKey "${foldDesignKey}".`;
-            } else if (byIdCtx && byKeyCtx && byIdCtx.ref.id !== byKeyCtx.ref.id) {
-              parentError = `Cross-parent conflict for "${f.sequenceId}": sourceStructureId "${foldSourceId}" and designKey "${foldDesignKey}" resolved to different backbones.`;
-            } else if (!byIdCtx && !byKeyCtx) {
-              parentError = `Missing parent backbone for "${f.sequenceId}": neither sourceStructureId "${foldSourceId}" nor designKey "${foldDesignKey}" exists in the structure collection.`;
-            } else if (!byKeyCtx && byIdCtx && byIdCtx.ref.designKey) {
-              parentError = `Cross-parent conflict for "${f.sequenceId}": declared designKey "${foldDesignKey}" is absent; refusing to alias to "${byIdCtx.ref.designKey}".`;
-            } else {
-              resolvedCtx = byKeyCtx ?? byIdCtx;
-            }
-          } else {
-            resolvedCtx = byKeyCtx ?? byIdCtx;
-            if (!resolvedCtx) {
-              parentError = `Missing parent backbone for "${f.sequenceId}": declared parent "${foldSourceId || foldDesignKey}" was not found in the structure collection.`;
-            }
-          }
-
-          if (parentError || !resolvedCtx) {
-            const errMsg = parentError ?? `Missing parent backbone for "${f.sequenceId}".`;
-            anyLineageMismatch = true;
-            if (!mismatchedDetail) mismatchedDetail = foldSourceId || foldDesignKey || 'unlinked';
-            if (strictLineage) {
-              throw new Error(errMsg);
-            }
-            const confVal = resolveFoldConfidence(f);
-            const confidenceAvailable = confVal !== null;
-            const effectiveMeanPlddt = confVal !== null ? confVal : Number.NaN;
-            const geom = computeGeometryStats(
-              f.caCoords,
-              f.chainIds && f.chainIds.length === foldLen ? f.chainIds : undefined,
-              f.resNums && f.resNums.length === foldLen ? f.resNums : undefined,
-            );
-            const failedGates: string[] = [errMsg];
-            if (!confidenceAvailable) {
-              failedGates.push('Confidence unavailable (no pLDDT)');
-            } else if (effectiveMeanPlddt < plddtThresh) {
-              failedGates.push(`pLDDT ${effectiveMeanPlddt.toFixed(1)} < ${plddtThresh}`);
-            }
-            return {
-              structureId: foldSourceId || structure.id,
-              sequenceId: f.sequenceId,
-              candidateKey: f.key ?? f.sequenceId,
-              ...(foldDesignKey ? { designKey: foldDesignKey } : {}),
-              ...(f.designIndex !== undefined ? { designIndex: f.designIndex } : {}),
-              ...(f.sequenceKey ? { sequenceKey: f.sequenceKey } : {}),
-              ...(f.foldKey ? { foldKey: f.foldKey } : {}),
-              ...(foldSourceId ? { sourceStructureId: foldSourceId } : {}),
-              sequence: f.sequence,
-              ...(f.chainLengths && f.chainLengths.length > 0 ? { chainLengths: f.chainLengths } : {}),
-              scRmsd: Number.NaN,
-              scTm: Number.NaN,
-              meanPlddt: effectiveMeanPlddt,
-              confidenceAvailable,
-              ptm: f.ptm,
-              iptm: f.iptm ?? null,
-              ...(typeof f.ipsae === 'number' && Number.isFinite(f.ipsae) ? { ipsae: f.ipsae } : {}),
-              ...(typeof f.ipsaeMin === 'number' && Number.isFinite(f.ipsaeMin) ? { ipsaeMin: f.ipsaeMin } : {}),
-              referenceMode: 'lineage-mismatch',
-              referenceRelation: foldSourceId || foldDesignKey ? 'external-mismatch' : 'external-unlinked',
-              referenceLabel: `Invalid parent reference · ${errMsg}`,
-              selfConsistencyValid: false,
-              lineageMismatch: true,
-              alignedResidueCount: 0,
-              designable: false,
-              failedGates,
-              ...(f.msaMode ? { msaMode: f.msaMode } : {}),
-              ...(typeof f.msaDepth === 'number' && Number.isFinite(f.msaDepth) ? { msaDepth: f.msaDepth } : {}),
-              alignedFoldPdb: f.pdbText,
-              designedPdb: '',
-              pae: f.pae,
-              plddt: f.plddt,
-              geometry: geom,
-              foldElapsedMs: f.elapsedMs,
-            };
-          }
-
-          const parsedMapping = parseReferenceResidueMapping(rawMappingParam, foldLen, resolvedCtx.refLen);
-          if (parsedMapping && !appliedMappingSpec) {
-            appliedMappingSpec = parsedMapping.spec;
-          }
-          const rowSelfConsistencyValid = !parsedMapping && !allowExternalReference;
-          const rowReferenceRelation: ReferenceRelation = parsedMapping
-            ? 'external-mapped'
-            : rowSelfConsistencyValid
-              ? 'self-consistency'
-              : 'external-unlinked';
-          const rowReferenceMode: 'self-consistency' | 'external-reference' | 'lineage-mismatch' =
-            rowSelfConsistencyValid ? 'self-consistency' : 'external-reference';
-          const rowReferenceLabel =
-            rowReferenceRelation === 'self-consistency'
-              ? `Self-consistency against ${resolvedCtx.refDisplayName}`
-              : parsedMapping
-                ? `Comparison against ${resolvedCtx.refDisplayName} · Mapped ${parsedMapping.pairs.length} residues`
-                : `Comparison against ${resolvedCtx.refDisplayName} · External reference mode enabled`;
-
-          const row = scoreFoldAgainstRef(f, resolvedCtx, {
-            rowLineage: resolvedCtx.ref.id,
-            rowSelfConsistencyValid,
-            rowLineageMismatch: false,
-            rowReferenceRelation,
-            rowReferenceLabel,
-            rowReferenceMode,
-            parsedMapping,
-          });
-          evaluatedDesignIds.add(resolvedCtx.ref.id);
-          if (row.designable) passingDesignIds.add(resolvedCtx.ref.id);
-          return row;
-        });
-
-        rows.sort((a, b) => {
-          const af = Number.isFinite(a.scRmsd);
-          const bf = Number.isFinite(b.scRmsd);
-          if (af && bf) return a.scRmsd - b.scRmsd;
-          if (af) return -1;
-          if (bf) return 1;
-          return 0;
-        });
-
-        const passed = rows.filter((r) => r.designable).length;
-        const topSelfConsistencyValid =
-          !appliedMappingSpec &&
-          !allowExternalReference &&
-          !anyLineageMismatch &&
-          rows.length > 0 &&
-          rows.every((r) => r.selfConsistencyValid === true);
-
-        let lineageStatus: DesignabilityMetrics['lineageStatus'];
-        let referenceMode: DesignabilityMetrics['referenceMode'];
-        let referenceRelation: ReferenceRelation;
-        let referenceLabel: string;
-        let lineageWarning: string | undefined;
-
-        if (appliedMappingSpec) {
-          lineageStatus = 'external-mapped';
-          referenceMode = 'external-reference';
-          referenceRelation = 'external-mapped';
-          referenceLabel = `Comparison across ${evaluatedDesignIds.size} backbones · Mapped ${appliedMappingSpec.pairs?.length ?? 0} residues`;
-        } else if (anyLineageMismatch) {
-          lineageStatus = 'mismatch';
-          referenceMode = 'lineage-mismatch';
-          referenceRelation = 'external-mismatch';
-          referenceLabel = `Multi-design parent mismatch (${mismatchedDetail ?? 'unknown'})`;
-          lineageWarning =
-            `Multi-design parent mismatch: one or more folds referenced a missing, unlinked, or conflicting parent backbone (${mismatchedDetail ?? 'unknown'}). ` +
-            `Self-consistency pass status is disabled on mismatched rows.`;
-        } else if (allowExternalReference) {
-          lineageStatus = 'external-unmapped';
-          referenceMode = 'external-reference';
-          referenceRelation = 'external-unlinked';
-          referenceLabel = `External reference comparison across ${evaluatedDesignIds.size} backbones`;
-        } else {
-          lineageStatus = 'matched';
-          referenceMode = 'self-consistency';
-          referenceRelation = 'self-consistency';
-          referenceLabel = `Self-consistency across ${evaluatedDesignIds.size} backbones`;
-        }
-
-        const threshHash = fnv1a(
-          canonicalJsonStringify({
-            scThresh,
-            plddtThresh,
-            motifThresh,
-            ipaeThresh,
-            ipsaeThresh,
-            targetAlignedBinderThresh,
-            allowExternalReference,
-            strictLineage,
-            mapping: appliedMappingSpec ?? null,
-            collectionId: structure.collection?.id ?? null,
-          }),
-        );
-        const metrics: DesignabilityMetrics = {
-          kind: 'DesignabilityMetrics',
-          id: `metrics-${structure.id}-${folds.id}-${threshHash}`,
-          rows,
-          best: rows[0] ?? null,
-          passRate: rows.length > 0 ? passed / rows.length : 0,
-          referenceStructureId: structure.id,
-          foldParentStructureId: folds.parentStructureId || 'multi-design',
-          referenceMode,
-          referenceRelation,
-          referenceLabel,
-          selfConsistencyValid: topSelfConsistencyValid,
-          lineageStatus,
-          lineageMismatch: anyLineageMismatch,
-          multiDesign: true,
-          evaluatedDesignCount: evaluatedDesignIds.size,
-          designHitRate:
-            evaluatedDesignIds.size > 0
-              ? passingDesignIds.size / evaluatedDesignIds.size
-              : null,
-          ...(lineageWarning ? { lineageWarning } : {}),
-          ...(appliedMappingSpec ? { referenceMapping: appliedMappingSpec } : {}),
-          ...(folds.collectionKind ? { collectionKind: folds.collectionKind } : {}),
-        };
-        return { metrics };
-      }
-
-      // Single-backbone legacy path (100% preserved semantics)
-      const refCtx = prepareRefScoringContext(structure);
-      const structLen = refCtx.refLen;
-
-      const foldSetLineages = new Set<string>(
-        [
-          normalizeLineageId(folds.parentStructureId),
-          normalizeLineageId(folds.sourceStructureId),
-          normalizeLineageId(upstreamLineageHint),
-        ].filter(Boolean),
-      );
-      const foldSetHasConflict = foldSetLineages.size > 1;
-      const foldSetNonRef = [...foldSetLineages].find((id) => id !== structure.id);
-      const foldSetLineage = foldSetNonRef ?? [...foldSetLineages][0] ?? '';
-
-      let anyLineageMismatch = false;
-      let mismatchedSourceId: string | null = null;
-      let appliedMappingSpec: ReferenceResidueMapping | undefined;
-      const refDisplayName = refCtx.refDisplayName;
-
-      const rows: DesignabilityRow[] = folds.folds.map((f) => {
-        const foldLen = Math.floor(f.caCoords.length / 3);
-        const parsedMapping = parseReferenceResidueMapping(rawMappingParam, foldLen, structLen);
-        if (parsedMapping && !appliedMappingSpec) {
-          appliedMappingSpec = parsedMapping.spec;
-        }
-
-        const rowLineageSet = new Set<string>(foldSetLineages);
-        const perFoldLineage = normalizeLineageId(f.sourceStructureId);
-        if (perFoldLineage) rowLineageSet.add(perFoldLineage);
-        const rowHasConflict = rowLineageSet.size > 1;
-        const rowNonRef = [...rowLineageSet].find((id) => id !== structure.id);
-        const rowLineage = rowNonRef ?? [...rowLineageSet][0] ?? '';
-
-        const hasExplicitExternal = Boolean(parsedMapping) || allowExternalReference;
-        const rowSelfConsistencyValid =
-          !parsedMapping &&
-          !allowExternalReference &&
-          !rowHasConflict &&
-          rowLineageSet.size === 1 &&
-          rowLineage === structure.id;
-        const rowHasLineageDisagreement =
-          rowHasConflict || (Boolean(rowLineage) && rowLineage !== structure.id);
-        const rowLineageMismatch = !hasExplicitExternal && rowHasLineageDisagreement;
-        if (rowLineageMismatch) {
-          anyLineageMismatch = true;
-          if (!mismatchedSourceId) {
-            mismatchedSourceId = rowHasConflict ? [...rowLineageSet].join(' vs ') : rowLineage;
-          }
-        }
-
-        const rowReferenceRelation: ReferenceRelation = parsedMapping
-          ? 'external-mapped'
-          : rowSelfConsistencyValid
-            ? 'self-consistency'
-            : rowHasLineageDisagreement
-              ? 'external-mismatch'
-              : 'external-unlinked';
-
-        const rowOriginLabel = rowHasConflict ? [...rowLineageSet].join(' / ') : rowLineage;
-        const rowReferenceLabel =
-          rowReferenceRelation === 'self-consistency'
-            ? `Self-consistency against ${refDisplayName}`
-            : rowReferenceRelation === 'external-mapped'
-              ? `Comparison against ${refDisplayName} · Mapped ${parsedMapping!.pairs.length} residues${rowOriginLabel ? ` · Fold originated from ${rowOriginLabel}` : ''}`
-              : rowReferenceRelation === 'external-mismatch'
-                ? `Comparison against ${refDisplayName} · Fold originated from ${rowOriginLabel}`
-                : allowExternalReference && rowOriginLabel
-                  ? `Comparison against ${refDisplayName} · External reference mode enabled`
-                  : `Comparison against ${refDisplayName} · No parent structure recorded`;
-
-        const rowReferenceMode: 'self-consistency' | 'external-reference' | 'lineage-mismatch' =
-          rowLineageMismatch
-            ? 'lineage-mismatch'
-            : rowSelfConsistencyValid
-              ? 'self-consistency'
-              : 'external-reference';
-
-        return scoreFoldAgainstRef(f, refCtx, {
-          rowLineage,
-          rowSelfConsistencyValid,
-          rowLineageMismatch,
-          rowReferenceRelation,
-          rowReferenceLabel,
-          rowReferenceMode,
-          parsedMapping,
-        });
-      });
-
-      // Also detect top-level lineage mismatch even if `folds.folds` is empty
-      const topHasLineageDisagreement =
-        foldSetHasConflict || (Boolean(foldSetLineage) && foldSetLineage !== structure.id);
-      if (
-        !anyLineageMismatch &&
-        !appliedMappingSpec &&
-        !allowExternalReference &&
-        topHasLineageDisagreement
-      ) {
-        anyLineageMismatch = true;
-        mismatchedSourceId = foldSetHasConflict
-          ? [...foldSetLineages].join(' vs ')
-          : foldSetLineage;
-      }
-
-      const topSelfConsistencyValid =
-        !appliedMappingSpec &&
-        !allowExternalReference &&
-        !anyLineageMismatch &&
-        !foldSetHasConflict &&
-        foldSetLineages.size === 1 &&
-        foldSetLineage === structure.id &&
-        rows.every((r) => r.selfConsistencyValid === true);
-
-      let lineageStatus: DesignabilityMetrics['lineageStatus'];
-      let referenceMode: DesignabilityMetrics['referenceMode'];
-      let referenceRelation: ReferenceRelation;
-      let referenceLabel: string;
-      let lineageWarning: string | undefined;
-
-      if (appliedMappingSpec) {
-        lineageStatus = 'external-mapped';
-        referenceMode = 'external-reference';
-        referenceRelation = 'external-mapped';
-        referenceLabel = `Comparison against ${refDisplayName} · Mapped ${appliedMappingSpec.pairs?.length ?? 0} residues${foldSetLineage ? ` · Fold originated from ${foldSetLineage}` : ''}`;
-      } else if (anyLineageMismatch) {
-        lineageStatus = 'mismatch';
-        referenceMode = 'lineage-mismatch';
-        referenceRelation = 'external-mismatch';
-        referenceLabel = `Comparison against ${refDisplayName} · Fold originated from ${mismatchedSourceId}`;
-        lineageWarning =
-          `Reference lineage mismatch: folds descended from structure "${mismatchedSourceId}" ` +
-          `were wired to different reference structure "${structure.id}" ("${structure.label}"). ` +
-          `Self-consistency pass status is disabled; wire the originating structure or configure allowExternalReference / residueMapping for external-reference comparison.`;
-        if (strictLineage) {
-          throw new Error(lineageWarning);
-        }
-      } else if (allowExternalReference) {
-        lineageStatus = 'external-unmapped';
-        referenceMode = 'external-reference';
-        referenceRelation = topHasLineageDisagreement
-          ? 'external-mismatch'
-          : 'external-unlinked';
-        referenceLabel = topHasLineageDisagreement
-          ? `Comparison against ${refDisplayName} · Fold originated from ${foldSetHasConflict ? [...foldSetLineages].join(' / ') : foldSetLineage}`
-          : foldSetLineage
-            ? `Comparison against ${refDisplayName} · External reference mode enabled`
-            : `Comparison against ${refDisplayName} · No parent structure recorded`;
-        if (foldSetLineage && foldSetLineage !== structure.id) {
-          lineageWarning = `External-reference comparison enabled without custom residueMapping: comparing folds from "${foldSetLineage}" against "${structure.id}" by positional index.`;
-        }
-      } else if (!foldSetLineage) {
-        lineageStatus = 'untracked';
-        referenceMode = 'external-reference';
-        referenceRelation = 'external-unlinked';
-        referenceLabel = `Comparison against ${refDisplayName} · No parent structure recorded`;
-        lineageWarning =
-          `Unverified reference correspondence: incoming folds have no recorded parent structure (sequence-only source). ` +
-          `Self-consistency pass status is disabled; supply residueMapping or allowExternalReference to make external-reference correspondence explicit.`;
-      } else {
-        lineageStatus = 'matched';
-        referenceMode = 'self-consistency';
-        referenceRelation = 'self-consistency';
-        referenceLabel = `Self-consistency against ${refDisplayName}`;
-      }
-
-      rows.sort((a, b) => {
-        const af = Number.isFinite(a.scRmsd);
-        const bf = Number.isFinite(b.scRmsd);
-        if (af && bf) return a.scRmsd - b.scRmsd;
-        if (af) return -1;
-        if (bf) return 1;
-        return 0;
-      });
-      const passed = rows.filter((r) => r.designable).length;
-      const threshHash = fnv1a(
-        canonicalJsonStringify({
-          scThresh,
-          plddtThresh,
-          motifThresh,
-          ipaeThresh,
-          ipsaeThresh,
-          targetAlignedBinderThresh,
-          allowExternalReference,
-          strictLineage,
-          mapping: appliedMappingSpec ?? null,
-        }),
-      );
-      const metrics: DesignabilityMetrics = {
-        kind: 'DesignabilityMetrics',
-        id: `metrics-${structure.id}-${folds.id}-${threshHash}`,
-        rows,
-        best: rows[0] ?? null,
-        passRate: rows.length > 0 ? passed / rows.length : 0,
-        referenceStructureId: structure.id,
-        foldParentStructureId: foldSetLineage || folds.parentStructureId || 'none',
-        referenceMode,
-        referenceRelation,
-        referenceLabel,
-        selfConsistencyValid: topSelfConsistencyValid,
-        lineageStatus,
-        lineageMismatch: anyLineageMismatch,
-        ...(lineageWarning ? { lineageWarning } : {}),
-        ...(appliedMappingSpec ? { referenceMapping: appliedMappingSpec } : {}),
-        ...(folds.collectionKind ? { collectionKind: folds.collectionKind } : {}),
-      };
-      return { metrics };
-    }
-
-    throw new Error(`Unknown CPU adapter "${node.adapterId}"`);
+    return Promise.reject(new Error(`Unknown CPU adapter "${node.adapterId}"`));
   }
 
   /**
@@ -3025,7 +1642,7 @@ export class ExecutionScheduler {
           return await finishCancelled();
         }
 
-        const manifest = ADAPTER_REGISTRY[node.adapterId];
+        const manifest = resolveManifestForAdapter(node.adapterId, this.pluginRegistry);
         if (!manifest) throw new Error(`Unknown adapter "${node.adapterId}"`);
 
         this.activeRun = {
@@ -3040,7 +1657,6 @@ export class ExecutionScheduler {
         const inputs: Record<string, CanonicalArtifact> = {};
         const multiInputs: Record<string, CanonicalArtifact[]> = {};
         const inputIds: Record<string, string | string[]> = {};
-        let upstreamLineageHint: string | undefined;
         for (const edge of graph.edges) {
           if (edge.toNode !== node.id) continue;
           const up = outputsByNode[edge.fromNode]?.[edge.fromPort];
@@ -3058,21 +1674,6 @@ export class ExecutionScheduler {
               inputIds[edge.toPort] = up.id;
             }
           }
-          // Trace SequenceSet lineage feeding the upstream LocalFold node for designability-scorer
-          if (node.adapterId === 'designability-scorer' && edge.toPort === 'folds') {
-            const seqEdge = graph.edges.find(
-              (e) => e.toNode === edge.fromNode && e.toPort === 'sequences',
-            );
-            if (seqEdge) {
-              const seqArt = outputsByNode[seqEdge.fromNode]?.[seqEdge.fromPort];
-              if (seqArt && seqArt.kind === 'SequenceSet') {
-                const candidateLineage = seqArt.sourceStructureId ?? seqArt.parentStructureId;
-                if (candidateLineage && candidateLineage.toLowerCase() !== 'none') {
-                  upstreamLineageHint = candidateLineage;
-                }
-              }
-            }
-          }
         }
 
         // Content-addressed memoization key (canonicalized key order + compute provenance boundary, M6)
@@ -3080,7 +1681,7 @@ export class ExecutionScheduler {
         const cacheKey = fnv1a(
           canonicalJsonStringify({
             adapter: node.adapterId,
-            params: normalizeParamsForComputation(node.adapterId, node.params),
+            params: normalizeParamsForComputation(node.adapterId, node.params, this.pluginRegistry),
             inputIds,
             ...(execProv && execProv !== 'local' ? { backend: execProv } : {}),
           }),
@@ -3099,7 +1700,7 @@ export class ExecutionScheduler {
 
         if (cachedOutputs) {
           // Always re-verify output contract even on cached/checkpointed entries before passing downstream
-          nodeOutputs = validateAdapterOutputs(node, cachedOutputs);
+          nodeOutputs = validateAdapterOutputs(node, cachedOutputs, this.pluginRegistry);
           if (!memoHit) {
             this.setMemoEntry(cacheKey, nodeOutputs);
           }
@@ -3117,12 +1718,23 @@ export class ExecutionScheduler {
           try {
             let rawOutputs: unknown;
             if (manifest.runtime === 'cpu-ts') {
+              const upstreamGraph: UpstreamGraphQuery = {
+                getIncomingEdges: (nid, toPort) =>
+                  graph.edges.filter(
+                    (e) => e.toNode === nid && (toPort === undefined || e.toPort === toPort),
+                  ),
+                getNode: (nid) => graph.nodes.find((gn) => gn.id === nid),
+                getNodeOutputs: (nid) =>
+                  outputsByNode[nid] as unknown as Record<string, ArtifactEnvelope> | undefined,
+              };
               rawOutputs = await this.runCpuNode(
                 node,
                 inputs,
                 onProgress,
-                upstreamLineageHint,
                 multiInputs,
+                upstreamGraph,
+                outputsByNode,
+                internalAbort.signal,
               );
               elapsedMs = performance.now() - nStart;
             } else {
@@ -3142,7 +1754,7 @@ export class ExecutionScheduler {
             }
 
             // Issue #4: Validate worker/CPU output contract BEFORE memoizing or passing downstream
-            nodeOutputs = validateAdapterOutputs(node, rawOutputs);
+            nodeOutputs = validateAdapterOutputs(node, rawOutputs, this.pluginRegistry);
 
             // Propagate SequenceSet sourceStructureId onto FoldedStructure if missing
             if (node.adapterId === 'localfold-af2') {
@@ -3480,161 +2092,6 @@ function summarizeArtifact(art: CanonicalArtifact): ArtifactRef {
         : {}),
     },
   };
-}
-
-interface ScorerChainRange {
-  chainId: string;
-  start: number;
-  length: number;
-}
-
-function resolveScorerChainRanges(
-  L: number,
-  chainLengths?: readonly number[],
-  chainIds?: readonly string[],
-): ScorerChainRange[] {
-  if (L <= 0) return [];
-  if (chainIds && chainIds.length === L) {
-    const ranges: ScorerChainRange[] = [];
-    let start = 0;
-    for (let i = 1; i <= L; i++) {
-      if (i === L || chainIds[i] !== chainIds[start]) {
-        ranges.push({ chainId: chainIds[start], start, length: i - start });
-        start = i;
-      }
-    }
-    if (ranges.length > 0) return ranges;
-  }
-  if (chainLengths && chainLengths.length > 0 && chainLengths.reduce((a, b) => a + b, 0) === L) {
-    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    let start = 0;
-    return chainLengths.map((len, idx) => {
-      const r = { chainId: alphabet[idx % alphabet.length], start, length: len };
-      start += len;
-      return r;
-    });
-  }
-  return [{ chainId: 'A', start: 0, length: L }];
-}
-
-function expandChainRangesToIds(ranges: readonly ScorerChainRange[]): string[] {
-  const out: string[] = [];
-  for (const r of ranges) {
-    for (let i = 0; i < r.length; i++) out.push(r.chainId);
-  }
-  return out;
-}
-
-function splitBinderAndTargetIndices(
-  ranges: readonly ScorerChainRange[],
-  chainRoles?: Record<string, 'target' | 'binder' | 'scaffold'>,
-  lockedChains?: readonly string[],
-): { binderIndices: number[]; targetIndices: number[]; explicitRoleSplit: boolean } {
-  let binderRanges: ScorerChainRange[] = [];
-  let targetRanges: ScorerChainRange[] = [];
-  let explicitRoleSplit = false;
-
-  if (chainRoles) {
-    binderRanges = ranges.filter((r) => chainRoles[r.chainId] === 'binder');
-    targetRanges = ranges.filter((r) => chainRoles[r.chainId] === 'target');
-    if (binderRanges.length > 0 && targetRanges.length > 0) {
-      explicitRoleSplit = true;
-    }
-  }
-
-  if (!explicitRoleSplit && lockedChains && lockedChains.length > 0) {
-    const locked = new Set(lockedChains.map((c) => c.trim().toUpperCase()));
-    targetRanges = ranges.filter((r) => locked.has(r.chainId.toUpperCase()));
-    binderRanges = ranges.filter((r) => !locked.has(r.chainId.toUpperCase()));
-    if (binderRanges.length > 0 && targetRanges.length > 0) {
-      explicitRoleSplit = true;
-    }
-  }
-
-  if (binderRanges.length === 0 || targetRanges.length === 0) {
-    // Fallback heuristic: shorter chain is the designed binder (tie-breaker: later chain, matching Target=A, Binder=B)
-    let binderIdx = ranges.length - 1;
-    let minLen = ranges[binderIdx].length;
-    for (let i = ranges.length - 2; i >= 0; i--) {
-      if (ranges[i].length < minLen) {
-        minLen = ranges[i].length;
-        binderIdx = i;
-      }
-    }
-    binderRanges = [ranges[binderIdx]];
-    targetRanges = ranges.filter((_, idx) => idx !== binderIdx);
-  }
-
-  const expand = (rs: readonly ScorerChainRange[]): number[] => {
-    const out: number[] = [];
-    for (const r of rs) {
-      for (let i = r.start; i < r.start + r.length; i++) out.push(i);
-    }
-    return out;
-  };
-
-  return {
-    binderIndices: expand(binderRanges),
-    targetIndices: expand(targetRanges),
-    explicitRoleSplit,
-  };
-}
-
-function gatherCoordsByIndices(coords: Float32Array, indices: readonly number[]): Float32Array {
-  const out = new Float32Array(indices.length * 3);
-  for (let i = 0; i < indices.length; i++) {
-    const src = indices[i] * 3;
-    out[i * 3 + 0] = coords[src + 0];
-    out[i * 3 + 1] = coords[src + 1];
-    out[i * 3 + 2] = coords[src + 2];
-  }
-  return out;
-}
-
-function computeInterfacePae(
-  pae: Float32Array,
-  paeDim: number,
-  proteinLen: number,
-  ranges: readonly ScorerChainRange[],
-  binderIndices?: readonly number[],
-  targetIndices?: readonly number[],
-): number | undefined {
-  let sum = 0;
-  let count = 0;
-  if (binderIndices && targetIndices && binderIndices.length > 0 && targetIndices.length > 0) {
-    for (const bi of binderIndices) {
-      for (const ti of targetIndices) {
-        const v1 = pae[bi * paeDim + ti];
-        if (Number.isFinite(v1)) {
-          sum += v1;
-          count++;
-        }
-        const v2 = pae[ti * paeDim + bi];
-        if (Number.isFinite(v2)) {
-          sum += v2;
-          count++;
-        }
-      }
-    }
-  } else {
-    const chainOf = new Int32Array(proteinLen);
-    for (let c = 0; c < ranges.length; c++) {
-      const r = ranges[c];
-      for (let i = r.start; i < r.start + r.length; i++) chainOf[i] = c;
-    }
-    for (let i = 0; i < proteinLen; i++) {
-      const ci = chainOf[i];
-      for (let j = 0; j < proteinLen; j++) {
-        if (ci === chainOf[j]) continue;
-        const v = pae[i * paeDim + j];
-        if (Number.isFinite(v)) {
-          sum += v;
-          count++;
-        }
-      }
-    }
-  }
-  return count > 0 ? sum / count : undefined;
 }
 
 /**

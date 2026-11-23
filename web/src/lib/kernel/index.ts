@@ -7,6 +7,7 @@ export * from './iterative-loop';
 export * from './domain-pack';
 export * from './plugin-registry';
 export * from './active-registry';
+export * from './hash-utils';
 export * from './compare-kernel';
 export * from './webgpu-device';
 export * from './worker-harness';
