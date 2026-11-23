@@ -27,28 +27,29 @@ import {
   isCrystallizationBuffer,
   parseResidueRangeTokens,
   resolveGenie3CompiledInput,
+  resolveLocalFoldEffectiveConfig,
   resolveRfd4CompiledInput,
   type Rfd4TemplateContext,
 } from './conditioning';
 import {
-  clampLocalFoldRecycles,
   computeAf2MsaBudgets,
   computeTargetOnlyOffMask,
-  resolveAf2Tolerance,
   validateAndParseA3mText,
 } from './localfold-msa';
 import { esmfold2Chains } from './localfold-esmfold2';
 import {
-  ANTIBODY_CDR_BOUNDS,
+  compileAntiFoldDesignPlan,
   compileMpnnInputSpec,
-  detectAntibodyHeavyLightChains,
   normalizeAntiFoldNumberingParam,
   parseFixedPositionsAndChains,
-  resolveAntibodyNumbering,
   type NumberedChainInfo,
   type OrderedStructureResidue,
 } from './mpnn-spec';
-import { validateParamsWithSchema } from './param-schema';
+import {
+  getActiveModeSpec,
+  getVisibleParamFields,
+  validateParamsWithSchema,
+} from './param-schema';
 import { extractSubgraphUpTo, findContextStructure } from './peek';
 import {
   ADAPTER_REGISTRY,
@@ -68,10 +69,10 @@ import type {
   ResidueRole,
 } from './studio-types';
 import type {
+  AdapterManifest,
   CanonicalArtifact,
   ConditionSpecArtifact,
   FoldedStructure,
-  MsaMode,
   SequenceSet,
   StructureArtifact,
   WorkflowGraph,
@@ -716,10 +717,278 @@ function parseScorerMappingPreview(
 // Main entry point: compileNodeInputPreview
 // ---------------------------------------------------------------------------
 
+export interface SchemaFallbackPreviewContext {
+  node: WorkflowNode;
+  nodeLabel: string;
+  manifest: AdapterManifest | undefined;
+  resolvedInputs: Record<string, CanonicalArtifact>;
+  missingUpstreamByPort: Map<string, string>;
+  allMissingUpstream: Set<string>;
+  runRuntimeValidation: () => boolean;
+}
+
+export interface SchemaFallbackPreviewResult {
+  availability: NodeInputPreview['availability'];
+  missingUpstreamNodeIds: string[];
+  chains: PreviewChainTrack[];
+  entities: NodeInputPreview['entities'];
+  fastaEntries: FastaPreviewEntry[];
+  previewStructurePdb: string | null;
+  previewStructureMeta?: NodeInputPreview['previewStructureMeta'];
+  highlightLayers: ResidueHighlightLayer[];
+  payload: CompiledModelPayloadView;
+  totalResidues: number;
+  designedResidues: number;
+  fixedResidues: number;
+  estimatedTokens: number;
+}
+
+/**
+ * Schema-driven compiled input preview for adapters without a dedicated branch (`CT-08`:
+ * ProtPardelle, RFdiffusion, BoltzGen, EvoDiff, La-Proteina, Proteina, SiD-Protein, Genie 2,
+ * FrameFlow, FoldFlow 2, ESM-C, Dyna-1, Top-K Filter, Structure Compare).
+ * Evaluates active mode & port requirements, resolves upstream structures/sequences, runs
+ * runtime validation, and emits honest `ready` / `pending-upstream` / `error` availability.
+ */
+export function compileSchemaFallbackPreview(
+  ctx: SchemaFallbackPreviewContext,
+): SchemaFallbackPreviewResult {
+  const {
+    node,
+    nodeLabel,
+    manifest,
+    resolvedInputs,
+    missingUpstreamByPort,
+    allMissingUpstream,
+    runRuntimeValidation,
+  } = ctx;
+
+  const activeMode = manifest ? getActiveModeSpec(manifest, node.params) : null;
+  const requiredPorts = new Set<string>();
+  if (manifest) {
+    for (const [port, spec] of Object.entries(manifest.inputs)) {
+      if (spec.required !== false) requiredPorts.add(port);
+    }
+    if (activeMode?.requiredInputs) {
+      for (const port of activeMode.requiredInputs) requiredPorts.add(port);
+    }
+  }
+
+  const missingUpstreamIds = new Set<string>();
+  const unconnectedRequiredPorts: string[] = [];
+  for (const port of requiredPorts) {
+    if (!resolvedInputs[port]) {
+      const upId = missingUpstreamByPort.get(port);
+      if (upId) missingUpstreamIds.add(upId);
+      else unconnectedRequiredPorts.push(port);
+    }
+  }
+
+  // Handle cross-input adapters (e.g. esmc, dyna1) where at least one of sequences/structure is required
+  if (
+    (node.adapterId === 'esmc' || node.adapterId === 'dyna1') &&
+    !resolvedInputs.sequences &&
+    !resolvedInputs.structure
+  ) {
+    const upSeq = missingUpstreamByPort.get('sequences');
+    const upStruct = missingUpstreamByPort.get('structure');
+    if (upSeq) missingUpstreamIds.add(upSeq);
+    if (upStruct) missingUpstreamIds.add(upStruct);
+    if (!upSeq && !upStruct) {
+      unconnectedRequiredPorts.push('sequences|structure');
+    }
+  }
+
+  // Handle multi-input comparison nodes wired to un-run upstreams
+  if (node.adapterId === 'structure-compare' && Object.keys(resolvedInputs).length === 0) {
+    if (allMissingUpstream.size > 0) {
+      for (const id of allMissingUpstream) missingUpstreamIds.add(id);
+    } else {
+      unconnectedRequiredPorts.push('structure');
+    }
+  }
+
+  // Build schema-driven compiledSummary from visible fields
+  const compiledSummary: CompiledModelPayloadView['compiledSummary'] = {
+    adapterId: node.adapterId,
+  };
+  if (manifest?.modeParamKey && activeMode) {
+    compiledSummary[manifest.modeParamKey] = activeMode.id;
+  }
+  const visibleFields = manifest ? getVisibleParamFields(manifest, node.params) : [];
+  for (const field of visibleFields) {
+    const raw = node.params[field.key] ?? field.defaultValue;
+    if (raw === undefined || raw === null || raw === '') continue;
+    if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
+      compiledSummary[field.key] = raw;
+    } else if (Array.isArray(raw)) {
+      compiledSummary[field.key] = raw.map((x) => String(x));
+    }
+  }
+
+  let availability: NodeInputPreview['availability'] = 'ready';
+  if (unconnectedRequiredPorts.length > 0) {
+    availability = 'error';
+  } else if (missingUpstreamIds.size > 0) {
+    availability = 'pending-upstream';
+  }
+
+  let chains: PreviewChainTrack[] = [];
+  let entities: NodeInputPreview['entities'] = {
+    includedLigands: [],
+    filteredBuffers: [],
+    nucleicChains: [],
+  };
+  let fastaEntries: FastaPreviewEntry[] = [];
+  let previewStructurePdb: string | null = null;
+  let previewStructureMeta: NodeInputPreview['previewStructureMeta'];
+  const highlightLayers: ResidueHighlightLayer[] = [];
+  let totalResidues = 0;
+  let designedResidues = 0;
+  let fixedResidues = 0;
+  let estimatedTokens = 0;
+
+  if (availability === 'ready') {
+    runRuntimeValidation();
+  }
+
+  const structArt =
+    (resolvedInputs.structure as StructureArtifact | undefined) ??
+    (Object.values(resolvedInputs).find((a) => a?.kind === 'StructureArtifact') as
+      | StructureArtifact
+      | undefined);
+  const seqArt = resolvedInputs.sequences as SequenceSet | undefined;
+
+  if (structArt && structArt.kind === 'StructureArtifact') {
+    const rawText = structArt.pdbText || structArt.cifText || '';
+    if (rawText) {
+      try {
+        const entry = getOrParseCachedStructure(structArt.id, rawText);
+        const parsed = entry.parsed;
+        const chainMap = new Map<string, PreviewChainTrack>();
+        for (let i = 0; i < parsed.nResidues; i++) {
+          const src = parsed.sourceResidues[i];
+          let track = chainMap.get(src.authChainId);
+          if (!track) {
+            track = {
+              chainId: src.authChainId,
+              ...(src.labelChainId ? { labelChainId: src.labelChainId } : {}),
+              entityKind: 'protein',
+              sequence: '',
+              residues: [],
+            };
+            chainMap.set(src.authChainId, track);
+          }
+          const aa1 = parsed.sequence[i] ?? AA3_TO_AA1[src.resName] ?? 'X';
+          track.residues.push({
+            flatIndex: i,
+            authChain: src.authChainId,
+            ...(src.labelChainId ? { labelChain: src.labelChainId } : {}),
+            authSeqId: src.resNum,
+            insCode: src.insCode,
+            token: formatResidueToken(src.authChainId, src.resNum, src.insCode),
+            aa1,
+            resName: src.resName,
+            roles: ['fixed-backbone'],
+            backboneAtoms: formatBackboneAtoms(parsed.atomPresence[i], structArt.atomGranularity),
+          });
+          track.sequence += aa1;
+        }
+        chains = [...chainMap.values()];
+        const ligClass = classifyLigands(
+          structArt.diagnostics?.ligandNames ?? parsed.diagnostics.ligandNames,
+        );
+        entities = {
+          includedLigands: ligClass.includedLigands,
+          filteredBuffers: ligClass.filteredBuffers,
+          nucleicChains: [
+            ...(structArt.diagnostics?.nucleicAcidChains ?? parsed.diagnostics.nucleicAcidChains),
+          ],
+        };
+        totalResidues = parsed.nResidues;
+        fixedResidues = parsed.nResidues;
+        estimatedTokens = parsed.nResidues;
+        previewStructurePdb = structArt.pdbText;
+        previewStructureMeta = {
+          label: structArt.label,
+          atomGranularity: structArt.atomGranularity ?? 'backbone4',
+          bfactorSemantics: structArt.bfactorSemantics,
+          length: parsed.nResidues,
+        };
+        fastaEntries = [
+          {
+            id: structArt.id,
+            header: `>${structArt.label} (${parsed.nResidues} aa)`,
+            sequence: parsed.sequence,
+            chainLengths: parsed.diagnostics.chainLengths,
+            selected: true,
+          },
+        ];
+      } catch {
+        totalResidues = structArt.length;
+        estimatedTokens = structArt.length;
+      }
+    } else {
+      totalResidues = structArt.length;
+      estimatedTokens = structArt.length;
+    }
+  } else if (seqArt && seqArt.kind === 'SequenceSet') {
+    fastaEntries = seqArt.candidates.map((cand) => ({
+      id: cand.id,
+      header: `>${cand.id}${typeof cand.score === 'number' && Number.isFinite(cand.score) ? ` | score ${cand.score.toFixed(2)}` : ''}`,
+      sequence: cand.sequence,
+      ...(cand.chainLengths ? { chainLengths: cand.chainLengths } : {}),
+      selected: true,
+    }));
+    const primaryLen = seqArt.candidates[0]?.sequence.replace(/[\s/:,]+/g, '').length ?? 0;
+    totalResidues = primaryLen;
+    estimatedTokens = primaryLen;
+  } else {
+    const lengthField = manifest?.paramSchema?.find((f) => f.key === 'length');
+    const rawLen = Number(node.params.length ?? lengthField?.defaultValue ?? 0);
+    if (Number.isFinite(rawLen) && rawLen > 0) {
+      totalResidues = Math.round(rawLen);
+      designedResidues = totalResidues;
+      estimatedTokens = totalResidues;
+    }
+  }
+
+  const modeTag = activeMode ? ` (${activeMode.label})` : '';
+  const statusTag =
+    availability === 'pending-upstream'
+      ? 'waiting for upstream input'
+      : availability === 'error' && unconnectedRequiredPorts.length > 0
+        ? `connect ${unconnectedRequiredPorts.join(', ')}`
+        : totalResidues > 0
+          ? `L=${totalResidues} aa`
+          : 'ready';
+  const payload: CompiledModelPayloadView = {
+    format: 'raw-input',
+    headline: `${nodeLabel}${modeTag} · ${statusTag}`,
+    compiledSummary,
+    rawSpecText: JSON.stringify(compiledSummary, null, 2),
+  };
+
+  return {
+    availability,
+    missingUpstreamNodeIds: [...missingUpstreamIds],
+    chains,
+    entities,
+    fastaEntries,
+    previewStructurePdb,
+    previewStructureMeta,
+    highlightLayers,
+    payload,
+    totalResidues,
+    designedResidues,
+    fixedResidues,
+    estimatedTokens,
+  };
+}
+
 /**
  * Pure synchronous compiler producing the exact `NodeInputPreview` for any workflow node.
- * Covers all 7 adapters (`pdb-input`, `sequence-input`, `rfd4-proteina`, `genie3`,
- * `web-protein-mpnn`, `localfold-af2`, `designability-scorer`) with zero side effects.
+ * Covers all 25 denovo.run adapters (dedicated compilers + schema-driven fallback) with zero side effects.
  */
 export function compileNodeInputPreview(
   graph: WorkflowGraph,
@@ -2168,20 +2437,27 @@ export function compileNodeInputPreview(
     const modelKey = String(node.params.model ?? 'monomer');
     const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelKey) ?? LOCALFOLD_MODEL_OPTIONS[0];
     const isEsmFold = meta.family === 'esmfold2';
-    const recycles = clampLocalFoldRecycles(modelKey, node.params.recycles, 1);
-    const tolerance = resolveAf2Tolerance(modelKey, node.params.tolerance);
-    const diffusionSteps = Math.max(10, Math.min(200, Math.round(Number(node.params.diffusionSteps ?? 25))));
-    const rawMsaMode = isEsmFold ? 'single' : String(node.params.msaMode ?? 'single');
-    const msaMode: MsaMode =
-      rawMsaMode === 'mmseqs2' || rawMsaMode === 'target-only' || rawMsaMode === 'a3m'
-        ? rawMsaMode
-        : 'single';
-    const msaA3mText = typeof node.params.msaA3mText === 'string' ? node.params.msaA3mText : '';
+    const baseCfg = resolveLocalFoldEffectiveConfig({ modelKey, params: node.params });
+    const {
+      recycles,
+      tolerance,
+      diffusionSteps,
+      msaMode,
+      msaA3mText,
+      ligandCcdCodes,
+      dnaSeqs,
+      rnaSeqs,
+    } = baseCfg;
     const foldSettings: CompiledModelPayloadView['compiledSummary'] = {
-      model: modelKey, family: meta.family, msaMode,
+      model: modelKey,
+      family: meta.family,
+      msaMode,
     };
     if (isEsmFold) {
-      foldSettings.esmfold2Steps = Number(node.params.esmfold2Steps ?? 15);
+      foldSettings.esmfold2Steps = baseCfg.effectiveEsmfold2Steps;
+      if (baseCfg.esmfold2StepsAdjusted) {
+        foldSettings.requestedEsmfold2Steps = baseCfg.requestedEsmfold2Steps;
+      }
     } else {
       foldSettings.recycles = recycles;
       foldSettings.tolerance = tolerance;
@@ -2207,6 +2483,21 @@ export function compileNodeInputPreview(
     } else {
       const validInputs = runRuntimeValidation();
       const work = selectFoldWorkItems(seqSet, node.params);
+      if (isEsmFold) {
+        const maxResidueLength = work.selected.reduce(
+          (mx, c) => Math.max(mx, c.sequence.replace(/[\s/:,]+/g, '').length),
+          0,
+        );
+        const effCfg = resolveLocalFoldEffectiveConfig({
+          modelKey,
+          params: node.params,
+          maxResidueLength,
+        });
+        foldSettings.esmfold2Steps = effCfg.effectiveEsmfold2Steps;
+        if (effCfg.esmfold2StepsAdjusted) {
+          foldSettings.requestedEsmfold2Steps = effCfg.requestedEsmfold2Steps;
+        }
+      }
       const lockedChains: string[] | undefined = Array.isArray(seqSet.lockedChains)
         ? seqSet.lockedChains
         : Array.isArray(node.params.lockedChains)
@@ -2217,25 +2508,6 @@ export function compileNodeInputPreview(
         (node.params.chainRoles && typeof node.params.chainRoles === 'object'
           ? (node.params.chainRoles as Record<string, 'target' | 'binder' | 'scaffold'>)
           : undefined);
-
-      const ligandCcdCodes: string[] = Array.isArray(node.params.ligandCcdCodes)
-        ? (node.params.ligandCcdCodes as string[]).map((s) => String(s).trim().toUpperCase()).filter(Boolean)
-        : String(node.params.ligandCcdCodes ?? '')
-            .split(/[,\s]+/)
-            .map((s) => s.trim().toUpperCase())
-            .filter(Boolean);
-      const dnaSeqs: string[] = Array.isArray(node.params.dnaSequences)
-        ? (node.params.dnaSequences as string[]).map((s) => String(s).replace(/[^ACGT]/gi, '').toUpperCase()).filter(Boolean)
-        : String(node.params.dnaSequences ?? '')
-            .split(/[:,;\s]+/)
-            .map((s) => s.replace(/[^ACGT]/gi, '').toUpperCase())
-            .filter(Boolean);
-      const rnaSeqs: string[] = Array.isArray(node.params.rnaSequences)
-        ? (node.params.rnaSequences as string[]).map((s) => String(s).replace(/[^ACGU]/gi, '').toUpperCase()).filter(Boolean)
-        : String(node.params.rnaSequences ?? '')
-            .split(/[:,;\s]+/)
-            .map((s) => s.replace(/[^ACGU]/gi, '').toUpperCase())
-            .filter(Boolean);
 
       const selectedSet = new Set(work.selected.map((c) => c.key ?? c.id));
       fastaEntries = seqSet.candidates.map((cand) => {
@@ -3158,19 +3430,6 @@ export function compileNodeInputPreview(
         const rawText = structure.pdbText || structure.cifText || '';
         const entry = getOrParseCachedStructure(structure.id, rawText);
         const parsed = entry.parsed;
-        const allChains = [...new Set(parsed.sourceResidues.map((s) => s.authChainId))];
-        const upperToChain = new Map(allChains.map((c) => [c.toUpperCase(), c]));
-        const resolveChain = (raw: string): string | undefined =>
-          raw ? (allChains.includes(raw) ? raw : upperToChain.get(raw.toUpperCase())) : undefined;
-
-        const explicitTarget = targetChainParam ? resolveChain(targetChainParam) : undefined;
-        if (targetChainParam && !explicitTarget) {
-          pushIssue({
-            severity: 'warning',
-            source: 'compiler',
-            message: `Target chain "${targetChainParam}" not found in structure (available: ${allChains.join(', ')}).`,
-          });
-        }
 
         const orderedResidues: OrderedStructureResidue[] = [];
         const chainInfoMap = new Map<string, NumberedChainInfo>();
@@ -3195,179 +3454,40 @@ export function compileNodeInputPreview(
         }
         const chainInfos = [...chainInfoMap.values()];
 
-        const { lockedChains: preUserLockedRaw } = parseFixedPositionsAndChains(
-          fixedSpec,
-          allChains[0] ?? 'A',
+        // Compile via single-source-of-truth plan shared 1:1 with antifold.worker.ts (#77)
+        const designPlan = compileAntiFoldDesignPlan({
+          chainInfos,
           orderedResidues,
-        );
-        const lockedChainSet = new Set<string>();
-        for (const ch of preUserLockedRaw) {
-          const resolved = resolveChain(ch);
-          if (resolved) lockedChainSet.add(resolved);
+          chainTypes: structure.molecularContext?.chainTypes,
+          inheritedLockedChains: structure.lockedChains,
+          inheritedFixedResidueIndices: structure.fixedResidueIndices,
+          variant,
+          samplingMode,
+          targetChainSpec: targetChainParam,
+          numberingParam,
+          regionsSpec: regions,
+          fixedPositionsSpec: fixedSpec,
+          unlockInherited,
+          strictTargetChain: false,
+        });
+        for (const w of designPlan.warnings) {
+          pushIssue({ severity: 'warning', source: 'compiler', message: w });
         }
-        if (!unlockInherited && Array.isArray(structure.lockedChains)) {
-          for (const rawCh of structure.lockedChains) {
-            const resolved = resolveChain(String(rawCh).trim());
-            if (resolved) lockedChainSet.add(resolved);
-          }
-        }
 
-        const chainTypes = structure.molecularContext?.chainTypes ?? {};
-        const { heavyChain: detectedHeavy, lightChain: detectedLight } =
-          detectAntibodyHeavyLightChains(chainInfos, chainTypes, lockedChainSet, explicitTarget);
-
-        const unlockedHeavy =
-          detectedHeavy && !lockedChainSet.has(detectedHeavy) ? detectedHeavy : undefined;
-        const unlockedLight =
-          detectedLight && !lockedChainSet.has(detectedLight) ? detectedLight : undefined;
-        const firstUnlocked =
-          allChains.find((c) => !lockedChainSet.has(c)) ?? allChains[0] ?? 'A';
-        const effectiveTargetChain =
-          explicitTarget ??
-          (variant === 'antifold' ? unlockedHeavy ?? unlockedLight ?? firstUnlocked : undefined);
-        const resolvedTargetChain = effectiveTargetChain ?? allChains[0] ?? 'A';
-
-        const heavyChain =
-          variant === 'antifold'
-            ? detectedHeavy ?? explicitTarget ?? firstUnlocked
-            : undefined;
-        const lightChain =
-          variant === 'antifold'
-            ? detectedLight && detectedLight !== heavyChain
-              ? detectedLight
-              : explicitTarget && explicitTarget !== heavyChain
-                ? explicitTarget
-                : undefined
-            : undefined;
-
-        const resolvedNumbering =
-          variant === 'antifold'
-            ? resolveAntibodyNumbering(numberingParam, chainInfos, heavyChain, lightChain)
-            : 'imgt';
-
-        // Exact IMGT/Kabat regionMask matching web/static/vendor/antifold-esmif1/shared/structure.js
-        const regionList =
-          variant === 'antifold'
-            ? regions
-                .split(/[,\s]+/)
-                .map((t) => t.trim())
-                .filter(Boolean)
-            : [];
-        const regionSelectors: Array<(r: { chain: string; number: number; insertion: string }) => boolean> = [];
-        if (regionList.length > 0 && heavyChain) {
-          const schemeBounds = ANTIBODY_CDR_BOUNDS[resolvedNumbering];
-          for (const region of regionList) {
-            const explicitSpan = /^([^:]+):(-?\d+[A-Za-z]?(?:--?\d+[A-Za-z]?)?(?:,-?\d+[A-Za-z]?(?:--?\d+[A-Za-z]?)?)*)$/.exec(region);
-            if (explicitSpan) {
-              const chainId =
-                explicitSpan[1] === 'H'
-                  ? heavyChain
-                  : explicitSpan[1] === 'L'
-                    ? lightChain
-                    : resolveChain(explicitSpan[1]) ?? explicitSpan[1];
-              const ranges: Array<{ a: number; b: number; startIns: string; endIns: string }> = [];
-              let valid = true;
-              for (const part of explicitSpan[2].split(',')) {
-                const rm = /^(-?\d+)([A-Za-z]?)(?:-(-?\d+)([A-Za-z]?))?$/.exec(part);
-                if (!rm) {
-                  valid = false;
-                  break;
-                }
-                const a = Number(rm[1]);
-                const startIns = (rm[2] ?? '').toUpperCase();
-                const isRange = rm[3] !== undefined;
-                const b = isRange ? Number(rm[3]) : a;
-                const endIns = isRange ? (rm[4] ?? '').toUpperCase() : startIns;
-                if (b < a || (b === a && startIns > endIns)) {
-                  valid = false;
-                  break;
-                }
-                ranges.push({ a, b, startIns, endIns });
-              }
-              if (valid && chainId) {
-                regionSelectors.push(
-                  (r) =>
-                    r.chain === chainId &&
-                    ranges.some((x) => {
-                      const ins = (r.insertion ?? '').toUpperCase();
-                      const afterStart =
-                        r.number > x.a || (r.number === x.a && (!x.startIns || ins >= x.startIns));
-                      const beforeEnd =
-                        r.number < x.b || (r.number === x.b && (!x.endIns || ins <= x.endIns));
-                      return afterStart && beforeEnd;
-                    }),
-                );
-              } else {
-                pushIssue({
-                  severity: 'warning',
-                  source: 'compiler',
-                  message: `Invalid AntiFold region selector "${region}".`,
-                });
-              }
-              continue;
-            }
-            const m = /^(all|CDR|FW)([HL]?)([1-4]?)$/.exec(region);
-            if (!m || (m[1] === 'CDR' && m[3] === '4')) {
-              pushIssue({
-                severity: 'warning',
-                source: 'compiler',
-                message: `Invalid AntiFold region "${region}" (expected CDR1-3, CDRH1-3, CDRL1-3, FW1-4, all, or chain:start-end).`,
-              });
-              continue;
-            }
-            const [, type, role, num] = m;
-            regionSelectors.push((r) => {
-              const roleHere = r.chain === heavyChain ? 'H' : r.chain === lightChain ? 'L' : null;
-              if (!roleHere || (role && role !== roleHere)) return false;
-              const maxPos = roleHere === 'H' ? schemeBounds.maxH : schemeBounds.maxL;
-              if (r.number < 1 || r.number > maxPos) return false;
-              if (type === 'all') return true;
-              const b = schemeBounds[roleHere];
-              const regionsHere: ReadonlyArray<readonly [number, number]> =
-                type === 'CDR'
-                  ? b
-                  : [
-                      [1, b[0][0] - 1],
-                      [b[0][1] + 1, b[1][0] - 1],
-                      [b[1][1] + 1, b[2][0] - 1],
-                      [b[2][1] + 1, maxPos],
-                    ];
-              return regionsHere.some(
-                ([lo, hi], idx) => (!num || idx === Number(num) - 1) && r.number >= lo && r.number <= hi,
-              );
-            });
-          }
-        }
-        const useRegionMask = regionList.length > 0;
-
-        const { fixedPositions: userFixed, lockedChains: userLockedRaw } =
-          parseFixedPositionsAndChains(fixedSpec, resolvedTargetChain, orderedResidues);
-        const userLockedChainSet = new Set(userLockedRaw.map((c) => c.toUpperCase()));
-        const inheritedLockedChainSet = new Set(
-          !unlockInherited && Array.isArray(structure.lockedChains)
-            ? structure.lockedChains.map((c) => String(c).trim().toUpperCase())
-            : [],
-        );
-        const userFixedKeys = new Set<string>();
-        for (const ref of userFixed) {
-          if (typeof ref !== 'number') {
-            userFixedKeys.add(`${ref.chain.toUpperCase()}:${ref.number}:${ref.insertionCode ?? ''}`);
-          }
-        }
-        const inheritedFixedIndices = new Set<number>(
-          !unlockInherited && Array.isArray(structure.fixedResidueIndices)
-            ? structure.fixedResidueIndices.map((idx) => Number(idx) - 1)
-            : [],
-        );
+        const {
+          resolvedTargetChain,
+          resolvedNumbering,
+          effectiveRegions,
+          remappedChains,
+          designedCount,
+          fixedCount,
+        } = designPlan;
 
         const chainMap = new Map<string, PreviewChainTrack>();
         const allRes: PreviewResidue[] = [];
-        let designedCount = 0;
-        let fixedCount = 0;
 
         for (let i = 0; i < parsed.nResidues; i++) {
           const src = parsed.sourceResidues[i];
-          const chUpper = src.authChainId.toUpperCase();
           let track = chainMap.get(src.authChainId);
           if (!track) {
             const roleTag = structure.chainRoles?.[src.authChainId];
@@ -3389,31 +3509,12 @@ export function compileNodeInputPreview(
             if (delta > 0) gapBefore = delta;
           }
 
-          // Match antifold.worker.ts exact chain + region + fixedPositions locking:
-          // - When targetChain is explicitly set, non-target chains are always locked.
-          // - In autoregressive mode, only the target chain prefix is sampled.
-          // - When regions are set (AntiFold), only residues matching regionMask are designable.
-          const lockedByTargetChain =
-            (Boolean(explicitTarget) && src.authChainId !== explicitTarget) ||
-            (samplingMode === 'autoregressive' &&
-              effectiveTargetChain !== undefined &&
-              chUpper !== effectiveTargetChain.toUpperCase());
-          const inRegion =
-            !useRegionMask ||
-            regionSelectors.some((sel) =>
-              sel({ chain: src.authChainId, number: src.resNum, insertion: src.insCode }),
-            );
-          const resKey = `${chUpper}:${src.resNum}:${src.insCode}`;
-          const isUserFixed = userLockedChainSet.has(chUpper) || userFixedKeys.has(resKey);
-          const isInheritedFixed =
-            !isUserFixed && (inheritedLockedChainSet.has(chUpper) || inheritedFixedIndices.has(i));
-          const roles: ResidueRole[] = lockedByTargetChain
+          const state = designPlan.residueStates[i];
+          const roles: ResidueRole[] = state.lockedByTargetChain
             ? ['fixed-backbone', 'fixed-sequence']
-            : !inRegion || isUserFixed || isInheritedFixed
+            : !state.willDesign
               ? ['fixed-sequence']
               : ['designable'];
-          if (roles.includes('designable')) designedCount++;
-          else fixedCount++;
 
           const aa1 = parsed.sequence[i] ?? AA3_TO_AA1[src.resName] ?? 'X';
           const pr: PreviewResidue = {
@@ -3427,7 +3528,7 @@ export function compileNodeInputPreview(
             aa1,
             resName: src.resName,
             roles,
-            ...(isInheritedFixed ? { inheritedLock: true } : {}),
+            ...(state.isInheritedFixed ? { inheritedLock: true } : {}),
             ...(gapBefore > 0 ? { gapBefore } : {}),
             ...(entry.bfactors ? { bfactor: entry.bfactors[i] } : {}),
             backboneAtoms: formatBackboneAtoms(parsed.atomPresence[i], structure.atomGranularity),
@@ -3482,6 +3583,7 @@ export function compileNodeInputPreview(
             targetChain: resolvedTargetChain,
             ...(variant === 'antifold' ? { numbering: resolvedNumbering } : {}),
             ...(regions ? { regions } : {}),
+            ...(remappedChains.length > 0 ? { effectiveRegions } : {}),
             numSequences,
             temperature,
             unlockInherited,
@@ -3493,7 +3595,13 @@ export function compileNodeInputPreview(
               precision,
               samplingMode,
               targetChain: resolvedTargetChain,
-              ...(variant === 'antifold' ? { numbering: resolvedNumbering, regions: regions || null } : {}),
+              ...(variant === 'antifold'
+                ? {
+                    numbering: resolvedNumbering,
+                    regions: regions || null,
+                    ...(remappedChains.length > 0 ? { effectiveRegions, remappedChains } : {}),
+                  }
+                : {}),
               numSequences,
               temperature,
               fixedPositions: fixedSpec || null,
@@ -3516,19 +3624,38 @@ export function compileNodeInputPreview(
       }
     }
   } else {
-    availability = 'partial';
-    payload = {
-      format: 'raw-input',
-      headline: nodeLabel,
-      compiledSummary: { adapterId: node.adapterId },
-      rawSpecText: JSON.stringify(node.params, null, 2),
-    };
+    const fallback = compileSchemaFallbackPreview({
+      node,
+      nodeLabel,
+      manifest,
+      resolvedInputs,
+      missingUpstreamByPort,
+      allMissingUpstream,
+      runRuntimeValidation,
+    });
+    availability = fallback.availability;
+    missingUpstreamNodeIds = fallback.missingUpstreamNodeIds;
+    chains = fallback.chains;
+    entities = fallback.entities;
+    fastaEntries = fallback.fastaEntries;
+    previewStructurePdb = fallback.previewStructurePdb;
+    previewStructureMeta = fallback.previewStructureMeta;
+    highlightLayers = fallback.highlightLayers;
+    payload = fallback.payload;
+    totalResidues = fallback.totalResidues;
+    designedResidues = fallback.designedResidues;
+    fixedResidues = fallback.fixedResidues;
+    estimatedTokens = fallback.estimatedTokens;
   }
 
-  // Promote error availability if schema/runtime/compiler emitted blocking errors while not pending-upstream
+  // Promote error availability if schema/runtime/compiler emitted blocking errors while not pending-upstream (CT-08)
   if (
     availability === 'ready' &&
-    issues.some((i) => i.severity === 'error' && (i.source === 'compiler' || i.source === 'runtime'))
+    issues.some(
+      (i) =>
+        i.severity === 'error' &&
+        (i.source === 'schema' || i.source === 'compiler' || i.source === 'runtime'),
+    )
   ) {
     availability = 'error';
   }

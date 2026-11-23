@@ -101,6 +101,7 @@ const WAVE7A_SPECS = [
     expectedParamKeys: [
       'checkpoint',
       'length',
+      'motifGuidance',
       'motifSelection',
       'numDesigns',
       'numSteps',
@@ -280,8 +281,14 @@ describe('Wave-7A WebGPU vendored engines & workers', () => {
     expect(antiSrc).toContain('sampleIndependent');
     expect(antiSrc).toContain('activeEngine.sample(');
     expect(antiSrc).toContain('makeCachedFetch');
-    expect(antiSrc).toContain('parseFixedPositionsAndChains');
+    expect(antiSrc).toContain('compileAntiFoldDesignPlan');
     expect(antiSrc).toContain('computeChainLengths');
+
+    const ppSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/protpardelle.worker.ts'), 'utf8');
+    expect(ppSrc).toContain('buildMotifLineage');
+    expect(ppSrc).toContain('motifGuidance');
+    expect(ppSrc).toContain('motifIndices: motifLineage.motifIndices');
+    expect(ppSrc).toContain('fixedResidueIndices: motifLineage.fixedResidueIndices');
   });
 
   it('matches vendored pure-JS parser and constraint contracts across all 4 engines on a holo PDB fixture', async () => {

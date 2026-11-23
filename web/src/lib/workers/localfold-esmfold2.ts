@@ -1,4 +1,7 @@
-import { normalizeLocalFoldChainScores } from '$lib/engine/conditioning';
+import {
+  normalizeLocalFoldChainScores,
+  resolveLocalFoldEffectiveConfig,
+} from '$lib/engine/conditioning';
 import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 import { parsePdbBackbone } from '$lib/protein-ops/pdb';
 
@@ -42,15 +45,22 @@ export async function loadEsmfold2(
     const rnaSeqs = holo?.rnaSeqs ?? [];
     const parsedLigands = holo?.parsedLigands ?? [];
     const hasExtraContext = dnaSeqs.length > 0 || rnaSeqs.length > 0 || parsedLigands.length > 0;
+    const sharedConfig = resolveLocalFoldEffectiveConfig({
+      modelKey: family,
+      params: { esmfold2Steps: steps },
+      maxResidueLength: sequence.length,
+      hasHoloContext: hasExtraContext,
+    });
     const effectiveSteps =
       typeof model.esmfold2StepsFor === 'function'
-        ? (model.esmfold2StepsFor(steps, {
-            atomised: hasExtraContext,
-            residues: sequence.length,
-          }) as number)
-        : hasExtraContext || sequence.length > 2048
-          ? Math.max(steps, 64)
-          : steps;
+        ? Math.max(
+            sharedConfig.effectiveEsmfold2Steps,
+            model.esmfold2StepsFor(steps, {
+              atomised: hasExtraContext,
+              residues: sequence.length,
+            }) as number,
+          )
+        : sharedConfig.effectiveEsmfold2Steps;
     const allPolymerSeqs = [...chains, ...dnaSeqs, ...rnaSeqs];
     const chainKinds: Array<'protein' | 'dna' | 'rna'> = [
       ...chains.map(() => 'protein' as const),

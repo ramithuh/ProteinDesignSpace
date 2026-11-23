@@ -1079,3 +1079,398 @@ export function resolveAntibodyNumbering(
   }
   return kabatTotal >= 2 && kabatTotal > imgtTotal ? 'kabat' : 'imgt';
 }
+
+export interface AntiFoldDesignPlanInput {
+  chainInfos: readonly NumberedChainInfo[];
+  orderedResidues: readonly OrderedStructureResidue[];
+  chainTypes?: Readonly<Record<string, string>>;
+  inheritedLockedChains?: readonly string[];
+  inheritedFixedResidueIndices?: readonly number[];
+  variant: 'antifold' | 'esmif1';
+  samplingMode: 'independent' | 'autoregressive';
+  targetChainSpec: string;
+  numberingParam: AntiFoldNumberingParam;
+  regionsSpec: string;
+  fixedPositionsSpec: string;
+  unlockInherited: boolean;
+  /** When true (worker), throws if `targetChainSpec` is absent from structure; when false (preview), records a warning. */
+  strictTargetChain?: boolean;
+}
+
+export interface AntiFoldResidueDesignState {
+  flatIndex: number;
+  chain: string;
+  number: number;
+  insertion: string;
+  willDesign: boolean;
+  lockedByTargetChain: boolean;
+  inRegion: boolean;
+  isUserFixed: boolean;
+  isInheritedFixed: boolean;
+}
+
+export interface CompiledAntiFoldDesignPlan {
+  availableChains: string[];
+  explicitTarget?: string;
+  /** Passed to vendor `prepareInput` only when explicitly specified by user (prevents AR truncation on H+L). */
+  effectiveTargetChain?: string;
+  resolvedTargetChain: string;
+  heavyChain?: string;
+  lightChain?: string;
+  detectedHeavy?: string;
+  detectedLight?: string;
+  resolvedNumbering: ResolvedAntiFoldNumbering;
+  rawRegions: string[];
+  effectiveRegions: string[];
+  remappedChains: string[];
+  combineOpts: Record<string, unknown>;
+  lockedChainSet: Set<string>;
+  userLockedChainSet: Set<string>;
+  inheritedLockedChainSet: Set<string>;
+  userFixedKeys: Set<string>;
+  inheritedFixedIndices: Set<number>;
+  residueStates: AntiFoldResidueDesignState[];
+  designedCount: number;
+  fixedCount: number;
+  warnings: string[];
+}
+
+function makeAntiFoldResidueKey(chain: string, num: number, ins: string): string {
+  return `${chain}:${num}:${ins}`;
+}
+
+/**
+ * Pure single-source-of-truth AntiFold / ESM-IF1 design plan compiler (`#77`).
+ * Encapsulates Ig sequence hallmarks, `firstNonLight` heavy/light resolution, numbering resolution,
+ * `remapSequentialAntibodyRegions`, locked chains, fixed residues, and exact `regionMask` evaluation
+ * so `antifold.worker.ts` and `input-preview.ts` match 1:1 on both canonical and sequentially numbered
+ * RCSB entries (e.g. `1N8Z`, `1MEL`, `6W41`).
+ */
+export function compileAntiFoldDesignPlan(
+  input: AntiFoldDesignPlanInput,
+): CompiledAntiFoldDesignPlan {
+  const {
+    chainInfos,
+    orderedResidues,
+    chainTypes = {},
+    inheritedLockedChains,
+    inheritedFixedResidueIndices,
+    variant,
+    samplingMode,
+    targetChainSpec,
+    numberingParam,
+    regionsSpec,
+    fixedPositionsSpec,
+    unlockInherited,
+    strictTargetChain = false,
+  } = input;
+
+  const warnings: string[] = [];
+  const availableChains = chainInfos.map((c) => c.id);
+  const chainSet = new Set(availableChains);
+  const upperToChain = new Map<string, string>();
+  for (const ch of availableChains) {
+    if (!upperToChain.has(ch.toUpperCase())) upperToChain.set(ch.toUpperCase(), ch);
+  }
+  const resolveChain = (raw: string): string | undefined => {
+    if (!raw) return undefined;
+    if (chainSet.has(raw)) return raw;
+    return upperToChain.get(raw.toUpperCase());
+  };
+
+  const originalOrderKeys = orderedResidues.map((r) =>
+    makeAntiFoldResidueKey(r.chain, r.number, r.insertionCode ?? ''),
+  );
+
+  // Pass 1: collect whole-chain locks before target/VH/VL resolution
+  const defaultChain = availableChains[0] ?? 'A';
+  const { lockedChains: preUserLockedChains } = parseFixedPositionsAndChains(
+    fixedPositionsSpec,
+    defaultChain,
+    orderedResidues,
+  );
+  const lockedChainSet = new Set<string>();
+  const userLockedChainSet = new Set<string>();
+  const inheritedLockedChainSet = new Set<string>();
+
+  for (const ch of preUserLockedChains) {
+    const resolved = resolveChain(ch);
+    if (resolved) {
+      lockedChainSet.add(resolved);
+      userLockedChainSet.add(resolved);
+    }
+  }
+  if (!unlockInherited && Array.isArray(inheritedLockedChains)) {
+    for (const rawCh of inheritedLockedChains) {
+      const resolved = resolveChain(String(rawCh).trim());
+      if (resolved) {
+        lockedChainSet.add(resolved);
+        inheritedLockedChainSet.add(resolved);
+      }
+    }
+  }
+
+  const trimmedTarget = targetChainSpec.trim();
+  const explicitTarget = trimmedTarget ? resolveChain(trimmedTarget) : undefined;
+  if (trimmedTarget && !explicitTarget) {
+    const msg = `Target chain "${trimmedTarget}" not found in structure (available: ${availableChains.join(', ')}).`;
+    if (strictTargetChain) {
+      throw new Error(msg);
+    }
+    warnings.push(msg);
+  }
+
+  const { heavyChain: detectedHeavy, lightChain: detectedLight } = detectAntibodyHeavyLightChains(
+    chainInfos,
+    chainTypes,
+    lockedChainSet,
+    explicitTarget,
+  );
+
+  const unlockedHeavy =
+    detectedHeavy && !lockedChainSet.has(detectedHeavy) ? detectedHeavy : undefined;
+  const unlockedLight =
+    detectedLight && !lockedChainSet.has(detectedLight) ? detectedLight : undefined;
+  const firstUnlocked = availableChains.find((c) => !lockedChainSet.has(c)) ?? defaultChain;
+
+  // Only set `effectiveTargetChain` when explicitly specified by user so H+L antibodies
+  // design both H & L CDRs and AR mode does not truncate at H.
+  const effectiveTargetChain = explicitTarget;
+  const resolvedTargetChain =
+    explicitTarget ??
+    (variant === 'antifold' ? unlockedHeavy ?? unlockedLight ?? firstUnlocked : undefined) ??
+    defaultChain;
+
+  // Pass 2: parse chainless fixedPositions against resolvedTargetChain
+  const { fixedPositions: userRefs, lockedChains: userLockedChains } = parseFixedPositionsAndChains(
+    fixedPositionsSpec,
+    resolvedTargetChain,
+    orderedResidues,
+  );
+  for (const ch of userLockedChains) {
+    const resolved = resolveChain(ch);
+    if (resolved) {
+      lockedChainSet.add(resolved);
+      userLockedChainSet.add(resolved);
+    }
+  }
+
+  const rawRegions =
+    variant === 'antifold'
+      ? regionsSpec
+          .split(/[,\s]+/)
+          .map((t) => t.trim())
+          .filter(Boolean)
+      : [];
+
+  const firstNonLight =
+    availableChains.find((c) => c !== detectedLight && !lockedChainSet.has(c)) ??
+    availableChains.find((c) => c !== detectedLight);
+  const heavyChain =
+    variant === 'antifold'
+      ? detectedHeavy ??
+        explicitTarget ??
+        (!detectedLight ? firstUnlocked : firstNonLight ?? firstUnlocked)
+      : undefined;
+  const lightChain =
+    variant === 'antifold'
+      ? detectedLight && detectedLight !== heavyChain
+        ? detectedLight
+        : explicitTarget && explicitTarget !== heavyChain
+          ? explicitTarget
+          : undefined
+      : undefined;
+
+  const anchorHeavy = detectedHeavy ?? (heavyChain !== detectedLight ? heavyChain : undefined);
+  const anchorLight = detectedLight ?? lightChain;
+
+  const resolvedNumbering =
+    variant === 'antifold'
+      ? resolveAntibodyNumbering(numberingParam, chainInfos, anchorHeavy, anchorLight)
+      : 'imgt';
+
+  const remapped =
+    variant === 'antifold' && rawRegions.length > 0
+      ? remapSequentialAntibodyRegions(
+          rawRegions,
+          chainInfos,
+          anchorHeavy,
+          anchorLight,
+          numberingParam,
+        )
+      : { regions: rawRegions, remappedChains: [] };
+  const effectiveRegions = remapped.regions;
+
+  const combineOpts: Record<string, unknown> = {
+    ...(effectiveTargetChain ? { targetChain: effectiveTargetChain } : {}),
+    ...(heavyChain ? { heavyChain } : {}),
+    ...(lightChain ? { lightChain } : {}),
+    ...(variant === 'antifold' ? { numbering: resolvedNumbering } : {}),
+    ...(effectiveRegions.length > 0 ? { regions: effectiveRegions } : {}),
+  };
+
+  // Collect user & inherited fixed residue keys
+  const userFixedKeys = new Set<string>();
+  for (const ref of userRefs) {
+    if (typeof ref === 'number') {
+      const k = originalOrderKeys[ref];
+      if (k) userFixedKeys.add(k);
+    } else {
+      const ch = resolveChain(ref.chain) ?? ref.chain;
+      userFixedKeys.add(makeAntiFoldResidueKey(ch, ref.number, ref.insertionCode ?? ''));
+    }
+  }
+  const inheritedFixedIndices = new Set<number>();
+  if (!unlockInherited && Array.isArray(inheritedFixedResidueIndices)) {
+    for (const oneBased of inheritedFixedResidueIndices) {
+      const idx = Number(oneBased) - 1;
+      if (Number.isInteger(idx) && idx >= 0 && idx < originalOrderKeys.length) {
+        inheritedFixedIndices.add(idx);
+      }
+    }
+  }
+
+  // Evaluate regionMask using exact `antifold-esmif1/shared/structure.js` semantics on `effectiveRegions`
+  const regionSelectors: Array<(r: { chain: string; number: number; insertion: string }) => boolean> = [];
+  if (effectiveRegions.length > 0 && heavyChain) {
+    const schemeBounds = ANTIBODY_CDR_BOUNDS[resolvedNumbering];
+    for (const region of effectiveRegions) {
+      const explicitSpan =
+        /^([^:]+):(-?\d+[A-Za-z]?(?:--?\d+[A-Za-z]?)?(?:,-?\d+[A-Za-z]?(?:--?\d+[A-Za-z]?)?)*)$/.exec(
+          region,
+        );
+      if (explicitSpan) {
+        const chainId =
+          explicitSpan[1] === 'H'
+            ? heavyChain
+            : explicitSpan[1] === 'L'
+              ? lightChain
+              : resolveChain(explicitSpan[1]) ?? explicitSpan[1];
+        const ranges: Array<{ a: number; b: number; startIns: string; endIns: string }> = [];
+        let valid = true;
+        for (const part of explicitSpan[2].split(',')) {
+          const rm = /^(-?\d+)([A-Za-z]?)(?:-(-?\d+)([A-Za-z]?))?$/.exec(part);
+          if (!rm) {
+            valid = false;
+            break;
+          }
+          const a = Number(rm[1]);
+          const startIns = (rm[2] ?? '').toUpperCase();
+          const isRange = rm[3] !== undefined;
+          const b = isRange ? Number(rm[3]) : a;
+          const endIns = isRange ? (rm[4] ?? '').toUpperCase() : startIns;
+          if (b < a || (b === a && startIns > endIns)) {
+            valid = false;
+            break;
+          }
+          ranges.push({ a, b, startIns, endIns });
+        }
+        if (valid && chainId) {
+          regionSelectors.push(
+            (r) =>
+              r.chain === chainId &&
+              ranges.some((x) => {
+                const ins = (r.insertion ?? '').toUpperCase();
+                const afterStart =
+                  r.number > x.a || (r.number === x.a && (!x.startIns || ins >= x.startIns));
+                const beforeEnd =
+                  r.number < x.b || (r.number === x.b && (!x.endIns || ins <= x.endIns));
+                return afterStart && beforeEnd;
+              }),
+          );
+        } else {
+          warnings.push(`Invalid AntiFold region selector "${region}".`);
+        }
+        continue;
+      }
+      const m = /^(all|CDR|FW)([HL]?)([1-4]?)$/.exec(region);
+      if (!m || (m[1] === 'CDR' && m[3] === '4')) {
+        warnings.push(
+          `Invalid AntiFold region "${region}" (expected CDR1-3, CDRH1-3, CDRL1-3, FW1-4, all, or chain:start-end).`,
+        );
+        continue;
+      }
+      const [, type, role, num] = m;
+      regionSelectors.push((r) => {
+        const roleHere = r.chain === heavyChain ? 'H' : r.chain === lightChain ? 'L' : null;
+        if (!roleHere || (role && role !== roleHere)) return false;
+        const maxPos = roleHere === 'H' ? schemeBounds.maxH : schemeBounds.maxL;
+        if (r.number < 1 || r.number > maxPos) return false;
+        if (type === 'all') return true;
+        const b = schemeBounds[roleHere];
+        const regionsHere: ReadonlyArray<readonly [number, number]> =
+          type === 'CDR'
+            ? b
+            : [
+                [1, b[0][0] - 1],
+                [b[0][1] + 1, b[1][0] - 1],
+                [b[1][1] + 1, b[2][0] - 1],
+                [b[2][1] + 1, maxPos],
+              ];
+        return regionsHere.some(
+          ([lo, hi], idx) => (!num || idx === Number(num) - 1) && r.number >= lo && r.number <= hi,
+        );
+      });
+    }
+  }
+  const useRegionMask = effectiveRegions.length > 0;
+
+  const residueStates: AntiFoldResidueDesignState[] = [];
+  let designedCount = 0;
+  let fixedCount = 0;
+  for (let i = 0; i < orderedResidues.length; i++) {
+    const r = orderedResidues[i];
+    const ins = r.insertionCode ?? '';
+    const k = originalOrderKeys[i];
+    const lockedByTargetChain =
+      (Boolean(explicitTarget) && r.chain !== explicitTarget) ||
+      (samplingMode === 'autoregressive' &&
+        effectiveTargetChain !== undefined &&
+        r.chain !== effectiveTargetChain);
+    const inRegion =
+      !useRegionMask ||
+      regionSelectors.some((sel) => sel({ chain: r.chain, number: r.number, insertion: ins }));
+    const isUserFixed = userLockedChainSet.has(r.chain) || userFixedKeys.has(k);
+    const isInheritedFixed =
+      !isUserFixed && (inheritedLockedChainSet.has(r.chain) || inheritedFixedIndices.has(i));
+    const willDesign = !lockedByTargetChain && inRegion && !isUserFixed && !isInheritedFixed;
+    if (willDesign) designedCount++;
+    else fixedCount++;
+    residueStates.push({
+      flatIndex: i,
+      chain: r.chain,
+      number: r.number,
+      insertion: ins,
+      willDesign,
+      lockedByTargetChain,
+      inRegion,
+      isUserFixed,
+      isInheritedFixed,
+    });
+  }
+
+  return {
+    availableChains,
+    ...(explicitTarget ? { explicitTarget } : {}),
+    ...(effectiveTargetChain ? { effectiveTargetChain } : {}),
+    resolvedTargetChain,
+    ...(heavyChain ? { heavyChain } : {}),
+    ...(lightChain ? { lightChain } : {}),
+    ...(detectedHeavy ? { detectedHeavy } : {}),
+    ...(detectedLight ? { detectedLight } : {}),
+    resolvedNumbering,
+    rawRegions,
+    effectiveRegions,
+    remappedChains: remapped.remappedChains,
+    combineOpts,
+    lockedChainSet,
+    userLockedChainSet,
+    inheritedLockedChainSet,
+    userFixedKeys,
+    inheritedFixedIndices,
+    residueStates,
+    designedCount,
+    fixedCount,
+    warnings,
+  };
+}

@@ -304,15 +304,31 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
       },
     };
     const liveIssues = validateBioCapabilities(graphAutoPreview, { pdb: { structure: liveHolo } });
-    expect(liveIssues.some((i) => i.code === 'genie3-unsupported-entities' && i.nodeId === 'g3')).toBe(true);
+    const g3EntityIssue = liveIssues.find(
+      (i) => i.code === 'genie3-unsupported-entities' && i.nodeId === 'g3',
+    );
+    expect(g3EntityIssue).toBeDefined();
+    expect(g3EntityIssue?.fix?.label).toBe('Crop protein chain');
 
-    // Layer 2 also rejects custom holo PDBs into Genie 3 even in motif mode
+    // Unified Primitive 2 policy: >=3 protein residues + uncropped ligands produce a non-blocking
+    // Layer-2 warning (NO runtime throw), whereas <3 protein residues or incompatible all-atom benchmarks hard-block.
+    const g3Rt = validateRuntimeNodeInputs(
+      { id: 'g3', adapterId: 'genie3', params: { taskMode: 'motif', motifSpan: 'A1-10' } },
+      { structure: liveHolo },
+    );
+    expect(g3Rt.warnings.some((w) => /protein-only/i.test(w))).toBe(true);
     expect(() =>
       validateRuntimeNodeInputs(
-        { id: 'g3', adapterId: 'genie3', params: { taskMode: 'motif' } },
-        { structure: liveHolo },
+        { id: 'g3', adapterId: 'genie3', params: { taskMode: 'motif', motifSpan: 'A1-10' } },
+        { structure: { ...liveHolo, length: 2, sequence: 'AA' } },
       ),
-    ).toThrow(/protein-only/i);
+    ).toThrow(/at least 3 protein/i);
+    expect(() =>
+      validateRuntimeNodeInputs(
+        { id: 'g3', adapterId: 'genie3', params: { taskMode: 'motif', motifSpan: 'A1-10' } },
+        { structure: { ...liveHolo, benchmarkId: 'ame_1ctt_cda' } },
+      ),
+    ).toThrow(/all-atom/i);
 
     // 2. strippedNonProtein propagates through MPNN so RFD4 (SAM) -> MPNN -> LocalFold still warns about apo refold!
     const mpnnApoGraph: WorkflowGraph = {

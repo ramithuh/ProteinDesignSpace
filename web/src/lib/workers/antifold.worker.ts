@@ -4,12 +4,9 @@
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
 import {
+  compileAntiFoldDesignPlan,
   computeChainLengths,
-  detectAntibodyHeavyLightChains,
   normalizeAntiFoldNumberingParam,
-  parseFixedPositionsAndChains,
-  remapSequentialAntibodyRegions,
-  resolveAntibodyNumbering,
   type AntiFoldNumberingParam,
   type NumberedChainInfo,
   type OrderedStructureResidue,
@@ -168,18 +165,6 @@ function resolveAntiFoldPlan(
   unlockInherited: boolean,
 ): ResolvedAntiFoldPlan {
   const parsed = sharedMod.parseStructure(structureText) as ParsedAntiFoldStructure;
-  const availableChains = parsed.chains.map((c) => c.id);
-  const chainSet = new Set(availableChains);
-  const upperToChain = new Map<string, string>();
-  for (const ch of availableChains) {
-    if (!upperToChain.has(ch.toUpperCase())) upperToChain.set(ch.toUpperCase(), ch);
-  }
-
-  const resolveChain = (raw: string): string | undefined => {
-    if (!raw) return undefined;
-    if (chainSet.has(raw)) return raw;
-    return upperToChain.get(raw.toUpperCase());
-  };
 
   // Preserve original structure residue ordering & native AAs for clean downstream alignment
   const originalOrderKeys: string[] = [];
@@ -211,112 +196,27 @@ function resolveAntiFoldPlan(
   }
   const originalChainLengths = computeChainLengths(originalChainList);
 
-  // Resolve inherited & user locked chains (pass 1: collect whole-chain locks before target resolution)
-  const defaultChain = availableChains[0] ?? 'A';
-  const { lockedChains: preUserLockedChains } =
-    parseFixedPositionsAndChains(fixedPositionsSpec, defaultChain, orderedResidues);
-
-  const lockedChainSet = new Set<string>();
-  for (const ch of preUserLockedChains) {
-    const resolved = resolveChain(ch);
-    if (resolved) lockedChainSet.add(resolved);
-  }
-  if (!unlockInherited && Array.isArray(backbone.lockedChains)) {
-    for (const rawCh of backbone.lockedChains) {
-      const resolved = resolveChain(String(rawCh).trim());
-      if (resolved) lockedChainSet.add(resolved);
-    }
-  }
-
-  // Resolve targetChain, heavyChain, lightChain
-  const explicitTarget = targetChainSpec ? resolveChain(targetChainSpec) : undefined;
-  if (targetChainSpec && !explicitTarget) {
-    throw new Error(
-      `Target chain "${targetChainSpec}" not found in structure (available: ${availableChains.join(', ')}).`,
-    );
-  }
-
-  const chainTypes = backbone.molecularContext?.chainTypes ?? {};
-  const { heavyChain: detectedHeavy, lightChain: detectedLight } = detectAntibodyHeavyLightChains(
+  // Compile via single-source-of-truth plan shared 1:1 with input-preview.ts (#77):
+  // resolves `unlockedHeavy ?? unlockedLight ?? firstUnlocked` and runs pass-2
+  // `parseFixedPositionsAndChains(fixedPositionsSpec, resolvedTargetChain, orderedResidues)`.
+  const compiled = compileAntiFoldDesignPlan({
     chainInfos,
-    chainTypes,
-    lockedChainSet,
-    explicitTarget,
-  );
+    orderedResidues,
+    chainTypes: backbone.molecularContext?.chainTypes,
+    inheritedLockedChains: backbone.lockedChains,
+    inheritedFixedResidueIndices: backbone.fixedResidueIndices,
+    variant,
+    samplingMode,
+    targetChainSpec,
+    numberingParam,
+    regionsSpec,
+    fixedPositionsSpec,
+    unlockInherited,
+    strictTargetChain: true,
+  });
 
-  const unlockedHeavy =
-    detectedHeavy && !lockedChainSet.has(detectedHeavy) ? detectedHeavy : undefined;
-  const unlockedLight =
-    detectedLight && !lockedChainSet.has(detectedLight) ? detectedLight : undefined;
-  const firstUnlocked = availableChains.find((c) => !lockedChainSet.has(c)) ?? availableChains[0];
-  // Only set `targetChain` when the user explicitly specified one: leaving it unset for
-  // H+L antibodies lets score() include both H & L CDRs and prevents AR mode from truncating at H.
-  const effectiveTargetChain = explicitTarget;
-  const resolvedTargetChain =
-    explicitTarget ??
-    (variant === 'antifold' ? unlockedHeavy ?? unlockedLight ?? firstUnlocked : undefined) ??
-    defaultChain;
-
-  // Pass 2: parse chainless fixedPositions against resolvedTargetChain (matching input-preview.ts)
-  const { fixedPositions: userRefs, lockedChains: userLockedChains } =
-    parseFixedPositionsAndChains(fixedPositionsSpec, resolvedTargetChain, orderedResidues);
-  for (const ch of userLockedChains) {
-    const resolved = resolveChain(ch);
-    if (resolved) lockedChainSet.add(resolved);
-  }
-
-  const regionList =
-    variant === 'antifold'
-      ? regionsSpec
-          .split(/[,\s]+/)
-          .map((t) => t.trim())
-          .filter(Boolean)
-      : [];
-
-  const firstNonLight = availableChains.find((c) => c !== detectedLight && !lockedChainSet.has(c))
-    ?? availableChains.find((c) => c !== detectedLight);
-  const heavyChain =
-    variant === 'antifold'
-      ? detectedHeavy ?? explicitTarget ?? (!detectedLight ? firstUnlocked : firstNonLight ?? firstUnlocked)
-      : undefined;
-  const lightChain =
-    variant === 'antifold'
-      ? detectedLight && detectedLight !== heavyChain
-        ? detectedLight
-        : explicitTarget && explicitTarget !== heavyChain
-          ? explicitTarget
-          : undefined
-      : undefined;
-
-  const resolvedNumbering =
-    variant === 'antifold'
-      ? resolveAntibodyNumbering(
-          numberingParam,
-          chainInfos,
-          detectedHeavy ?? (heavyChain !== detectedLight ? heavyChain : undefined),
-          detectedLight ?? lightChain,
-        )
-      : 'imgt';
-
-  const remapped =
-    variant === 'antifold' && regionList.length > 0
-      ? remapSequentialAntibodyRegions(
-          regionList,
-          chainInfos,
-          detectedHeavy ?? (heavyChain !== detectedLight ? heavyChain : undefined),
-          detectedLight ?? lightChain,
-          numberingParam,
-        )
-      : { regions: regionList, remappedChains: [] };
-
-  const combineOpts: Record<string, unknown> = {
-    ...(effectiveTargetChain ? { targetChain: effectiveTargetChain } : {}),
-    ...(heavyChain ? { heavyChain } : {}),
-    ...(lightChain ? { lightChain } : {}),
-    ...(variant === 'antifold' ? { numbering: resolvedNumbering } : {}),
-    ...(remapped.regions.length > 0 ? { regions: remapped.regions } : {}),
-  };
-
+  const { combineOpts, lockedChainSet, explicitTarget, userFixedKeys, inheritedFixedIndices } =
+    compiled;
   const prepared = sharedMod.prepareInput(parsed, combineOpts) as PreparedAntiFoldInput;
 
   // Determine active sampling length
@@ -327,23 +227,10 @@ function resolveAntiFoldPlan(
   }
 
   // Collect fixed residue keys (user fixedPositions + inherited fixedResidueIndices)
-  const fixedKeySet = new Set<string>();
-  for (const ref of userRefs) {
-    if (typeof ref === 'number') {
-      const k = originalOrderKeys[ref];
-      if (k) fixedKeySet.add(k);
-    } else {
-      const ch = resolveChain(ref.chain) ?? ref.chain;
-      fixedKeySet.add(residueKey(ch, ref.number, ref.insertionCode ?? ''));
-    }
-  }
-  if (!unlockInherited && Array.isArray(backbone.fixedResidueIndices)) {
-    for (const oneBased of backbone.fixedResidueIndices) {
-      const idx = Number(oneBased) - 1;
-      if (Number.isInteger(idx) && idx >= 0 && idx < originalOrderKeys.length) {
-        fixedKeySet.add(originalOrderKeys[idx]);
-      }
-    }
+  const fixedKeySet = new Set<string>(userFixedKeys);
+  for (const idx of inheritedFixedIndices) {
+    const k = originalOrderKeys[idx];
+    if (k) fixedKeySet.add(k);
   }
 
   // Build index-keyed fixed map against `prepared.residues` (bounded by `sampleLength`).

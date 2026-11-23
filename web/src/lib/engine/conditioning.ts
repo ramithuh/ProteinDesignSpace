@@ -12,10 +12,12 @@ import {
   type ParsedStructure,
   type SourceResidueId,
 } from '$lib/protein-ops/pdb';
+import { evaluateProteinOnlyStructurePolicy } from '$lib/protein-ops/hetatm-policy';
 import { getBenchmarkById } from './benchmarks';
 import type {
   CanonicalConditionIntent,
   ConditionSpecArtifact,
+  MsaMode,
   StructureArtifact,
 } from './types';
 
@@ -1486,6 +1488,64 @@ export function assertRfd4ConditionSelectorsMatch(
   }
 }
 
+export interface MotifLineage {
+  /** 1-based flat residue indices for downstream ProteinMPNN / AntiFold locking. */
+  fixedResidueIndices: number[];
+  /** 0-based residue indices into `caCoords` corresponding 1:1 with `nativeMotifCoords`. */
+  motifIndices: number[];
+  /** Optional native Cα [x, y, z] coordinates aligned 1:1 with `motifIndices`. */
+  nativeMotifCoords?: number[][];
+}
+
+/**
+ * Shared pure motif-lineage builder preventing 0-based vs 1-based drift (`CT-01`):
+ * - `fixedResidueIndices`: 1-based flat residue indices for ProteinMPNN / AntiFold.
+ * - `motifIndices`: 0-based indices into `StructureArtifact.caCoords` for `designability-scorer`.
+ * - `nativeMotifCoords`: native template Cα [x, y, z] coordinates aligned 1:1 with `motifIndices`.
+ */
+export function buildMotifLineage(
+  zeroBasedTargetIndices: readonly number[],
+  sourceIndices?: readonly number[],
+  upCa?: ArrayLike<number>,
+): MotifLineage {
+  const motifIndices: number[] = [];
+  const fixedResidueIndices: number[] = [];
+  const canExtractCoords =
+    Boolean(sourceIndices) &&
+    Boolean(upCa) &&
+    sourceIndices!.length === zeroBasedTargetIndices.length &&
+    sourceIndices!.length > 0;
+  const nativeMotifCoords: number[][] | undefined = canExtractCoords ? [] : undefined;
+
+  for (let k = 0; k < zeroBasedTargetIndices.length; k++) {
+    const tIdx = Math.trunc(zeroBasedTargetIndices[k]);
+    if (!Number.isInteger(tIdx) || tIdx < 0) continue;
+    motifIndices.push(tIdx);
+    fixedResidueIndices.push(tIdx + 1);
+    if (nativeMotifCoords && sourceIndices && upCa) {
+      const sIdx = Math.trunc(sourceIndices[k]);
+      const base = sIdx * 3;
+      if (Number.isInteger(sIdx) && sIdx >= 0 && base + 2 < upCa.length) {
+        nativeMotifCoords.push([
+          Number(upCa[base] ?? 0),
+          Number(upCa[base + 1] ?? 0),
+          Number(upCa[base + 2] ?? 0),
+        ]);
+      } else {
+        nativeMotifCoords.push([0, 0, 0]);
+      }
+    }
+  }
+
+  return {
+    fixedResidueIndices,
+    motifIndices,
+    ...(nativeMotifCoords && nativeMotifCoords.length === motifIndices.length && motifIndices.length > 0
+      ? { nativeMotifCoords }
+      : {}),
+  };
+}
+
 export interface ExtractedDesignMetadata {
   lockedChains?: string[];
   fixedResidueIndices?: number[];
@@ -2687,24 +2747,26 @@ export function resolveGenie3CompiledInput(
     );
   }
 
-  // Guard against non-protein/enzyme/DNA templates when conditioning on a template
+  // Guard against explicitly incompatible all-atom benchmarks or non-protein (<3 Cα) templates.
+  // Unified Primitive 2 policy: structures with >=3 protein Cα residues + uncropped HETATMs/DNA
+  // compile cleanly because Genie 3 ignores non-protein records cleanly.
   if (template && taskMode !== 'unconditional') {
-    if (template.benchmarkId) {
-      const bench = getBenchmarkById(template.benchmarkId);
-      if (bench && !bench.supportsGenie3) {
-        throw new Error(
-          `${bench.shortLabel} requires all-atom enzyme/ligand/DNA conditioning, which is supported by RFD4-Proteina rather than Genie 3.`,
-        );
-      }
-    }
-    if (template.diagnostics?.hasLigands || template.diagnostics?.hasNucleicAcids) {
-      const extras = [
-        ...(template.diagnostics.hasLigands ? [`ligands (${template.diagnostics.ligandNames.join(', ')})`] : []),
-        ...(template.diagnostics.hasNucleicAcids ? [`nucleic acid chains (${template.diagnostics.nucleicAcidChains.join(', ')})`] : []),
-      ];
-      throw new Error(
-        `Genie 3 is a protein-only Cα backbone diffusion model and cannot condition on ${extras.join(' and ')}. Use RFD4-Proteina for all-atom ligand/DNA conditioning.`,
-      );
+    const bench = template.benchmarkId ? getBenchmarkById(template.benchmarkId) : undefined;
+    const inferredPdbId =
+      bench?.pdbId ??
+      (/\b([0-9][A-Za-z0-9]{3})\b/.exec(template.label ?? '')?.[1]?.toUpperCase() || undefined);
+    const policy = evaluateProteinOnlyStructurePolicy({
+      modelName: 'Genie 3',
+      benchmark: bench,
+      pdbId: inferredPdbId,
+      proteinResidueCount: template.length,
+      ligandNames: template.diagnostics?.ligandNames,
+      nucleicAcidChains: template.diagnostics?.nucleicAcidChains,
+      hasLigands: template.diagnostics?.hasLigands,
+      hasNucleicAcids: template.diagnostics?.hasNucleicAcids,
+    });
+    if (policy.action === 'hard-block') {
+      throw new Error(policy.message);
     }
   }
 
@@ -2761,5 +2823,183 @@ export function resolveGenie3CompiledInput(
     totalLength: compiledSpec?.length ?? length,
     chainLengths: compiledSpec?.chainLengths ?? [length],
     summary: compiledSpec?.summary ?? `unconditional L=${length}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Shared LocalFold Effective Config Resolver (CT-05: 1:1 Worker <-> Preview)
+// ---------------------------------------------------------------------------
+
+export const LOCALFOLD_AF2_MODELS: ReadonlySet<string> = new Set([
+  'monomer',
+  'monomer-2',
+  'monomer-3',
+  'monomer-4',
+  'monomer-5',
+]);
+
+export const LOCALFOLD_AF2_MULTIMER_MODELS: ReadonlySet<string> = new Set([
+  'multimer',
+  'multimer-2',
+  'multimer-3',
+  'multimer-4',
+  'multimer-5',
+]);
+
+export const LOCALFOLD_ESMFOLD2_MODELS: ReadonlySet<string> = new Set([
+  'ef2-fast-300m',
+  'ef2-fast-600m',
+]);
+
+export const LOCALFOLD_AF3_MODELS: ReadonlySet<string> = new Set([
+  'rosettafold3',
+  'boltz2',
+  'openbind0',
+  'protenix2',
+  'opendde',
+  'mol1',
+  'intellifold2',
+  'af3',
+]);
+
+export interface LocalFoldEffectiveConfigInput {
+  modelKey?: string;
+  params?: Record<string, unknown>;
+  /** Max protein residue length across scheduled candidate(s) (triggers 64-step floor when >2048). */
+  maxResidueLength?: number;
+  /** Optional explicit override for holo context presence (e.g. already-parsed ligands/DNA/RNA). */
+  hasHoloContext?: boolean;
+}
+
+export interface LocalFoldEffectiveConfig {
+  modelKey: string;
+  isAf2Mono: boolean;
+  isAf2Multi: boolean;
+  isAf3: boolean;
+  isEsmfold2: boolean;
+  recycles: number;
+  tolerance: number;
+  diffusionSteps: number;
+  msaMode: MsaMode;
+  msaA3mText: string;
+  ligandCcdCodes: string[];
+  dnaSeqs: string[];
+  rnaSeqs: string[];
+  hasHoloContext: boolean;
+  requestedEsmfold2Steps: number;
+  effectiveEsmfold2Steps: number;
+  esmfold2StepsAdjusted: boolean;
+}
+
+/**
+ * Resolve ESMFold2 effective diffusion steps matching upstream `esmfold2StepsFor`:
+ * holo/atomised complexes (ligands/DNA/RNA) or sequences >2048 aa floor at 64 steps.
+ */
+export function resolveEsmfold2EffectiveSteps(
+  requestedSteps: unknown,
+  opts?: { hasHoloContext?: boolean; residueLength?: number },
+): number {
+  const parsed = Number(requestedSteps ?? 15);
+  const base = Number.isFinite(parsed) ? Math.round(parsed) : 15;
+  const needs64Floor = Boolean(opts?.hasHoloContext) || (opts?.residueLength ?? 0) > 2048;
+  return needs64Floor ? Math.max(base, 64) : base;
+}
+
+/**
+ * Pure single-source-of-truth LocalFold effective config resolver (`CT-05`).
+ * Shared by `localfold.worker.ts`, `localfold-esmfold2.ts`, and `input-preview.ts`
+ * so `af2-multimer` tolerance (`0.5` Å), holo parsing, and `effectiveEsmfold2Steps` (`64` on
+ * holo or `>2048` aa) are resolved identically BEFORE `runHash`, `FoldedStructure.id`, and preview.
+ */
+export function resolveLocalFoldEffectiveConfig(
+  input: LocalFoldEffectiveConfigInput,
+): LocalFoldEffectiveConfig {
+  const p = input.params ?? {};
+  const modelKey = String(input.modelKey ?? p.model ?? 'monomer');
+  const isAf2Mono = LOCALFOLD_AF2_MODELS.has(modelKey);
+  const isAf2Multi = LOCALFOLD_AF2_MULTIMER_MODELS.has(modelKey);
+  const isAf3 = LOCALFOLD_AF3_MODELS.has(modelKey);
+  const isEsmfold2 = LOCALFOLD_ESMFOLD2_MODELS.has(modelKey);
+
+  const maxRecycles = modelKey === 'mol1' || isAf2Multi ? 20 : 10;
+  const parsedRecycles = Number(p.recycles ?? 1);
+  const recycles = Math.max(
+    0,
+    Math.min(maxRecycles, Number.isFinite(parsedRecycles) ? Math.round(parsedRecycles) : 1),
+  );
+
+  const defaultTol = isAf2Multi ? 0.5 : 0;
+  const rawTol = p.tolerance;
+  const tolerance =
+    rawTol === undefined || rawTol === null || rawTol === ''
+      ? defaultTol
+      : Number.isFinite(Number(rawTol))
+        ? Math.max(0, Math.min(5, Number(rawTol)))
+        : defaultTol;
+
+  const parsedDiff = Number(p.diffusionSteps ?? 25);
+  const diffusionSteps = Math.max(
+    10,
+    Math.min(200, Number.isFinite(parsedDiff) ? Math.round(parsedDiff) : 25),
+  );
+
+  const rawMsaMode = isEsmfold2 ? 'single' : String(p.msaMode ?? 'single').trim();
+  const msaMode: MsaMode =
+    rawMsaMode === 'mmseqs2' || rawMsaMode === 'target-only' || rawMsaMode === 'a3m'
+      ? rawMsaMode
+      : 'single';
+  const msaA3mText = typeof p.msaA3mText === 'string' ? p.msaA3mText : '';
+
+  const ligandCcdCodes: string[] = Array.isArray(p.ligandCcdCodes)
+    ? (p.ligandCcdCodes as string[]).map((s) => String(s).trim().toUpperCase()).filter(Boolean)
+    : String(p.ligandCcdCodes ?? '')
+        .split(/[,\s]+/)
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
+  const dnaSeqs: string[] = Array.isArray(p.dnaSequences)
+    ? (p.dnaSequences as string[])
+        .map((s) => String(s).replace(/[^ACGT]/gi, '').toUpperCase())
+        .filter(Boolean)
+    : String(p.dnaSequences ?? '')
+        .split(/[:,;\s]+/)
+        .map((s) => s.replace(/[^ACGT]/gi, '').toUpperCase())
+        .filter(Boolean);
+  const rnaSeqs: string[] = Array.isArray(p.rnaSequences)
+    ? (p.rnaSequences as string[])
+        .map((s) => String(s).replace(/[^ACGU]/gi, '').toUpperCase())
+        .filter(Boolean)
+    : String(p.rnaSequences ?? '')
+        .split(/[:,;\s]+/)
+        .map((s) => s.replace(/[^ACGU]/gi, '').toUpperCase())
+        .filter(Boolean);
+
+  const hasHoloContext =
+    input.hasHoloContext ??
+    (ligandCcdCodes.length > 0 || dnaSeqs.length > 0 || rnaSeqs.length > 0);
+  const parsedEf2 = Number(p.esmfold2Steps ?? 15);
+  const requestedEsmfold2Steps = Number.isFinite(parsedEf2) ? Math.round(parsedEf2) : 15;
+  const effectiveEsmfold2Steps = resolveEsmfold2EffectiveSteps(requestedEsmfold2Steps, {
+    hasHoloContext,
+    residueLength: input.maxResidueLength,
+  });
+
+  return {
+    modelKey,
+    isAf2Mono,
+    isAf2Multi,
+    isAf3,
+    isEsmfold2,
+    recycles,
+    tolerance,
+    diffusionSteps,
+    msaMode,
+    msaA3mText,
+    ligandCcdCodes,
+    dnaSeqs,
+    rnaSeqs,
+    hasHoloContext,
+    requestedEsmfold2Steps,
+    effectiveEsmfold2Steps,
+    esmfold2StepsAdjusted: isEsmfold2 && effectiveEsmfold2Steps !== requestedEsmfold2Steps,
   };
 }
