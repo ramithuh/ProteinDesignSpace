@@ -19,7 +19,7 @@
     draftPreview: PlannedWorkflowResult | null;
     onDraftChange: (draft: PlannedWorkflowResult | null) => void;
     onPromptStateChange?: (hasText: boolean, loading: boolean) => void;
-    onApply: (graph: WorkflowGraph, summary: string) => void;
+    onApply: (graph: WorkflowGraph, summary: string, isAiDraft?: boolean) => void;
     onOpenCatalog?: () => void;
     onClose: () => void;
   }
@@ -77,6 +77,7 @@
       !infoOpen,
   );
   let showCharCount = $derived(prompt.length > 220 && !draftPreview);
+  let isAiDraft = $derived(Boolean(draftPreview && draftPreview.model !== 'local-preset'));
 
   $effect(() => {
     onPromptStateChange?.(trimmedPrompt.length > 0, loading);
@@ -283,8 +284,9 @@
     if (!draftPreview || disabled) return;
     const nextGraph = $state.snapshot(draftPreview.graph) as WorkflowGraph;
     const summary = draftPreview.plan.summary;
+    const aiDraft = draftPreview.model !== 'local-preset';
     onDraftChange(null);
-    onApply(nextGraph, summary);
+    onApply(nextGraph, summary, aiDraft);
     onClose();
   }
 
@@ -389,8 +391,16 @@
         </button>
       {/each}
     </div>
-  {:else if draftPreview && (draftPreview.unsupported.length > 0 || draftPreview.notes.length > 0)}
+  {:else if draftPreview}
     <div class="above-strip note-stack">
+      <div class="warn-pill" role="status">
+        <span class="warn-icon" aria-hidden="true">⚠</span>
+        <span>
+          {isAiDraft
+            ? "AI-drafted (gemma-4) — double-check each block's parameters, PDB/chain IDs & wiring before running."
+            : "Auto-drafted workflow — double-check each block's parameters, PDB/chain IDs & wiring before running."}
+        </span>
+      </div>
       {#if draftPreview.unsupported.length > 0}
         <div
           class="warn-pill"
@@ -583,6 +593,10 @@
           <p>
             All protein generation, sequence design, folding, and model weights still run
             <strong>100% locally in your browser on WebGPU</strong>.
+          </p>
+          <p>
+            LLM drafts can miss residue ranges, chain IDs, or model settings — always double-check
+            each block before running.
           </p>
         </div>
       {/if}

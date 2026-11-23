@@ -641,6 +641,39 @@
   }
 
   /**
+   * Build `typeParams` for primary polymer representations, omitting Mol*'s dashed
+   * `polymer-gap` cylinders so disjoint motifs and missing loops render cleanly without
+   * phantom dashed sticks connecting non-contiguous Cα atoms.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function buildPrimaryTypeParams(
+    rep: PolymerRepType,
+    struct: any,
+    alpha?: number,
+  ): Record<string, unknown> {
+    const params: Record<string, unknown> = {};
+    if (alpha !== undefined) params.alpha = alpha;
+    if (rep === 'cartoon') {
+      const units = struct?.data?.units;
+      let hasNucleotides = false;
+      if (Array.isArray(units)) {
+        for (const u of units) {
+          if (u?.nucleotideElements?.length > 0) {
+            hasNucleotides = true;
+            break;
+          }
+        }
+      }
+      params.visuals = hasNucleotides ? ['polymer-trace', 'nucleotide-ring'] : ['polymer-trace'];
+    } else if (rep === 'putty') {
+      params.visuals = ['polymer-tube'];
+    } else if (rep === 'backbone') {
+      params.visuals = ['polymer-backbone-cylinder', 'polymer-backbone-sphere'];
+    }
+    return params;
+  }
+
+  /**
    * Add ligand (ball-and-stick), ion (spacefill), and sparse theozyme (<= 15 polymer residues,
    * ball-and-stick) representations to a Mol* structure and return their state refs for visibility toggling.
    */
@@ -968,7 +1001,7 @@
           await ctx.builders.structure.representation.addRepresentation(struct, {
             type: styleOpts.rep,
             ...designedColorArg,
-            typeParams: { alpha: designedAlpha },
+            typeParams: buildPrimaryTypeParams(styleOpts.rep, struct, designedAlpha),
           });
           await addAccessoryRepresentations(ctx, struct, {
             includeLigands: styleOpts.ligands,
@@ -1011,6 +1044,7 @@
           await ctx.builders.structure.representation.addRepresentation(struct, {
             type: styleOpts.rep,
             ...refoldColorArg,
+            typeParams: buildPrimaryTypeParams(styleOpts.rep, struct),
           });
           await addAccessoryRepresentations(ctx, struct, {
             includeLigands: styleOpts.ligands,
@@ -1241,7 +1275,7 @@
           const repr = await ctx.builders.structure.representation.addRepresentation(struct, {
             type: styleOpts.rep,
             ...modelColorArg,
-            typeParams: { alpha: m.alpha },
+            typeParams: buildPrimaryTypeParams(styleOpts.rep, struct, m.alpha),
           });
           if (destroyed || mySeq !== loadSeq) return;
           const extraRefs = await addAccessoryRepresentations(ctx, struct, {

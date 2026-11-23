@@ -123,6 +123,7 @@
   let plannerHasText = $state(false);
   let plannerLoading = $state(false);
   let draftPreview = $state<PlannedWorkflowResult | null>(null);
+  let draftNotice = $state<{ graphId: string; isAiDraft: boolean } | null>(null);
   let lastNotifiedDraft: PlannedWorkflowResult | null = null;
   function notifyDraftPreview(next: PlannedWorkflowResult | null) {
     if (lastNotifiedDraft === next) return;
@@ -481,13 +482,19 @@
     );
   }
 
-  // Clear stale ghost proposals & planner preview when starting a run
+  // Clear stale ghost proposals, planner preview & AI draft banner when starting a run or switching graphs
   $effect(() => {
     if (isRunning) {
       clearProposals();
+      draftNotice = null;
       if (draftPreview || plannerOpen) {
         closeInlinePlanner();
       }
+    }
+  });
+  $effect(() => {
+    if (draftNotice && (graph.id !== draftNotice.graphId || graph.nodes.length === 0)) {
+      draftNotice = null;
     }
   });
 
@@ -1159,6 +1166,22 @@
         {/if}
       </span>
     </div>
+  {:else if draftNotice && draftNotice.graphId === graph.id && !draftPreview && !isRunning && graph.nodes.length > 0}
+    <div class="ai-draft-warning canvas-overlay" role="status">
+      <span class="adw-icon" aria-hidden="true">⚠</span>
+      <span>
+        <strong>{draftNotice.isAiDraft ? 'AI-drafted (gemma-4)' : 'Auto-drafted workflow'}</strong> — double-check each step's inputs, residue ranges &amp; parameters before running.
+      </span>
+      <button
+        type="button"
+        class="adw-dismiss"
+        onclick={() => (draftNotice = null)}
+        aria-label="Dismiss draft warning"
+        title="Dismiss"
+      >
+        ×
+      </button>
+    </div>
   {/if}
 
   <!-- Floating Top-Right: Utility controls (Wire legend & Clear) -->
@@ -1241,10 +1264,11 @@
           plannerHasText = hasText;
           plannerLoading = isLoading;
         }}
-        onApply={(nextGraph, summary) => {
+        onApply={(nextGraph, summary, isAiDraft) => {
           clearProposals();
           draftPreview = null;
           notifyDraftPreview(null);
+          draftNotice = { graphId: nextGraph.id, isAiDraft: Boolean(isAiDraft) };
           if (onApplyPlannedGraph) {
             onApplyPlannedGraph(nextGraph, summary);
           } else {
@@ -1545,6 +1569,46 @@
   .dpb-spark {
     color: var(--accent-bright);
     flex-shrink: 0;
+  }
+  .ai-draft-warning {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 26;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 10px 5px 12px;
+    border-radius: 999px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+    font-size: 11.5px;
+    line-height: 1.35;
+    color: var(--warn-text);
+    max-width: min(640px, calc(100% - 170px));
+  }
+  .ai-draft-warning strong {
+    font-weight: 600;
+  }
+  .adw-icon {
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .adw-dismiss {
+    background: none;
+    border: none;
+    color: inherit;
+    opacity: 0.72;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+    flex-shrink: 0;
+  }
+  .adw-dismiss:hover {
+    opacity: 1;
   }
   .canvas-action-dock {
     position: absolute;
