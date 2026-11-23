@@ -8,6 +8,7 @@ import {
   formatRfdiffusionContig,
   parseLengthFromContig,
 } from '$lib/engine/benchmark-sync';
+import { computeUploadDigest } from '$lib/engine/param-validation';
 import { isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
 import type { WorkflowGraph, WorkflowNode } from '$lib/engine/types';
 
@@ -24,19 +25,19 @@ export function buildNodePreviewSignature(
       const cachedFor = normalizePdbId(String(p.fetchedPdbId ?? ''));
       const txt = String(p.pdbText ?? '');
       const hasCached = txt.trim().length > 0 && cachedFor === normId;
-      return `pdb-id|${normId}|${hasCached ? txt.length : 0}|${String(p.benchmarkId ?? '')}|${crop}`;
+      return `pdb-id|${normId}|${hasCached ? computeUploadDigest(txt).slice(0, 16) : 0}|${String(p.benchmarkId ?? '')}|${crop}`;
     }
     if (mode === 'custom') {
       const txt = String(p.pdbText ?? '').trim();
       if (txt.length === 0) return null;
-      return `custom|${txt.length}|${txt.slice(0, 64)}|${String(p.filename ?? '')}|${String(p.benchmarkId ?? '')}|${crop}`;
+      return `custom|${txt.length}|${computeUploadDigest(txt).slice(0, 16)}|${String(p.filename ?? '')}|${String(p.benchmarkId ?? '')}|${crop}`;
     }
     return `demo-bundle|${String(p.benchmarkId ?? '')}|${crop}`;
   }
   if (node.adapterId === 'sequence-input') {
     const raw = String(p.sequence ?? '').trim();
     if (raw.length < 5) return null;
-    return `seq|${raw.length}|${raw.slice(0, 64)}|${String(p.label ?? '')}`;
+    return `seq|${raw.length}|${computeUploadDigest(raw).slice(0, 16)}|${String(p.label ?? '')}`;
   }
   return null;
 }
@@ -90,7 +91,16 @@ export function syncTaskToSiblingGenerators(
   const parsedLen = parseLengthFromContig(String(sp.contig ?? ''));
   const defaultSrcLen =
     src.adapterId === 'boltzgen' ? 48 : src.adapterId === 'rfd4-proteina' ? 70 : 80;
-  const syncLen = Number(sp.length ?? parsedLen ?? defaultSrcLen);
+  const rawLen =
+    typeof sp.length === 'number' || (typeof sp.length === 'string' && sp.length.trim() !== '')
+      ? Number(sp.length)
+      : NaN;
+  const syncLen =
+    Number.isFinite(rawLen) && rawLen > 0
+      ? rawLen
+      : parsedLen !== null && Number.isFinite(parsedLen) && parsedLen > 0
+        ? parsedLen
+        : defaultSrcLen;
   const srcMotif = String(sp.motifSpan ?? sp.motifSelection ?? sp.motifRange ?? '').trim();
   const srcHotspots = String(sp.hotspots ?? '').trim();
   const srcContig = String(sp.contig ?? '').trim();
@@ -110,6 +120,7 @@ export function syncTaskToSiblingGenerators(
         userEditedTask: true,
       };
       if (n.adapterId === 'genie3') {
+        const clampedLen = Math.max(16, Math.min(512, Math.round(syncLen)));
         const isSupported =
           srcMode === 'binder' || srcMode === 'motif' || srcMode === 'unconditional';
         if (!isSupported) {
@@ -119,7 +130,7 @@ export function syncTaskToSiblingGenerators(
             params: {
               ...n.params,
               taskMode: 'unconditional',
-              length: syncLen,
+              length: clampedLen,
               contig: '',
               lockChain: '',
               hotspots: '',
@@ -134,7 +145,7 @@ export function syncTaskToSiblingGenerators(
             params: {
               ...n.params,
               taskMode: 'unconditional',
-              length: syncLen,
+              length: clampedLen,
               contig: '',
               lockChain: '',
               hotspots: '',
@@ -143,7 +154,7 @@ export function syncTaskToSiblingGenerators(
             },
           };
         }
-        return { ...n, params: { ...n.params, ...shared, taskMode: srcMode } };
+        return { ...n, params: { ...n.params, ...shared, length: clampedLen, taskMode: srcMode } };
       }
       if (n.adapterId === 'boltzgen') {
         const clampedLen = Math.max(16, Math.min(160, Math.round(syncLen)));

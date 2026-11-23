@@ -2,7 +2,7 @@
 // Eliminates per-worker boilerplate across 21 GPU workers:
 //   - Binds `self.onmessage = async (ev) => ...` (directly awaitable in Node unit tests)
 //   - Unified resilient WebGPU adapter/device acquisition + Safari desktop memory budget helper
-//   - In-flight run-lease guard (`inFlightRunPromise` + `isAborting`) preventing abort/run GPU races:
+//   - Reference-counted serialized control chain (`inFlightRunPromise` + `activeControlOps` + `controlChain`) preventing abort/dispose/run GPU races:
 //     `{ id, type: 'aborted' }` is ONLY posted after `inFlightRunPromise` settles cleanly.
 //   - Owned transferable ArrayBuffer collection (`collectOwnedTransferables`).
 
@@ -47,6 +47,9 @@ export interface WorkerRunContext<
   id: number;
   params: TParams;
   inputs: TInputs;
+  /** Domain-agnostic runtime resource caps (e.g. `{ maxResidues: 1024 }`). */
+  resourceLimits?: Record<string, number>;
+  /** @deprecated Backwards-compatible alias for protein fold workers; prefer `resourceLimits`. */
   maxFoldResidues?: number;
   signal: AbortSignal;
   runtime: WorkerRuntimeContext;

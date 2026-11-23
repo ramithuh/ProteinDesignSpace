@@ -104,6 +104,8 @@
     // Preserve valid unapplied edits across YAML <-> JSON without losing work
     try {
       const parsed = parseRecipeToGraph(editorText);
+      const plain = $state.snapshot(graph) as WorkflowGraph;
+      lastSyncedCanvasText = serializeCanvas(plain, next);
       format = next;
       editorText = next === 'yaml' ? graphToYamlRecipe(parsed) : serializeWorkflowJson(parsed);
       parseErr = null;
@@ -131,19 +133,17 @@
       const next = parseRecipeToGraph(editorText);
       const prevById = new Map(graph.nodes.map((n) => [n.id, n]));
       const mergedNodes = next.nodes.map((n) => {
-        if (format === 'yaml') {
-          const plugin = defaultPluginRegistry.getPlugin(n.adapterId);
-          const prev = prevById.get(n.id);
-          if (plugin?.share.restoreOmittedInlineAsset && prev && prev.adapterId === n.adapterId) {
-            const restored = plugin.share.restoreOmittedInlineAsset(
-              prev.params,
-              n.params,
-              editorText,
-              n.id,
-            );
-            if (restored) {
-              return { ...n, params: restored };
-            }
+        const plugin = defaultPluginRegistry.getPlugin(n.adapterId);
+        const prev = prevById.get(n.id);
+        if (plugin?.share.restoreOmittedInlineAsset && prev && prev.adapterId === n.adapterId) {
+          const restored = plugin.share.restoreOmittedInlineAsset(
+            prev.params,
+            n.params,
+            format === 'yaml' ? editorText : undefined,
+            n.id,
+          );
+          if (restored) {
+            return { ...n, params: restored };
           }
         }
         return n;

@@ -66,6 +66,13 @@
     return map;
   });
 
+  function escapeAttrSelectorValue(val: string): string {
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+      return CSS.escape(val);
+    }
+    return val.replace(/["\\]/g, '\\$&');
+  }
+
   function getAddStepTarget(stepId: 'add-mpnn' | 'add-fold' | 'add-scorer') {
     const cfg = stepConfigById.get(stepId);
     return {
@@ -153,8 +160,18 @@
       const cfg = getAddStepTarget(step);
       const addBtn = document.querySelector<HTMLElement>('[data-tour="add-block-btn"]');
       const catalogShell = document.querySelector<HTMLElement>('.catalog-shell');
-      const subEl = catalogShell?.querySelector<HTMLElement>(`[data-sub-key="${cfg.subKey}"]`) ?? null;
-      const catEl = catalogShell?.querySelector<HTMLElement>(`[data-category-id="${cfg.categoryId}"]`) ?? null;
+      const subEl =
+        cfg.subKey && catalogShell
+          ? catalogShell.querySelector<HTMLElement>(
+              `[data-sub-key="${escapeAttrSelectorValue(cfg.subKey)}"]`,
+            )
+          : null;
+      const catEl =
+        cfg.categoryId && catalogShell
+          ? catalogShell.querySelector<HTMLElement>(
+              `[data-category-id="${escapeAttrSelectorValue(cfg.categoryId)}"]`,
+            )
+          : null;
 
       if (subEl) {
         subStage = 'item';

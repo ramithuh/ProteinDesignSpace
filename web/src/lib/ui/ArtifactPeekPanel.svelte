@@ -1891,12 +1891,14 @@
     </div>
 
     {#if activeStruct.dockingMetrics && activeStruct.dockingMetrics.rows.length > 0}
-      <DockingScoreCard
-        structure={activeStruct}
-        dockingMetrics={activeStruct.dockingMetrics}
-        {onDownloadText}
-        {safeFilename}
-      />
+      {#key activeStruct.id}
+        <DockingScoreCard
+          structure={activeStruct}
+          dockingMetrics={activeStruct.dockingMetrics}
+          {onDownloadText}
+          {safeFilename}
+        />
+      {/key}
     {/if}
 
     <div class="stat-chips">

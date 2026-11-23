@@ -52,9 +52,10 @@
           onTitleDraftChange?.(val);
           onUpdateLabel(nodeId, val);
         }}
-        onblur={() => {
-          const trimmed = titleDraft.trim();
-          if (trimmed !== titleDraft) {
+        onblur={(e) => {
+          const live = e.currentTarget.value;
+          const trimmed = live.trim();
+          if (trimmed !== live) {
             onTitleDraftChange?.(trimmed);
             onUpdateLabel(nodeId, trimmed);
           }

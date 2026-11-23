@@ -13,9 +13,41 @@
   let { structure, dockingMetrics, onDownloadText, safeFilename }: Props = $props();
 
   let exportOpen = $state(false);
+  let exportWrapEl = $state<HTMLDivElement | null>(null);
+  let exportTriggerEl = $state<HTMLButtonElement | null>(null);
+
+  $effect(() => {
+    if (!exportOpen || typeof document === 'undefined') return;
+    const onPointerDown = (ev: PointerEvent) => {
+      if (exportWrapEl && ev.target instanceof Node && !exportWrapEl.contains(ev.target)) {
+        exportOpen = false;
+      }
+    };
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        ev.stopPropagation();
+        exportOpen = false;
+        exportTriggerEl?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown, true);
+    };
+  });
 
   function isFiniteNum(v: unknown): v is number {
     return typeof v === 'number' && Number.isFinite(v);
+  }
+
+  function csvEscape(raw: unknown): string {
+    const str = String(raw ?? '');
+    if (/[",\r\n]/.test(str)) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
   }
 
   let primaryDock = $derived(dockingMetrics.rows[0] ?? null);
@@ -55,20 +87,20 @@
       ...dm.rows.map((r, idx) =>
         [
           r.rank ?? idx + 1,
-          JSON.stringify(r.poseId),
-          JSON.stringify(r.ligandCode),
-          dm.taskMode,
-          dm.precision,
+          csvEscape(r.poseId),
+          csvEscape(r.ligandCode),
+          csvEscape(dm.taskMode),
+          csvEscape(dm.precision),
           r.heavyAtoms,
           r.rotors,
-          r.cnnScore.toFixed(4),
-          r.cnnAffinity.toFixed(4),
-          r.cnnVS.toFixed(4),
-          r.vinaScore.toFixed(4),
-          r.rmsdToBest !== undefined ? r.rmsdToBest.toFixed(3) : '',
-          r.initialCnnScore !== undefined ? r.initialCnnScore.toFixed(4) : '',
-          r.initialVinaScore !== undefined ? r.initialVinaScore.toFixed(4) : '',
-          r.poseRmsd !== undefined ? r.poseRmsd.toFixed(3) : '',
+          isFiniteNum(r.cnnScore) ? r.cnnScore.toFixed(4) : '',
+          isFiniteNum(r.cnnAffinity) ? r.cnnAffinity.toFixed(4) : '',
+          isFiniteNum(r.cnnVS) ? r.cnnVS.toFixed(4) : '',
+          isFiniteNum(r.vinaScore) ? r.vinaScore.toFixed(4) : '',
+          isFiniteNum(r.rmsdToBest) ? r.rmsdToBest.toFixed(3) : '',
+          isFiniteNum(r.initialCnnScore) ? r.initialCnnScore.toFixed(4) : '',
+          isFiniteNum(r.initialVinaScore) ? r.initialVinaScore.toFixed(4) : '',
+          isFiniteNum(r.poseRmsd) ? r.poseRmsd.toFixed(3) : '',
         ].join(','),
       ),
     ];
@@ -94,22 +126,23 @@
       </span>
       <div class="gnina-head-actions">
         <span class="gnina-mode-pill">{modeLabel}</span>
-        <div class="export-menu">
+        <div class="export-menu" bind:this={exportWrapEl}>
           <button
+            bind:this={exportTriggerEl}
             type="button"
             class="export-trigger"
-            aria-haspopup="menu"
             aria-expanded={exportOpen}
+            aria-controls={`gnina-export-${structure.id}`}
             onclick={() => (exportOpen = !exportOpen)}
           >
             Export ▾
           </button>
           {#if exportOpen}
-            <div class="export-popover" role="menu">
-              <button type="button" role="menuitem" class="export-item" onclick={downloadDockingCsv}>
+            <div id={`gnina-export-${structure.id}`} class="export-popover">
+              <button type="button" class="export-item" onclick={downloadDockingCsv}>
                 ↓ Docking CSV
               </button>
-              <button type="button" role="menuitem" class="export-item" onclick={downloadDockingJson}>
+              <button type="button" class="export-item" onclick={downloadDockingJson}>
                 ↓ Scores JSON
               </button>
             </div>
@@ -213,41 +246,43 @@
       </div>
     {/if}
 
-    <details class="gnina-breakdown">
-      <summary>Ensemble models ({modelEntries.length}) &amp; Vina energy terms</summary>
-      <div class="gnina-breakdown-grid">
-        {#if modelEntries.length > 0}
-          <table class="gnina-scores gnina-mini-tbl">
-            <thead>
-              <tr>
-                <th scope="col">Ensemble Model</th>
-                <th scope="col">CNNscore</th>
-                <th scope="col">CNNaffinity (pK)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each modelEntries as [mName, mScore] (mName)}
+    {#if modelEntries.length > 0 || primaryDock.vinaTerms}
+      <details class="gnina-breakdown">
+        <summary>Ensemble models ({modelEntries.length}) &amp; Vina energy terms</summary>
+        <div class="gnina-breakdown-grid">
+          {#if modelEntries.length > 0}
+            <table class="gnina-scores gnina-mini-tbl">
+              <thead>
                 <tr>
-                  <td><code>{mName}</code></td>
-                  <td>{mScore.cnnScore.toFixed(3)}</td>
-                  <td>{mScore.cnnAffinity.toFixed(2)}</td>
+                  <th scope="col">Ensemble Model</th>
+                  <th scope="col">CNNscore</th>
+                  <th scope="col">CNNaffinity (pK)</th>
                 </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
-        {#if primaryDock.vinaTerms}
-          <div class="gnina-vina-terms">
-            <span><b>gauss1:</b> {primaryDock.vinaTerms.gauss1.toFixed(2)}</span>
-            <span><b>gauss2:</b> {primaryDock.vinaTerms.gauss2.toFixed(2)}</span>
-            <span><b>repulsion:</b> {primaryDock.vinaTerms.repulsion.toFixed(2)}</span>
-            <span><b>hydrophobic:</b> {primaryDock.vinaTerms.hydrophobic.toFixed(2)}</span>
-            <span><b>h-bond:</b> {primaryDock.vinaTerms.hydrogen.toFixed(2)}</span>
-            <span><b>rotors:</b> {primaryDock.vinaTerms.rotors}</span>
-          </div>
-        {/if}
-      </div>
-    </details>
+              </thead>
+              <tbody>
+                {#each modelEntries as [mName, mScore] (mName)}
+                  <tr>
+                    <td><code>{mName}</code></td>
+                    <td>{mScore.cnnScore.toFixed(3)}</td>
+                    <td>{mScore.cnnAffinity.toFixed(2)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+          {#if primaryDock.vinaTerms}
+            <div class="gnina-vina-terms">
+              <span><b>gauss1:</b> {primaryDock.vinaTerms.gauss1.toFixed(2)}</span>
+              <span><b>gauss2:</b> {primaryDock.vinaTerms.gauss2.toFixed(2)}</span>
+              <span><b>repulsion:</b> {primaryDock.vinaTerms.repulsion.toFixed(2)}</span>
+              <span><b>hydrophobic:</b> {primaryDock.vinaTerms.hydrophobic.toFixed(2)}</span>
+              <span><b>h-bond:</b> {primaryDock.vinaTerms.hydrogen.toFixed(2)}</span>
+              <span><b>rotors:</b> {primaryDock.vinaTerms.rotors}</span>
+            </div>
+          {/if}
+        </div>
+      </details>
+    {/if}
   </div>
 {/if}
 

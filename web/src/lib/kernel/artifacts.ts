@@ -269,7 +269,7 @@ export function isArtifactEnvelope(value: unknown): value is ArtifactEnvelope {
  */
 export function hydrateLegacyArtifactToEnvelope<TKind extends string = string>(
   raw: Record<string, unknown>,
-  defaultDomainId = 'protein-biopolymer',
+  defaultDomainId = 'default',
 ): ArtifactEnvelope<TKind, Record<string, unknown>> {
   if (isArtifactEnvelope(raw)) {
     return raw as unknown as ArtifactEnvelope<TKind, Record<string, unknown>>;

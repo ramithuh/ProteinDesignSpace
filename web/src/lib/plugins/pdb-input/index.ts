@@ -10,6 +10,7 @@ import { materializePdbInputNode, deriveSequenceSetFromStructure, runPdbInputCpu
 export { materializePdbInputNode, deriveSequenceSetFromStructure, runPdbInputCpu };
 
 const UPLOAD_META_KEYS = new Set(['missingUpload', 'expectedPdbSha256', 'expectedFilename']);
+const INLINE_PDB_SHARE_LIMIT = 1500;
 
 function yamlNodeExplicitlySetsMode(yamlText: string, nodeId: string): boolean {
   const trimmed = yamlText.trim();
@@ -34,7 +35,8 @@ function yamlNodeExplicitlySetsMode(yamlText: string, nodeId: string): boolean {
       const obj = JSON.parse(line.slice(colon + 1).trim()) as Record<string, unknown>;
       return Object.hasOwn(obj, 'mode');
     } catch {
-      return false;
+      // Safer default: never silently revert an unparseable node line to a prior upload
+      return true;
     }
   }
   return false;
@@ -79,7 +81,7 @@ export const pdbInputPlugin: ModelPlugin = {
           if (k === 'pdbText' || UPLOAD_META_KEYS.has(k)) continue;
         } else if (mode === 'custom') {
           if (UPLOAD_META_KEYS.has(k)) continue;
-          if (k === 'pdbText' && typeof v === 'string' && v.length > 1500 && stripLargeUploads) {
+          if (k === 'pdbText' && typeof v === 'string' && v.length > INLINE_PDB_SHARE_LIMIT && stripLargeUploads) {
             stripped = true;
             strippedPdbText = v;
             continue;
@@ -163,7 +165,7 @@ export const pdbInputPlugin: ModelPlugin = {
       const prevHasLargeCustom =
         prevParams.mode === 'custom' &&
         typeof prevParams.pdbText === 'string' &&
-        prevParams.pdbText.length > 1500;
+        prevParams.pdbText.length > INLINE_PDB_SHARE_LIMIT;
       if (!prevHasLargeCustom) return null;
 
       const isMissingUploadMarker =
