@@ -2555,6 +2555,22 @@ function compileBlockGraphPlan(
               }
             }
           }
+        } else {
+          // Switched to a non-benchmark PDB (e.g. demo-bundle): if stale motif/contig fields were
+          // stripped and mode was not explicitly patched, reset orphaned 'motif' mode cleanly.
+          const manifest = ADAPTER_REGISTRY[downstream.adapterId];
+          const modeKey = manifest?.modeParamKey;
+          if (
+            modeKey &&
+            !patchedKeys?.has(modeKey) &&
+            String(downstream.params[modeKey] ?? '') === 'motif' &&
+            !String(downstream.params.motifSpan ?? '').trim() &&
+            !String(downstream.params.contig ?? '').trim() &&
+            !String(downstream.params.customSpecYaml ?? '').trim() &&
+            manifest?.modes?.some((m) => m.id === 'unconditional')
+          ) {
+            downstream.params[modeKey] = 'unconditional';
+          }
         }
       }
     }
