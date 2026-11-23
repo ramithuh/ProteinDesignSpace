@@ -52,7 +52,7 @@ Run state-of-the-art generative, inverse-folding, folding, and scoring models **
 | **Sequence** | **LASErMPNN** | Ligand-aware sequence & all-atom sidechain rotamer co-design | [`ramithuh/lasermpnn-webgpu`](https://huggingface.co/ramithuh/lasermpnn-webgpu) | MIT |
 | **Sequence** | **AntiFold & ESM-IF1** | Antibody CDR inverse folding & GVP-Transformer inverse folding | [`ramithuh/antifold-esmif1-webgpu`](https://huggingface.co/ramithuh/antifold-esmif1-webgpu) | BSD-3 / MIT |
 | **Sequence** | **EvoDiff-Seq (38M)** | MSA-free order-agnostic discrete sequence diffusion & inpainting | [`ramithuh/evodiff-webgpu`](https://huggingface.co/ramithuh/evodiff-webgpu) | MIT / CC-BY-4.0 |
-| **Prediction** | **LocalFold Suite** | AF2, AF2-Multimer, AF3*, Boltz-2, RF3, Protenix-v2, OpenFold 3, IntelliFold 2, ESMFold2 | [`sokrypton/localfold`](https://github.com/sokrypton/localfold) | Apache-2.0 / MIT / CC-BY-4.0 (*AF3 non-commercial) |
+| **Prediction** | **LocalFold Suite** | AF2, AF2-Multimer, AF3*, Boltz-2, RF3, Protenix-v2, OpenFold 3, IntelliFold 2, ESMFold2 | [`sokrypton/localfold`](https://github.com/sokrypton/localfold) | Beer-Ware (code) · Apache-2.0 / MIT / CC-BY-4.0 (*AF3 non-commercial) |
 | **Property** | **ThermoMPNN** | Full L×20 site-saturation ΔΔG stability scan & 3D B-factor painting | [`ramithuh/thermompnn-webgpu`](https://huggingface.co/ramithuh/thermompnn-webgpu) | MIT |
 | **Property** | **ESM-C 300M** | Zero-shot L×20 LLR fitness heatmap, pseudo-perplexity & masked fill | [`ramithuh/esmc-webgpu`](https://huggingface.co/ramithuh/esmc-webgpu) | MIT |
 | **Property** | **Dyna-1** | Millisecond conformational exchange & flexibility prediction | [`ramithuh/dyna1-webgpu`](https://huggingface.co/ramithuh/dyna1-webgpu) | MIT / ESM-3 Open |
@@ -148,3 +148,12 @@ ProteinDesignSpace/
     │   └── __tests__/          # Vitest unit & integration suite (368 tests)
     └── static/vendor/          # Vendored zero-dep upstream JS/WGSL modules
 ```
+
+---
+
+## License
+
+The **ProteinDesignSpace (`denovo.run`)** workbench code is licensed under the [MIT License](LICENSE) — *and unofficially under the Ice-Cream-Ware License: if we meet someday and `denovo.run` saved you a conda install or helped design a protein, you can buy me an ice cream in return 🍦*
+
+Vendored third-party inference engines under `web/static/vendor/` (such as LocalFold under Beer-Ware, FoldFlow 2 under CC BY-NC 4.0, and NVIDIA Research components) and model weights downloaded at runtime are **not** covered by this license and remain subject to their respective upstream licenses.
+
