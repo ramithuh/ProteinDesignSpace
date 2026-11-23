@@ -18,9 +18,43 @@ import { autoLayoutGraph, defaultParamsForAdapter, validateConnection, validateG
 import { sanitizeEvoDiffFixedSequence } from './param-validation';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { parseStructureText } from '$lib/protein-ops/pdb';
-import type { BioCompatibilityIssue, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
+import {
+  buildPlannerCatalogIndex,
+  getActivePluginRegistry,
+  type PlannerCatalogIndex,
+  type PluginRegistry,
+} from '$lib/kernel';
+import type { AdapterManifest, BioCompatibilityIssue, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
 
-export type GeneratorId = 'rfd4-proteina' | 'genie3' | 'protpardelle';
+const plannerIndexCache = new WeakMap<PluginRegistry, PlannerCatalogIndex>();
+
+/** Return a cached dynamic PlannerCatalogIndex for the active PluginRegistry (if booted). */
+export function getActivePlannerCatalogIndex(): PlannerCatalogIndex | null {
+  const reg = getActivePluginRegistry();
+  if (!reg) return null;
+  let idx = plannerIndexCache.get(reg);
+  if (!idx) {
+    idx = buildPlannerCatalogIndex(reg);
+    plannerIndexCache.set(reg, idx);
+  }
+  return idx;
+}
+
+function resolvePlannerManifest(adapterId: string): AdapterManifest | undefined {
+  const plugin = getActivePluginRegistry()?.getPlugin(adapterId);
+  if (plugin) return plugin.manifest as unknown as AdapterManifest;
+  return Object.hasOwn(ADAPTER_REGISTRY, adapterId) ? ADAPTER_REGISTRY[adapterId] : undefined;
+}
+
+function isGeneratorAdapter(adapterId: string): boolean {
+  const idx = getActivePlannerCatalogIndex();
+  if (idx && idx.getPlugin(adapterId)) {
+    return idx.hasRole(adapterId, 'generator');
+  }
+  return resolvePlannerManifest(adapterId)?.stage === 'generate';
+}
+
+export type GeneratorId = 'rfd4-proteina' | 'genie3' | 'protpardelle' | (string & {});
 export type SequenceDesignerId =
   | 'native'
   | 'web-protein-mpnn'
@@ -28,7 +62,8 @@ export type SequenceDesignerId =
   | 'ligandmpnn'
   | 'lasermpnn'
   | 'esmif1'
-  | 'antifold';
+  | 'antifold'
+  | (string & {});
 export type FoldOracleId =
   | 'monomer'
   | 'multimer'
@@ -41,7 +76,8 @@ export type FoldOracleId =
   | 'intellifold2'
   | 'ef2-fast-300m'
   | 'ef2-fast-600m'
-  | 'af3';
+  | 'af3'
+  | (string & {});
 
 export type PdbTaskId =
   | 'thermompnn'
@@ -53,7 +89,8 @@ export type PdbTaskId =
   | 'solublempnn'
   | 'esmc'
   | 'dyna1'
-  | 'gnina';
+  | 'gnina'
+  | (string & {});
 
 export type EditActionId =
   | 'add_stability_scan'
@@ -902,7 +939,7 @@ function attachGeneratorBranch(opts: {
 }
 
 function hasOutputPort(node: WorkflowNode, portName: string): boolean {
-  const adapter = ADAPTER_REGISTRY[node.adapterId];
+  const adapter = resolvePlannerManifest(node.adapterId);
   return Boolean(adapter?.outputs?.[portName]);
 }
 
@@ -1063,7 +1100,7 @@ function applyEditCurrentPlan(
         for (const inEdge of incoming) {
           const src = nodeById.get(inEdge.fromNode);
           if (!src) continue;
-          const outSpec = ADAPTER_REGISTRY[src.adapterId]?.outputs?.[inEdge.fromPort];
+          const outSpec = resolvePlannerManifest(src.adapterId)?.outputs?.[inEdge.fromPort];
           if (!outSpec || outSpec.type !== neededType) continue;
           if (!removedSet.has(src.id)) {
             return { fromNode: src.id, fromPort: inEdge.fromPort };
@@ -1078,7 +1115,7 @@ function applyEditCurrentPlan(
         if (!removedSet.has(outEdge.fromNode) || removedSet.has(outEdge.toNode)) continue;
         const dst = nodeById.get(outEdge.toNode);
         if (!dst) continue;
-        const inSpec = ADAPTER_REGISTRY[dst.adapterId]?.inputs?.[outEdge.toPort];
+        const inSpec = resolvePlannerManifest(dst.adapterId)?.inputs?.[outEdge.toPort];
         if (!inSpec) continue;
         const src = findPassThroughSource(outEdge.fromNode, inSpec.type);
         if (!src) continue;
@@ -1128,7 +1165,7 @@ function applyEditCurrentPlan(
         changed = false;
         const orphanIds = new Set<string>();
         for (const node of nodes) {
-          const manifest = ADAPTER_REGISTRY[node.adapterId];
+          const manifest = resolvePlannerManifest(node.adapterId);
           if (!manifest) continue;
           for (const [portName, spec] of Object.entries(manifest.inputs)) {
             if (spec.required === false) continue;
@@ -1665,8 +1702,8 @@ function resolveBlockEdgePorts(
   existingEdges: WorkflowEdge[],
   allNodes: WorkflowNode[],
 ): { fromPort: string; toPort: string } | null {
-  const fromAdapter = ADAPTER_REGISTRY[fromNode.adapterId];
-  const toAdapter = ADAPTER_REGISTRY[toNode.adapterId];
+  const fromAdapter = resolvePlannerManifest(fromNode.adapterId);
+  const toAdapter = resolvePlannerManifest(toNode.adapterId);
   if (!fromAdapter || !toAdapter) return null;
 
   // Prefer semantic primary port pairs first
@@ -1792,10 +1829,12 @@ function isSupportedBlockName(raw: string, compiledNodes?: readonly WorkflowNode
   const norm = normalizeBlockName(raw);
   const normFull = transliterateBlockChars(raw).replace(/[^a-z0-9]+/g, '');
   if (!norm && !normFull) return false;
+  const liveIdx = getActivePlannerCatalogIndex();
+  if (liveIdx?.isSupportedBlockName(raw)) return true;
   if (SUPPORTED_BLOCK_NAMES.has(norm) || SUPPORTED_BLOCK_NAMES.has(normFull)) return true;
   if (compiledNodes && compiledNodes.length > 0) {
     for (const n of compiledNodes) {
-      const m = ADAPTER_REGISTRY[n.adapterId];
+      const m = resolvePlannerManifest(n.adapterId);
       const candidates = [
         n.adapterId,
         n.label ?? '',
@@ -1830,9 +1869,7 @@ function sanitizeRawBlockParamEntries(
   if (!rawParams || typeof rawParams !== 'object') return sanitized;
 
   const defaults = defaultParamsForAdapter(adapterId);
-  const manifest = Object.hasOwn(ADAPTER_REGISTRY, adapterId)
-    ? ADAPTER_REGISTRY[adapterId]
-    : undefined;
+  const manifest = resolvePlannerManifest(adapterId);
   const schemaKeys = new Set((manifest?.paramSchema ?? []).map((f) => f.key));
   const controlledKeys = CONTROLLED_METADATA_KEYS_BY_ADAPTER[adapterId];
   const allowedKeys = new Set<string>([
@@ -1970,20 +2007,6 @@ function sanitizeBlockNodeParams(
   return merged;
 }
 
-const PASS2_GENERATOR_ADAPTERS = new Set([
-  'rfd4-proteina',
-  'genie3',
-  'genie2',
-  'protpardelle',
-  'rfdiffusion',
-  'boltzgen',
-  'la-proteina',
-  'proteina',
-  'sid-protein',
-  'frameflow',
-  'foldflow2',
-]);
-
 const CA_ONLY_GENERATORS = new Set(['genie3', 'genie2', 'proteina', 'sid-protein']);
 
 const ALL_ATOM_GENERATORS = new Set([
@@ -2013,7 +2036,7 @@ function wireMissingScorerStructureEdges(nodes: WorkflowNode[], edges: WorkflowE
       visited.add(cur);
       const cn = nodeById.get(cur);
       if (cn) {
-        if (PASS2_GENERATOR_ADAPTERS.has(cn.adapterId)) {
+        if (isGeneratorAdapter(cn.adapterId)) {
           foundGen = cur;
           break;
         }
@@ -2068,7 +2091,7 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
     if (node.adapterId === 'evodiff' && typeof node.params.fixedSequence === 'string') {
       node.params.fixedSequence = sanitizeEvoDiffFixedSequence(node.params.fixedSequence);
     }
-    const manifest = ADAPTER_REGISTRY[node.adapterId];
+    const manifest = resolvePlannerManifest(node.adapterId);
     if (manifest?.modeParamKey === 'taskMode' && node.params.mode !== undefined) {
       if (node.params.taskMode === undefined || node.params.taskMode === 'unconditional') {
         const valid = !manifest.modes?.length || manifest.modes.some((m) => m.id === String(node.params.mode));
@@ -2094,7 +2117,7 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
     const downstreamGens = cloned.edges
       .filter((e) => e.fromNode === node.id)
       .map((e) => nodeByIdInit.get(e.toNode))
-      .filter((n): n is WorkflowNode => Boolean(n && PASS2_GENERATOR_ADAPTERS.has(n.adapterId)));
+      .filter((n): n is WorkflowNode => Boolean(n && isGeneratorAdapter(n.adapterId)));
 
     let bm =
       typeof node.params.benchmarkId === 'string' && node.params.benchmarkId
@@ -2402,7 +2425,8 @@ function compileBlockGraphPlan(
     for (const op of (plan.editOps ?? []).slice(0, MAX_BLOCK_GRAPH_EDIT_OPS)) {
       if (op.action === 'add_node') {
         const adapterId = op.adapter ?? '';
-        if (!Object.hasOwn(ADAPTER_REGISTRY, adapterId)) continue;
+        const opManifest = resolvePlannerManifest(adapterId);
+        if (!opManifest) continue;
         const requestedId = op.nodeId?.trim();
         const safeRequestedId =
           requestedId && !BLOCK_FORBIDDEN_KEYS.has(requestedId) ? requestedId : '';
@@ -2415,7 +2439,7 @@ function compileBlockGraphPlan(
         nodes.push({
           id: finalId,
           adapterId,
-          label: sanitizeDisplayText(op.label, ADAPTER_REGISTRY[adapterId].shortName, 64),
+          label: sanitizeDisplayText(op.label, opManifest.shortName, 64),
           params: sanitizeBlockNodeParams(adapterId, op.params ?? undefined),
         });
         addedNodeIds.push(finalId);
@@ -2590,7 +2614,7 @@ function compileBlockGraphPlan(
         if (
           !downstream ||
           addedNodeIdSet.has(downstream.id) ||
-          !PASS2_GENERATOR_ADAPTERS.has(downstream.adapterId)
+          !isGeneratorAdapter(downstream.adapterId)
         ) {
           continue;
         }
@@ -2602,7 +2626,7 @@ function compileBlockGraphPlan(
         }
         const catChange = changedPdbCategory.get(edge.fromNode);
         if (catChange?.newBm) {
-          const manifest = ADAPTER_REGISTRY[downstream.adapterId];
+          const manifest = resolvePlannerManifest(downstream.adapterId);
           const modeKey = manifest?.modeParamKey;
           if (modeKey && !patchedKeys?.has(modeKey)) {
             const curMode = String(downstream.params[modeKey] ?? '').trim();
@@ -2621,7 +2645,7 @@ function compileBlockGraphPlan(
         } else {
           // Switched to a non-benchmark PDB (e.g. demo-bundle): if stale motif/contig fields were
           // stripped and mode was not explicitly patched, reset orphaned 'motif' mode cleanly.
-          const manifest = ADAPTER_REGISTRY[downstream.adapterId];
+          const manifest = resolvePlannerManifest(downstream.adapterId);
           const modeKey = manifest?.modeParamKey;
           if (
             modeKey &&
@@ -2642,7 +2666,8 @@ function compileBlockGraphPlan(
     for (const nid of addedNodeIds) {
       const hasIn = edges.some((e) => e.toNode === nid);
       const addedNode = nodes.find((n) => n.id === nid);
-      if (!addedNode || hasIn || Object.keys(ADAPTER_REGISTRY[addedNode.adapterId].inputs).length === 0) {
+      const addedManifest = addedNode ? resolvePlannerManifest(addedNode.adapterId) : undefined;
+      if (!addedNode || hasIn || !addedManifest || Object.keys(addedManifest.inputs).length === 0) {
         continue;
       }
       for (let i = nodes.length - 1; i >= 0; i--) {
@@ -2698,7 +2723,8 @@ function compileBlockGraphPlan(
   const seenIds = new Set<string>();
   const explicitFamilyNodeIds = new Set<string>();
   for (const spec of rawNodes) {
-    if (!Object.hasOwn(ADAPTER_REGISTRY, spec.adapter)) continue;
+    const specManifest = resolvePlannerManifest(spec.adapter);
+    if (!specManifest) continue;
     const rawId = spec.id.trim();
     let id =
       rawId && !BLOCK_FORBIDDEN_KEYS.has(rawId)
@@ -2749,7 +2775,7 @@ function compileBlockGraphPlan(
     nodes.push({
       id,
       adapterId: spec.adapter,
-      label: sanitizeDisplayText(spec.label, ADAPTER_REGISTRY[spec.adapter].shortName, 64),
+      label: sanitizeDisplayText(spec.label, specManifest.shortName, 64),
       params: sanitizeBlockNodeParams(spec.adapter, effectiveRawParams),
     });
   }
@@ -4489,7 +4515,7 @@ function reconcileBlockGraphPlan(
     const hasWeakBinderCue = /\b(?:mdm2|bind)\b/i.test(trimmed);
     const hasWeakMotifCue = /\b(?:p53|helix|peptide)\b/i.test(trimmed);
     const downstreamHasBinder = clonedNodes.some((n) => {
-      if (!PASS2_GENERATOR_ADAPTERS.has(n.adapter)) return false;
+      if (!isGeneratorAdapter(n.adapter)) return false;
       const m = String(n.params?.mode ?? n.params?.taskMode ?? '').trim();
       const lock = String(n.params?.lockChain ?? '').trim();
       const hot = String(n.params?.hotspots ?? '').trim();
@@ -4497,7 +4523,7 @@ function reconcileBlockGraphPlan(
       return m === 'binder' || Boolean(lock) || Boolean(hot) || contig.includes('/0');
     });
     const downstreamHasMotif = clonedNodes.some((n) => {
-      if (!PASS2_GENERATOR_ADAPTERS.has(n.adapter)) return false;
+      if (!isGeneratorAdapter(n.adapter)) return false;
       const m = String(n.params?.mode ?? n.params?.taskMode ?? '').trim();
       return m === 'motif';
     });
@@ -4557,12 +4583,12 @@ function reconcileBlockGraphPlan(
     const wiredGens = blockEdges
       .filter(([fromId]) => fromId === pdbNode.id)
       .map(([, toId]) => blockNodeById.get(toId))
-      .filter((n): n is NonNullable<typeof n> => Boolean(n && PASS2_GENERATOR_ADAPTERS.has(n.adapter)));
+      .filter((n): n is NonNullable<typeof n> => Boolean(n && isGeneratorAdapter(n.adapter)));
     const targetGens =
       wiredGens.length > 0
         ? wiredGens
         : pdbNodes.length === 1
-          ? clonedNodes.filter((n) => PASS2_GENERATOR_ADAPTERS.has(n.adapter))
+          ? clonedNodes.filter((n) => isGeneratorAdapter(n.adapter))
           : [];
 
     const bp = bm.conditionParams;
@@ -4637,7 +4663,7 @@ function reconcileBlockGraphPlan(
       if (toId !== n.id) return false;
       const src = blockNodeById.get(fromId);
       if (!src) return false;
-      const srcManifest = ADAPTER_REGISTRY[src.adapter];
+      const srcManifest = resolvePlannerManifest(src.adapter);
       return Boolean(
         srcManifest &&
           Object.values(srcManifest.outputs).some((o) => o.type === 'StructureArtifact'),

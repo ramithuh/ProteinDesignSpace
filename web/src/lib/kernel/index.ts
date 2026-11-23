@@ -13,3 +13,4 @@ export * from './webgpu-device';
 export * from './worker-harness';
 export * from './work-plan';
 export * from './cache-manager';
+export * from './planner';

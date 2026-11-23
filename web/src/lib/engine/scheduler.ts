@@ -1166,7 +1166,7 @@ export class ExecutionScheduler {
     // Never spawn or reuse a GPU worker while a prior cooperative abort or disposal is settling
     await this.waitForPendingGpuDisposal();
 
-    const plugin = this.pluginRegistry?.getPlugin(node.adapterId);
+    const plugin = (this.pluginRegistry ?? getActivePluginRegistry())?.getPlugin(node.adapterId);
     // Worker isolation key: plugin hook first, legacy LocalFold ESMFold2 fallback otherwise
     const isolatedCheckpoint = plugin?.execution.getWorkerIsolationKey
       ? plugin.execution.getWorkerIsolationKey(node.params)

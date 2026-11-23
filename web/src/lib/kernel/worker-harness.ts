@@ -36,6 +36,8 @@ export interface WorkerRuntimeContext {
   estimateMemoryBudgetBytes: typeof estimateSafeBrowserMemoryBudgetBytes;
   cache?: WorkerCacheContext;
   postProgress: (id: number, payload: WorkerProgressPayload) => void;
+  /** Optional AbortSignal active during `init()` so weight downloads can cancel cleanly. */
+  signal?: AbortSignal;
 }
 
 export interface WorkerRunContext<
@@ -150,7 +152,19 @@ export function createWorkerHarness<
   let inFlightRunPromise: Promise<void> | null = null;
   let activeRunId: number | null = null;
   let activeAbortController: AbortController | null = null;
-  let isAborting = false;
+  // Reference-counted control barrier + serialized promise chain so overlapping
+  // `abort` and `dispose` messages can never clear each other's guard early.
+  let activeControlOps = 0;
+  let controlChain: Promise<void> = Promise.resolve();
+
+  const enqueueControlOp = (op: () => Promise<void>): Promise<void> => {
+    activeControlOps++;
+    const next = controlChain.then(op, op).finally(() => {
+      activeControlOps--;
+    });
+    controlChain = next.catch(() => {});
+    return next;
+  };
 
   const post = (msg: unknown, transfer?: Transferable[]) => {
     if (transfer && transfer.length > 0) {
@@ -187,25 +201,21 @@ export function createWorkerHarness<
     const msgId = typeof msg.id === 'number' ? msg.id : 0;
 
     if (msg.type === 'abort') {
-      isAborting = true;
-      const runIdToAbort = activeRunId ?? msgId;
-      try {
+      await enqueueControlOp(async () => {
+        const runIdToAbort = activeRunId ?? msgId;
         activeAbortController?.abort(new Error('Run aborted'));
         await runner.abort?.(runIdToAbort);
         // Critical invariant: NEVER post 'aborted' until in-flight run's finally block settles!
         if (inFlightRunPromise) {
           await inFlightRunPromise.catch(() => {});
         }
-      } finally {
-        isAborting = false;
-      }
-      post({ id: msgId, type: 'aborted' });
+        post({ id: msgId, type: 'aborted' });
+      });
       return;
     }
 
     if (msg.type === 'dispose') {
-      isAborting = true;
-      try {
+      await enqueueControlOp(async () => {
         activeAbortController?.abort(new Error('Worker disposed'));
         if (inFlightRunPromise) {
           await runner.abort?.(activeRunId ?? msgId);
@@ -213,22 +223,21 @@ export function createWorkerHarness<
         }
         await runner.dispose();
         initialized = false;
-      } finally {
-        isAborting = false;
-      }
-      post({ id: msgId, type: 'disposed' });
+        post({ id: msgId, type: 'disposed' });
+      });
       return;
     }
 
     if (msg.type === 'run') {
-      // In-flight run-lease guard: reject overlapping runs while busy or aborting
-      if (inFlightRunPromise !== null || isAborting) {
+      // In-flight run-lease guard: reject overlapping runs while busy or aborting/disposing
+      if (inFlightRunPromise !== null || activeControlOps > 0) {
         post({
           id: msgId,
           type: 'error',
-          message: isAborting
-            ? 'Worker is aborting a previous run; wait for settlement before starting a new run.'
-            : 'Worker already has an active run in flight.',
+          message:
+            activeControlOps > 0
+              ? 'Worker is aborting or disposing a previous run; wait for settlement before starting a new run.'
+              : 'Worker already has an active run in flight.',
         });
         return;
       }
@@ -241,7 +250,7 @@ export function createWorkerHarness<
       const runPromise = (async () => {
         try {
           if (!initialized && runner.init) {
-            await runner.init(runtimeCtx);
+            await runner.init({ ...runtimeCtx, signal: ctrl.signal });
             initialized = true;
           }
           if (ctrl.signal.aborted) {
@@ -260,11 +269,13 @@ export function createWorkerHarness<
               runtimeCtx.postProgress(msgId, { phase, progress, detail });
             },
           });
-          if (ctrl.signal.aborted || isAborting) {
-            // Suppress late 'result' if an abort took ownership of this run
+          if (ctrl.signal.aborted || activeControlOps > 0) {
+            // Suppress late 'result' if an abort/dispose took ownership of this run
             return;
           }
-          const transfer = res.transferables ?? collectOwnedTransferables(res.outputs);
+          // Opt-in zero-copy transfer only when runner explicitly supplies `transferables`
+          // so cached ArrayBuffers retained by a runner across runs are never detached.
+          const transfer = res.transferables ?? [];
           post(
             {
               id: msgId,
@@ -275,7 +286,7 @@ export function createWorkerHarness<
             transfer,
           );
         } catch (err) {
-          if (ctrl.signal.aborted || isAborting) {
+          if (ctrl.signal.aborted || activeControlOps > 0) {
             // Abort path will emit `{ id: abortId, type: 'aborted' }` once inFlightRunPromise settles
             return;
           }
@@ -310,7 +321,7 @@ export function createWorkerHarness<
   return {
     handleMessage,
     isRunning: () => inFlightRunPromise !== null,
-    isAborting: () => isAborting,
+    isAborting: () => activeControlOps > 0,
   };
 }
 
