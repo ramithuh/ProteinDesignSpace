@@ -3,6 +3,7 @@
 // directly from measured repository artifacts and upstream manifests — never estimated or fabricated.
 
 import { LOCALFOLD_MODEL_OPTIONS, MPNN_VARIANT_OPTIONS } from './registry';
+import { getActivePluginRegistry } from '$lib/kernel/active-registry';
 
 export interface ParityMeasurement {
   /** Measured quantity and comparison basis (e.g. "WebGPU ΔΔG relRMS vs PyTorch FP32"). */
@@ -1466,11 +1467,10 @@ export function formatModelCardPillLabel(card: ModelCardSpec, compact = false): 
 }
 
 /**
- * Resolve a ModelCardSpec for a workflow adapter (or direct card ID) with optional
- * parameter-aware specialization (LocalFold checkpoint, ProteinMPNN family, RFD4 encoder mode,
- * or selected precision tier). Returns null for non-ML built-in CPU utilities.
+ * Legacy baseline ModelCardSpec resolver (used by legacy-bridge and as fallback
+ * until each adapter extracts its own `plugins/<id>/model-card.ts`).
  */
-export function getModelCardForAdapter(
+export function getLegacyModelCardForAdapter(
   adapterId: string,
   params?: Record<string, unknown>,
 ): ModelCardSpec | null {
@@ -1570,4 +1570,26 @@ export function getModelCardForAdapter(
   }
 
   return resolved;
+}
+
+/**
+ * Resolve a ModelCardSpec for a workflow adapter (or direct card ID) with optional
+ * parameter-aware specialization. Consults the active PluginRegistry first (so native
+ * plugins and future domain models work with zero edits here) and falls back to legacy
+ * `MODEL_CARDS`. Returns null for non-ML built-in CPU utilities.
+ */
+export function getModelCardForAdapter(
+  adapterId: string,
+  params?: Record<string, unknown>,
+): ModelCardSpec | null {
+  const plugin = getActivePluginRegistry()?.getPlugin(adapterId);
+  if (plugin?.modelCard) {
+    const card = plugin.modelCard.resolveCard
+      ? plugin.modelCard.resolveCard(params ?? {})
+      : plugin.modelCard.staticCard;
+    if (card) {
+      return card as unknown as ModelCardSpec;
+    }
+  }
+  return getLegacyModelCardForAdapter(adapterId, params);
 }

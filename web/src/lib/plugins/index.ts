@@ -1,7 +1,7 @@
 // Layer 3 Model Plugins Barrel — Single Registration Entrypoint.
 // Adding model #27 = 1 cohesive folder under `src/lib/plugins/<id>/` + 1 entry in `NATIVE_PLUGINS`.
 
-import { PluginRegistry, type DomainPack, type ModelPlugin } from '$lib/kernel';
+import { PluginRegistry, setActivePluginRegistry, type DomainPack, type ModelPlugin } from '$lib/kernel';
 import { proteinBiopolymerDomainPack } from '$lib/domains/protein-biopolymer';
 import { buildLegacyBridgedPlugins } from './legacy-bridge';
 
@@ -48,3 +48,4 @@ export function createDefaultPluginRegistry(opts?: {
 
 /** Frozen singleton PluginRegistry for production runtime boot. */
 export const defaultPluginRegistry: PluginRegistry = createDefaultPluginRegistry({ freeze: true });
+setActivePluginRegistry(defaultPluginRegistry);

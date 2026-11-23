@@ -53,6 +53,8 @@ import {
 import { sha256Hex, type CollectionMember } from './collections';
 import { planTopKFilter } from './work-plan';
 import type { PluginRegistry } from '$lib/kernel/plugin-registry';
+import { getActivePluginRegistry } from '$lib/kernel/active-registry';
+import { hydrateLegacyArtifactToEnvelope } from '$lib/kernel/artifacts';
 import type {
   ArtifactRef,
   CanonicalArtifact,
@@ -3420,6 +3422,20 @@ function summarizeArtifact(art: CanonicalArtifact): ArtifactRef {
         contig: art.contig,
         summary: art.summary,
       },
+    };
+  }
+  if (art.kind !== 'DesignabilityMetrics') {
+    // Generic Layer 1 / multi-domain PortType fallback (e.g. future PropertyTable / SmallMolecule)
+    const rawArt = art as unknown as { id: string; kind: string };
+    const registry = getActivePluginRegistry();
+    const desc = registry?.portTypes.get(rawArt.kind);
+    const summary = desc
+      ? desc.summarize(hydrateLegacyArtifactToEnvelope(rawArt))
+      : { kind: rawArt.kind };
+    return {
+      id: rawArt.id,
+      kind: rawArt.kind as ArtifactRef['kind'],
+      summary,
     };
   }
   const best = art.best;

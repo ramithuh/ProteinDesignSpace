@@ -5,7 +5,28 @@ import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from './registry';
 import { autoLayoutGraph, defaultParamsForAdapter, validateGraph } from './graph-utils';
 import { computeUploadDigest, isValidSha256Hex } from './param-validation';
 import { UI_TRACKING_PARAM_HINTS } from './benchmark-sync';
-import type { WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
+import { getActivePluginRegistry } from '$lib/kernel/active-registry';
+import type { AdapterManifest, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
+
+function resolveAdapterManifest(adapterId: string): AdapterManifest | undefined {
+  const plugin = getActivePluginRegistry()?.getPlugin(adapterId);
+  if (plugin) return plugin.manifest as unknown as AdapterManifest;
+  return Object.hasOwn(ADAPTER_REGISTRY, adapterId) ? ADAPTER_REGISTRY[adapterId] : undefined;
+}
+
+function resolveShortCodeForAdapter(adapterId: string): string {
+  return (
+    getActivePluginRegistry()?.getShortCode(adapterId) ??
+    ADAPTER_TO_SHORT[adapterId] ??
+    adapterId
+  );
+}
+
+function resolveAdapterFromShortCode(shortCode: string): string {
+  const fromReg = getActivePluginRegistry()?.resolveShortCode(shortCode);
+  if (fromReg) return fromReg;
+  return Object.hasOwn(SHORT_TO_ADAPTER, shortCode) ? SHORT_TO_ADAPTER[shortCode] : shortCode;
+}
 
 export { UI_TRACKING_PARAM_HINTS };
 
@@ -189,15 +210,27 @@ function diffParams(
   stripLargePdb = false,
 ): { diff: Record<string, unknown>; strippedPdb: boolean } {
   const defaults = base ?? defaultParamsForAdapter(adapterId);
+  const plugin = getActivePluginRegistry()?.getPlugin(adapterId);
+  const stripKeySet = plugin?.share.stripOnShareKeys
+    ? new Set(plugin.share.stripOnShareKeys)
+    : null;
+  let effectiveParams = params;
+  let pluginStripped = false;
+  if (plugin?.share.prepareForShare) {
+    const prep = plugin.share.prepareForShare(params, { stripLargeUploads: stripLargePdb });
+    effectiveParams = prep.params;
+    pluginStripped = Boolean(prep.stripped);
+  }
   const diff: Record<string, unknown> = {};
-  let strippedPdb = false;
+  let strippedPdb = pluginStripped;
   let strippedPdbText: string | null = null;
   const effectivePdbMode =
-    adapterId === 'pdb-input' ? String(params.mode ?? defaults.mode ?? 'demo-bundle') : '';
+    adapterId === 'pdb-input' ? String(effectiveParams.mode ?? defaults.mode ?? 'demo-bundle') : '';
 
-  for (const [k, v] of Object.entries(params)) {
+  for (const [k, v] of Object.entries(effectiveParams)) {
     if (FORBIDDEN_KEYS.has(k)) continue;
-    if (adapterId === 'pdb-input') {
+    if (stripKeySet?.has(k)) continue;
+    if (adapterId === 'pdb-input' && !plugin?.share.prepareForShare) {
       if (k === 'fetchedPdbId') continue;
       if (effectivePdbMode === 'pdb-id' || effectivePdbMode === 'demo-bundle') {
         if (k === 'pdbText' || UPLOAD_META_KEYS.has(k)) continue;
@@ -209,7 +242,7 @@ function diffParams(
           continue;
         }
       }
-    } else if (k === 'pdbText' && typeof v === 'string' && v.length > 1500 && stripLargePdb) {
+    } else if (!plugin?.share.prepareForShare && k === 'pdbText' && typeof v === 'string' && v.length > 1500 && stripLargePdb) {
       strippedPdb = true;
       continue;
     }
@@ -228,7 +261,7 @@ function diffParams(
     }
   }
 
-  if (adapterId === 'pdb-input' && effectivePdbMode === 'custom') {
+  if (adapterId === 'pdb-input' && !plugin?.share.prepareForShare && effectivePdbMode === 'custom') {
     const existingShaRaw = String(params.expectedPdbSha256 ?? '').trim().toLowerCase();
     const existingExpName = String(params.expectedFilename ?? '').trim();
     const curFilename = String(params.filename ?? '').trim();
@@ -325,7 +358,7 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
       for (const [k, v] of Object.entries(diff)) {
         qs.set(`${n.id}.${k}`, typeof v === 'string' ? v : JSON.stringify(v));
       }
-      const baseLabel = baseN.label || ADAPTER_REGISTRY[baseN.adapterId]?.shortName || '';
+      const baseLabel = baseN.label || resolveAdapterManifest(baseN.adapterId)?.shortName || '';
       const curLabel = n.label?.trim() ? n.label : baseLabel;
       if (curLabel && curLabel !== baseLabel) {
         qs.set(`${n.id}._label`, curLabel);
@@ -361,13 +394,13 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
 
   // 2. General DAG -> short-alias tuple representation -> deflate-raw -> base64url
   const compactNodes = graph.nodes.map((n) => {
-    const a = ADAPTER_TO_SHORT[n.adapterId] ?? n.adapterId;
+    const a = resolveShortCodeForAdapter(n.adapterId);
     const { diff, strippedPdb: s } = diffParams(n.adapterId, n.params, undefined, true);
     if (s) strippedPdb = true;
     const tuple: unknown[] = [n.id, a];
     const hasDiff = Object.keys(diff).length > 0;
     const customLabel =
-      n.label && n.label !== ADAPTER_REGISTRY[n.adapterId]?.shortName ? n.label : undefined;
+      n.label && n.label !== resolveAdapterManifest(n.adapterId)?.shortName ? n.label : undefined;
     if (hasDiff || customLabel) tuple.push(diff);
     if (customLabel) tuple.push(customLabel);
     return tuple;
@@ -402,7 +435,7 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
 }
 
 function getSchemaTypeTemplate(adapterId: string, paramKey: string): unknown {
-  const schema = ADAPTER_REGISTRY[adapterId]?.paramSchema;
+  const schema = resolveAdapterManifest(adapterId)?.paramSchema;
   if (!schema) return undefined;
   const field = schema.find((f) => f.key === paramKey);
   if (!field) return undefined;
@@ -467,14 +500,18 @@ export function normalizeWorkflowGraph(
     seenIds.add(id);
 
     const adapterId = String(n.adapterId ?? '');
-    if (!Object.hasOwn(ADAPTER_REGISTRY, adapterId)) {
+    const manifest = resolveAdapterManifest(adapterId);
+    if (!manifest) {
       throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
     }
     const rawParams = isPlainObject(n.params) ? sanitizeParams(n.params) : {};
-    const mergedParams = fillDefaults ? { ...defaultParamsForAdapter(adapterId), ...rawParams } : { ...rawParams };
-    // Security: discard externally supplied fetch provenance / cached coordinates for accession-based
-    // PDB inputs so an imported recipe cannot spoof an RCSB accession with arbitrary coordinates.
-    if (adapterId === 'pdb-input') {
+    let mergedParams = fillDefaults ? { ...defaultParamsForAdapter(adapterId), ...rawParams } : { ...rawParams };
+    const plugin = getActivePluginRegistry()?.getPlugin(adapterId);
+    if (plugin?.share.sanitizeOnImport) {
+      mergedParams = plugin.share.sanitizeOnImport(mergedParams);
+    } else if (adapterId === 'pdb-input') {
+      // Security: discard externally supplied fetch provenance / cached coordinates for accession-based
+      // PDB inputs so an imported recipe cannot spoof an RCSB accession with arbitrary coordinates.
       delete mergedParams.fetchedPdbId;
       const mode = String(mergedParams.mode ?? 'demo-bundle');
       if (mode === 'pdb-id' || mode === 'demo-bundle') {
@@ -496,7 +533,7 @@ export function normalizeWorkflowGraph(
     return {
       id,
       adapterId,
-      label: typeof n.label === 'string' && n.label.trim() ? n.label : ADAPTER_REGISTRY[adapterId].shortName,
+      label: typeof n.label === 'string' && n.label.trim() ? n.label : manifest.shortName,
       params: mergedParams,
       ...(pos ? { position: pos } : {}),
     };
@@ -670,10 +707,10 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
       if (!Array.isArray(tuple) || tuple.length < 2) return null;
       const id = String(tuple[0]);
       const shortA = String(tuple[1]);
-      const adapterId = Object.hasOwn(SHORT_TO_ADAPTER, shortA) ? SHORT_TO_ADAPTER[shortA] : shortA;
+      const adapterId = resolveAdapterFromShortCode(shortA);
       const rawOverrides = isPlainObject(tuple[2]) ? tuple[2] : {};
       const overrides = sanitizeParams(rawOverrides);
-      const label = typeof tuple[3] === 'string' ? tuple[3] : ADAPTER_REGISTRY[adapterId]?.shortName ?? adapterId;
+      const label = typeof tuple[3] === 'string' ? tuple[3] : resolveAdapterManifest(adapterId)?.shortName ?? adapterId;
       const posTuple = rawPositions?.[i];
       const position =
         Array.isArray(posTuple) &&
@@ -728,14 +765,25 @@ export function graphToYamlRecipe(graph: WorkflowGraph): string {
     const { diff, strippedPdb } = diffParams(n.adapterId, n.params, undefined, true);
     if (strippedPdb) anyStrippedPdb = true;
     const kv: Record<string, unknown> = { model: n.adapterId };
-    if (n.label && n.label !== ADAPTER_REGISTRY[n.adapterId]?.shortName) kv.label = n.label;
-    if (n.adapterId === 'localfold-af2' && 'model' in diff) {
-      diff.foldModel = diff.model;
-      delete diff.model;
-    }
-    if (n.adapterId === 'sequence-input' && 'label' in diff) {
-      diff.seqLabel = diff.label;
-      delete diff.label;
+    const manifest = resolveAdapterManifest(n.adapterId);
+    if (n.label && n.label !== manifest?.shortName) kv.label = n.label;
+    const aliases = getActivePluginRegistry()?.getPlugin(n.adapterId)?.share.yamlKeyAliases;
+    if (aliases) {
+      for (const [paramKey, yamlKey] of Object.entries(aliases)) {
+        if (paramKey in diff) {
+          diff[yamlKey] = diff[paramKey];
+          delete diff[paramKey];
+        }
+      }
+    } else {
+      if (n.adapterId === 'localfold-af2' && 'model' in diff) {
+        diff.foldModel = diff.model;
+        delete diff.model;
+      }
+      if (n.adapterId === 'sequence-input' && 'label' in diff) {
+        diff.seqLabel = diff.label;
+        delete diff.label;
+      }
     }
     Object.assign(kv, diff);
     nodeLines.push(`  ${n.id}: ${JSON.stringify(kv)}`);
@@ -814,14 +862,24 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
       }
       const obj = parsedBody;
       const adapterId = String(obj.adapterId ?? obj.model ?? '');
-      if (!Object.hasOwn(ADAPTER_REGISTRY, adapterId)) {
+      const manifest = resolveAdapterManifest(adapterId);
+      if (!manifest) {
         throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
       }
-      const label = typeof obj.label === 'string' ? obj.label : ADAPTER_REGISTRY[adapterId].shortName;
+      const label = typeof obj.label === 'string' ? obj.label : manifest.shortName;
       const rest = sanitizeParams(obj);
       delete rest.model;
       delete rest.adapterId;
       delete rest.label;
+      const aliases = getActivePluginRegistry()?.getPlugin(adapterId)?.share.yamlKeyAliases;
+      if (aliases) {
+        for (const [paramKey, yamlKey] of Object.entries(aliases)) {
+          if (yamlKey in rest) {
+            rest[paramKey] = rest[yamlKey];
+            delete rest[yamlKey];
+          }
+        }
+      }
       if (adapterId === 'localfold-af2') {
         const foldModel = obj.foldModel ?? obj.checkpoint;
         if (typeof foldModel === 'string' && foldModel) {

@@ -4,7 +4,7 @@
 
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from '$lib/engine/registry';
 import { CONCISE_BLOCK_ROLES } from '$lib/engine/catalog';
-import { getModelCardForAdapter } from '$lib/engine/model-cards';
+import { getLegacyModelCardForAdapter } from '$lib/engine/model-cards';
 import { PROTEIN_DOMAIN_ID } from '$lib/domains/protein-biopolymer';
 import type {
   FallbackPolicy,
@@ -171,7 +171,7 @@ export function buildLegacyBridgedPlugins(excludeIds: ReadonlySet<string> = new 
         ? {
             modelCard: {
               resolveCard: (params) =>
-                (getModelCardForAdapter(id, params) as unknown as KernelModelCardSpec) ?? {
+                (getLegacyModelCardForAdapter(id, params) as unknown as KernelModelCardSpec) ?? {
                   adapterId: id,
                   displayName: manifest.displayName,
                   license: manifest.licenseNote,
