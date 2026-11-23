@@ -11,6 +11,35 @@ export { materializePdbInputNode, deriveSequenceSetFromStructure, runPdbInputCpu
 
 const UPLOAD_META_KEYS = new Set(['missingUpload', 'expectedPdbSha256', 'expectedFilename']);
 
+function yamlNodeExplicitlySetsMode(yamlText: string, nodeId: string): boolean {
+  const trimmed = yamlText.trim();
+  if (!trimmed || trimmed.startsWith('{')) return true;
+  let inNodes = false;
+  for (const rawLine of trimmed.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (line === 'nodes:') {
+      inNodes = true;
+      continue;
+    }
+    if (line === 'wires:') {
+      inNodes = false;
+      continue;
+    }
+    if (!inNodes) continue;
+    const colon = line.indexOf(':');
+    if (colon <= 0) continue;
+    if (line.slice(0, colon).trim() !== nodeId) continue;
+    try {
+      const obj = JSON.parse(line.slice(colon + 1).trim()) as Record<string, unknown>;
+      return Object.hasOwn(obj, 'mode');
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export const pdbInputPlugin: ModelPlugin = {
   id: 'pdb-input',
   domainId: PROTEIN_DOMAIN_ID,
@@ -128,6 +157,41 @@ export const pdbInputPlugin: ModelPlugin = {
         }
       }
       return next;
+    },
+    restoreOmittedInlineAsset: (prevParams, nextParams, rawRecipeText, nodeId) => {
+      if (String(nextParams.pdbText ?? '').trim()) return null;
+      const prevHasLargeCustom =
+        prevParams.mode === 'custom' &&
+        typeof prevParams.pdbText === 'string' &&
+        prevParams.pdbText.length > 1500;
+      if (!prevHasLargeCustom) return null;
+
+      const isMissingUploadMarker =
+        nextParams.mode === 'custom' && Boolean(nextParams.missingUpload);
+      const isImplicitLegacyOmission =
+        nextParams.mode === 'demo-bundle' &&
+        Boolean(rawRecipeText && nodeId) &&
+        !yamlNodeExplicitlySetsMode(rawRecipeText!, nodeId!);
+
+      if (!isMissingUploadMarker && !isImplicitLegacyOmission) return null;
+
+      const expectedSha = String(nextParams.expectedPdbSha256 ?? '')
+        .trim()
+        .toLowerCase();
+      const prevPdbText = prevParams.pdbText as string;
+      const digestMatches = !expectedSha || computeUploadDigest(prevPdbText) === expectedSha;
+      if (!digestMatches) return null;
+
+      const restored: Record<string, unknown> = {
+        ...nextParams,
+        mode: 'custom',
+        filename: String(nextParams.filename ?? '').trim() || prevParams.filename,
+        pdbText: prevPdbText,
+      };
+      delete restored.missingUpload;
+      delete restored.expectedPdbSha256;
+      delete restored.expectedFilename;
+      return restored;
     },
   },
   catalog: {

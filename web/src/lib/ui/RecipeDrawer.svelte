@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { computeUploadDigest } from '$lib/engine/param-validation';
+  import { defaultPluginRegistry } from '$lib/plugins';
   import {
     encodeGraphToHash,
     graphToYamlRecipe,
@@ -124,87 +124,25 @@
     format = next;
   }
 
-  function yamlNodeExplicitlySetsMode(yamlText: string, nodeId: string): boolean {
-    const trimmed = yamlText.trim();
-    if (!trimmed || trimmed.startsWith('{')) return true;
-    let inNodes = false;
-    for (const rawLine of trimmed.split('\n')) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith('#')) continue;
-      if (line === 'nodes:') {
-        inNodes = true;
-        continue;
-      }
-      if (line === 'wires:') {
-        inNodes = false;
-        continue;
-      }
-      if (!inNodes) continue;
-      const colon = line.indexOf(':');
-      if (colon <= 0) continue;
-      if (line.slice(0, colon).trim() !== nodeId) continue;
-      try {
-        const obj = JSON.parse(line.slice(colon + 1).trim()) as Record<string, unknown>;
-        return Object.hasOwn(obj, 'mode');
-      } catch {
-        return false;
-      }
-    }
-    return false;
-  }
-
   function applyEdits() {
     parseErr = null;
     clearStatus();
     try {
       const next = parseRecipeToGraph(editorText);
-      // When applying a YAML recipe that omitted an oversized inline pdbText (>1500 chars),
-      // restore the canvas node's existing custom PDB for both:
-      // 1) Issue #1 missing-upload markers (`mode: 'custom', missingUpload: true`, verifying digest when present)
-      // 2) Legacy YAML recipes without an explicit `mode` field (`mode: 'demo-bundle'`).
       const prevById = new Map(graph.nodes.map((n) => [n.id, n]));
       const mergedNodes = next.nodes.map((n) => {
-        if (
-          format === 'yaml' &&
-          n.adapterId === 'pdb-input' &&
-          !String(n.params.pdbText ?? '').trim()
-        ) {
+        if (format === 'yaml') {
+          const plugin = defaultPluginRegistry.getPlugin(n.adapterId);
           const prev = prevById.get(n.id);
-          const prevHasLargeCustom =
-            prev?.adapterId === 'pdb-input' &&
-            prev.params.mode === 'custom' &&
-            typeof prev.params.pdbText === 'string' &&
-            prev.params.pdbText.length > 1500;
-
-          if (prevHasLargeCustom && prev) {
-            const isMissingUploadMarker =
-              n.params.mode === 'custom' && Boolean(n.params.missingUpload);
-            const isImplicitLegacyOmission =
-              n.params.mode === 'demo-bundle' && !yamlNodeExplicitlySetsMode(editorText, n.id);
-
-            if (isMissingUploadMarker || isImplicitLegacyOmission) {
-              const expectedSha = String(n.params.expectedPdbSha256 ?? '')
-                .trim()
-                .toLowerCase();
-              const prevPdbText = prev.params.pdbText as string;
-              const digestMatches =
-                !expectedSha || computeUploadDigest(prevPdbText) === expectedSha;
-
-              if (digestMatches) {
-                const nextParams: Record<string, unknown> = {
-                  ...n.params,
-                  mode: 'custom',
-                  filename: String(n.params.filename ?? '').trim() || prev.params.filename,
-                  pdbText: prevPdbText,
-                };
-                delete nextParams.missingUpload;
-                delete nextParams.expectedPdbSha256;
-                delete nextParams.expectedFilename;
-                return {
-                  ...n,
-                  params: nextParams,
-                };
-              }
+          if (plugin?.share.restoreOmittedInlineAsset && prev && prev.adapterId === n.adapterId) {
+            const restored = plugin.share.restoreOmittedInlineAsset(
+              prev.params,
+              n.params,
+              editorText,
+              n.id,
+            );
+            if (restored) {
+              return { ...n, params: restored };
             }
           }
         }

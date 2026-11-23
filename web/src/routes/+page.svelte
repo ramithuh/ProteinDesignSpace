@@ -63,6 +63,12 @@
   import { type PaperInsightExample } from '$lib/engine/paper-gallery';
   import ModelCardPopover from '$lib/ui/ModelCardPopover.svelte';
   import OnboardingModal from '$lib/ui/OnboardingModal.svelte';
+  import {
+    buildNodePreviewSignature,
+    formatGeomStripLabel,
+    getSiblingGeneratorIds as resolveSiblingGeneratorIds,
+    syncTaskToSiblingGenerators,
+  } from '$lib/ui/workbench-controller';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
   import NodeStudioPopover from '$lib/ui/NodeStudioPopover.svelte';
   import type { StudioBrushOption } from '$lib/ui/AnnotatedFastaView.svelte';
@@ -1302,7 +1308,7 @@
     canvasFitViewTrigger += 1;
   }
 
-  function autoStepTourBlock(adapterId: 'web-protein-mpnn' | 'localfold-af2' | 'designability-scorer') {
+  function autoStepTourBlock(adapterId: string) {
     if (isRunning) return;
     const opts =
       adapterId === 'web-protein-mpnn'
@@ -1773,242 +1779,33 @@
   const failedInputSigs = new Map<string, string>();
 
   function computeInputPreviewSig(node: { adapterId: string; params: Record<string, unknown> }): string | null {
-    const p = node.params ?? {};
-    if (node.adapterId === 'pdb-input') {
-      const mode = String(p.mode ?? 'demo-bundle');
-      const crop = String(p.cropSegments ?? '').trim();
-      if (mode === 'pdb-id') {
-        const normId = normalizePdbId(String(p.pdbId ?? ''));
-        if (!isValidPdbId(normId)) return null;
-        const cachedFor = normalizePdbId(String(p.fetchedPdbId ?? ''));
-        const txt = String(p.pdbText ?? '');
-        const hasCached = txt.trim().length > 0 && cachedFor === normId;
-        return `pdb-id|${normId}|${hasCached ? txt.length : 0}|${String(p.benchmarkId ?? '')}|${crop}`;
-      }
-      if (mode === 'custom') {
-        const txt = String(p.pdbText ?? '').trim();
-        if (txt.length === 0) return null;
-        return `custom|${txt.length}|${txt.slice(0, 64)}|${String(p.filename ?? '')}|${String(p.benchmarkId ?? '')}|${crop}`;
-      }
-      return `demo-bundle|${String(p.benchmarkId ?? '')}|${crop}`;
-    }
-    if (node.adapterId === 'sequence-input') {
-      const raw = String(p.sequence ?? '').trim();
-      if (raw.length < 5) return null;
-      return `seq|${raw.length}|${raw.slice(0, 64)}|${String(p.label ?? '')}`;
-    }
-    return null;
+    return buildNodePreviewSignature(node);
   }
 
   function getSiblingGeneratorIds(nodeId: string): string[] {
-    const structEdge = graph.edges.find(
-      (e) => e.toNode === nodeId && (e.toPort === 'structure' || e.toPort === 'template'),
-    );
-    if (!structEdge) return [];
-    return graph.nodes
-      .filter(
-        (n) =>
-          n.id !== nodeId &&
-          BENCHMARK_SYNC_ADAPTER_IDS.has(n.adapterId) &&
-          graph.edges.some(
-            (e) =>
-              e.fromNode === structEdge.fromNode &&
-              e.toNode === n.id &&
-              (e.toPort === 'structure' || e.toPort === 'template'),
-          ),
-      )
-      .map((n) => n.id);
+    return resolveSiblingGeneratorIds(graph, nodeId);
   }
 
   function handleSyncTaskToSiblings(sourceNodeId: string) {
-    const src = graph.nodes.find((n) => n.id === sourceNodeId);
-    if (!src) return;
-    const siblingIds = new Set(getSiblingGeneratorIds(sourceNodeId));
-    if (siblingIds.size === 0) return;
-
-    const sp = src.params ?? {};
-    const srcMode =
-      src.adapterId === 'rfd4-proteina'
-        ? String(sp.mode ?? 'unconditional')
-        : src.adapterId === 'genie2'
-          ? String(sp.motifRange ?? '').trim()
-            ? 'motif'
-            : 'unconditional'
-          : String(sp.taskMode ?? 'unconditional');
-    const parsedLen = parseLengthFromContig(String(sp.contig ?? ''));
-    const defaultSrcLen =
-      src.adapterId === 'boltzgen' ? 48 : src.adapterId === 'rfd4-proteina' ? 70 : 80;
-    const syncLen = Number(sp.length ?? parsedLen ?? defaultSrcLen);
-    const srcMotif = String(sp.motifSpan ?? sp.motifSelection ?? sp.motifRange ?? '').trim();
-    const srcHotspots = String(sp.hotspots ?? '').trim();
-    const srcContig = String(sp.contig ?? '').trim();
-    const srcLockChain = String(sp.lockChain ?? '').trim();
-    const unsupportedSiblingLabels: string[] = [];
-
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
+    const res = syncTaskToSiblingGenerators(prevSnapshot, sourceNodeId);
+    if (!res) return;
     pushGraphUndo(prevSnapshot);
     clearStaleUrlHash();
     sharePopoverState = null;
-    const nextGraph: WorkflowGraph = {
-      ...prevSnapshot,
-      nodes: prevSnapshot.nodes.map((n) => {
-        if (!siblingIds.has(n.id)) return n;
-        const shared = {
-          length: syncLen,
-          contig: srcContig,
-          lockChain: srcLockChain,
-          hotspots: srcHotspots,
-          motifSpan: srcMotif,
-          userEditedTask: true,
-        };
-        if (n.adapterId === 'genie3') {
-          const isSupported = srcMode === 'binder' || srcMode === 'motif' || srcMode === 'unconditional';
-          if (!isSupported) {
-            unsupportedSiblingLabels.push(n.label ?? 'Genie 3');
-            return {
-              ...n,
-              params: {
-                ...n.params,
-                taskMode: 'unconditional',
-                length: syncLen,
-                contig: '',
-                lockChain: '',
-                hotspots: '',
-                motifSpan: '',
-                userEditedTask: true,
-              },
-            };
-          }
-          if (srcMode === 'unconditional') {
-            return {
-              ...n,
-              params: {
-                ...n.params,
-                taskMode: 'unconditional',
-                length: syncLen,
-                contig: '',
-                lockChain: '',
-                hotspots: '',
-                motifSpan: '',
-                userEditedTask: true,
-              },
-            };
-          }
-          return { ...n, params: { ...n.params, ...shared, taskMode: srcMode } };
-        }
-        if (n.adapterId === 'boltzgen') {
-          const clampedLen = Math.max(16, Math.min(160, Math.round(syncLen)));
-          const isSupported = srcMode === 'binder' || srcMode === 'motif' || srcMode === 'unconditional';
-          if (!isSupported) {
-            unsupportedSiblingLabels.push(n.label ?? 'BoltzGen-1');
-            return {
-              ...n,
-              params: { ...n.params, taskMode: 'unconditional', length: clampedLen, hotspots: '', userEditedTask: true },
-            };
-          }
-          return {
-            ...n,
-            params: {
-              ...n.params,
-              taskMode: srcMode,
-              length: clampedLen,
-              hotspots: srcMode === 'binder' ? srcHotspots : '',
-              userEditedTask: true,
-            },
-          };
-        }
-        if (n.adapterId === 'protpardelle') {
-          const clampedLen = Math.max(20, Math.min(256, Math.round(syncLen)));
-          const isSupported = srcMode === 'motif' || srcMode === 'unconditional';
-          if (!isSupported) {
-            unsupportedSiblingLabels.push(n.label ?? 'ProtPardelle-1c');
-            return {
-              ...n,
-              params: { ...n.params, taskMode: 'unconditional', length: clampedLen, motifSelection: '', userEditedTask: true },
-            };
-          }
-          return {
-            ...n,
-            params: {
-              ...n.params,
-              taskMode: srcMode,
-              length: clampedLen,
-              motifSelection: srcMode === 'motif' ? srcMotif : '',
-              userEditedTask: true,
-            },
-          };
-        }
-        if (n.adapterId === 'rfdiffusion') {
-          const clampedLen = Math.max(16, Math.min(256, Math.round(syncLen)));
-          const isSupported = srcMode === 'motif' || srcMode === 'unconditional';
-          if (!isSupported) {
-            unsupportedSiblingLabels.push(n.label ?? 'RFdiffusion');
-            return {
-              ...n,
-              params: { ...n.params, taskMode: 'unconditional', length: clampedLen, contig: '', userEditedTask: true },
-            };
-          }
-          return {
-            ...n,
-            params: {
-              ...n.params,
-              taskMode: srcMode,
-              length: clampedLen,
-              contig: srcMode === 'motif' ? formatRfdiffusionContig(srcContig) : '',
-              userEditedTask: true,
-            },
-          };
-        }
-        if (n.adapterId === 'genie2') {
-          const clampedLen = Math.max(20, Math.min(256, Math.round(syncLen)));
-          const isSupported = srcMode === 'motif' || srcMode === 'unconditional';
-          if (!isSupported) {
-            unsupportedSiblingLabels.push(n.label ?? 'Genie 2');
-            return {
-              ...n,
-              params: { ...n.params, length: clampedLen, motifRange: '', userEditedTask: true },
-            };
-          }
-          return {
-            ...n,
-            params: {
-              ...n.params,
-              length: clampedLen,
-              motifRange: srcMode === 'motif' ? extractFirstContiguousMotifRange(srcMotif) : '',
-              userEditedTask: true,
-            },
-          };
-        }
-        return {
-          ...n,
-          params: {
-            ...n.params,
-            ...shared,
-            mode: srcMode,
-            ...(src.adapterId === 'rfd4-proteina'
-              ? {
-                  presetId: String(sp.presetId ?? n.params.presetId ?? 'custom_cath_monomer'),
-                  partialFraction: Number(sp.partialFraction ?? n.params.partialFraction ?? 0.5),
-                  unindexedMotif: Boolean(sp.unindexedMotif),
-                  hbondMode: String(sp.hbondMode ?? 'none'),
-                  hbondSelection: String(sp.hbondSelection ?? ''),
-                  cathCode: String(sp.cathCode ?? ''),
-                }
-              : {}),
-          },
-        };
-      }),
-    };
-    graph = nextGraph;
-    scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
-    invalidateNodes(getDownstreamNodeIds(nextGraph, siblingIds));
-    if (unsupportedSiblingLabels.length > 0) {
+    graph = res.nextGraph;
+    scheduler.invalidateEditedGraph(prevSnapshot, res.nextGraph);
+    invalidateNodes(getDownstreamNodeIds(res.nextGraph, res.siblingIds));
+    if (res.unsupportedSiblingLabels.length > 0) {
       showToastMessage(
-        `${unsupportedSiblingLabels.join(', ')} does not support "${srcMode}" mode — reset to unconditional (${syncLen} aa) and cleared incompatible constraints.`,
+        `${res.unsupportedSiblingLabels.join(', ')} does not support "${res.srcMode}" mode — reset to unconditional (${res.syncLen} aa) and cleared incompatible constraints.`,
         4500,
       );
     } else {
-      showToastMessage(`Synced task settings to ${siblingIds.size} sibling generator${siblingIds.size > 1 ? 's' : ''}.`, 2600);
+      showToastMessage(
+        `Synced task settings to ${res.siblingIds.size} sibling generator${res.siblingIds.size > 1 ? 's' : ''}.`,
+        2600,
+      );
     }
   }
 
@@ -3040,7 +2837,9 @@
     selectedNode ? getNodePeekSlots(graph, selectedNode.id, outputsByNode) : [],
   );
 
-  let hasPeekData = $derived(peekSlots.some((s) => s.artifact !== null));
+  let hasPeekData = $derived(
+    peekSlots.some((s) => s.availability !== 'inactive-in-mode' && s.artifact !== null),
+  );
 
   let resolvedPeekSlotId = $derived.by(() => {
     if (selectedPeekSlotId && peekSlots.some((s) => s.id === selectedPeekSlotId)) {
@@ -4741,7 +4540,7 @@
         {#if !isCompareMode && viewerStructureMeta}
           <div class="geom-strip">
             <span class="geom-lbl">
-              {viewerStructureMeta.sourceModelId === 'pdb-input' && !peekMetrics ? 'Input:' : 'Designed:'}
+              {formatGeomStripLabel(activePeekSlot?.viewportRole, viewerStructureMeta.sourceModelId, Boolean(peekMetrics))}
             </span>
             <span>L = <b>{viewerStructureMeta.length} aa</b></span>
             <span>R<sub>g</sub> = <b>{viewerStructureMeta.geometry.rg.toFixed(1)} Å</b></span>

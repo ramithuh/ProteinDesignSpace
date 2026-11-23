@@ -78,7 +78,12 @@ describe('Track A + B regressions (#32–#37, #58, catalog & UX)', () => {
     expect(canvasSrc).toContain('left: compact ? 0.12 : 0.14');
 
     const inspectorSrc = readFileSync(resolve(WEB_ROOT, 'src/lib/ui/NodeInspector.svelte'), 'utf8');
-    expect(inspectorSrc).toContain('Fold all');
+    expect(inspectorSrc).toContain('LocalFoldWidget');
+    const localFoldWidgetSrc = readFileSync(
+      resolve(WEB_ROOT, 'src/lib/ui/inspector/LocalFoldWidget.svelte'),
+      'utf8',
+    );
+    expect(localFoldWidgetSrc).toContain('Fold all');
   });
 
   it('#37: resilient WebGPU helper classifies software adapters, detects device-loss errors, and falls back across retries', async () => {

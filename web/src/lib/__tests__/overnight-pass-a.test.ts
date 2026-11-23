@@ -518,11 +518,12 @@ describe('Overnight Pass A — Issue #87 (TrajectoryFrames viewer, tiedPositions
     expect(pdb!).toContain('MET A   1');
     expect(pdb!.trim().endsWith('END')).toBe(true);
 
-    // ArtifactPeekPanel must render TrajectoryFrames cleanly with download button
+    // ArtifactPeekPanel + TrajectoryPeekView must render TrajectoryFrames cleanly with download button
     const peekSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/ArtifactPeekPanel.svelte'), 'utf8');
+    const trajViewSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/peek/TrajectoryPeekView.svelte'), 'utf8');
     expect(peekSrc).toContain("artifact?.kind === 'TrajectoryFrames'");
     expect(peekSrc).toContain('{:else if trajArt}');
-    expect(peekSrc).toContain('↓ Trajectory PDB');
+    expect(trajViewSrc).toContain('↓ Trajectory PDB');
   });
 
   it('computeUpstreamLockSummary surfaces tiedPositions (post-run & pre-run symmetry) and predicts Genie 3 Lock B · Design A even with lockChain=A', () => {

@@ -1117,21 +1117,25 @@
   }
 
   let wireLegendItems = $derived.by(() => {
-    const hasLegacyConditioner = graph.nodes.some((n) => n.adapterId === 'rfd4-conditioner');
-    return hasLegacyConditioner
-      ? [
-          PORT_COLORS.StructureArtifact,
-          PORT_COLORS.ConditionSpec,
-          PORT_COLORS.SequenceSet,
-          PORT_COLORS.FoldedStructure,
-          PORT_COLORS.DesignabilityMetrics,
-        ]
-      : [
-          PORT_COLORS.StructureArtifact,
-          PORT_COLORS.SequenceSet,
-          PORT_COLORS.FoldedStructure,
-          PORT_COLORS.DesignabilityMetrics,
-        ];
+    const core = [
+      PORT_COLORS.StructureArtifact,
+      PORT_COLORS.SequenceSet,
+      PORT_COLORS.FoldedStructure,
+      PORT_COLORS.DesignabilityMetrics,
+    ];
+    const seen = new Set(core.map((c) => c.label));
+    const extras: Array<(typeof PORT_COLORS)[keyof typeof PORT_COLORS]> = [];
+    for (const edge of graph.edges) {
+      const fromNode = graph.nodes.find((n) => n.id === edge.fromNode);
+      const spec = fromNode ? ADAPTER_REGISTRY[fromNode.adapterId]?.outputs?.[edge.fromPort] : undefined;
+      const pType = Array.isArray(spec?.type) ? spec.type[0] : spec?.type;
+      const entry = pType ? PORT_COLORS[pType as keyof typeof PORT_COLORS] : undefined;
+      if (entry && !seen.has(entry.label)) {
+        seen.add(entry.label);
+        extras.push(entry);
+      }
+    }
+    return [...core, ...extras];
   });
 </script>
 

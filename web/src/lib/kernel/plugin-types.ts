@@ -264,6 +264,7 @@ export interface PluginShareSpec<TParams extends Record<string, unknown> = Recor
     prevParams: TParams,
     nextParams: TParams,
     rawRecipeText?: string,
+    nodeId?: string,
   ) => TParams | null;
   /** Bidirectional YAML key remapping (e.g. `model` <-> `foldModel`). */
   yamlKeyAliases?: Readonly<Record<string, string>>;
