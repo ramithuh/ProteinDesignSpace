@@ -178,21 +178,23 @@ describe('Track A + B regressions (#32–#37, #58, catalog & UX)', () => {
   it('Track B UX: simple fast starter chips, stage-colored selection glow, clickable brand logo, returning empty canvas, and vertical split resizer', () => {
     expect(LOCAL_EXAMPLE_PLANS.map((p) => p.id)).toEqual([
       'add-stability-scan',
-      'stabilize-1ubq',
-      'redesign-1l2y',
+      'gnina-1stp-pocket',
       'denovo-60aa',
+      'stabilize-1ubq',
     ]);
-    const ubq = compileLocalStarterPlan(LOCAL_EXAMPLE_PLANS[1].plan);
-    expect(validateGraph(ubq.graph)).toEqual([]);
-    expect(ubq.graph.nodes).toHaveLength(2);
+    const gninaStarter = compileLocalStarterPlan(LOCAL_EXAMPLE_PLANS[1].plan);
+    expect(validateGraph(gninaStarter.graph)).toEqual([]);
+    expect(gninaStarter.graph.nodes).toHaveLength(2);
+    expect(gninaStarter.graph.nodes[1].adapterId).toBe('gnina');
+    expect(gninaStarter.graph.nodes[1].params.taskMode).toBe('pocket-scan');
 
-    const trpcage = compileLocalStarterPlan(LOCAL_EXAMPLE_PLANS[2].plan);
-    expect(validateGraph(trpcage.graph)).toEqual([]);
-    expect(trpcage.graph.nodes).toHaveLength(4);
-
-    const denovo = compileLocalStarterPlan(LOCAL_EXAMPLE_PLANS[3].plan);
+    const denovo = compileLocalStarterPlan(LOCAL_EXAMPLE_PLANS[2].plan);
     expect(validateGraph(denovo.graph)).toEqual([]);
     expect(denovo.graph.nodes).toHaveLength(4);
+
+    const ubq = compileLocalStarterPlan(LOCAL_EXAMPLE_PLANS[3].plan);
+    expect(validateGraph(ubq.graph)).toEqual([]);
+    expect(ubq.graph.nodes).toHaveLength(2);
 
     const nodeSrc = readFileSync(resolve(WEB_ROOT, 'src/lib/ui/ProteinNode.svelte'), 'utf8');
     expect(nodeSrc).toContain('border-color: var(--stage-color');
