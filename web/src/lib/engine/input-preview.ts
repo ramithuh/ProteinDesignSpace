@@ -19,6 +19,7 @@ import { evaluateProteinOnlyStructurePolicy } from '$lib/protein-ops/hetatm-poli
 import {
   extractHoloReceptorAndLigands,
   findPocketResidues,
+  parsePocketResidueTokens,
 } from '$lib/protein-ops/gnina-prep';
 import { getBenchmarkById } from './benchmarks';
 import { sanitizeEvoDiffFixedSequence, validateSequenceText } from './param-validation';
@@ -3028,16 +3029,25 @@ export function compileNodeInputPreview(
     const precision = String(node.params.precision ?? 'fp16');
     const ligandCode = String(node.params.ligandCode ?? '').trim();
     const ligandSdf = String(node.params.ligandSdf ?? '').trim();
+    const dockLigandCcd = String(node.params.dockLigandCcd ?? '').trim().toUpperCase();
+    const pocketResiduesSpec = String(node.params.pocketResidues ?? '').trim();
+    const exhaustiveness = Math.max(1, Math.min(16, Math.round(Number(node.params.exhaustiveness ?? 8))));
+    const numModes = Math.max(1, Math.min(9, Math.round(Number(node.params.numModes ?? 5))));
+    const sortBy = String(node.params.sortBy ?? 'cnnScore').trim();
+    const autoboxAdd = Math.max(2.0, Math.min(12.0, Number(node.params.autoboxAdd ?? 4.0)));
+    const seed = Math.max(0, Math.min(999999, Math.round(Number(node.params.seed ?? 42))));
     const includeMetals = node.params.includeMetals !== false;
     const pocketRadius = Math.max(3.0, Math.min(8.0, Number(node.params.pocketRadius ?? 5.0)));
     const maxPocketResidues = Math.max(4, Math.min(48, Math.round(Number(node.params.maxPocketResidues ?? 24))));
     const minimizeIterations = Math.max(1, Math.min(12, Math.round(Number(node.params.minimizeIterations ?? 4))));
     const modeLabel =
-      taskMode === 'pocket-scan'
-        ? 'Pocket Scan'
-        : taskMode === 'minimize'
-          ? `Minimize (${minimizeIterations} iters)`
-          : 'Score Pose';
+      taskMode === 'dock'
+        ? `Dock Ligand (exh=${exhaustiveness}, ${numModes}p)`
+        : taskMode === 'pocket-scan'
+          ? 'Pocket Scan'
+          : taskMode === 'minimize'
+            ? `Minimize (${minimizeIterations} iters)`
+            : 'Score Pose';
 
     if (!structure) {
       const missingUp = missingUpstreamByPort.get('structure');
@@ -3051,16 +3061,32 @@ export function compileNodeInputPreview(
         format: 'scorer-mapping',
         headline: missingUp
           ? `GNINA 1.3 · ${modeLabel} (${precision.toUpperCase()}) · waiting for upstream structure`
-          : `GNINA 1.3 · ${modeLabel} (${precision.toUpperCase()}) · connect a holo StructureArtifact`,
+          : `GNINA 1.3 · ${modeLabel} (${precision.toUpperCase()}) · connect a StructureArtifact`,
         compiledSummary: {
           taskMode,
           precision,
-          ligandCode: ligandCode || 'auto',
+          ligandCode: dockLigandCcd || ligandCode || 'auto',
           externalLigand: ligandSdf.length > 0,
+          ...(taskMode === 'dock'
+            ? {
+                exhaustiveness,
+                numModes,
+                sortBy,
+                pocketBox: pocketResiduesSpec || 'holo autobox',
+              }
+            : {}),
           includeMetals,
         },
         rawSpecText: JSON.stringify(
-          { taskMode, precision, ligandCode: ligandCode || 'auto', includeMetals },
+          {
+            taskMode,
+            precision,
+            ligandCode: ligandCode || 'auto',
+            ...(taskMode === 'dock'
+              ? { dockLigandCcd: dockLigandCcd || null, pocketResidues: pocketResiduesSpec || null, exhaustiveness, numModes, sortBy, autoboxAdd, seed }
+              : {}),
+            includeMetals,
+          },
           null,
           2,
         ),
@@ -3076,7 +3102,29 @@ export function compileNodeInputPreview(
       });
 
       const pocketSet = new Set<string>();
-      if (taskMode === 'pocket-scan' && prep.selectedLigand && prep.receptorPdb.trim()) {
+      let explicitPocketKeys: string[] = [];
+      if (taskMode === 'dock') {
+        if (pocketResiduesSpec && prep.receptorPdb.trim()) {
+          explicitPocketKeys = parsePocketResidueTokens(pocketResiduesSpec, prep.receptorPdb);
+          for (const key of explicitPocketKeys) {
+            const parts = key.split('/');
+            if (parts.length >= 2) {
+              const ins = parts.length === 4 ? parts[2] : '';
+              pocketSet.add(`${parts[0]}${parts[1]}${ins}`);
+            }
+          }
+          if (explicitPocketKeys.length === 0) {
+            pushIssue({
+              severity: 'error',
+              source: 'compiler',
+              message: `Pocket Box Residues "${pocketResiduesSpec}" matched 0 residues in "${structure.label}". Use tokens like "A45, A79, A90".`,
+            });
+          }
+        } else if (prep.selectedLigand && prep.receptorPdb.trim()) {
+          const pocket = findPocketResidues(prep.receptorPdb, prep.selectedLigand.atoms, 5.0, 24);
+          for (const r of pocket) pocketSet.add(r.residueId);
+        }
+      } else if (taskMode === 'pocket-scan' && prep.selectedLigand && prep.receptorPdb.trim()) {
         const pocket = findPocketResidues(
           prep.receptorPdb,
           prep.selectedLigand.atoms,
@@ -3086,14 +3134,28 @@ export function compileNodeInputPreview(
         for (const r of pocket) pocketSet.add(r.residueId);
       }
 
-      if (!ligandSdf && !prep.selectedLigand) {
+      const hasDockSource = taskMode === 'dock' && Boolean(dockLigandCcd);
+      if (!ligandSdf && !hasDockSource && !prep.selectedLigand) {
         pushIssue({
           severity: 'error',
           source: 'compiler',
           message:
             ligandCode && prep.detectedLigandCodes.length > 0
               ? `Target ligand "${ligandCode}" not found in "${structure.label}" (detected: ${prep.detectedLigandCodes.join(', ')}).`
-              : `No organic small-molecule ligand found in "${structure.label}". Wire a holo complex or paste an SDF/MOL2 in Advanced parameters.`,
+              : taskMode === 'dock'
+                ? `No ligand specified for docking into "${structure.label}". Enter a Ligand CCD Code (e.g. BTN, ATP, I4B), paste an SDF/MOL2, or wire a holo complex.`
+                : `No organic small-molecule ligand found in "${structure.label}". Wire a holo complex or paste an SDF/MOL2 in Advanced parameters.`,
+        });
+      } else if (
+        taskMode === 'dock' &&
+        (ligandSdf || hasDockSource) &&
+        !pocketResiduesSpec &&
+        !prep.selectedLigand
+      ) {
+        pushIssue({
+          severity: 'error',
+          source: 'compiler',
+          message: `Docking into apo structure "${structure.label}" requires Pocket Box Residues (e.g. "A45, A79, A90") to define the binding box.`,
         });
       }
 
@@ -3146,11 +3208,13 @@ export function compileNodeInputPreview(
       chains = [...chainMap.values()];
       highlightLayers = buildHighlightLayersFromResidues(allRes);
       const ligClass = classifyLigands(structure.diagnostics?.ligandNames ?? parsed.diagnostics.ligandNames);
+      const previewLigands = [
+        ...(hasDockSource ? [dockLigandCcd] : []),
+        ...(prep.selectedLigand ? [prep.selectedLigand.compId] : prep.detectedLigandCodes),
+        ...prep.keptMetals,
+      ];
       entities = {
-        includedLigands: [
-          ...(prep.selectedLigand ? [prep.selectedLigand.compId] : prep.detectedLigandCodes),
-          ...prep.keptMetals,
-        ],
+        includedLigands: [...new Set(previewLigands)],
         filteredBuffers: ligClass.filteredBuffers,
         nucleicChains: [...(structure.diagnostics?.nucleicAcidChains ?? parsed.diagnostics.nucleicAcidChains)],
       };
@@ -3170,31 +3234,65 @@ export function compileNodeInputPreview(
 
       const targetLigLabel = ligandSdf
         ? 'external SDF/MOL2'
-        : prep.selectedLigand
-          ? `${prep.selectedLigand.compId} (${prep.selectedLigand.heavyAtomCount} heavy atoms)`
-          : 'none detected';
+        : hasDockSource
+          ? `RCSB CCD ${dockLigandCcd}`
+          : prep.selectedLigand
+            ? `${prep.selectedLigand.compId} (${prep.selectedLigand.heavyAtomCount} heavy atoms)`
+            : 'none detected';
+
+      const dockBoxDesc =
+        explicitPocketKeys.length > 0
+          ? `${explicitPocketKeys.length} pocket res (+${autoboxAdd.toFixed(1)} Å)`
+          : prep.selectedLigand
+            ? `autobox ${prep.selectedLigand.compId} (+${autoboxAdd.toFixed(1)} Å)`
+            : 'unboxed';
 
       payload = {
         format: 'scorer-mapping',
         headline:
-          taskMode === 'pocket-scan'
-            ? `GNINA 1.3 · Pocket Scan (${pocketSet.size} res ≤ ${pocketRadius.toFixed(1)} Å) · ${targetLigLabel}`
-            : `GNINA 1.3 · ${modeLabel} (${precision.toUpperCase()}) · ${targetLigLabel}`,
+          taskMode === 'dock'
+            ? `GNINA 1.3 · Dock ${targetLigLabel} · ${dockBoxDesc} · exh=${exhaustiveness}`
+            : taskMode === 'pocket-scan'
+              ? `GNINA 1.3 · Pocket Scan (${pocketSet.size} res ≤ ${pocketRadius.toFixed(1)} Å) · ${targetLigLabel}`
+              : `GNINA 1.3 · ${modeLabel} (${precision.toUpperCase()}) · ${targetLigLabel}`,
         compiledSummary: {
           taskMode,
           precision,
           selectedLigand: targetLigLabel,
           detectedLigands: prep.detectedLigandCodes,
           keptMetals: prep.keptMetals,
+          ...(taskMode === 'dock'
+            ? {
+                pocketBox: dockBoxDesc,
+                exhaustiveness,
+                numModes,
+                sortBy,
+              }
+            : {}),
           ...(taskMode === 'pocket-scan' ? { pocketResidues: pocketSet.size, pocketRadius } : {}),
         },
         rawSpecText: JSON.stringify(
           {
             taskMode,
             precision,
-            selectedLigand: prep.selectedLigand?.instanceKey ?? (ligandSdf ? 'external' : null),
+            selectedLigand: ligandSdf
+              ? 'external'
+              : hasDockSource
+                ? `rcsb:${dockLigandCcd}`
+                : prep.selectedLigand?.instanceKey ?? null,
             detectedLigands: prep.detectedLigandCodes,
             keptMetals: prep.keptMetals,
+            ...(taskMode === 'dock'
+              ? {
+                  pocketBox: dockBoxDesc,
+                  explicitPocketKeys,
+                  autoboxAdd,
+                  exhaustiveness,
+                  numModes,
+                  sortBy,
+                  seed,
+                }
+              : {}),
             ...(taskMode === 'pocket-scan'
               ? { pocketRadius, maxPocketResidues, pocketResidues: [...pocketSet] }
               : {}),

@@ -237,14 +237,17 @@ export interface BioCompatibilityIssue {
 
 export interface GninaPoseScoreRow {
   poseId: string;
+  rank?: number;
   ligandCode: string;
-  ligandSource: 'holo-hetatm' | 'external-sdf' | 'external-mol2';
+  ligandSource: 'holo-hetatm' | 'external-sdf' | 'external-mol2' | 'rcsb-ccd';
   heavyAtoms: number;
   rotors: number;
   cnnScore: number;
   cnnAffinity: number;
   cnnVS: number;
   vinaScore: number;
+  /** Heavy-atom RMSD (Å) to rank-1 pose (present in `dock` mode). */
+  rmsdToBest?: number;
   /** Present in `minimize` mode: initial pose scores before rigid-body optimization. */
   initialCnnScore?: number;
   initialCnnAffinity?: number;
@@ -267,7 +270,7 @@ export interface GninaPoseScoreRow {
 
 export interface DockingScoreSummary {
   engine: 'gnina-1.3';
-  taskMode: 'score' | 'pocket-scan' | 'minimize';
+  taskMode: 'score' | 'pocket-scan' | 'minimize' | 'dock';
   precision: 'int8' | 'fp16' | 'fp32';
   ensemble: string[];
   receptorName: string;
@@ -276,6 +279,14 @@ export interface DockingScoreSummary {
   selectedLigand: string;
   pocketResiduesScanned?: number;
   pocketRadius?: number;
+  box?: { center: [number, number, number]; size: [number, number, number] };
+  dockStats?: {
+    gridMs: number;
+    searchMs: number;
+    rescoreMs: number;
+    evaluatedCandidates: number;
+    rotors: number;
+  };
   rows: GninaPoseScoreRow[];
 }
 

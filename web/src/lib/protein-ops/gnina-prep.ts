@@ -660,3 +660,95 @@ export function computePoseHeavyRmsd(
 export function detectExternalLigandFormat(text: string): 'mol2' | 'sdf' {
   return text.includes('@<TRIPOS>MOLECULE') ? 'mol2' : 'sdf';
 }
+
+/**
+ * Parse user-friendly pocket residue selectors (e.g. `"A45, A79, A90-94"` or `"45, 79"`)
+ * into GNINA's exact `pocketResidues` keys (`[chain, seq, ins, res].filter(Boolean).join('/')`).
+ */
+export function parsePocketResidueTokens(spec: string, receptorPdb: string): string[] {
+  const trimmed = spec.trim();
+  if (!trimmed) return [];
+  const { atoms } = parseAllPdbAtomLines(receptorPdb);
+  const resByChainNum = new Map<string, string>();
+  const resByNumOnly = new Map<string, string[]>();
+  const validKeys = new Set<string>();
+
+  for (const a of atoms) {
+    if (a.record === 'HETATM' && classifyHetatmCompId(a.resName) !== 'modified-amino-acid') {
+      continue;
+    }
+    const key = [a.chain, a.resSeq, a.insCode, a.resName].filter(Boolean).join('/');
+    if (validKeys.has(key)) continue;
+    validKeys.add(key);
+    resByChainNum.set(`${a.chain.toUpperCase()}:${a.resSeq}${a.insCode.toUpperCase()}`, key);
+    const list = resByNumOnly.get(a.resSeq) ?? [];
+    list.push(key);
+    resByNumOnly.set(a.resSeq, list);
+  }
+
+  const out = new Set<string>();
+  const tokens = trimmed.split(/[\s,;]+/).filter(Boolean);
+  for (const rawTok of tokens) {
+    const tok = rawTok.trim();
+    if (validKeys.has(tok)) {
+      out.add(tok);
+      continue;
+    }
+    // Range with chain prefix: A45-52 or A:45-52
+    const rangeMatch = tok.match(/^([A-Za-z]):?(\d+)-(\d+)$/);
+    if (rangeMatch) {
+      const ch = rangeMatch[1].toUpperCase();
+      const lo = Number(rangeMatch[2]);
+      const hi = Number(rangeMatch[3]);
+      for (let n = Math.min(lo, hi); n <= Math.max(lo, hi); n++) {
+        const hit = resByChainNum.get(`${ch}:${n}`);
+        if (hit) out.add(hit);
+      }
+      continue;
+    }
+    // Single residue with chain prefix: A45, A:45, A100A
+    const singleChain = tok.match(/^([A-Za-z]):?(\d+)([A-Za-z]?)$/);
+    if (singleChain) {
+      const hit = resByChainNum.get(
+        `${singleChain[1].toUpperCase()}:${singleChain[2]}${singleChain[3].toUpperCase()}`,
+      );
+      if (hit) out.add(hit);
+      continue;
+    }
+    // Bare residue number or range (match first/all chains)
+    const bareRange = tok.match(/^(\d+)-(\d+)$/);
+    if (bareRange) {
+      const lo = Number(bareRange[1]);
+      const hi = Number(bareRange[2]);
+      for (let n = Math.min(lo, hi); n <= Math.max(lo, hi); n++) {
+        for (const hit of resByNumOnly.get(String(n)) ?? []) out.add(hit);
+      }
+      continue;
+    }
+    if (/^\d+$/.test(tok)) {
+      for (const hit of resByNumOnly.get(tok) ?? []) out.add(hit);
+    }
+  }
+  return [...out];
+}
+
+/**
+ * Build a multi-model PDB (`MODEL 1`..`MODEL K`) combining the receptor with each ranked docked pose
+ * so Mol*'s frame scrubber lets users inspect Pose #1..#K interactively in 3D.
+ */
+export function buildMultiPoseDockedPdb(
+  receptorPdb: string,
+  rankedPoses: ReadonlyArray<ReadonlyArray<{ x: number; y: number; z: number; el?: string; name?: string }>>,
+  resName = 'LIG',
+  chainId = 'L',
+): string {
+  const models: string[] = [];
+  for (let i = 0; i < rankedPoses.length; i++) {
+    const framePdb = appendExternalLigandToReceptorPdb(receptorPdb, rankedPoses[i], resName, chainId)
+      .split(/\r?\n/)
+      .filter((l) => !/^END\b/.test(l.trim()))
+      .join('\n');
+    models.push(`MODEL     ${String(i + 1).padStart(4, ' ')}\n${framePdb}\nENDMDL`);
+  }
+  return `${models.join('\n')}\nEND\n`;
+}

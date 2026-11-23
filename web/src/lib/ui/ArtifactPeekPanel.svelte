@@ -1897,6 +1897,7 @@
             onclick={() => {
               const dm = activeStruct.dockingMetrics!;
               const hdr = [
+                'rank',
                 'pose_id',
                 'ligand',
                 'mode',
@@ -1907,14 +1908,16 @@
                 'cnn_affinity_pk',
                 'cnn_vs',
                 'vina_kcal_mol',
+                'rmsd_to_best_angstrom',
                 'initial_cnn_score',
                 'initial_vina_kcal_mol',
                 'pose_rmsd_angstrom',
               ];
               const csvLines = [
                 hdr.join(','),
-                ...dm.rows.map((r) =>
+                ...dm.rows.map((r, idx) =>
                   [
+                    r.rank ?? idx + 1,
                     JSON.stringify(r.poseId),
                     JSON.stringify(r.ligandCode),
                     dm.taskMode,
@@ -1925,6 +1928,7 @@
                     r.cnnAffinity.toFixed(4),
                     r.cnnVS.toFixed(4),
                     r.vinaScore.toFixed(4),
+                    r.rmsdToBest !== undefined ? r.rmsdToBest.toFixed(3) : '',
                     r.initialCnnScore !== undefined ? r.initialCnnScore.toFixed(4) : '',
                     r.initialVinaScore !== undefined ? r.initialVinaScore.toFixed(4) : '',
                     r.poseRmsd !== undefined ? r.poseRmsd.toFixed(3) : '',
@@ -1982,13 +1986,32 @@
             </span>
           </span>
           <span class="gnina-mode-pill">
-            {dm.taskMode === 'pocket-scan'
-              ? `Pocket Scan (${dm.pocketResiduesScanned ?? 0} res ≤ ${dm.pocketRadius ?? 5} Å)`
-              : dm.taskMode === 'minimize'
-                ? 'Minimized Pose'
-                : '3-Model Ensemble'}
+            {dm.taskMode === 'dock'
+              ? `Flexible Dock (${dm.rows.length} pose${dm.rows.length === 1 ? '' : 's'})`
+              : dm.taskMode === 'pocket-scan'
+                ? `Pocket Scan (${dm.pocketResiduesScanned ?? 0} res ≤ ${dm.pocketRadius ?? 5} Å)`
+                : dm.taskMode === 'minimize'
+                  ? 'Minimized Pose'
+                  : '3-Model Ensemble'}
           </span>
         </div>
+
+        {#if dm.taskMode === 'dock' && (dm.dockStats || dm.box)}
+          <div class="gnina-dock-meta">
+            {#if dm.box}
+              <span>Box {dm.box.size.map((v) => v.toFixed(1)).join('×')} Å</span>
+            {/if}
+            {#if dm.dockStats}
+              <span>
+                Grid {(dm.dockStats.gridMs / 1000).toFixed(2)}s · Search {(dm.dockStats.searchMs / 1000).toFixed(2)}s · CNN {(dm.dockStats.rescoreMs / 1000).toFixed(2)}s
+              </span>
+              <span>{dm.dockStats.evaluatedCandidates} candidates</span>
+            {/if}
+            {#if activeStruct.trajectoryPdb && (activeStruct.trajectoryFrameCount ?? 0) > 1}
+              <span>Use 3D frame slider to scrub poses #1–#{activeStruct.trajectoryFrameCount}</span>
+            {/if}
+          </div>
+        {/if}
 
         <div class="gnina-kpi-grid">
           <div class="gnina-kpi" title="Ensemble pose probability (0–1; higher = more native-like)">
@@ -2039,21 +2062,33 @@
           <table class="scores gnina-poses">
             <thead>
               <tr>
+                {#if dm.taskMode === 'dock'}
+                  <th>Rank</th>
+                {/if}
                 <th>Pose</th>
                 <th>CNNscore</th>
                 <th>CNNaffinity (pK)</th>
                 <th>CNN_VS</th>
                 <th>Vina (kcal/mol)</th>
+                {#if dm.taskMode === 'dock'}
+                  <th>RMSD (Å)</th>
+                {/if}
               </tr>
             </thead>
             <tbody>
               {#each dm.rows as row, idx (`${row.poseId}_${idx}`)}
                 <tr>
+                  {#if dm.taskMode === 'dock'}
+                    <td>#{row.rank ?? idx + 1}</td>
+                  {/if}
                   <td><code>{row.poseId}</code></td>
                   <td class:good-val={row.cnnScore >= 0.5}>{row.cnnScore.toFixed(3)}</td>
                   <td>{row.cnnAffinity.toFixed(2)}</td>
                   <td>{row.cnnVS.toFixed(2)}</td>
                   <td>{row.vinaScore.toFixed(2)}</td>
+                  {#if dm.taskMode === 'dock'}
+                    <td>{isFiniteNum(row.rmsdToBest) ? row.rmsdToBest.toFixed(2) : '—'}</td>
+                  {/if}
                 </tr>
               {/each}
             </tbody>
@@ -3077,6 +3112,14 @@
     border: 1px solid var(--border);
     color: var(--text-secondary);
     background: var(--bg-pill);
+  }
+  .gnina-dock-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    font-size: 10.5px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    color: var(--text-dim);
   }
   .gnina-kpi-grid {
     display: grid;

@@ -542,6 +542,19 @@ function buildSubGroupsForAdapter(adapterId: string): {
   if (adapterId === 'gnina') {
     const items: CatalogSubItem[] = [
       {
+        key: 'gnina-dock',
+        label: 'GNINA 1.3 · Dock Ligand (Flexible)',
+        subtitle: 'Flexible-torsion MC + BFGS pocket docking with 3-model WebGPU CNN rescoring (~1–3 s)',
+        meta: '~4 MB · Apache-2.0 / GPLv2',
+        insert: {
+          adapterId: 'gnina',
+          params: { taskMode: 'dock', precision: 'fp16', exhaustiveness: 8, numModes: 5 },
+          label: 'GNINA 1.3 (Dock)',
+        },
+        searchBlob:
+          'gnina gnina1.3 dock docking flexible torsion monte carlo bfgs vina cnn rescore ligand pocket small molecule'.toLowerCase(),
+      },
+      {
         key: 'gnina-score',
         label: 'GNINA 1.3 · Score Pose',
         subtitle: '3-model 3D CNN ensemble (CNNscore, CNNaffinity pK, CNN_VS) + Vina (~65 ms)',

@@ -2989,7 +2989,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     precisionWeightsMB: { int8: 2, fp16: 4, fp32: 7 },
     licenseNote: 'Apache-2.0 / GPLv2 (gnina/gnina 1.3 · WebGPU port ramithuh/gnina-webgpu)',
     description:
-      'Pure-WebGPU 3D CNN protein–ligand docking scorer & rigid-body pose optimizer (full 3-model default GNINA 1.3 ensemble: dense_1.3, dense_1.3_PT_KD_3, crossdock_default2018_KD_4 + Vina energy decomposition). Supports holo PDB/mmCIF complexes or pasted SDF/MOL2 ligand poses, pocket residue ablation scans (ΔCNN_VS painted onto 3D pocket & residue track), and rigid-body pose minimization.',
+      'Pure-WebGPU 3D CNN protein–ligand docking engine & scorer (full 3-model default GNINA 1.3 ensemble: dense_1.3, dense_1.3_PT_KD_3, crossdock_default2018_KD_4 + Vina affinity grids). Supports flexible-ligand Monte Carlo + BFGS docking search with CNN rescoring, fast pose scoring, binding-pocket residue ablation (ΔCNN_VS), and rigid-body pose minimization.',
     inputs: {
       structure: { type: 'StructureArtifact' },
     },
@@ -3004,6 +3004,13 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         label: 'Score Pose',
         description:
           'Score holo ligand (or pasted SDF/MOL2 poses) with the 3-model GNINA 1.3 CNN ensemble (CNNscore, CNNaffinity pK, CNN_VS) + Vina energy breakdown (~65 ms warm).',
+        requiredInputs: ['structure'],
+      },
+      {
+        id: 'dock',
+        label: 'Dock Ligand',
+        description:
+          'Flexible-ligand docking search (Vina 3D affinity grids + seeded Monte Carlo & BFGS over translations, rotations, and rotatable torsions) followed by WebGPU 3-model CNN rescoring & multi-pose ranking.',
         requiredInputs: ['structure'],
       },
       {
@@ -3030,11 +3037,12 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         defaultValue: 'score',
         options: [
           { value: 'score', label: 'Score Pose (CNN + Vina · ~65 ms)' },
+          { value: 'dock', label: 'Dock Ligand (Flexible MC + BFGS + CNN)' },
           { value: 'pocket-scan', label: 'Pocket Contribution Scan (ΔCNN_VS)' },
           { value: 'minimize', label: 'Minimize Pose (Rigid-body refinement)' },
         ],
         description:
-          'Choose fast ensemble scoring, binding-pocket residue CNN ablation mapping, or rigid-body CNN+Vina pose minimization.',
+          'Choose fast ensemble scoring, flexible-ligand docking search, binding-pocket residue CNN ablation mapping, or rigid-body CNN+Vina pose minimization.',
       },
       {
         key: 'precision',
@@ -3050,10 +3058,58 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Weight precision streamed into WebGPU (all 3 ensemble models fit in a single <8 MB shard).',
       },
       {
+        key: 'dockLigandCcd',
+        label: 'Ligand CCD Code (RCSB)',
+        kind: 'text',
+        tier: 'primary',
+        modes: ['dock'],
+        defaultValue: '',
+        placeholder: 'Auto (redock holo) or e.g. BTN, ATP, I4B, MK1',
+        description:
+          'Optional 1–5 char RCSB Chemical Component Dictionary code to fetch an ideal 3D ligand conformer and dock into the pocket. Leave blank to redock the structure’s holo ligand (or paste SDF/MOL2 in Advanced).',
+      },
+      {
+        key: 'pocketResidues',
+        label: 'Pocket Box Residues',
+        kind: 'residue-list',
+        tier: 'primary',
+        modes: ['dock'],
+        studioRole: 'hotspot',
+        defaultValue: '',
+        placeholder: 'Auto from holo ligand, or e.g. A45, A79, A90',
+        description:
+          'Receptor residues defining the docking autobox (+4 Å padding). Leave blank on holo complexes to autobox around the native ligand; required when docking into an apo structure.',
+      },
+      {
+        key: 'exhaustiveness',
+        label: 'Exhaustiveness',
+        kind: 'integer',
+        tier: 'primary',
+        modes: ['dock'],
+        defaultValue: 8,
+        min: 1,
+        max: 16,
+        step: 1,
+        description: 'Independent randomized Monte Carlo + BFGS search chains (8 = GNINA default).',
+      },
+      {
+        key: 'numModes',
+        label: 'Max Docked Poses',
+        kind: 'integer',
+        tier: 'primary',
+        modes: ['dock'],
+        defaultValue: 5,
+        min: 1,
+        max: 9,
+        step: 1,
+        description: 'Maximum distinct clustered poses returned and viewable in 3D (separated by ≥ 1.0 Å RMSD).',
+      },
+      {
         key: 'ligandCode',
         label: 'Target Ligand Code',
         kind: 'text',
         tier: 'primary',
+        modes: ['score', 'pocket-scan', 'minimize'],
         defaultValue: '',
         placeholder: 'Auto-detect (e.g. BTN, DHZ, or A:300)',
         description:
@@ -3090,9 +3146,49 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'textarea',
         tier: 'advanced',
         defaultValue: '',
-        placeholder: 'Optional V2000/V3000 SDF (single or multi-pose) or MOL2 text to score against the receptor',
+        placeholder: 'Optional V2000/V3000 SDF (single or multi-pose) or MOL2 text to dock or score against the receptor',
         description:
-          'When provided, scores these external ligand pose(s) against the connected receptor structure instead of extracting a holo HETATM ligand.',
+          'When provided, uses these external ligand pose(s) instead of extracting a holo HETATM ligand or fetching a CCD code.',
+      },
+      {
+        key: 'sortBy',
+        label: 'Rank Poses By',
+        kind: 'select',
+        tier: 'advanced',
+        modes: ['dock'],
+        defaultValue: 'cnnScore',
+        options: [
+          { value: 'cnnScore', label: 'CNNscore (pose probability · default)' },
+          { value: 'cnnVS', label: 'CNN_VS (virtual screening)' },
+          { value: 'cnnAffinity', label: 'CNNaffinity (pK)' },
+          { value: 'vina', label: 'Vina energy (kcal/mol)' },
+        ],
+        description: 'Criterion used to rank final docked poses.',
+      },
+      {
+        key: 'autoboxAdd',
+        label: 'Autobox Padding',
+        kind: 'number',
+        tier: 'advanced',
+        modes: ['dock'],
+        defaultValue: 4.0,
+        min: 2.0,
+        max: 12.0,
+        step: 0.5,
+        unit: 'Å',
+        description: 'Padding added around the reference ligand or pocket residues on each box face.',
+      },
+      {
+        key: 'seed',
+        label: 'Random Seed',
+        kind: 'integer',
+        tier: 'advanced',
+        modes: ['dock'],
+        defaultValue: 42,
+        min: 0,
+        max: 999999,
+        step: 1,
+        description: 'Deterministic PRNG seed for reproducible Monte Carlo docking trajectories.',
       },
       {
         key: 'includeMetals',
@@ -3101,7 +3197,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         tier: 'advanced',
         defaultValue: true,
         description:
-          'Retain monoatomic catalytic/structural metal ions (e.g. ZN, MG, FE, CA) in the receptor during scoring (recommended for metalloenzymes like 1CTT).',
+          'Retain monoatomic catalytic/structural metal ions (e.g. ZN, MG, FE, CA) in the receptor during docking/scoring (recommended for metalloenzymes like 1CTT).',
       },
       {
         key: 'maxPocketResidues',

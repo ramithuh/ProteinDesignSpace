@@ -896,9 +896,9 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     citation:
       'McNutt, Li, Meli, Aggarwal & Koes (2025) GNINA 1.3: the next increment in molecular docking with deep learning, Journal of Cheminformatics 17, 28.',
     limitations: [
-      'Scores existing 3D protein–ligand poses (holo PDB/mmCIF or pasted SDF/MOL2) and performs rigid-body CNN+Vina minimization; full global flexible-torsion Monte Carlo docking search is not included.',
-      'Receptor grids cover a 24 Å × 24 Å × 24 Å box (48³ voxels at 0.5 Å) centered on the ligand centroid; atoms outside the box do not enter the CNN grid.',
-      'When extracting a ligand from a PDB/mmCIF HETATM block lacking explicit bond orders, aromatic rings and carbonyls are inferred geometrically — pasting an explicit SDF/MOL2 gives exact chemistry.',
+      'Flexible-ligand docking (MC + BFGS over rigid-body + rotatable torsions with 3-model WebGPU CNN rescoring) is verified on blinded redocking benchmarks (184L 2-rotor: 0.51 Å top-1 in 1.43 s; 10GS 13-rotor: 1.86 Å top-1 in 2.72 s on GB10) with a rigid receptor (flexible receptor sidechains are not enabled).',
+      'Docking requires a 3D ligand conformer (holo ligand, RCSB CCD ideal 3D SDF code like BTN/ATP/I4B, or pasted 3D SDF/MOL2) — raw 2D SMILES strings are not converted to 3D conformers in-browser.',
+      'CNN rescoring grids cover a 24 Å × 24 Å × 24 Å box (48³ voxels at 0.5 Å) centered on the ligand centroid; atoms outside the box do not enter the CNN grid.',
       'Water/buffer HETATMs are excluded automatically while monoatomic catalytic metals (e.g. ZN, MG, FE) are kept in the receptor by default.',
     ],
   },

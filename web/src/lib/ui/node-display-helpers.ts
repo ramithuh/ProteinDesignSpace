@@ -305,6 +305,13 @@ export function formatNodeParamSummary(
       const prec = String(p.precision ?? 'fp16').toUpperCase();
       const lig = String(p.ligandCode ?? '').trim().toUpperCase();
       const ligTag = lig ? ` · ${lig}` : '';
+      if (tm === 'dock') {
+        const exh = num(p.exhaustiveness, 8);
+        const modes = num(p.numModes, 5);
+        const ccd = String(p.dockLigandCcd ?? '').trim().toUpperCase();
+        const dockLigTag = ccd ? ` · ${ccd}` : ligTag;
+        return `Dock (exh=${exh}, ${modes}p)${dockLigTag} · ${prec}`;
+      }
       if (tm === 'pocket-scan') {
         const rad = num(p.pocketRadius, 5.0);
         return `Pocket Scan (${rad} Å)${ligTag} · ${prec}`;

@@ -7,9 +7,11 @@ import { encodeGraphToHash, decodeHashToGraph } from '$lib/engine/share';
 import { getModelCardForAdapter } from '$lib/engine/model-cards';
 import {
   applyMinimizedHoloLigandCoords,
+  buildMultiPoseDockedPdb,
   computePoseHeavyRmsd,
   extractHoloReceptorAndLigands,
   findPocketResidues,
+  parsePocketResidueTokens,
 } from '$lib/protein-ops/gnina-prep';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
@@ -73,7 +75,7 @@ describe('GNINA 1.3 WebGPU integration', () => {
     expect(manifest.stage).toBe('score');
     expect(manifest.runtime).toBe('wgsl-custom');
     expect(manifest.precisionWeightsMB).toEqual({ int8: 2, fp16: 4, fp32: 7 });
-    expect(manifest.modes?.map((m) => m.id)).toEqual(['score', 'pocket-scan', 'minimize']);
+    expect(manifest.modes?.map((m) => m.id)).toEqual(['score', 'dock', 'pocket-scan', 'minimize']);
 
     const card = getModelCardForAdapter('gnina');
     expect(card?.id).toBe('gnina-webgpu');
@@ -215,5 +217,65 @@ describe('GNINA 1.3 WebGPU integration', () => {
     const colorArg = resolveUncertaintyColorArgFromValues([0, 0.45, -0.15, 0.85], 'gnina-contrib');
     expect(colorArg.color).toBe('uncertainty');
     expect(colorArg.colorParams?.domain).toEqual([0.85, -0.85]);
+  });
+
+  it('supports flexible-ligand docking pocket tokens, multi-model PDB output, apo docking guard, and dock preview', () => {
+    const prep = extractHoloReceptorAndLigands(MINI_HOLO_PDB, { includeMetals: true });
+    const pocketKeys = parsePocketResidueTokens('A10, A11-12', prep.receptorPdb);
+    expect(pocketKeys).toEqual(['A/10/HIS', 'A/11/ASP', 'A/12/ALA']);
+
+    const pose1 = prep.selectedLigand!.atoms.map((a) => ({ x: a.x, y: a.y, z: a.z, el: a.element }));
+    const pose2 = prep.selectedLigand!.atoms.map((a) => ({ x: a.x + 1.0, y: a.y, z: a.z, el: a.element }));
+    const multiPdb = buildMultiPoseDockedPdb(prep.receptorPdb, [pose1, pose2], 'DHZ', 'L');
+    expect(multiPdb).toContain('MODEL        1');
+    expect(multiPdb).toContain('MODEL        2');
+    expect(multiPdb).toContain('ENDMDL');
+    expect(multiPdb).toContain('DHZ L');
+
+    // Apo docking with CCD code requires pocketResidues
+    const apoDockNoPocket: WorkflowGraph = {
+      id: 'gnina-apo-dock-no-pocket',
+      name: 'Apo Dock Missing Pocket',
+      nodes: [
+        {
+          id: 'pdb_1',
+          adapterId: 'pdb-input',
+          label: 'Apo PDB',
+          params: { ...defaultParamsForAdapter('pdb-input'), mode: 'custom', pdbText: MINI_APO_PDB },
+        },
+        {
+          id: 'gnina_1',
+          adapterId: 'gnina',
+          label: 'GNINA 1.3',
+          params: { ...defaultParamsForAdapter('gnina'), taskMode: 'dock', dockLigandCcd: 'BTN' },
+        },
+      ],
+      edges: [{ fromNode: 'pdb_1', fromPort: 'structure', toNode: 'gnina_1', toPort: 'structure' }],
+    };
+    const missingPocketIssues = validateBioCapabilities(apoDockNoPocket);
+    expect(missingPocketIssues.some((i) => i.code === 'gnina-dock-missing-pocket' && i.severity === 'error')).toBe(true);
+
+    // Adding pocketResidues clears the apo docking error
+    const apoDockWithPocket: WorkflowGraph = {
+      ...apoDockNoPocket,
+      nodes: [
+        apoDockNoPocket.nodes[0],
+        {
+          ...apoDockNoPocket.nodes[1],
+          params: { ...apoDockNoPocket.nodes[1].params, pocketResidues: 'A10, A11' },
+        },
+      ],
+    };
+    const okIssues = validateBioCapabilities(apoDockWithPocket);
+    expect(okIssues.some((i) => i.severity === 'error')).toBe(false);
+
+    // Node Studio input preview highlights explicit pocket residues and shows CCD ligand
+    const apoStruct = makeStructArtifact(MINI_APO_PDB, 'Apo Mini');
+    const preview = compileNodeInputPreview(apoDockWithPocket, 'gnina_1', { pdb_1: { structure: apoStruct } });
+    expect(preview.availability).toBe('ready');
+    expect(preview.payload.headline).toContain('Dock');
+    expect(preview.payload.headline).toContain('BTN');
+    expect(preview.budget.designedResidues).toBe(2);
+    expect(preview.entities.includedLigands).toContain('BTN');
   });
 });

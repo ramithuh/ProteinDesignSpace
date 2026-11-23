@@ -120,7 +120,11 @@
       if (art.kind === 'StructureArtifact') {
         if (art.dockingMetrics?.rows?.[0]) {
           const r = art.dockingMetrics.rows[0];
-          return `CNN ${r.cnnScore.toFixed(2)} · pK ${r.cnnAffinity.toFixed(2)} · Vina ${r.vinaScore.toFixed(1)}`;
+          const posePrefix =
+            art.dockingMetrics.taskMode === 'dock' && art.dockingMetrics.rows.length > 1
+              ? `${art.dockingMetrics.rows.length} poses · `
+              : '';
+          return `${posePrefix}CNN ${r.cnnScore.toFixed(2)} · pK ${r.cnnAffinity.toFixed(2)} · Vina ${r.vinaScore.toFixed(1)}`;
         }
         const ligNames = art.diagnostics?.ligandNames ?? [];
         const naChains = art.diagnostics?.nucleicAcidChains ?? [];

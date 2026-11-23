@@ -2323,10 +2323,14 @@ export function validateBioCapabilities(
       }
     }
 
-    // GNINA 1.3: requires a wired all-atom structure and either a holo organic ligand or pasted SDF/MOL2
+    // GNINA 1.3: requires a wired all-atom structure and either a holo organic ligand, RCSB CCD (dock), or pasted SDF/MOL2
     if (node.adapterId === 'gnina') {
       const structEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
+      const taskMode = String(node.params.taskMode ?? 'score');
       const hasExternalLig = String(node.params.ligandSdf ?? '').trim().length > 0;
+      const dockCcd = taskMode === 'dock' ? String(node.params.dockLigandCcd ?? '').trim().toUpperCase() : '';
+      const hasDockCcd = dockCcd.length > 0;
+      const hasPocketSpec = String(node.params.pocketResidues ?? '').trim().length > 0;
       const requestedCode = String(node.params.ligandCode ?? '').trim().toUpperCase();
       if (!structEdge) {
         issues.push({
@@ -2335,7 +2339,7 @@ export function validateBioCapabilities(
           nodeId: node.id,
           message: `${node.label ?? 'GNINA 1.3'} requires a wired "structure" input (holo protein–ligand complex or receptor).`,
         });
-      } else if (!hasExternalLig) {
+      } else {
         const src = graph.nodes.find((n) => n.id === structEdge.fromNode);
         if (src) {
           const liveStruct = outputsByNode?.[src.id]?.[structEdge.fromPort] as StructureArtifact | undefined;
@@ -2366,12 +2370,24 @@ export function validateBioCapabilities(
           }
           if (knownApo && ligandNames !== null) {
             const organic = ligandNames.filter((c) => classifyHetatmCompId(c) === 'organic-ligand');
-            if (organic.length === 0) {
+            if (hasExternalLig || hasDockCcd) {
+              if (taskMode === 'dock' && organic.length === 0 && !hasPocketSpec) {
+                issues.push({
+                  severity: 'error',
+                  code: 'gnina-dock-missing-pocket',
+                  nodeId: node.id,
+                  message: `${node.label ?? 'GNINA 1.3'} is docking ${hasDockCcd ? `CCD "${dockCcd}"` : 'an external ligand'} into apo structure "${src.label ?? src.id}" with no autobox ligand. Specify Pocket Box Residues (e.g. A45, A79, A90) or wire a holo complex.`,
+                });
+              }
+            } else if (organic.length === 0) {
               issues.push({
                 severity: 'error',
                 code: 'gnina-no-organic-ligand',
                 nodeId: node.id,
-                message: `${node.label ?? 'GNINA 1.3'} found no organic small-molecule ligand in "${src.label ?? src.id}"${ligandNames.length > 0 ? ` (only ${ligandNames.join(', ')})` : ''}. Wire a holo protein–ligand complex (e.g. 1STP, 1CTT, 184L) or paste a ligand SDF/MOL2 in Advanced parameters.`,
+                message:
+                  taskMode === 'dock'
+                    ? `${node.label ?? 'GNINA 1.3'} found no organic ligand in "${src.label ?? src.id}"${ligandNames.length > 0 ? ` (only ${ligandNames.join(', ')})` : ''}. Enter a Ligand CCD Code (e.g. BTN, ATP, I4B) + Pocket Box Residues, paste a ligand SDF/MOL2, or wire a holo complex.`
+                    : `${node.label ?? 'GNINA 1.3'} found no organic small-molecule ligand in "${src.label ?? src.id}"${ligandNames.length > 0 ? ` (only ${ligandNames.join(', ')})` : ''}. Wire a holo protein–ligand complex (e.g. 1STP, 1CTT, 184L) or paste a ligand SDF/MOL2 in Advanced parameters.`,
               });
             } else if (
               requestedCode &&

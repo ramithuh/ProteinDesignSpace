@@ -9,10 +9,12 @@ import { paintStructureBfactors } from '$lib/protein-ops/bfactor-paint';
 import {
   appendExternalLigandToReceptorPdb,
   applyMinimizedHoloLigandCoords,
+  buildMultiPoseDockedPdb,
   computePoseHeavyRmsd,
   detectExternalLigandFormat,
   extractHoloReceptorAndLigands,
   findPocketResidues,
+  parsePocketResidueTokens,
 } from '$lib/protein-ops/gnina-prep';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type {
@@ -27,7 +29,7 @@ declare const self: DedicatedWorkerGlobalScope;
 const DEFAULT_BASE_URL = 'https://huggingface.co/ramithuh/gnina-webgpu/resolve/main/default';
 
 type Precision = 'int8' | 'fp16' | 'fp32';
-type TaskMode = 'score' | 'pocket-scan' | 'minimize';
+type TaskMode = 'score' | 'pocket-scan' | 'minimize' | 'dock';
 
 function fnv1a(str: string): string {
   let h = 0x811c9dc5;
@@ -61,8 +63,25 @@ function normalizePrecision(raw: unknown): Precision {
 
 function normalizeTaskMode(raw: unknown): TaskMode {
   const val = String(raw ?? 'score').trim().toLowerCase();
-  if (val === 'pocket-scan' || val === 'minimize') return val;
+  if (val === 'pocket-scan' || val === 'minimize' || val === 'dock') return val;
   return 'score';
+}
+
+async function fetchRcsbCcdIdealSdf(ccdRaw: string, signal?: AbortSignal): Promise<string> {
+  const ccd = ccdRaw.trim().toUpperCase();
+  if (!/^[A-Z0-9]{1,5}$/.test(ccd)) {
+    throw new Error(`Invalid RCSB CCD ligand code "${ccdRaw}" (expected 1–5 alphanumeric characters, e.g. BTN, ATP, I4B).`);
+  }
+  const url = `https://files.rcsb.org/ligands/download/${encodeURIComponent(ccd)}_ideal.sdf`;
+  const resp = await fetch(url, { signal });
+  if (!resp.ok) {
+    throw new Error(`Could not fetch ideal 3D SDF for CCD "${ccd}" from RCSB (HTTP ${resp.status}).`);
+  }
+  const text = await resp.text();
+  if (!text.includes('V2000') && !text.includes('V3000')) {
+    throw new Error(`RCSB response for CCD "${ccd}" was not a valid SDF conformer.`);
+  }
+  return text;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -266,6 +285,16 @@ self.onmessage = async (ev: MessageEvent) => {
       const taskMode = normalizeTaskMode(p.taskMode);
       const ligandCode = String(p.ligandCode ?? '').trim();
       const ligandSdf = String(p.ligandSdf ?? '').trim();
+      const dockLigandCcd = String(p.dockLigandCcd ?? '').trim().toUpperCase();
+      const pocketResiduesSpec = String(p.pocketResidues ?? '').trim();
+      const autoboxAdd = Math.max(2.0, Math.min(12.0, Number(p.autoboxAdd ?? 4.0)));
+      const exhaustiveness = Math.max(1, Math.min(16, Math.round(Number(p.exhaustiveness ?? 8))));
+      const numModes = Math.max(1, Math.min(9, Math.round(Number(p.numModes ?? 5))));
+      const sortByRaw = String(p.sortBy ?? 'cnnScore').trim();
+      const sortBy = (['cnnScore', 'cnnVS', 'cnnAffinity', 'vina'].includes(sortByRaw)
+        ? sortByRaw
+        : 'cnnScore') as 'cnnScore' | 'cnnVS' | 'cnnAffinity' | 'vina';
+      const seed = Math.max(0, Math.min(999999, Math.round(Number(p.seed ?? 42))));
       const includeMetals = p.includeMetals !== false;
       const pocketRadius = Math.max(3.0, Math.min(8.0, Number(p.pocketRadius ?? 5.0)));
       const maxPocketResidues = Math.max(4, Math.min(48, Math.round(Number(p.maxPocketResidues ?? 24))));
@@ -292,27 +321,45 @@ self.onmessage = async (ev: MessageEvent) => {
         throw new Error(`GNINA 1.3 found no protein receptor atoms in "${struct.label}".`);
       }
 
+      const controller = new AbortController();
+      activeAbort = controller;
+
       const useExternal = ligandSdf.length > 0;
-      if (!useExternal && !prep.selectedLigandSdf) {
+      const useRcsbCcd = taskMode === 'dock' && !useExternal && dockLigandCcd.length > 0;
+      let rcsbCcdSdf: string | null = null;
+      if (useRcsbCcd) {
+        self.postMessage({
+          id: msg.id,
+          type: 'progress',
+          phase: 'init',
+          progress: 0.04,
+          detail: `Fetching 3D ideal SDF for CCD "${dockLigandCcd}" from RCSB...`,
+        });
+        rcsbCcdSdf = await fetchRcsbCcdIdealSdf(dockLigandCcd, controller.signal);
+      }
+
+      if (!useExternal && !useRcsbCcd && !prep.selectedLigandSdf) {
         if (ligandCode && prep.detectedLigandCodes.length > 0) {
           throw new Error(
             `Ligand "${ligandCode}" not found in "${struct.label}". Detected organic ligands: ${prep.detectedLigandCodes.join(', ')}.`,
           );
         }
         throw new Error(
-          `No organic small-molecule ligand found in "${struct.label}". Wire a holo protein–ligand structure (e.g. 1STP, 1CTT, 184L) or paste a ligand SDF/MOL2 in Advanced parameters.`,
+          taskMode === 'dock'
+            ? `No ligand specified for docking into "${struct.label}". Provide a CCD code (e.g. BTN, ATP, I4B), paste a ligand SDF/MOL2, or connect a holo complex.`
+            : `No organic small-molecule ligand found in "${struct.label}". Wire a holo protein–ligand structure (e.g. 1STP, 1CTT, 184L) or paste a ligand SDF/MOL2 in Advanced parameters.`,
         );
       }
 
       const activeEngine = await ensureEngine(msg.id, precision);
-      const controller = new AbortController();
-      activeAbort = controller;
 
       const typedReceptor = gninaMod.parseReceptor(prep.receptorPdb, 'pdb');
       const externalFmt = useExternal ? detectExternalLigandFormat(ligandSdf) : 'sdf';
       const typedPoses = useExternal
         ? gninaMod.parseLigands(ligandSdf, externalFmt)
-        : gninaMod.parseLigands(prep.selectedLigandSdf!, 'sdf');
+        : useRcsbCcd
+          ? gninaMod.parseLigands(rcsbCcdSdf!, 'sdf')
+          : gninaMod.parseLigands(prep.selectedLigandSdf!, 'sdf');
 
       if (!typedPoses || typedPoses.length === 0) {
         throw new Error('No valid ligand poses could be parsed for GNINA 1.3.');
@@ -322,14 +369,20 @@ self.onmessage = async (ev: MessageEvent) => {
         ? externalFmt === 'mol2'
           ? 'External MOL2'
           : 'External SDF'
-        : prep.selectedLigand!.compId;
+        : useRcsbCcd
+          ? dockLigandCcd
+          : prep.selectedLigand!.compId;
 
       const rows: GninaPoseScoreRow[] = [];
       let outputPdbText = prep.normalizedPdb;
       let outputCifText: string | undefined = struct.cifText;
+      let outputTrajectoryPdb: string | undefined;
+      let outputTrajectoryCount: number | undefined;
       let outputBfactorSemantics = struct.bfactorSemantics;
       let trackArtifact: ResidueTrackArtifact | undefined;
       let pocketResiduesScanned: number | undefined;
+      let dockBox: DockingScoreSummary['box'] | undefined;
+      let dockStats: DockingScoreSummary['dockStats'] | undefined;
 
       try {
         if (taskMode === 'score') {
@@ -432,6 +485,141 @@ self.onmessage = async (ev: MessageEvent) => {
           } else {
             outputPdbText = appendExternalLigandToReceptorPdb(prep.receptorPdb, minRes.pose.atoms);
             outputCifText = undefined;
+          }
+        } else if (taskMode === 'dock') {
+          const dockLigand = typedPoses[0];
+          const explicitPocketKeys = pocketResiduesSpec
+            ? parsePocketResidueTokens(pocketResiduesSpec, prep.receptorPdb)
+            : [];
+          if (pocketResiduesSpec && explicitPocketKeys.length === 0) {
+            throw new Error(
+              `Pocket residues "${pocketResiduesSpec}" did not match any residues in "${struct.label}". Use format like "A45, A79, A90".`,
+            );
+          }
+          const autoboxLig =
+            explicitPocketKeys.length === 0 && prep.selectedLigandSdf
+              ? gninaMod.parseLigands(prep.selectedLigandSdf, 'sdf')[0]
+              : undefined;
+          if (explicitPocketKeys.length === 0 && !autoboxLig) {
+            throw new Error(
+              `Docking into apo receptor "${struct.label}" requires Pocket Residues (e.g. "A45, A79, A90") to define the binding box.`,
+            );
+          }
+
+          self.postMessage({
+            id: msg.id,
+            type: 'progress',
+            phase: 'dock',
+            progress: 0.48,
+            detail: `Building Vina pocket grid & docking ${selectedLigandName} (exhaustiveness=${exhaustiveness})...`,
+          });
+
+          const dockRes = await activeEngine.dockPose(typedReceptor, dockLigand, {
+            ...(explicitPocketKeys.length > 0
+              ? { pocketResidues: explicitPocketKeys }
+              : { autoboxLigand: autoboxLig }),
+            autoboxAdd,
+            seed,
+            exhaustiveness,
+            numModes,
+            minRmsd: 1.0,
+            cnnScoring: 'rescore',
+            sortBy,
+            workers: 1,
+            signal: controller.signal,
+            onProgress: (ev: { phase: string; completed: number; total: number }) => {
+              const frac = ev.total > 0 ? ev.completed / ev.total : 0;
+              if (ev.phase === 'grid') {
+                self.postMessage({
+                  id: msg.id,
+                  type: 'progress',
+                  phase: 'dock',
+                  progress: 0.48 + frac * 0.1,
+                  detail: `Building Vina affinity grids (${ev.completed}/${ev.total})...`,
+                });
+              } else if (ev.phase === 'search') {
+                self.postMessage({
+                  id: msg.id,
+                  type: 'progress',
+                  phase: 'dock',
+                  progress: 0.58 + frac * 0.22,
+                  detail: `MC + BFGS flexible search (${ev.completed}/${ev.total} chains)...`,
+                });
+              } else if (ev.phase === 'rescore') {
+                self.postMessage({
+                  id: msg.id,
+                  type: 'progress',
+                  phase: 'score',
+                  progress: 0.8 + frac * 0.18,
+                  detail: `GNINA 1.3 CNN rescoring (${ev.completed}/${ev.total} poses)...`,
+                });
+              }
+            },
+          });
+
+          if (!dockRes.poses || dockRes.poses.length === 0) {
+            throw new Error(`GNINA 1.3 docking produced 0 valid poses for ${selectedLigandName}.`);
+          }
+
+          dockBox = {
+            center: [
+              Number(dockRes.box.center[0]),
+              Number(dockRes.box.center[1]),
+              Number(dockRes.box.center[2]),
+            ],
+            size: [
+              Number(dockRes.box.size[0]),
+              Number(dockRes.box.size[1]),
+              Number(dockRes.box.size[2]),
+            ],
+          };
+          dockStats = {
+            gridMs: Number(dockRes.stats.gridMs),
+            searchMs: Number(dockRes.stats.searchMs),
+            rescoreMs: Number(dockRes.stats.rescoreMs),
+            evaluatedCandidates: Number(dockRes.stats.evaluatedCandidates),
+            rotors: Number(dockRes.stats.rotors),
+          };
+
+          const ligSource: GninaPoseScoreRow['ligandSource'] = useExternal
+            ? externalFmt === 'mol2'
+              ? 'external-mol2'
+              : 'external-sdf'
+            : useRcsbCcd
+              ? 'rcsb-ccd'
+              : 'holo-hetatm';
+
+          for (const dp of dockRes.poses) {
+            rows.push({
+              poseId: `${selectedLigandName} #${dp.rank}`,
+              rank: Number(dp.rank),
+              ligandCode: selectedLigandName,
+              ligandSource: ligSource,
+              heavyAtoms: dp.pose.atoms.length,
+              rotors: dp.pose.rotors ?? dockStats.rotors,
+              cnnScore: Number(dp.cnnScore),
+              cnnAffinity: Number(dp.cnnAffinity),
+              cnnVS: Number(dp.cnnVS),
+              vinaScore: Number(dp.vinaScore),
+              rmsdToBest: Number(dp.rmsdToBest ?? 0),
+              models: formatPerModel(dp.models),
+              vinaTerms: formatVinaTerms(dp.contributions, dp.pose.rotors ?? dockStats.rotors),
+            });
+          }
+
+          const topPose = dockRes.poses[0].pose;
+          const resCode3 = (useRcsbCcd ? dockLigandCcd : !useExternal && prep.selectedLigand ? prep.selectedLigand.compId : 'LIG').slice(0, 3);
+          outputPdbText = appendExternalLigandToReceptorPdb(prep.receptorPdb, topPose.atoms, resCode3, 'L');
+          outputCifText = undefined;
+          if (dockRes.poses.length > 1) {
+            outputTrajectoryPdb = buildMultiPoseDockedPdb(
+              prep.receptorPdb,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              dockRes.poses.map((dp: any) => dp.pose.atoms),
+              resCode3,
+              'L',
+            );
+            outputTrajectoryCount = dockRes.poses.length;
           }
         } else {
           // pocket-scan: baseline score + per-residue CNN ablation over pocket residues within pocketRadius Å
@@ -588,6 +776,8 @@ self.onmessage = async (ev: MessageEvent) => {
         detectedLigands: prep.detectedLigandCodes,
         selectedLigand: selectedLigandName,
         ...(pocketResiduesScanned !== undefined ? { pocketResiduesScanned, pocketRadius } : {}),
+        ...(dockBox ? { box: dockBox } : {}),
+        ...(dockStats ? { dockStats } : {}),
         rows,
       };
 
@@ -599,6 +789,7 @@ self.onmessage = async (ev: MessageEvent) => {
           selectedLigandName,
           minimizeIterations: taskMode === 'minimize' ? minimizeIterations : 0,
           pocketRadius: taskMode === 'pocket-scan' ? pocketRadius : 0,
+          dockKey: taskMode === 'dock' ? `${pocketResiduesSpec}|${exhaustiveness}|${numModes}|${sortBy}|${seed}|${autoboxAdd}` : '',
         }),
       );
 
@@ -609,11 +800,13 @@ self.onmessage = async (ev: MessageEvent) => {
         : undefined;
 
       const modeTag =
-        taskMode === 'minimize'
-          ? 'min'
-          : taskMode === 'pocket-scan'
-            ? 'pocket'
-            : 'score';
+        taskMode === 'dock'
+          ? 'dock'
+          : taskMode === 'minimize'
+            ? 'min'
+            : taskMode === 'pocket-scan'
+              ? 'pocket'
+              : 'score';
 
       const outStructure: StructureArtifact = {
         ...struct,
@@ -626,6 +819,9 @@ self.onmessage = async (ev: MessageEvent) => {
         ...(obsCopy ? { observedBackboneMask: obsCopy } : {}),
         pdbText: outputPdbText,
         ...(outputCifText !== undefined ? { cifText: outputCifText } : { cifText: undefined }),
+        ...(outputTrajectoryPdb
+          ? { trajectoryPdb: outputTrajectoryPdb, trajectoryFrameCount: outputTrajectoryCount }
+          : {}),
         bfactorSemantics: outputBfactorSemantics,
         dockingMetrics,
         provenance: {
