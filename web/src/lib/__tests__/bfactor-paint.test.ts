@@ -5,6 +5,7 @@ import {
   formatMutationMatrixCsv,
   formatResidueTrackCsv,
   paintStructureBfactors,
+  rankMutations,
   rankTopMutations,
 } from '$lib/protein-ops/bfactor-paint';
 
@@ -260,6 +261,40 @@ describe('rankTopMutations', () => {
   it('prefixes chain IDs on multi-chain matrices and preserves insertion codes', () => {
     expect(formatMutationLabel('G', 'H100A', 'D', true)).toBe('H:G100AD');
     expect(formatMutationLabel('A', 'A42', 'G', false)).toBe('A42G');
+  });
+
+  it('rankMutations supports worst-first sorting and residue/mutant filtering with global rank preservation', () => {
+    const matrix: MutationMatrixArtifact = {
+      kind: 'MutationMatrix',
+      id: 'esmc-test',
+      sourceModelId: 'esmc',
+      metric: 'llr',
+      unit: 'LLR',
+      direction: 'higher-is-better',
+      residues: 'GQA',
+      residueIds: ['A12', 'A61', 'A28'],
+      alphabet: 'ACDV',
+      // G12: A=-10, C=-12, D=-8, V=-9; Q61: A=-7, C=-11, D=-6, V=-5; A28: A=0(WT), C=-1, D=+2, V=+1
+      values: new Float32Array([-10, -12, -8, -9, -7, -11, -6, -5, 0, -1, 2, 1]),
+      meanPerPosition: new Float32Array([-9.75, -7.25, 0.67]),
+    };
+
+    const worstAll = rankMutations(matrix, { sort: 'worst', limit: 3 });
+    expect(worstAll.totalAll).toBe(11);
+    expect(worstAll.items.map((m) => m.label)).toEqual(['G12C', 'Q61C', 'G12A']);
+    expect(worstAll.items.map((m) => m.rank)).toEqual([1, 2, 3]);
+
+    const filteredHotspots = rankMutations(matrix, { sort: 'worst', query: 'G12, Q61', limit: 20 });
+    expect(filteredHotspots.totalMatched).toBe(8);
+    expect(filteredHotspots.items[0].label).toBe('G12C');
+    expect(filteredHotspots.items[0].score).toBe(-12);
+
+    const bestFiltered = rankMutations(matrix, { sort: 'best', query: 'A28', limit: 10 });
+    expect(bestFiltered.items.map((m) => `${m.rank}:${m.label}`)).toEqual([
+      '1:A28D',
+      '2:A28V',
+      '3:A28C',
+    ]);
   });
 });
 

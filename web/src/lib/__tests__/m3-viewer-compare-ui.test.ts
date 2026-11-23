@@ -717,7 +717,7 @@ describe('M3 §2.5b, §2.5c, §2.5e & Svelte UI wiring', () => {
     expect(pageSrc).toContain('onSelectResidue={handleSelectPerResidue}');
 
     const peekSrc = readWebFile('src/lib/ui/ArtifactPeekPanel.svelte');
-    expect(peekSrc).toContain('<MutationHeatmap matrix={mutArt} {onDownloadText} {onSelectResidue} />');
+    expect(peekSrc).toContain('<MutationHeatmap matrix={mutArt} {onDownloadText} {onSelectResidue}');
     expect(peekSrc).toContain('<ResidueTrackPlot track={trackArt} {onDownloadText} {onSelectResidue} />');
 
     const viewerSrc = readWebFile('src/lib/viewer/MolSuperposeViewer.svelte');

@@ -152,6 +152,15 @@
       return Boolean(outs && Object.keys(outs).length > 0);
     });
   });
+  let activePaperMutationHighlight = $derived.by(() => {
+    if (!activePaperInsight || !showPaperWalkthrough || !hasActivePaperOutputs) return null;
+    const step = activePaperInsight.walkthrough[paperWalkthroughIdx];
+    if (!step?.mutationHighlight || !step.nodeId || step.nodeId !== selectedNodeId) return null;
+    return {
+      key: `${activePaperInsight.id}:${paperWalkthroughIdx}:${step.nodeId}`,
+      ...step.mutationHighlight,
+    };
+  });
   let onboardingInteractive = $state(false);
   let canvasFitViewTrigger = $state(0);
   let showSeqParentBackbone = $state(false);
@@ -3940,6 +3949,7 @@
                 {plddtThreshold}
                 {ipaeThreshold}
                 {motifRmsdThreshold}
+                mutationHighlight={activePaperMutationHighlight}
                 {ipsaeThreshold}
                 {isRunning}
                 hasScorerResult={Boolean(latestScorerHit && latestScorerHit.nodeId !== selectedNode?.id)}
@@ -4104,6 +4114,7 @@
               {plddtThreshold}
               {ipaeThreshold}
               {motifRmsdThreshold}
+              mutationHighlight={activePaperMutationHighlight}
               {ipsaeThreshold}
               {isRunning}
               hasScorerResult={Boolean(latestScorerHit && latestScorerHit.nodeId !== selectedNode?.id)}

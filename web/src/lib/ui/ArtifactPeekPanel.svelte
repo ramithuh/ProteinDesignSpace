@@ -45,7 +45,7 @@
     StructureArtifact,
     WorkflowNode,
   } from '$lib/engine/types';
-  import MutationHeatmap from '$lib/viewer/MutationHeatmap.svelte';
+  import MutationHeatmap, { type HeatmapHighlightSpec } from '$lib/viewer/MutationHeatmap.svelte';
   import PaePlot from '$lib/viewer/PaePlot.svelte';
   import ResidueTrackPlot from '$lib/viewer/ResidueTrackPlot.svelte';
 
@@ -73,6 +73,7 @@
     onJumpToScorer?: () => void;
     onDownloadText: (text: string, filename: string) => void;
     onSelectResidue?: (positionIndex: number, residueId: string) => void;
+    mutationHighlight?: HeatmapHighlightSpec | null;
   }
 
   let {
@@ -99,6 +100,7 @@
     onJumpToScorer = undefined,
     onDownloadText,
     onSelectResidue = undefined,
+    mutationHighlight = null,
   }: Props = $props();
 
   let copiedKey = $state<string | null>(null);
@@ -2000,7 +2002,7 @@
         {/if}
       </div>
     {/if}
-    <MutationHeatmap matrix={mutArt} {onDownloadText} {onSelectResidue} />
+    <MutationHeatmap matrix={mutArt} {onDownloadText} {onSelectResidue} highlightSpec={mutationHighlight} />
   {:else if trackArt}
     <div class="meta-bar">
       <span>

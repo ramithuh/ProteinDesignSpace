@@ -1,6 +1,13 @@
 export type PaperWalkthroughPhase = 'setup' | 'run' | 'result';
 export type PaperSpotlightTarget = 'canvas' | 'run' | 'viewer' | 'inspector';
 
+export interface PaperMutationHighlight {
+  residues: string[];
+  sort?: 'best' | 'worst';
+  query?: string;
+  limit?: number;
+}
+
 export interface PaperWalkthroughStep {
   phase: PaperWalkthroughPhase;
   spotlightTarget: PaperSpotlightTarget;
@@ -11,6 +18,7 @@ export interface PaperWalkthroughStep {
   tab?: 'peek' | 'params';
   outputPort?: string;
   focusResidue?: string;
+  mutationHighlight?: PaperMutationHighlight;
 }
 
 export interface PaperInsightExample {
@@ -98,16 +106,28 @@ export const PAPER_INSIGHT_EXAMPLES: PaperInsightExample[] = [
         tab: 'peek',
         outputPort: 'mutations',
         focusResidue: 'A12',
+        mutationHighlight: {
+          residues: ['A7', 'A19', 'A82', 'A12', 'A61'],
+          sort: 'worst',
+          query: 'V7, L19, F82, G12, Q61',
+          limit: 20,
+        },
       },
       {
         phase: 'result',
         spotlightTarget: 'inspector',
         title: 'Evolution: G12 and Q61 are strongly forbidden',
-        body: 'In ESM-C\'s mutational heatmap, those exact G12 and Q61 hotspots show deep evolutionary intolerance (LLR −8 to −13): they preserve fold stability while breaking GTPase turn-off.',
+        body: 'In ESM-C\'s mutational heatmap and filtered table here, those exact G12 and Q61 hotspots show deep evolutionary intolerance (LLR −8 to −13): they preserve fold stability while breaking GTPase turn-off.',
         nodeId: 'esmc',
         tab: 'peek',
         outputPort: 'mutations',
         focusResidue: 'A12',
+        mutationHighlight: {
+          residues: ['A12', 'A61'],
+          sort: 'worst',
+          query: 'G12, Q61',
+          limit: 20,
+        },
       },
       {
         phase: 'result',
@@ -148,21 +168,33 @@ export const PAPER_INSIGHT_EXAMPLES: PaperInsightExample[] = [
         phase: 'result',
         spotlightTarget: 'inspector',
         title: 'Top substitutions rediscover yeast ubiquitin',
-        body: 'Look at the top-ranked mutations in the ESM-C table here: without any MSA, ESM-C places natural human-to-yeast substitutions (P19S #1, E24D #5, A28S #18) at the very top of 1,444 mutants.',
+        body: 'Look at the highlighted rows in the ESM-C table here: without any MSA, ESM-C places all three natural human-to-yeast substitutions (P19S #1, E24D #5, A28S #18) at the very top of 1,444 mutants.',
         nodeId: 'esmc',
         tab: 'peek',
         outputPort: 'mutations',
         focusResidue: 'A19',
+        mutationHighlight: {
+          residues: ['A19', 'A24', 'A28'],
+          sort: 'best',
+          query: '',
+          limit: 20,
+        },
       },
       {
         phase: 'result',
         spotlightTarget: 'inspector',
         title: 'Essential recognition & linkage patch (I44 / K48)',
-        body: 'Inspect positions I44, K48, and L73 in the L×20 heatmap — Roscoe et al.\'s indispensable ubiquitin recognition and poly-ubiquitin linkage sites are deeply intolerant across nearly every substitution.',
+        body: 'Inspect the highlighted I44, K48, and L73 columns and table below — Roscoe et al.\'s indispensable ubiquitin recognition and poly-ubiquitin linkage sites are deeply intolerant across nearly every substitution.',
         nodeId: 'esmc',
         tab: 'peek',
         outputPort: 'mutations',
         focusResidue: 'A44',
+        mutationHighlight: {
+          residues: ['A44', 'A48', 'A73'],
+          sort: 'worst',
+          query: 'I44, K48, L73',
+          limit: 20,
+        },
       },
       {
         phase: 'result',

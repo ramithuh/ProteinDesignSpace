@@ -4,7 +4,7 @@
     formatMutationLabel,
     formatMutationMatrixCsv,
     hasMultipleResidueChains,
-    rankTopMutations,
+    rankMutations,
   } from '$lib/protein-ops/bfactor-paint';
 
   // Precomputed 256-entry diverging color LUT:
@@ -41,11 +41,20 @@
     return lut;
   })();
 
+  export interface HeatmapHighlightSpec {
+    key: string;
+    residues: string[];
+    sort?: 'best' | 'worst';
+    query?: string;
+    limit?: number;
+  }
+
   interface Props {
     matrix: MutationMatrixArtifact;
     onDownloadText?: (text: string, filename: string) => void;
     onSelectResidue?: (positionIndex: number, residueId: string) => void;
     topLimit?: number;
+    highlightSpec?: HeatmapHighlightSpec | null;
   }
 
   let {
@@ -53,11 +62,43 @@
     onDownloadText = undefined,
     onSelectResidue = undefined,
     topLimit = 10,
+    highlightSpec = null,
   }: Props = $props();
 
   let canvas: HTMLCanvasElement | null = $state(null);
   let scrollEl: HTMLDivElement | null = $state(null);
   let cachedRect: DOMRect | null = null;
+
+  let sortMode = $state<'best' | 'worst'>('best');
+  let filterQuery = $state('');
+  let rowLimit = $state<number>(10);
+  let lastAppliedSpecKey = $state<string | null>(null);
+  let lastMatrixId = $state<string>('');
+
+  $effect(() => {
+    if (matrix.id !== lastMatrixId) {
+      lastMatrixId = matrix.id;
+      if (!highlightSpec) {
+        sortMode = 'best';
+        filterQuery = '';
+        rowLimit = topLimit;
+      }
+      lastAppliedSpecKey = null;
+    }
+  });
+
+  $effect(() => {
+    const spec = highlightSpec;
+    if (!spec) {
+      lastAppliedSpecKey = null;
+      return;
+    }
+    if (spec.key === lastAppliedSpecKey) return;
+    lastAppliedSpecKey = spec.key;
+    sortMode = spec.sort ?? 'best';
+    filterQuery = spec.query ?? '';
+    rowLimit = spec.limit ?? topLimit;
+  });
 
   let hoverCell = $state<{
     col: number;
@@ -110,7 +151,44 @@
     return Math.max(1.0, p98);
   });
 
-  let topMutations = $derived(rankTopMutations(matrix, topLimit));
+  let rankedResult = $derived(
+    rankMutations(matrix, {
+      sort: sortMode,
+      query: filterQuery,
+      limit: rowLimit,
+    }),
+  );
+  let topMutations = $derived(rankedResult.items);
+
+  let highlightedCols = $derived.by((): Array<{ col: number; label: string }> => {
+    const raw = highlightSpec?.residues;
+    if (!raw || raw.length === 0 || L === 0) return [];
+    const want = new Set(raw.map((r) => r.trim().toUpperCase()).filter(Boolean));
+    const hits: Array<{ col: number; label: string }> = [];
+    for (let i = 0; i < L; i++) {
+      const resId = (residueIds[i] ?? `A${i + 1}`).toUpperCase();
+      const numMatch = /(\d+[A-Z]?)$/.exec(resId);
+      const numPart = numMatch ? numMatch[1] : String(i + 1);
+      const wt = residues[i] ?? '';
+      const wtNum = `${wt}${numPart}`;
+      if (want.has(resId) || want.has(wtNum) || want.has(numPart)) {
+        hits.push({ col: i, label: wtNum || resId });
+      }
+    }
+    return hits;
+  });
+  let highlightedColSet = $derived(new Set(highlightedCols.map((h) => h.col)));
+
+  // Auto-scroll heatmap horizontally so the first highlighted walkthrough residue is visible
+  $effect(() => {
+    const specKey = highlightSpec?.key;
+    const cols = highlightedCols;
+    const sc = scrollEl;
+    if (!specKey || !sc || cols.length === 0) return;
+    const firstX = cols[0].col * cellW;
+    const targetScroll = Math.max(0, firstX - Math.max(40, sc.clientWidth * 0.25));
+    sc.scrollTo({ left: targetScroll, behavior: 'smooth' });
+  });
 
   let summaryStats = $derived.by(() => {
     let finite = 0;
@@ -385,6 +463,15 @@
               cachedRect = null;
             }}
           ></canvas>
+          {#each highlightedCols as pin (pin.col)}
+            <div
+              class="mh-col-pin"
+              style="left: {pin.col * cellW}px; top: {axisTopH}px; width: {cellW}px; height: {K * cellH}px"
+              aria-hidden="true"
+            >
+              <span class="mh-col-pin-lbl">{pin.label}</span>
+            </div>
+          {/each}
           {#if hoverCell}
             <div
               class="mh-highlight"
@@ -415,49 +502,130 @@
     <div class="mh-empty">No L×20 mutation matrix values available</div>
   {/if}
 
-  {#if topMutations.length > 0}
+  {#if rankedResult.totalAll > 0}
     <div class="mh-top-box">
       <div class="mh-top-head">
+        <div class="mh-mode-seg" role="tablist" aria-label="Sort mutants">
+          <button
+            type="button"
+            role="tab"
+            class="mh-seg-btn"
+            class:active={sortMode === 'best'}
+            aria-selected={sortMode === 'best'}
+            onclick={() => (sortMode = 'best')}
+          >
+            {lowerBetter ? 'Stabilizing' : 'Beneficial'}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            class="mh-seg-btn"
+            class:active={sortMode === 'worst'}
+            aria-selected={sortMode === 'worst'}
+            onclick={() => (sortMode = 'worst')}
+          >
+            {lowerBetter ? 'Destabilizing' : 'Deleterious'}
+          </button>
+        </div>
+
+        <div class="mh-filter-wrap">
+          <input
+            type="text"
+            class="mh-filter-input"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="Filter (e.g. G12, Q61, P19S)"
+            aria-label="Filter mutations by residue or mutant name"
+            bind:value={filterQuery}
+          />
+          {#if filterQuery.trim().length > 0}
+            <button
+              type="button"
+              class="mh-filter-clear"
+              aria-label="Clear mutation filter"
+              onclick={() => (filterQuery = '')}
+            >
+              ×
+            </button>
+          {/if}
+        </div>
+
+        <div class="mh-limit-seg" role="group" aria-label="Rows shown">
+          {#each [10, 20, 50] as lim (lim)}
+            <button
+              type="button"
+              class="mh-lim-btn"
+              class:active={rowLimit === lim}
+              onclick={() => (rowLimit = lim)}
+            >
+              {lim}
+            </button>
+          {/each}
+        </div>
+      </div>
+
+      <div class="mh-top-meta">
         <span>
-          Top {topMutations.length} {lowerBetter ? 'Stabilizing / Beneficial' : 'Beneficial'} Mutants
+          Showing {topMutations.length} of {rankedResult.totalMatched}{filterQuery.trim() ? ` matching "${filterQuery.trim()}"` : ''} ({rankedResult.totalAll} total)
         </span>
-        <span class="mh-top-sub">Click Copy to grab full mutant sequence</span>
+        <span class="mh-top-sub">Click row to focus 3D</span>
       </div>
-      <div class="mh-table-scroll">
-        <table class="mh-table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Mutant</th>
-              <th>Residue</th>
-              <th>{matrix.metric === 'ddg-kcal-mol' ? 'ΔΔG' : 'Score'}</th>
-              <th>Sequence</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each topMutations as m (`${m.rank}_${m.label}`)}
+
+      {#if topMutations.length > 0}
+        <div class="mh-table-scroll">
+          <table class="mh-table">
+            <thead>
               <tr>
-                <td class="num">{m.rank}</td>
-                <td><code>{m.label}</code></td>
-                <td class="muted">{m.residueId} ({m.wildType}→{m.mutant})</td>
-                <td class="num" class:good-val={isFavorableScore(m.score)}>
-                  {formatSignedScore(m.score)}
-                </td>
-                <td>
-                  <button
-                    type="button"
-                    class="mh-copy-btn"
-                    onclick={() => copyMutantSeq(m.mutantSequence, m.rank)}
-                    title={`Copy full ${m.mutantSequence.length}-aa sequence with ${m.label}`}
-                  >
-                    {copiedRank === m.rank ? '✓ Copied' : 'Copy seq'}
-                  </button>
-                </td>
+                <th title={sortMode === 'best' ? 'Rank from most favorable' : 'Rank from most unfavorable'}>#</th>
+                <th>Mutant</th>
+                <th>Residue</th>
+                <th>{matrix.metric === 'ddg-kcal-mol' ? 'ΔΔG' : 'Score'}</th>
+                <th>Sequence</th>
               </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {#each topMutations as m (`${sortMode}_${m.rank}_${m.label}`)}
+                {@const isPinned = highlightedColSet.has(m.positionIndex)}
+                {@const isGood = isFavorableScore(m.score)}
+                {@const isBad = lowerBetter ? m.score > 0 : m.score < 0}
+                <tr
+                  class:is-pinned={isPinned}
+                  class:is-clickable={Boolean(onSelectResidue) && m.positionIndex >= 0}
+                  onclick={() => {
+                    if (onSelectResidue && m.positionIndex >= 0) {
+                      onSelectResidue(m.positionIndex, m.residueId);
+                    }
+                  }}
+                >
+                  <td class="num">{m.rank}</td>
+                  <td><code>{m.label}</code></td>
+                  <td class="muted">{m.residueId} ({m.wildType}→{m.mutant})</td>
+                  <td class="num" class:good-val={isGood} class:bad-val={!isGood && isBad}>
+                    {formatSignedScore(m.score)}
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      class="mh-copy-btn"
+                      onclick={(ev) => {
+                        ev.stopPropagation();
+                        copyMutantSeq(m.mutantSequence, m.rank);
+                      }}
+                      title={`Copy full ${m.mutantSequence.length}-aa sequence with ${m.label}`}
+                    >
+                      {copiedRank === m.rank ? '✓ Copied' : 'Copy seq'}
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {:else}
+        <div class="mh-no-match">
+          No mutations match "{filterQuery.trim()}". Try a residue like G12, Q61, or A44.
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -577,6 +745,128 @@
     box-sizing: border-box;
     border: 1.5px solid #0f172a;
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9);
+  }
+  .mh-col-pin {
+    position: absolute;
+    pointer-events: none;
+    box-sizing: border-box;
+    border-left: 1.5px solid var(--accent);
+    border-right: 1.5px solid var(--accent);
+    box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.28);
+    z-index: 2;
+  }
+  .mh-col-pin-lbl {
+    position: absolute;
+    top: -17px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--accent);
+    color: #fff;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .mh-mode-seg,
+  .mh-limit-seg {
+    display: inline-flex;
+    align-items: center;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1px;
+    flex-shrink: 0;
+  }
+  .mh-seg-btn,
+  .mh-lim-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    font-weight: 500;
+    padding: 2px 7px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .mh-lim-btn {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    padding: 2px 5px;
+  }
+  .mh-seg-btn.active,
+  .mh-lim-btn.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .mh-filter-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex: 1 1 130px;
+    min-width: 110px;
+    max-width: 220px;
+  }
+  .mh-filter-input {
+    width: 100%;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 3px 20px 3px 7px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+  }
+  .mh-filter-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .mh-filter-clear {
+    position: absolute;
+    right: 3px;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+  }
+  .mh-filter-clear:hover {
+    color: var(--text-primary);
+  }
+  .mh-top-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 3px 10px 4px;
+    font-size: 10px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .mh-table tbody tr.is-clickable {
+    cursor: pointer;
+  }
+  .mh-table tbody tr.is-clickable:hover {
+    background: var(--bg-surface-hover);
+  }
+  .mh-table tbody tr.is-pinned {
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+  }
+  .mh-table tbody tr.is-pinned td:first-child {
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .mh-table td.bad-val {
+    color: var(--err-strong, #dc2626);
+    font-weight: 600;
+  }
+  .mh-no-match {
+    padding: 12px 10px;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-align: center;
   }
   .mh-legend {
     display: flex;

@@ -426,12 +426,54 @@ export function hasMultipleResidueChains(residueIds: readonly string[]): boolean
  * Respects `matrix.direction` (`'lower-is-better'` ascending vs `'higher-is-better'` descending),
  * skips wild-type self-mutations and non-finite (`NaN` / `±Infinity`) scores.
  */
-export function rankTopMutations(
+export interface RankMutationsOptions {
+  sort?: 'best' | 'worst';
+  query?: string;
+  limit?: number;
+}
+
+export interface RankedMutationsResult {
+  items: RankedMutation[];
+  totalMatched: number;
+  totalAll: number;
+}
+
+function matchesMutationToken(
+  token: string,
+  c: { residueId: string; wildType: string; mutant: string; label: string; positionIndex: number },
+): boolean {
+  const t = token.trim().toUpperCase();
+  if (!t) return true;
+  const labelU = c.label.toUpperCase();
+  const resIdU = c.residueId.toUpperCase();
+  const parsed = parseResidueLabel(c.residueId);
+  const numStr = parsed.pos || String(c.positionIndex + 1);
+  const wtNum = `${c.wildType}${numStr}`;
+  const wtNumMut = `${c.wildType}${numStr}${c.mutant}`;
+
+  if (/^\d+$/.test(t)) {
+    return numStr === t;
+  }
+  if (labelU === t || resIdU === t || wtNum === t || wtNumMut === t) {
+    return true;
+  }
+  // Support chain-prefixed shorthand like "A12" or "A:12" or "G12" prefix
+  if (t.length >= 2 && (labelU.startsWith(t) || resIdU === t.replace(':', ''))) {
+    return true;
+  }
+  return false;
+}
+
+export function rankMutations(
   matrix: MutationMatrixArtifact,
-  limit = 10,
-): RankedMutation[] {
-  const maxItems = Math.max(0, Math.floor(limit));
-  if (maxItems === 0) return [];
+  opts: RankMutationsOptions = {},
+): RankedMutationsResult {
+  const sort = opts.sort === 'worst' ? 'worst' : 'best';
+  const maxItems = Math.max(0, Math.floor(opts.limit ?? 10));
+  const queryTokens = (opts.query ?? '')
+    .split(/[,\s;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
   const residues = (matrix.residues ?? '').toUpperCase();
   const L = residues.length;
@@ -500,24 +542,46 @@ export function rankTopMutations(
     }
   }
 
+  // Sort in the requested direction so rank #1 is best (or most deleterious for 'worst')
+  const ascending = sort === 'best' ? lowerBetter : !lowerBetter;
   candidates.sort((a, b) => {
-    const diff = lowerBetter ? a.score - b.score : b.score - a.score;
+    const diff = ascending ? a.score - b.score : b.score - a.score;
     if (diff !== 0) return diff;
     if (a.positionIndex !== b.positionIndex) return a.positionIndex - b.positionIndex;
     return a.mutant.localeCompare(b.mutant);
   });
 
-  return candidates.slice(0, maxItems).map((c, idx) => {
+  const totalAll = candidates.length;
+  const ranked: Array<Candidate & { rank: number }> = [];
+  for (let idx = 0; idx < candidates.length; idx++) {
+    const c = candidates[idx];
+    if (queryTokens.length > 0 && !queryTokens.some((tok) => matchesMutationToken(tok, c))) {
+      continue;
+    }
+    ranked.push({ ...c, rank: idx + 1 });
+  }
+
+  const totalMatched = ranked.length;
+  const sliced = maxItems === 0 ? [] : ranked.slice(0, maxItems);
+  const items = sliced.map((c) => {
     const mutantSequence =
       c.positionIndex >= 0 && c.positionIndex < L
         ? residues.slice(0, c.positionIndex) + c.mutant + residues.slice(c.positionIndex + 1)
         : residues;
     return {
-      rank: idx + 1,
       ...c,
       mutantSequence,
     };
   });
+
+  return { items, totalMatched, totalAll };
+}
+
+export function rankTopMutations(
+  matrix: MutationMatrixArtifact,
+  limit = 10,
+): RankedMutation[] {
+  return rankMutations(matrix, { sort: 'best', limit }).items;
 }
 
 function escapeCsvCell(raw: string): string {

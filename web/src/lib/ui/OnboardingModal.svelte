@@ -463,24 +463,6 @@
           controls
           preload="metadata"
         ></video>
-        <div class="onb-video-cap">
-          Live demo · 100% in-browser WebGPU motif scaffolding, Boltz-2 / Protenix-v2 / ESMFold2 co-folding &amp; 3D Compare
-        </div>
-      </div>
-
-      <div class="onb-highlights">
-        <div class="hl-item">
-          <span class="hl-dot" style="background: #3b82f6"></span>
-          <span><b>Structure Design &amp; Co-Design:</b> All-atom &amp; Cα de novo monomers, motif scaffolding, protein binders, enzymes, ligands &amp; DNA.</span>
-        </div>
-        <div class="hl-item">
-          <span class="hl-dot" style="background: #a855f7"></span>
-          <span><b>Sequence Design:</b> Inverse folding with fixed-residue constraints and solubility optimization.</span>
-        </div>
-        <div class="hl-item">
-          <span class="hl-dot" style="background: #10b981"></span>
-          <span><b>Prediction &amp; Scoring:</b> Monomer &amp; complex folding, 3D comparison, scRMSD, scTM &amp; pLDDT evaluation.</span>
-        </div>
       </div>
 
       <div class="gpu-notice" role="note">
@@ -503,7 +485,7 @@
           class="btn-start"
           onclick={startInteractiveTour}
         >
-          Build your first workflow (30s) →
+          Build your first workflow →
         </button>
       </div>
       <div class="reopen-foot">Reopen anytime from <b>Quick Tour</b></div>
@@ -717,14 +699,6 @@
     background: #0b1020;
   }
 
-  .onb-video-cap {
-    padding: 6px 10px;
-    font-size: 11px;
-    color: var(--text-dim);
-    background: var(--bg-surface-2);
-    border-top: 1px solid var(--border);
-  }
-
   .onb-hero {
     display: flex;
     align-items: flex-start;
@@ -755,38 +729,6 @@
     font-size: 14.5px;
     line-height: 1.45;
     color: var(--text-muted);
-  }
-
-  .onb-highlights {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    background: var(--bg-surface-2);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px 16px;
-  }
-
-  .hl-item {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    font-size: 13.5px;
-    line-height: 1.5;
-    color: var(--text-secondary);
-  }
-
-  .hl-item b {
-    color: var(--text-primary);
-    font-weight: 600;
-  }
-
-  .hl-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    margin-top: 6px;
   }
 
   .gpu-notice {
@@ -880,10 +822,11 @@
   }
 
   .reopen-foot {
-    font-size: 12.5px;
+    font-size: 10.5px;
     color: var(--text-dim);
+    opacity: 0.75;
     text-align: center;
-    margin-top: -6px;
+    margin-top: -4px;
   }
 
   .reopen-foot b {
