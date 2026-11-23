@@ -138,6 +138,16 @@ export function deriveSequenceSetFromStructure(art: StructureArtifact): Sequence
   const candidateId = art.label.replace(/\s+\([^)]*\)$/, '').trim() || art.id;
   const chainLengths =
     art.chainLengths && art.chainLengths.length > 0 ? [...art.chainLengths] : [seq.length];
+  const uniqueChainIds =
+    art.chainIds && art.chainIds.length > 0
+      ? (() => {
+          const out: string[] = [];
+          for (const c of art.chainIds) {
+            if (out.length === 0 || out[out.length - 1] !== c) out.push(c);
+          }
+          return out.length === chainLengths.length ? out : undefined;
+        })()
+      : undefined;
   return {
     kind: 'SequenceSet',
     id: `pdb-seq-${art.id}`,
@@ -145,6 +155,8 @@ export function deriveSequenceSetFromStructure(art: StructureArtifact): Sequence
     sourceStructureId: art.id,
     sourceModelId: art.sourceModelId || 'pdb-input',
     collectionKind: 'independent-candidates',
+    ...(art.lockedChains?.length ? { lockedChains: art.lockedChains } : {}),
+    ...(art.chainRoles ? { chainRoles: art.chainRoles } : {}),
     candidates: [
       {
         id: candidateId,
@@ -156,6 +168,7 @@ export function deriveSequenceSetFromStructure(art: StructureArtifact): Sequence
         sourceStructureId: art.id,
         sampleIndex: 0,
         chainLengths,
+        ...(uniqueChainIds ? { chainIds: uniqueChainIds } : {}),
       },
     ],
   };

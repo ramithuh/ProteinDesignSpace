@@ -120,14 +120,6 @@ export async function loadEsmfold2(
     const meanPlddt = plddt.reduce((sum, v) => sum + v, 0) / plddt.length;
     const chainLengths = chains.map((chain) => chain.length);
     const pae = confidence.pae as Float32Array;
-    let ipsaeChainLengths = chainLengths;
-    let ipsaeChainIds = parsed.chainIds;
-    if (pae.length > sequence.length * sequence.length && features.tokens > sequence.length) {
-      const extraTokens = features.tokens - sequence.length;
-      ipsaeChainLengths = [...chainLengths, extraTokens];
-      ipsaeChainIds = [...parsed.chainIds, ...Array<string>(extraTokens).fill('LIG')];
-    }
-    const ipsaeRes = computeCandidateIpsae(pae, ipsaeChainLengths, ipsaeChainIds);
     // Vendor featurise.js:289 zero-bases asymId (0..totalEntities-1) in entity order: protein, DNA, RNA, ligands.
     const entityLabels: string[] = [...new Set(parsed.chainIds)];
     for (let i = 0; i < dnaSeqs.length; i++) entityLabels.push(`DNA${i + 1}`);
@@ -140,6 +132,39 @@ export async function loadEsmfold2(
       ligCounts.set(base, seen);
       entityLabels.push(seen > 1 ? `${base}#${seen}` : base);
     }
+    let ipsaeChainLengths = chainLengths;
+    let ipsaeChainIds = parsed.chainIds;
+    if (pae.length > sequence.length * sequence.length && features.tokens > sequence.length) {
+      const asymArr = (features.batch?.asymId ?? features.asymId) as ArrayLike<number> | undefined;
+      if (asymArr && asymArr.length === features.tokens) {
+        // Check whether asymId is 0-based or 1-based
+        const baseOffset = Number(asymArr[0]) === 0 ? 0 : 1;
+        const tokenLabels: string[] = new Array(features.tokens);
+        const entityLens: number[] = [];
+        let prevLbl = '';
+        for (let t = 0; t < features.tokens; t++) {
+          const idx = Number(asymArr[t]) - baseOffset;
+          const lbl =
+            t < parsed.chainIds.length
+              ? parsed.chainIds[t]
+              : entityLabels[idx] ?? `ENT${idx + 1}`;
+          tokenLabels[t] = lbl;
+          if (lbl !== prevLbl) {
+            entityLens.push(1);
+            prevLbl = lbl;
+          } else {
+            entityLens[entityLens.length - 1] += 1;
+          }
+        }
+        ipsaeChainIds = tokenLabels;
+        ipsaeChainLengths = entityLens;
+      } else {
+        const extraTokens = features.tokens - sequence.length;
+        ipsaeChainLengths = [...chainLengths, extraTokens];
+        ipsaeChainIds = [...parsed.chainIds, ...Array<string>(extraTokens).fill('LIG')];
+      }
+    }
+    const ipsaeRes = computeCandidateIpsae(pae, ipsaeChainLengths, ipsaeChainIds);
     return {
       sequence, pdbText, caCoords: parsed.caCoords, plddt, meanPlddt, confidence: meanPlddt,
       confidenceAvailable: true, ptm, iptm, pae,

@@ -21,7 +21,7 @@ import {
   detectExternalLigandFormat,
   extractHoloReceptorAndLigands,
   findPocketResidues,
-  parsePocketResidueTokens,
+  parsePocketResidueTokensStrict,
 } from '$lib/protein-ops/gnina-prep';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type {
@@ -250,9 +250,9 @@ createWorkerHarness({
     if (!struct || (!struct.pdbText && !struct.cifText)) {
       throw new Error('GNINA 1.3 requires an upstream all-atom StructureArtifact (holo protein–ligand complex or receptor + ligand SDF).');
     }
-    if (struct.atomGranularity === 'ca-only') {
+    if (struct.atomGranularity === 'ca-only' || struct.atomGranularity === 'backbone4') {
       throw new Error(
-        `GNINA 1.3 requires all-atom receptor and ligand coordinates, but "${struct.label}" is Cα-only.`,
+        `GNINA 1.3 requires all-atom receptor coordinates (including side chains), but "${struct.label}" is ${struct.atomGranularity}.`,
       );
     }
 
@@ -417,9 +417,15 @@ createWorkerHarness({
       }
     } else if (taskMode === 'dock') {
       const dockLigand = typedPoses[0];
-      const explicitPocketKeys = pocketResiduesSpec
-        ? parsePocketResidueTokens(pocketResiduesSpec, prep.receptorPdb)
-        : [];
+      const parsedPocket = pocketResiduesSpec
+        ? parsePocketResidueTokensStrict(pocketResiduesSpec, prep.receptorPdb)
+        : { keys: [], unmatched: [] };
+      const explicitPocketKeys = parsedPocket.keys;
+      if (parsedPocket.unmatched.length > 0) {
+        throw new Error(
+          `Pocket residue selector(s) [${parsedPocket.unmatched.join(', ')}] did not match any residues in "${struct.label}".`,
+        );
+      }
       if (pocketResiduesSpec && explicitPocketKeys.length === 0) {
         throw new Error(
           `Pocket residues "${pocketResiduesSpec}" did not match any residues in "${struct.label}". Use format like "A45, A79, A90".`,
@@ -626,11 +632,17 @@ createWorkerHarness({
 
       for (let i = 0; i < L; i++) {
         const sr = sourceResidues[i];
-        const rid = sr ? `${sr.authChainId}${sr.resNum}${sr.insCode ?? ''}` : `A${i + 1}`;
-        residueIds[i] = rid;
-        const dv = deltaByResId.get(rid) ?? 0;
+        const authRid = sr ? `${sr.authChainId}${sr.resNum}${sr.insCode ?? ''}` : `A${i + 1}`;
+        const projRid = sr ? `${sr.projectedChainId}${sr.resNum}${sr.insCode ?? ''}` : authRid;
+        residueIds[i] = authRid;
+        const matchedKey = deltaByResId.has(authRid)
+          ? authRid
+          : deltaByResId.has(projRid)
+            ? projRid
+            : null;
+        const dv = matchedKey ? deltaByResId.get(matchedKey)! : 0;
         trackValues[i] = dv;
-        if (deltaByResId.has(rid)) {
+        if (matchedKey) {
           scannedCount++;
           sum += dv;
           if (dv < minV) minV = dv;
@@ -697,14 +709,19 @@ createWorkerHarness({
       rows,
     };
 
+    const externalLigandHash = useExternal ? fnv1a(ligandSdf) : '';
     const runHash = fnv1a(
       JSON.stringify({
         structId: struct.id,
         taskMode,
         precision,
         selectedLigandName,
+        externalLigandHash,
+        includeMetals,
         minimizeIterations: taskMode === 'minimize' ? minimizeIterations : 0,
+        cnnWeight: taskMode === 'minimize' ? cnnWeight : 0,
         pocketRadius: taskMode === 'pocket-scan' ? pocketRadius : 0,
+        maxPocketResidues: taskMode === 'pocket-scan' ? maxPocketResidues : 0,
         dockKey: taskMode === 'dock' ? `${pocketResiduesSpec}|${exhaustiveness}|${numModes}|${sortBy}|${seed}|${autoboxAdd}` : '',
       }),
     );
@@ -724,6 +741,11 @@ createWorkerHarness({
             ? 'pocket'
             : 'score';
 
+    const emittedDiagnostics =
+      useExternal || taskMode === 'dock' || taskMode === 'minimize'
+        ? parseStructureText(outputPdbText).diagnostics
+        : struct.diagnostics;
+
     const outStructure: StructureArtifact = {
       ...struct,
       id: `gnina-${modeTag}-${struct.id}-${precision}-${runHash}`,
@@ -734,10 +756,10 @@ createWorkerHarness({
       backbone4Coords: bbCopy,
       ...(obsCopy ? { observedBackboneMask: obsCopy } : {}),
       pdbText: outputPdbText,
-      ...(outputCifText !== undefined ? { cifText: outputCifText } : { cifText: undefined }),
-      ...(outputTrajectoryPdb
-        ? { trajectoryPdb: outputTrajectoryPdb, trajectoryFrameCount: outputTrajectoryCount }
-        : {}),
+      cifText: outputCifText,
+      trajectoryPdb: outputTrajectoryPdb,
+      trajectoryFrameCount: outputTrajectoryCount,
+      diagnostics: emittedDiagnostics,
       bfactorSemantics: outputBfactorSemantics,
       dockingMetrics,
       provenance: {

@@ -283,9 +283,9 @@ createWorkerHarness({
         0.94,
         `Running ThermoMPNN ΔΔG scan (${precision.toUpperCase()}${bk === 'cpu' ? ', CPU fallback' : ''}${chains ? `, chain ${chains.join(',')}` : ''})...`,
       );
-      return await eng.predict(structureText, {
-        ...(chains ? { chains } : {}),
-      });
+      // Retain all chains during graph construction so interface residues preserve full binding-partner context;
+      // filter output rows to requested `chains` AFTER inference!
+      return await eng.predict(structureText);
     };
 
     let res: ThermoPredictResult;
@@ -303,10 +303,19 @@ createWorkerHarness({
     const alphabet = (res.alphabet || 'ACDEFGHIKLMNPQRSTVWY').slice(0, 20).toUpperCase();
     const K = alphabet.length;
 
-    // Filter out gap-padded residues so MutationMatrix aligns cleanly to observed polymer residues
+    // Filter out gap-padded residues AND apply requested target-chain filter AFTER full-complex inference
+    const requestedChainSet = chains ? new Set(chains) : null;
     const observedIndices: number[] = [];
     for (let i = 0; i < res.residues.length; i++) {
-      if (!res.residues[i].missing) observedIndices.push(i);
+      const r = res.residues[i];
+      if (r.missing) continue;
+      if (requestedChainSet && !requestedChainSet.has(r.chain)) continue;
+      observedIndices.push(i);
+    }
+    if (requestedChainSet && observedIndices.length === 0) {
+      throw new Error(
+        `ThermoMPNN found no observed residues for requested chain(s) [${chains!.join(', ')}].`,
+      );
     }
     const L = observedIndices.length;
     const values = new Float32Array(L * K);
@@ -322,7 +331,8 @@ createWorkerHarness({
       wtChars[outIdx] = wt;
       residueIds[outIdx] = formatResidueId(r.chain, r.number, r.ins);
 
-      const isValid = Boolean(res.valid?.[srcIdx]) && wt !== 'X';
+      const hasFullBackbone = res.mask ? Boolean(res.mask[srcIdx]) : true;
+      const isValid = Boolean(res.valid?.[srcIdx]) && hasFullBackbone && wt !== 'X';
       const srcOff = srcIdx * K;
       const dstOff = outIdx * K;
       if (isValid) {
@@ -392,10 +402,10 @@ createWorkerHarness({
     }
 
     const paintedPdb = structure.pdbText
-      ? paintStructureBfactors(structure.pdbText, pdbBfactors)
+      ? paintStructureBfactors(structure.pdbText, pdbBfactors, { missingValue: 0 })
       : structure.pdbText;
     const paintedCif = structure.cifText
-      ? paintStructureBfactors(structure.cifText, cifBfactors)
+      ? paintStructureBfactors(structure.cifText, cifBfactors, { missingValue: 0 })
       : undefined;
 
     const caCoordsCopy = new Float32Array(structure.caCoords);

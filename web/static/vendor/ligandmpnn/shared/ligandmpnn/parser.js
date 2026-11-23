@@ -37,7 +37,11 @@ function pdbAtoms(text) {
       chain: l[21].trim(),
       seq: l.slice(22, 26).trim(),
       ins: l[26].trim(),
-      xyz: [+l.slice(30, 38), +l.slice(38, 46), +l.slice(46, 54)],
+      xyz: [
+        l.slice(30, 38).trim() === "" ? NaN : +l.slice(30, 38),
+        l.slice(38, 46).trim() === "" ? NaN : +l.slice(38, 46),
+        l.slice(46, 54).trim() === "" ? NaN : +l.slice(46, 54),
+      ],
       occ: l.slice(54, 60).trim() === "" ? 1 : +l.slice(54, 60),
       element: l.slice(76, 78).trim().toUpperCase() || inferred.toUpperCase(),
     });
@@ -119,7 +123,10 @@ function cifAtoms(text) {
         ins: val("pdbx_PDB_ins_code"),
         alt: val("label_alt_id"),
         occ: val("occupancy") === "" ? 1 : +val("occupancy"),
-        xyz: ["Cartn_x", "Cartn_y", "Cartn_z"].map((k) => +val(k)),
+        xyz: ["Cartn_x", "Cartn_y", "Cartn_z"].map((k) => {
+          const raw = val(k);
+          return raw === "" ? NaN : +raw;
+        }),
         element: val("type_symbol").toUpperCase(),
       });
     }

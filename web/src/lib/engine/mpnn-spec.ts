@@ -96,18 +96,23 @@ export function parseFixedPositionsAndChains(
 
   const resolveStructureChain = (requested: string): string => {
     if (!orderedResidues || orderedResidues.length === 0) return requested;
-    if (orderedResidues.some((r) => r.chain === requested)) return requested;
+    const exact = orderedResidues.find((r) => r.chain === requested);
+    if (exact) return exact.chain;
     const upper = requested.toUpperCase();
-    const hit = orderedResidues.find((r) => r.chain.toUpperCase() === upper);
-    return hit ? hit.chain : requested;
+    const ciMatches = new Set<string>();
+    for (const r of orderedResidues) {
+      if (r.chain.toUpperCase() === upper) ciMatches.add(r.chain);
+    }
+    if (ciMatches.size === 1) return [...ciMatches][0];
+    return requested;
   };
 
   for (const raw of trimmed.split(/[,\s]+/)) {
     if (!raw) continue;
-    // Whole-chain token e.g. "A", "B", "_"
+    // Whole-chain token e.g. "A", "a", "B", "_"
     const chainOnly = /^([A-Za-z_])$/.exec(raw);
     if (chainOnly) {
-      const ch = chainOnly[1].toUpperCase();
+      const ch = resolveStructureChain(chainOnly[1]);
       if (!seenChains.has(ch)) {
         seenChains.add(ch);
         lockedChains.push(ch);
@@ -120,8 +125,8 @@ export function parseFixedPositionsAndChains(
     if (rangeMatch) {
       const rawStartChain = rangeMatch[1] ?? rangeMatch[2];
       const rawEndChain = rangeMatch[5] ?? rangeMatch[6];
-      const startChain = rawStartChain ? rawStartChain.toUpperCase() : null;
-      const endChain = rawEndChain ? rawEndChain.toUpperCase() : null;
+      const startChain = rawStartChain ? resolveStructureChain(rawStartChain) : null;
+      const endChain = rawEndChain ? resolveStructureChain(rawEndChain) : null;
       if (startChain && endChain && startChain !== endChain) {
         throw new Error(
           `Invalid fixed position "${raw}": range must stay within a single chain (${startChain} vs ${endChain})`,
@@ -142,8 +147,11 @@ export function parseFixedPositionsAndChains(
       }
 
       if (orderedResidues && orderedResidues.length > 0) {
+        const hasExactChain = orderedResidues.some((r) => r.chain === chain);
         const hits = orderedResidues.filter((r) => {
-          if (r.chain !== chain && r.chain.toUpperCase() !== chain.toUpperCase()) return false;
+          if (hasExactChain ? r.chain !== chain : r.chain.toUpperCase() !== chain.toUpperCase()) {
+            return false;
+          }
           const rIns = (r.insertionCode ?? '').toUpperCase();
           if (start === end && !startIns && !endIns) {
             return r.number === start && rIns === '';
@@ -209,7 +217,7 @@ export function parseFixedPositionsAndChains(
     const singleMatch = /^(?:([A-Za-z0-9_]+):|([A-Za-z_]))?(-?\d+)([A-Za-z])?$/.exec(raw);
     if (singleMatch) {
       const rawChain = singleMatch[1] ?? singleMatch[2];
-      const chain = resolveStructureChain(rawChain ? rawChain.toUpperCase() : defaultChain);
+      const chain = resolveStructureChain(rawChain ?? defaultChain);
       const number = Number(singleMatch[3]);
       const insertionCode = singleMatch[4]?.toUpperCase();
       fixedPositions.push(insertionCode ? { chain, number, insertionCode } : { chain, number });
@@ -219,7 +227,15 @@ export function parseFixedPositionsAndChains(
     const matchedMultiChain =
       orderedResidues &&
       /^[A-Za-z0-9_]+$/.test(raw) &&
-      orderedResidues.find((r) => r.chain.toUpperCase() === raw.toUpperCase());
+      (orderedResidues.find((r) => r.chain === raw) ??
+        (() => {
+          const ci = new Set(
+            orderedResidues
+              .filter((r) => r.chain.toUpperCase() === raw.toUpperCase())
+              .map((r) => r.chain),
+          );
+          return ci.size === 1 ? { chain: [...ci][0] } : undefined;
+        })());
     if (matchedMultiChain) {
       const ch = matchedMultiChain.chain;
       if (!seenChains.has(ch)) {
@@ -293,21 +309,23 @@ export function parseTiedPositions(spec: unknown, _defaultChain = 'A'): ResidueR
  */
 export function buildGapAwareResidueIndices(s: MpnnStructure): Int32Array {
   const out = new Int32Array(s.length);
-  const firstNumByChain = new Map<string, number>();
+  const lastNumByChain = new Map<string, number>();
   const lastIdxByChain = new Map<string, number>();
   for (let i = 0; i < s.length; i++) {
     const ch = s.chainIds[i];
     const rn = s.residueNumbers[i];
-    if (!firstNumByChain.has(ch)) {
-      firstNumByChain.set(ch, rn);
+    if (!lastNumByChain.has(ch)) {
+      lastNumByChain.set(ch, rn);
       out[i] = 0;
       lastIdxByChain.set(ch, 0);
     } else {
-      const base = firstNumByChain.get(ch)!;
-      const prev = lastIdxByChain.get(ch)!;
-      const candidate = rn - base;
-      const next = candidate > prev ? candidate : prev + 1;
+      const prevNum = lastNumByChain.get(ch)!;
+      const prevIdx = lastIdxByChain.get(ch)!;
+      // Preserve positive author-number gaps even after insertion codes (e.g. 10, 10A, 11, 15 -> 0, 1, 2, 6)
+      const delta = rn > prevNum ? rn - prevNum : 1;
+      const next = prevIdx + delta;
       out[i] = next;
+      lastNumByChain.set(ch, rn);
       lastIdxByChain.set(ch, next);
     }
   }
@@ -477,10 +495,15 @@ export function compileMpnnInputSpec(
   }
   if (!ignoreInheritedLocks && !explicitDesignChains && Array.isArray(structure.lockedChains)) {
     for (const ch of structure.lockedChains) {
-      const upper = String(ch).trim().toUpperCase();
-      if (presentChainSet.has(upper)) {
-        lockedChainSet.add(upper);
-        inheritedLockedChainSet.add(upper);
+      const rawCh = String(ch).trim();
+      const resolved = presentChainSet.has(rawCh)
+        ? rawCh
+        : allChains.filter((c) => c.toUpperCase() === rawCh.toUpperCase()).length === 1
+          ? allChains.find((c) => c.toUpperCase() === rawCh.toUpperCase())!
+          : null;
+      if (resolved) {
+        lockedChainSet.add(resolved);
+        inheritedLockedChainSet.add(resolved);
       }
     }
   }
@@ -493,7 +516,10 @@ export function compileMpnnInputSpec(
         `designChains includes chain(s) not present in structure: ${unknownDesignChains.join(', ')} (available: ${allChains.join(', ')}).`,
       );
     }
-    designChains = explicitDesignChains.filter((ch) => presentChainSet.has(ch));
+    // Subtract user-fixed whole chains so explicit fixedPositions='A' is never silently redesigned by designChains='A'
+    designChains = explicitDesignChains.filter(
+      (ch) => presentChainSet.has(ch) && !userLockedChainSet.has(ch),
+    );
   } else if (lockedChainSet.size > 0) {
     designChains = allChains.filter((ch) => !lockedChainSet.has(ch));
   } else {
@@ -514,12 +540,41 @@ export function compileMpnnInputSpec(
     }
   }
 
+  const srcResList = (
+    structure as {
+      sourceResidues?: ReadonlyArray<{
+        authChainId: string;
+        projectedChainId: string;
+        resNum: number;
+        insCode?: string;
+      }>;
+    }
+  ).sourceResidues;
   if (!ignoreInheritedLocks && Array.isArray(structure.fixedResidueIndices)) {
     for (const oneBasedIdx of structure.fixedResidueIndices) {
       const zeroBased = Number(oneBasedIdx) - 1;
-      if (Number.isInteger(zeroBased) && zeroBased >= 0 && zeroBased < mpnnStructure.length) {
-        fixedPositions.push(zeroBased);
-        inheritedFixedIndices.add(zeroBased);
+      if (!Number.isInteger(zeroBased) || zeroBased < 0) continue;
+      // Map encounter-ordered artifact index via sourceResidues -> prepared (sorted) structure index!
+      let mappedIdx: number | null = null;
+      if (srcResList && zeroBased < srcResList.length) {
+        const sr = srcResList[zeroBased];
+        mappedIdx =
+          tryResolveResidueIndex(mpnnStructure, {
+            chain: sr.projectedChainId,
+            number: sr.resNum,
+            ...(sr.insCode ? { insertionCode: sr.insCode } : {}),
+          }) ??
+          tryResolveResidueIndex(mpnnStructure, {
+            chain: sr.authChainId,
+            number: sr.resNum,
+            ...(sr.insCode ? { insertionCode: sr.insCode } : {}),
+          });
+      } else if (zeroBased < mpnnStructure.length) {
+        mappedIdx = zeroBased;
+      }
+      if (mappedIdx !== null && mappedIdx >= 0 && mappedIdx < mpnnStructure.length) {
+        fixedPositions.push(mappedIdx);
+        inheritedFixedIndices.add(mappedIdx);
       }
     }
   }
@@ -1255,11 +1310,13 @@ export function compileAntiFoldDesignPlan(
     }
   }
 
+  // Preserve comma-separated positions inside chain selectors like "H:10-11,20" while splitting
+  // whitespace or commas between separate selectors like "CDR1, CDR2, CDR3".
   const rawRegions =
     variant === 'antifold'
       ? regionsSpec
-          .split(/[,\s]+/)
-          .map((t) => t.trim())
+          .split(/\s+|,(?=\s*(?:all|CDR|FW|[A-Za-z0-9_]+:))/i)
+          .map((t) => t.replace(/^,+|,+$/g, '').trim())
           .filter(Boolean)
       : [];
 

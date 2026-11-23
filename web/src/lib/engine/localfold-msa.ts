@@ -580,6 +580,99 @@ export function computeTargetOnlyOffMask(
   return chainIds.map((_, idx) => !isTarget[idx]);
 }
 
+/**
+ * Parse a candidate protein sequence while preserving inline chain separators (`:` or `/`)
+ * BEFORE stripping whitespace/delimiters, and validate against supplied `chainLengths`.
+ */
+export function parseCandidateProteinChains(
+  rawSequence: string,
+  declaredChainLengths?: readonly number[],
+): { cleanSeq: string; chainLengths: number[]; chainSeqs: string[] } {
+  const upper = rawSequence.toUpperCase().trim();
+  const hasInlineSep = /[:/]/.test(upper);
+  const inlineParts = hasInlineSep
+    ? upper
+        .split(/[:/]+/)
+        .map((seg) => seg.replace(/[\s,]+/g, ''))
+        .filter(Boolean)
+    : [];
+
+  const stripped = hasInlineSep
+    ? inlineParts.join('')
+    : upper.replace(/[\s/:,]+/g, '');
+  const cleanSeq = stripped.replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, 'X');
+
+  const validDeclared =
+    Array.isArray(declaredChainLengths) &&
+    declaredChainLengths.length > 0 &&
+    declaredChainLengths.every((n) => Number.isInteger(n) && n > 0) &&
+    declaredChainLengths.reduce((a, b) => a + b, 0) === cleanSeq.length;
+
+  let chainLengths: number[];
+  if (hasInlineSep && inlineParts.length > 1) {
+    const inlineLengths = inlineParts.map((s) => s.length);
+    if (
+      validDeclared &&
+      declaredChainLengths!.length === inlineLengths.length &&
+      declaredChainLengths!.every((n, i) => n === inlineLengths[i])
+    ) {
+      chainLengths = [...declaredChainLengths!];
+    } else if (validDeclared) {
+      // Inline separators present AND declared chainLengths conflict -> trust inline separators
+      chainLengths = inlineLengths;
+    } else {
+      chainLengths = inlineLengths;
+    }
+  } else if (validDeclared) {
+    chainLengths = [...declaredChainLengths!];
+  } else {
+    chainLengths = [cleanSeq.length];
+  }
+
+  const chainSeqs: string[] = [];
+  let offset = 0;
+  for (const len of chainLengths) {
+    chainSeqs.push(cleanSeq.slice(offset, offset + len));
+    offset += len;
+  }
+  return { cleanSeq, chainLengths, chainSeqs };
+}
+
+/**
+ * Resolve ordered physical chain IDs for target-only MSA role lookup.
+ * When a candidate carries explicit `candChainIds` matching `chainCount`, uses them verbatim.
+ * Otherwise synthesizes `A, B, ...` ONLY if all declared `lockedChains` / `chainRoles` keys
+ * are accounted for within that synthetic alphabet; if any role/lock references a chain ID
+ * outside the synthetic list (e.g. physical chains `B, C` when synthetic is `A, B`), returns
+ * `ambiguous: true` so target-only MSA fails closed and never leaks a binder sequence.
+ */
+export function resolveMsaChainIdsSafely(opts: {
+  chainCount: number;
+  candidateChainIds?: readonly string[];
+  lockedChains?: readonly string[];
+  chainRoles?: Readonly<Record<string, 'target' | 'binder' | 'scaffold'>>;
+}): { chainIds: string[]; ambiguous: boolean } {
+  const { chainCount, candidateChainIds, lockedChains, chainRoles } = opts;
+  if (Array.isArray(candidateChainIds) && candidateChainIds.length === chainCount) {
+    return { chainIds: [...candidateChainIds], ambiguous: false };
+  }
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const synthetic = Array.from({ length: chainCount }, (_, idx) =>
+    idx < alphabet.length ? alphabet[idx] : `C${idx + 1}`,
+  );
+  const synthSet = new Set(synthetic);
+  const annotatedKeys = new Set<string>([
+    ...(lockedChains ?? []),
+    ...Object.keys(chainRoles ?? {}),
+  ]);
+  for (const k of annotatedKeys) {
+    if (!synthSet.has(k)) {
+      return { chainIds: [], ambiguous: true };
+    }
+  }
+  return { chainIds: synthetic, ambiguous: false };
+}
+
 export function createMsaSearchCache(): MsaSearchCache {
   return new Map<string, MsaSearchCacheEntry>();
 }

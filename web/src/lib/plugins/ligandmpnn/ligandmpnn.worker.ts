@@ -28,7 +28,7 @@ type Precision = 'fp16' | 'int8' | 'fp32';
 
 interface LigandDesignResult {
   sequences: string[];
-  scores: Array<{ global: number; ligand: number }>;
+  scores: Array<{ global: number; globalCount?: number; ligand: number; ligandCount?: number }>;
   residues: Array<{
     chain: string;
     number: number;
@@ -125,13 +125,13 @@ function buildLigandConstraints(
       const sr = sourceResidues[ref];
       if (sr) {
         const ch = useCif ? sr.authChainId : sr.projectedChainId;
-        fixedSet.add(`${ch}${sr.resNum}${sr.insCode ?? ''}`);
+        fixedSet.add(`${ch}:${sr.resNum}${sr.insCode ?? ''}`);
       }
     } else {
       const ch = presentChains.has(ref.chain)
         ? ref.chain
         : upperToChain.get(ref.chain.toUpperCase()) ?? ref.chain;
-      fixedSet.add(`${ch}${ref.number}${ref.insertionCode ?? ''}`);
+      fixedSet.add(`${ch}:${ref.number}${ref.insertionCode ?? ''}`);
     }
   }
 
@@ -152,13 +152,16 @@ function buildLigandConstraints(
         if (Number.isInteger(idx) && idx >= 0 && idx < sourceResidues.length) {
           const sr = sourceResidues[idx];
           const ch = useCif ? sr.authChainId : sr.projectedChainId;
-          fixedSet.add(`${ch}${sr.resNum}${sr.insCode ?? ''}`);
+          fixedSet.add(`${ch}:${sr.resNum}${sr.insCode ?? ''}`);
         }
       }
     }
   }
 
-  const rawTiedGroups = parseTiedPositions(tiedPositionsSpec);
+  // Inherit upstream symmetry tiedPositions (e.g. RFdiffusion C3/C6) when user did not supply explicit ties
+  const effectiveTiedSpec =
+    tiedPositionsSpec || (!unlockInherited && backbone.tiedPositions ? backbone.tiedPositions : '');
+  const rawTiedGroups = parseTiedPositions(effectiveTiedSpec);
   const tiedGroups: string[][] = [];
   for (const grp of rawTiedGroups) {
     const tokens: string[] = [];
@@ -167,13 +170,13 @@ function buildLigandConstraints(
         const sr = sourceResidues[ref];
         if (sr) {
           const ch = useCif ? sr.authChainId : sr.projectedChainId;
-          tokens.push(`${ch}${sr.resNum}${sr.insCode ?? ''}`);
+          tokens.push(`${ch}:${sr.resNum}${sr.insCode ?? ''}`);
         }
       } else {
         const ch = presentChains.has(ref.chain)
           ? ref.chain
           : upperToChain.get(ref.chain.toUpperCase()) ?? ref.chain;
-        tokens.push(`${ch}${ref.number}${ref.insertionCode ?? ''}`);
+        tokens.push(`${ch}:${ref.number}${ref.insertionCode ?? ''}`);
       }
     }
     if (tokens.length >= 2) tiedGroups.push(tokens);
@@ -380,23 +383,42 @@ createWorkerHarness({
         const seq = res.sequences[0];
         const sc = res.scores[0];
         const chainLengths = computeChainLengths(res.residues.map((r) => r.chain));
+        const orderedChainIds: string[] = [];
+        for (const r of res.residues) {
+          if (orderedChainIds.length === 0 || orderedChainIds[orderedChainIds.length - 1] !== r.chain) {
+            orderedChainIds.push(r.chain);
+          }
+        }
         const candChainLengths =
           chainLengths.length > 0 &&
           chainLengths.reduce((a, b) => a + b, 0) === seq.length
             ? chainLengths
             : undefined;
+        const candChainIds =
+          candChainLengths && orderedChainIds.length === candChainLengths.length
+            ? orderedChainIds
+            : undefined;
+        const hasLigandContact =
+          useLigandContext && (sc?.ligandCount === undefined ? true : sc.ligandCount > 0);
+        const primaryScore =
+          hasLigandContact && Number.isFinite(sc?.ligand)
+            ? sc.ligand
+            : Number.isFinite(sc?.global)
+              ? sc.global
+              : null;
 
         candidates.push({
           id: `ligandmpnn-${i + 1}`,
           sourceStructureId: structure.id,
           sampleIndex: i,
           sequence: seq,
-          score: Number.isFinite(sc?.ligand) ? sc.ligand : Number.isFinite(sc?.global) ? sc.global : null,
+          score: primaryScore,
           globalScore: Number.isFinite(sc?.global) ? sc.global : null,
           sourceModelId: modelLabel,
           temperature,
           seed: seed + i,
           ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
+          ...(candChainIds ? { chainIds: candChainIds } : {}),
         });
       }
 
@@ -469,6 +491,7 @@ createWorkerHarness({
         checkpoint,
         precision,
         fixedPositions: fixedPositionsSpec,
+        tiedPositions: tiedPositionsSpec,
         omitAminoAcids: omitAAs ?? '',
         useLigandContext,
         unlockInherited,
@@ -523,11 +546,29 @@ createWorkerHarness({
         const seq = res.sequences[0];
         const sc = res.scores[0];
         const chainLengths = computeChainLengths(res.residues.map((r) => r.chain));
+        const orderedChainIds: string[] = [];
+        for (const r of res.residues) {
+          if (orderedChainIds.length === 0 || orderedChainIds[orderedChainIds.length - 1] !== r.chain) {
+            orderedChainIds.push(r.chain);
+          }
+        }
         const candChainLengths =
           chainLengths.length > 0 &&
           chainLengths.reduce((a, b) => a + b, 0) === seq.length
             ? chainLengths
             : undefined;
+        const candChainIds =
+          candChainLengths && orderedChainIds.length === candChainLengths.length
+            ? orderedChainIds
+            : undefined;
+        const hasLigandContact =
+          useLigandContext && (sc?.ligandCount === undefined ? true : sc.ligandCount > 0);
+        const primaryScore =
+          hasLigandContact && Number.isFinite(sc?.ligand)
+            ? sc.ligand
+            : Number.isFinite(sc?.global)
+              ? sc.global
+              : null;
 
         backboneCandidates.push({
           id: `d${subplan.designIndex + 1}-ligandmpnn-${item.sequenceIndex + 1}`,
@@ -538,12 +579,13 @@ createWorkerHarness({
           sourceStructureId: backbone.id,
           sampleIndex: item.sequenceIndex,
           sequence: seq,
-          score: Number.isFinite(sc?.ligand) ? sc.ligand : Number.isFinite(sc?.global) ? sc.global : null,
+          score: primaryScore,
           globalScore: Number.isFinite(sc?.global) ? sc.global : null,
           sourceModelId: modelLabel,
           temperature,
           seed: itemSeed,
           ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
+          ...(candChainIds ? { chainIds: candChainIds } : {}),
         });
       }
 

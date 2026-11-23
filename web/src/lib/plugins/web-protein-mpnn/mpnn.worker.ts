@@ -189,11 +189,12 @@ createWorkerHarness({
         const compiled = compileMpnnInputSpec(
           {
             pdbText: structure.pdbText,
+            sourceResidues: structure.sourceResidues,
             lockedChains: structure.lockedChains,
             fixedResidueIndices: structure.fixedResidueIndices,
             tiedPositions: structure.tiedPositions,
             chainRoles: structure.chainRoles,
-          },
+          } as Parameters<typeof compileMpnnInputSpec>[0],
           rawParams,
           prepared.structure,
         );
@@ -207,6 +208,12 @@ createWorkerHarness({
         } = compiled;
 
         const chainLengths = computeChainLengths(prepared.structure.chainIds);
+        const uniqueChainIds: string[] = [];
+        for (const c of prepared.structure.chainIds) {
+          if (uniqueChainIds.length === 0 || uniqueChainIds[uniqueChainIds.length - 1] !== c) {
+            uniqueChainIds.push(c);
+          }
+        }
         const candidates: SequenceCandidate[] = [];
 
         for (let i = 0; i < numSequences; i++) {
@@ -231,6 +238,10 @@ createWorkerHarness({
             chainLengths.reduce((a, b) => a + b, 0) === res.sequence.length
               ? chainLengths
               : undefined;
+          const candChainIds =
+            candChainLengths && uniqueChainIds.length === candChainLengths.length
+              ? uniqueChainIds
+              : undefined;
           candidates.push({
             id: `mpnn-${i + 1}`,
             sequence: res.sequence,
@@ -240,6 +251,7 @@ createWorkerHarness({
             temperature,
             seed: seed + i,
             ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
+            ...(candChainIds ? { chainIds: candChainIds } : {}),
           });
         }
 
@@ -357,11 +369,12 @@ createWorkerHarness({
         const compiled = compileMpnnInputSpec(
           {
             pdbText: backbone.pdbText,
+            sourceResidues: backbone.sourceResidues,
             lockedChains: [...subplan.lockedChains],
             fixedResidueIndices: [...subplan.fixedResidueIndices],
             ...(subplan.tiedPositions ? { tiedPositions: subplan.tiedPositions } : {}),
             chainRoles: subplan.chainRoles ? { ...subplan.chainRoles } : undefined,
-          },
+          } as Parameters<typeof compileMpnnInputSpec>[0],
           rawParams,
           prepared.structure,
         );

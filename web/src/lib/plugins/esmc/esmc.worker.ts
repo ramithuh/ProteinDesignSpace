@@ -68,38 +68,33 @@ function formatResidueId(chain: string, resNum: number, ins: string): string {
     : `${chain}${resNum}${ins}`;
 }
 
-function buildEsmcSequenceIds(
+function resolveCandidateChainSplits(
   rawSeq: string,
   chainLengths: readonly number[] | undefined,
-  cleanLen: number,
-): Int32Array | undefined {
-  // Derive per-chain lengths either from explicit ':'/'/' separators or from chainLengths metadata
+  cleanSeq: string,
+): { chainSeqs: string[]; chainLengths: number[] } {
   const parts = rawSeq
     .split(/[:/]+/)
     .map((part) => part.replace(/[\s,-]+/g, '').toUpperCase())
     .filter(Boolean);
-  let lens: number[] | null = null;
-  if (parts.length > 1 && parts.reduce((s, part) => s + part.length, 0) === cleanLen) {
-    lens = parts.map((part) => part.length);
-  } else if (
+  if (parts.length > 1 && parts.reduce((s, part) => s + part.length, 0) === cleanSeq.length) {
+    return { chainSeqs: parts, chainLengths: parts.map((p) => p.length) };
+  }
+  if (
     chainLengths &&
     chainLengths.length > 1 &&
-    chainLengths.reduce((s, n) => s + n, 0) === cleanLen
+    chainLengths.every((n) => Number.isInteger(n) && n > 0) &&
+    chainLengths.reduce((s, n) => s + n, 0) === cleanSeq.length
   ) {
-    lens = [...chainLengths];
-  }
-  if (!lens || lens.length <= 1) return undefined;
-  const ids = new Int32Array(cleanLen + 2);
-  ids[0] = 1; // BOS shares first chain ID
-  let offset = 1;
-  for (let c = 0; c < lens.length; c++) {
-    const cid = c + 1;
-    for (let k = 0; k < lens[c]; k++) {
-      ids[offset++] = cid;
+    const seqs: string[] = [];
+    let off = 0;
+    for (const len of chainLengths) {
+      seqs.push(cleanSeq.slice(off, off + len));
+      off += len;
     }
+    return { chainSeqs: seqs, chainLengths: [...chainLengths] };
   }
-  ids[cleanLen + 1] = lens.length; // EOS shares last chain ID
-  return ids;
+  return { chainSeqs: [cleanSeq], chainLengths: [cleanSeq.length] };
 }
 
 function cleanCanonicalSequence(raw: string, label: string): string {
@@ -256,7 +251,11 @@ createWorkerHarness({
       const cand = sourceCandidates[i];
       const seq = cleanedSeqs[i];
       const positions = mode === 'fill' ? parseMaskPositions(maskPositionsRaw, seq.length) : undefined;
-      const sequenceIds = buildEsmcSequenceIds(cand.sequence, cand.chainLengths, seq.length);
+      const { chainSeqs, chainLengths: effChainLens } = resolveCandidateChainSplits(
+        cand.sequence,
+        cand.chainLengths,
+        seq,
+      );
 
       ctx.progress(
         'score',
@@ -264,53 +263,141 @@ createWorkerHarness({
         `ESM-C 300M (${mode}) on ${cand.id} (${seq.length} aa)...`,
       );
 
-      const res = await activeEngine.run(seq, {
-        mode,
-        ...(positions ? { positions } : {}),
-        ...(sequenceIds ? { sequenceIds } : {}),
-        signal: ctx.signal,
-        onProgress: (prog: { loaded?: number; total?: number }) => {
-          const frac = prog.total ? (prog.loaded ?? 0) / prog.total : 0.5;
-          ctx.progress(
-            'score',
-            Math.min(0.96, 0.78 + ((i + frac) / sourceCandidates.length) * 0.18),
-            `ESM-C 300M masked sweep (${cand.id}): ${prog.loaded ?? 0}/${prog.total ?? seq.length}`,
+      // Score multi-chain inputs per chain so EVERY chain gets proper BOS + EOS token context
+      // (avoids middle chains lacking BOS/EOS boundaries).
+      const runChainAware = async (
+        targetSeq: string,
+        targetChains: string[],
+        runMode: EsmcMode,
+        maskPos?: number[],
+      ): Promise<{
+        wtLogProbs: Float32Array<ArrayBuffer>;
+        llr: Float32Array<ArrayBuffer>;
+        naturalness: number;
+        pseudoPerplexity: number;
+        filledSequence?: string;
+      }> => {
+        const K20 = CANONICAL_ALPHABET.length;
+        if (targetChains.length <= 1) {
+          const res = await activeEngine.run(targetSeq, {
+            mode: runMode,
+            ...(maskPos ? { positions: maskPos } : {}),
+            signal: ctx.signal,
+            onProgress: (prog: { loaded?: number; total?: number }) => {
+              const frac = prog.total ? (prog.loaded ?? 0) / prog.total : 0.5;
+              ctx.progress(
+                'score',
+                Math.min(0.96, 0.78 + ((i + frac) / sourceCandidates.length) * 0.18),
+                `ESM-C 300M masked sweep (${cand.id}): ${prog.loaded ?? 0}/${prog.total ?? targetSeq.length}`,
+              );
+            },
+          });
+          const wtLp = new Float32Array(res.wtLogProbs as Float32Array);
+          const llrArr = new Float32Array(res.llr as Float32Array);
+          let sumLp = 0;
+          for (let r = 0; r < wtLp.length; r++) sumLp += wtLp[r];
+          const nat =
+            typeof res.naturalness === 'number' && Number.isFinite(res.naturalness)
+              ? res.naturalness
+              : sumLp / Math.max(1, wtLp.length);
+          const ppl =
+            typeof res.pseudoPerplexity === 'number' && Number.isFinite(res.pseudoPerplexity)
+              ? res.pseudoPerplexity
+              : Math.exp(-nat);
+          return {
+            wtLogProbs: wtLp,
+            llr: llrArr,
+            naturalness: nat,
+            pseudoPerplexity: ppl,
+            ...(typeof res.filledSequence === 'string' ? { filledSequence: res.filledSequence } : {}),
+          };
+        }
+
+        const mergedWt = new Float32Array(targetSeq.length);
+        const mergedLlr = new Float32Array(targetSeq.length * K20);
+        const filledParts: string[] = [];
+        let offset = 0;
+        for (let c = 0; c < targetChains.length; c++) {
+          const cSeq = targetChains[c];
+          const cMask = maskPos
+            ? maskPos
+                .filter((idx) => idx >= offset && idx < offset + cSeq.length)
+                .map((idx) => idx - offset)
+            : undefined;
+          const chainMode: EsmcMode =
+            runMode === 'fill' && (!cMask || cMask.length === 0) ? 'wildtype' : runMode;
+          const res = await activeEngine.run(cSeq, {
+            mode: chainMode,
+            ...(chainMode === 'fill' && cMask ? { positions: cMask } : {}),
+            signal: ctx.signal,
+          });
+          const wtLp = new Float32Array(res.wtLogProbs as Float32Array);
+          const llrArr = new Float32Array(res.llr as Float32Array);
+          mergedWt.set(wtLp.subarray(0, cSeq.length), offset);
+          mergedLlr.set(llrArr.subarray(0, cSeq.length * K20), offset * K20);
+          filledParts.push(
+            chainMode === 'fill' && typeof res.filledSequence === 'string'
+              ? res.filledSequence
+              : cSeq,
           );
-        },
-      });
+          offset += cSeq.length;
+        }
+        let sumLp = 0;
+        for (let r = 0; r < mergedWt.length; r++) sumLp += mergedWt[r];
+        const nat = sumLp / Math.max(1, mergedWt.length);
+        return {
+          wtLogProbs: mergedWt,
+          llr: mergedLlr,
+          naturalness: nat,
+          pseudoPerplexity: Math.exp(-nat),
+          ...(runMode === 'fill' ? { filledSequence: filledParts.join('') } : {}),
+        };
+      };
 
-      const wtLogProbs = new Float32Array(res.wtLogProbs as Float32Array);
-      const llr = new Float32Array(res.llr as Float32Array);
-      let sumLogP = 0;
-      for (let r = 0; r < wtLogProbs.length; r++) sumLogP += wtLogProbs[r];
-      const naturalness =
-        typeof res.naturalness === 'number' && Number.isFinite(res.naturalness)
-          ? res.naturalness
-          : sumLogP / Math.max(1, wtLogProbs.length);
-      const pseudoPerplexity =
-        typeof res.pseudoPerplexity === 'number' && Number.isFinite(res.pseudoPerplexity)
-          ? res.pseudoPerplexity
-          : Math.exp(-naturalness);
+      const initialRes = await runChainAware(seq, chainSeqs, mode, positions);
+      const outSeq =
+        mode === 'fill' && typeof initialRes.filledSequence === 'string'
+          ? initialRes.filledSequence
+          : seq;
+      const seqChanged = mode === 'fill' && outSeq !== seq;
 
-      if (i === 0) {
-        primaryLlr = llr;
-        primaryWtLogProbs = wtLogProbs;
-        primarySeq = seq;
-        primaryNaturalness = naturalness;
-        primaryPpl = pseudoPerplexity;
+      // In fill mode, rescore the newly filled sequence so candidate ranking reflects the filled residues
+      // rather than the pre-fill input tokens, and assign a fresh derived sequenceKey when mutated.
+      let rankNaturalness = initialRes.naturalness;
+      let rankPpl = initialRes.pseudoPerplexity;
+      if (seqChanged) {
+        const filledChains: string[] = [];
+        let off = 0;
+        for (const len of effChainLens) {
+          filledChains.push(outSeq.slice(off, off + len));
+          off += len;
+        }
+        const rescored = await runChainAware(outSeq, filledChains, 'wildtype');
+        rankNaturalness = rescored.naturalness;
+        rankPpl = rescored.pseudoPerplexity;
       }
 
-      const outSeq = mode === 'fill' && typeof res.filledSequence === 'string'
-        ? res.filledSequence
-        : seq;
+      if (i === 0) {
+        primaryLlr = initialRes.llr;
+        primaryWtLogProbs = initialRes.wtLogProbs;
+        primarySeq = seq;
+        primaryNaturalness = initialRes.naturalness;
+        primaryPpl = initialRes.pseudoPerplexity;
+      }
+
+      const derivedSeqKey = seqChanged
+        ? `${cand.sequenceKey ?? cand.key ?? cand.id}:esmc-fill:${fnv1a(outSeq)}`
+        : cand.sequenceKey;
 
       scoredCandidates.push({
         ...cand,
         id: mode === 'fill' ? `${cand.id}-esmc-fill` : cand.id,
+        ...(seqChanged ? { key: derivedSeqKey, sequenceKey: derivedSeqKey } : {}),
+        ...(effChainLens.length > 1 ? { chainLengths: effChainLens } : {}),
         sequence: outSeq,
         // Store negative naturalness (= mean NLL) so Top-K min-sorting picks the most natural sequence
-        score: -naturalness,
-        globalScore: pseudoPerplexity,
+        score: -rankNaturalness,
+        globalScore: rankPpl,
         sourceModelId: 'esmc',
       });
     }
@@ -369,8 +456,12 @@ createWorkerHarness({
 
     const runHash = fnv1a(
       JSON.stringify({
-        seq: primarySeq,
-        count: scoredCandidates.length,
+        candidates: scoredCandidates.map((c) => ({
+          id: c.id,
+          key: c.sequenceKey ?? c.key ?? c.id,
+          seq: c.sequence,
+          chains: c.chainLengths ?? null,
+        })),
         mode,
         precision,
         maskPositionsRaw,
@@ -428,6 +519,10 @@ createWorkerHarness({
       id: `esmc-seqs-${mode}-${runHash}`,
       parentStructureId: parentStructureId ?? 'none',
       sourceStructureId: parentStructureId ?? 'none',
+      ...(seqSet?.sourceStructureIds ? { sourceStructureIds: seqSet.sourceStructureIds } : {}),
+      ...(seqSet?.collectionKind ? { collectionKind: seqSet.collectionKind } : {}),
+      ...(seqSet?.lockedChains?.length ? { lockedChains: seqSet.lockedChains } : {}),
+      ...(seqSet?.chainRoles ? { chainRoles: seqSet.chainRoles } : {}),
       sourceModelId: 'esmc',
       candidates: scoredCandidates,
     };

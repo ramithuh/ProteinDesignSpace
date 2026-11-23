@@ -402,6 +402,8 @@ export interface SequenceCandidate {
   temperature?: number;
   seed?: number;
   chainLengths?: number[];
+  /** Ordered physical chain IDs matching `chainLengths` (prevents target-only MSA chain-role mismatch). */
+  chainIds?: string[];
 }
 
 export interface SequenceSet {

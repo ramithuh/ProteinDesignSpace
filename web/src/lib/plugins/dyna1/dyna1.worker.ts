@@ -300,32 +300,77 @@ createWorkerHarness({
         `Dyna-1 (${mode}) on ${cand.id} (${useStruct ? backbone3!.length : seq.length} aa)...`,
       );
 
-      const res = await activeEngine.predict(
-        mode === 'struct-only' ? null : seq,
-        {
-          mode,
-          ...(useStruct
-            ? cachedStructureTokens
-              ? { structureTokens: cachedStructureTokens }
-              : { structureCoords: backbone3!.coords, residueIndex: backbone3!.residueIndex }
-            : {}),
-          signal: ctx.signal,
-          onProgress: (prog: { phase?: string; loaded?: number; total?: number }) => {
-            if (prog.phase !== 'structure-encoder') return;
-            const loaded = prog.loaded ?? 0;
-            const total = prog.total ?? 0;
-            const frac = total > 0 ? loaded / total : 0.4;
-            const mb = (loaded / 1024 / 1024).toFixed(1);
-            const totMb = total > 0 ? (total / 1024 / 1024).toFixed(1) : '?';
-            ctx.progress(
-              'weights',
-              Math.min(0.84, 0.72 + frac * 0.12),
-              `Dyna-1 ESM-3 structure encoder: ${mb} / ${totMb} MB`,
-            );
+      // In seq-only mode, preserve multi-chain boundaries by scoring each chain independently
+      // so `AAA:GGG` does not merge into `AAAGGG` with cross-chain attention!
+      const rawChainParts = cand.sequence
+        .split(/[:/]+/)
+        .map((seg) => seg.replace(/[\s,-]+/g, '').toUpperCase())
+        .filter(Boolean);
+      const effChainSeqs: string[] = (() => {
+        if (
+          rawChainParts.length > 1 &&
+          rawChainParts.reduce((a, b) => a + b.length, 0) === seq.length
+        ) {
+          return rawChainParts;
+        }
+        if (
+          cand.chainLengths &&
+          cand.chainLengths.length > 1 &&
+          cand.chainLengths.every((n) => Number.isInteger(n) && n > 0) &&
+          cand.chainLengths.reduce((a, b) => a + b, 0) === seq.length
+        ) {
+          const out: string[] = [];
+          let off = 0;
+          for (const len of cand.chainLengths) {
+            out.push(seq.slice(off, off + len));
+            off += len;
+          }
+          return out;
+        }
+        return [seq];
+      })();
+
+      let probs: Float32Array<ArrayBuffer>;
+      if (mode === 'seq-only' && effChainSeqs.length > 1) {
+        probs = new Float32Array(seq.length);
+        let off = 0;
+        for (const cSeq of effChainSeqs) {
+          const cRes = await activeEngine.predict(cSeq, {
+            mode: 'seq-only',
+            signal: ctx.signal,
+          });
+          const cProbs = new Float32Array(cRes.probs as Float32Array);
+          probs.set(cProbs.subarray(0, cSeq.length), off);
+          off += cSeq.length;
+        }
+      } else {
+        const res = await activeEngine.predict(
+          mode === 'struct-only' ? null : seq,
+          {
+            mode,
+            ...(useStruct
+              ? cachedStructureTokens
+                ? { structureTokens: cachedStructureTokens }
+                : { structureCoords: backbone3!.coords, residueIndex: backbone3!.residueIndex }
+              : {}),
+            signal: ctx.signal,
+            onProgress: (prog: { phase?: string; loaded?: number; total?: number }) => {
+              if (prog.phase !== 'structure-encoder') return;
+              const loaded = prog.loaded ?? 0;
+              const total = prog.total ?? 0;
+              const frac = total > 0 ? loaded / total : 0.4;
+              const mb = (loaded / 1024 / 1024).toFixed(1);
+              const totMb = total > 0 ? (total / 1024 / 1024).toFixed(1) : '?';
+              ctx.progress(
+                'weights',
+                Math.min(0.84, 0.72 + frac * 0.12),
+                `Dyna-1 ESM-3 structure encoder: ${mb} / ${totMb} MB`,
+              );
+            },
           },
-        },
-      );
-      const probs = new Float32Array(res.probs as Float32Array);
+        );
+        probs = new Float32Array(res.probs as Float32Array);
+      }
 
       let sum = 0;
       let mn = Infinity;
@@ -371,10 +416,14 @@ createWorkerHarness({
 
     const runHash = fnv1a(
       JSON.stringify({
-        seq: primaryMode === 'struct-only' ? '' : primarySeq,
+        candidates: scoredCandidates.map((c) => ({
+          id: c.id,
+          key: c.sequenceKey ?? c.key ?? c.id,
+          seq: primaryMode === 'struct-only' ? '' : c.sequence,
+          chains: c.chainLengths ?? null,
+        })),
         structId: primaryMode !== 'seq-only' ? struct?.id ?? '' : '',
         mode: primaryMode,
-        count: scoredCandidates.length,
         precision,
       }),
     );
@@ -412,6 +461,10 @@ createWorkerHarness({
       id: `dyna1-seqs-${precision}-${runHash}`,
       parentStructureId: parentStructureId ?? 'none',
       sourceStructureId: parentStructureId ?? 'none',
+      ...(seqSet?.sourceStructureIds ? { sourceStructureIds: seqSet.sourceStructureIds } : {}),
+      ...(seqSet?.collectionKind ? { collectionKind: seqSet.collectionKind } : {}),
+      ...(seqSet?.lockedChains?.length ? { lockedChains: seqSet.lockedChains } : {}),
+      ...(seqSet?.chainRoles ? { chainRoles: seqSet.chainRoles } : {}),
       sourceModelId: 'dyna1',
       candidates: scoredCandidates,
     };

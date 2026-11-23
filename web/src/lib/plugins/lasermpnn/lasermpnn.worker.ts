@@ -50,6 +50,7 @@ interface LaserEngine {
     opts?: {
       numSequences?: number;
       temperature?: number;
+      chiTemperature?: number;
       seed?: number;
       fixedPositions?: string[];
       designChains?: string[];
@@ -490,6 +491,7 @@ createWorkerHarness({
         const res = await activeEngine.design(structureText, {
           numSequences: 1,
           temperature,
+          chiTemperature: temperature,
           seed: itemSeed,
           ...(fixedIds.length > 0 ? { fixedPositions: fixedIds } : {}),
           ...(designChains ? { designChains } : {}),
@@ -715,6 +717,7 @@ createWorkerHarness({
         const res = await activeEngine.design(text, {
           numSequences: 1,
           temperature,
+          chiTemperature: temperature,
           seed: itemSeed,
           ...(fixedIds.length > 0 ? { fixedPositions: fixedIds } : {}),
           ...(designChains ? { designChains } : {}),

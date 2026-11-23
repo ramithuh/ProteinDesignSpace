@@ -10,6 +10,8 @@ export interface PaintBfactorsOptions {
   clampMin?: number;
   /** Optional upper clamp applied after scaling. */
   clampMax?: number;
+  /** Optional numeric value written for NaN/unscored residues instead of keeping original B-factors. */
+  missingValue?: number;
 }
 
 export interface RankedMutation {
@@ -36,7 +38,12 @@ function padLeft(s: string, width: number): string {
 }
 
 function transformBfactorValue(raw: number, opts?: PaintBfactorsOptions): number | null {
-  if (!Number.isFinite(raw)) return null;
+  if (!Number.isFinite(raw)) {
+    if (opts?.missingValue !== undefined && Number.isFinite(opts.missingValue)) {
+      return opts.missingValue;
+    }
+    return null;
+  }
   const scale = opts?.scale !== undefined && Number.isFinite(opts.scale) ? opts.scale : 1;
   let v = raw * scale;
   if (!Number.isFinite(v)) return null;

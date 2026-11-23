@@ -76,32 +76,53 @@ function cifRecords(text) {
         }
         return "";
       };
+      const altloc = get("label_alt_id");
+      const modelNum = get("pdbx_PDB_model_num");
       rows.push({
         record: get("group_PDB"),
         atom: get("auth_atom_id", "label_atom_id"),
         name: get("auth_comp_id", "label_comp_id"),
-        chain: get("auth_asym_id", "label_asym_id"),
+        chain: get("auth_asym_id", "label_asym_id") || "A",
         number: Number(get("auth_seq_id", "label_seq_id")),
         ins: get("pdbx_PDB_ins_code"),
+        altloc: altloc === "." || altloc === "?" ? "" : altloc,
+        modelNum: modelNum || "1",
         xyz: ["Cartn_x", "Cartn_y", "Cartn_z"].map((k) =>
           get(k) === "" ? NaN : Number(get(k)),
         ),
       });
     }
   }
+  if (rows.length > 0) {
+    const firstModel = rows[0].modelNum;
+    return rows.filter((r) => r.modelNum === firstModel);
+  }
   return rows;
 }
 function pdbRecords(text) {
   const rows = [];
+  let sawModel = false;
   for (const l of text.split(/\r?\n/)) {
+    if (l.startsWith("ENDMDL")) {
+      if (sawModel || rows.length > 0) break;
+      continue;
+    }
+    if (l.startsWith("MODEL")) {
+      if (sawModel && rows.length > 0) break;
+      sawModel = true;
+      continue;
+    }
     if (!l.startsWith("ATOM") && !l.startsWith("HETATM")) continue;
+    const rawChain = l.slice(21, 22).trim();
+    const rawAlt = l.slice(16, 17).trim();
     rows.push({
       record: l.slice(0, 6).trim(),
       atom: l.slice(12, 16).trim(),
       name: l.slice(17, 20),
-      chain: l.slice(21, 22),
+      chain: rawChain || "A",
       number: Number(l.slice(22, 26).trim()),
       ins: l.slice(26, 27).trim(),
+      altloc: rawAlt,
       xyz: [30, 38, 46].map((i) =>
         l.slice(i, i + 8).trim() === "" ? NaN : Number(l.slice(i, i + 8)),
       ),
@@ -149,8 +170,24 @@ export function parseStructure(
     if (!byChain.has(r.chain)) byChain.set(r.chain, new Map());
     const residues = byChain.get(r.chain),
       key = `${r.number}:${r.ins}`;
-    if (!residues.has(key)) residues.set(key, { ...r, atoms: new Map() });
+    if (!residues.has(key)) {
+      residues.set(key, { ...r, chosenAlt: null, atoms: new Map() });
+    }
     const res = residues.get(key);
+    // Select one consistent alternate conformer per residue (prefer blank, then first seen / 'A'/'1')
+    const alt = r.altloc || "";
+    if (alt !== "") {
+      if (res.chosenAlt === null) {
+        res.chosenAlt = alt;
+      } else if (alt !== res.chosenAlt) {
+        if ((alt === "A" || alt === "1") && res.chosenAlt !== "A" && res.chosenAlt !== "1") {
+          res.chosenAlt = alt;
+          res.atoms.clear();
+        } else {
+          continue;
+        }
+      }
+    }
     if (!res.atoms.has(r.atom)) res.atoms.set(r.atom, r.xyz);
   }
   const ids =

@@ -105,10 +105,11 @@ function mulberry32(seed: number): () => number {
 function generateUniforms(length: number, seed: number): Float32Array {
   const rng = mulberry32(seed);
   const out = new Float32Array(length);
+  // Largest float32 strictly less than 1.0 (prevents Float64 draws like 0.9999999951 rounding to 1.0 in Float32Array!)
+  const MAX_F32_UNDER_ONE = 0.99999994;
   for (let i = 0; i < length; i++) {
-    const u = rng();
-    // Strictly clamp to [0, 1) as validated by AntiFold/ESM-IF1 samplers
-    out[i] = u >= 1 ? 0.9999999 : u < 0 ? 0 : u;
+    const f32 = Math.fround(rng());
+    out[i] = f32 >= 1 ? MAX_F32_UNDER_ONE : f32 < 0 ? 0 : f32;
   }
   return out;
 }

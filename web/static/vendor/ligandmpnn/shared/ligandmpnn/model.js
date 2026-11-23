@@ -386,7 +386,7 @@ export class LigandModel {
         o.scatter(hs, t, o.gather(this.w["W_s.weight"], [aa]));
       }
     }
-    const score = (m) => {
+    const scoreWithCount = (m) => {
       let sum = 0,
         n = 0;
       for (let i = 0; i < L; i++) {
@@ -394,8 +394,10 @@ export class LigandModel {
         sum -= logs[i * 21 + S[i]] * w;
         n += w;
       }
-      return sum / (n + 1e-8);
+      return { value: n > 0 ? sum / n : NaN, count: n };
     };
+    const gScore = scoreWithCount(mask);
+    const lScore = scoreWithCount(input.mask_XY);
     return {
       S,
       sequence: Array.from(S, (a) => ALPHABET[a]).join(""),
@@ -403,8 +405,10 @@ export class LigandModel {
       log_probs: logs,
       logits: logitsAll,
       decoding_order: Int32Array.from(order.flat),
-      global_score: score(mask),
-      ligand_score: score(input.mask_XY),
+      global_score: gScore.value,
+      global_count: gScore.count,
+      ligand_score: lScore.value,
+      ligand_count: lScore.count,
       trace: await this.readTrace(),
     };
   }
@@ -448,7 +452,9 @@ export function makeEngine(ops, bundle, defaults = {}) {
           sequences: results.map((r) => r.sequence),
           scores: results.map((r) => ({
             global: r.global_score,
+            globalCount: r.global_count,
             ligand: r.ligand_score,
+            ligandCount: r.ligand_count,
           })),
           logProbs: results.map((r) => r.log_probs),
           samplingProbs: results.map((r) => r.sampling_probs),

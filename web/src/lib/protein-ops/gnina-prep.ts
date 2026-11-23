@@ -226,13 +226,33 @@ export function buildLigandV2000Sdf(
     const a = Math.min(i, j);
     const b = Math.max(i, j);
     const key = `${a}/${b}`;
-    if (!bondMap.has(key)) bondMap.set(key, [a, b, order]);
+    const existing = bondMap.get(key);
+    if (!existing) {
+      bondMap.set(key, [a, b, order]);
+    } else if (order > existing[2]) {
+      existing[2] = order;
+    }
   };
 
+  // Preserve explicit PDB CONECT bond multiplicity: repeated directed entries from the same
+  // source atom (`CONECT 1 2 2` -> order 2, `CONECT 1 2 2 2` -> order 3) encode double/triple
+  // bonds, whereas reciprocal `CONECT 2 1` is the opposite direction of the same bond.
+  const directedCounts = new Map<string, number>();
   for (const [s1, s2] of conectPairs) {
     const i = serialToIdx.get(s1);
     const j = serialToIdx.get(s2);
-    if (i !== undefined && j !== undefined) addBond(i, j, 1);
+    if (i !== undefined && j !== undefined && i !== j) {
+      const dirKey = `${i}->${j}`;
+      directedCounts.set(dirKey, (directedCounts.get(dirKey) ?? 0) + 1);
+    }
+  }
+  for (const [dirKey, count] of directedCounts.entries()) {
+    const [iStr, jStr] = dirKey.split('->');
+    const i = Number(iStr);
+    const j = Number(jStr);
+    const revCount = directedCounts.get(`${j}->${i}`) ?? 0;
+    const explicitOrder = Math.min(3, Math.max(1, count, revCount));
+    addBond(i, j, explicitOrder);
   }
 
   for (let i = 0; i < ordered.length; i++) {
@@ -350,6 +370,25 @@ export function buildLigandV2000Sdf(
       }
     } else if ((parent.element === 'P' || parent.element === 'S') && edge.dist <= 1.52) {
       bonds[edge.bondIdx][2] = 2;
+    }
+  }
+
+  // 3. Perceive short acyclic unsaturated C=C / C=N / C#C / C#N bonds when still marked order 1
+  for (let bi = 0; bi < bonds.length; bi++) {
+    if (bonds[bi][2] !== 1) continue;
+    const [u, v] = bonds[bi];
+    const au = ordered[u];
+    const av = ordered[v];
+    if (
+      (au.element === 'C' || au.element === 'N') &&
+      (av.element === 'C' || av.element === 'N')
+    ) {
+      const dist = Math.hypot(au.x - av.x, au.y - av.y, au.z - av.z);
+      if (dist <= 1.22 && heavyDeg[u] <= 2 && heavyDeg[v] <= 2) {
+        bonds[bi][2] = 3;
+      } else if (dist <= 1.37 && heavyDeg[u] <= 3 && heavyDeg[v] <= 3) {
+        bonds[bi][2] = 2;
+      }
     }
   }
 
@@ -663,13 +702,18 @@ export function detectExternalLigandFormat(text: string): 'mol2' | 'sdf' {
 
 /**
  * Parse user-friendly pocket residue selectors (e.g. `"A45, A79, A90-94"` or `"45, 79"`)
- * into GNINA's exact `pocketResidues` keys (`[chain, seq, ins, res].filter(Boolean).join('/')`).
+ * into GNINA's exact `pocketResidues` keys (`[chain, seq, ins, res].filter(Boolean).join('/')`),
+ * resolving exact case-sensitive chain IDs first and reporting any unmatched tokens.
  */
-export function parsePocketResidueTokens(spec: string, receptorPdb: string): string[] {
+export function parsePocketResidueTokensStrict(
+  spec: string,
+  receptorPdb: string,
+): { keys: string[]; unmatched: string[] } {
   const trimmed = spec.trim();
-  if (!trimmed) return [];
+  if (!trimmed) return { keys: [], unmatched: [] };
   const { atoms } = parseAllPdbAtomLines(receptorPdb);
-  const resByChainNum = new Map<string, string>();
+  const resByExact = new Map<string, string>();
+  const resByUpper = new Map<string, string[]>();
   const resByNumOnly = new Map<string, string[]>();
   const validKeys = new Set<string>();
 
@@ -680,13 +724,27 @@ export function parsePocketResidueTokens(spec: string, receptorPdb: string): str
     const key = [a.chain, a.resSeq, a.insCode, a.resName].filter(Boolean).join('/');
     if (validKeys.has(key)) continue;
     validKeys.add(key);
-    resByChainNum.set(`${a.chain.toUpperCase()}:${a.resSeq}${a.insCode.toUpperCase()}`, key);
+    const exactKey = `${a.chain}:${a.resSeq}${a.insCode}`;
+    if (!resByExact.has(exactKey)) resByExact.set(exactKey, key);
+    const upperKey = `${a.chain.toUpperCase()}:${a.resSeq}${a.insCode.toUpperCase()}`;
+    const uList = resByUpper.get(upperKey) ?? [];
+    uList.push(key);
+    resByUpper.set(upperKey, uList);
     const list = resByNumOnly.get(a.resSeq) ?? [];
     list.push(key);
     resByNumOnly.set(a.resSeq, list);
   }
 
+  const lookupChainRes = (chain: string, resWithIns: string): string | null => {
+    const exact = resByExact.get(`${chain}:${resWithIns}`);
+    if (exact) return exact;
+    const uHits = resByUpper.get(`${chain.toUpperCase()}:${resWithIns.toUpperCase()}`);
+    if (uHits && uHits.length === 1) return uHits[0];
+    return null;
+  };
+
   const out = new Set<string>();
+  const unmatched: string[] = [];
   const tokens = trimmed.split(/[\s,;]+/).filter(Boolean);
   for (const rawTok of tokens) {
     const tok = rawTok.trim();
@@ -694,25 +752,32 @@ export function parsePocketResidueTokens(spec: string, receptorPdb: string): str
       out.add(tok);
       continue;
     }
-    // Range with chain prefix: A45-52 or A:45-52
+    // Range with chain prefix: A45-52 or A:45-52 (preserves exact chain case!)
     const rangeMatch = tok.match(/^([A-Za-z]):?(\d+)-(\d+)$/);
     if (rangeMatch) {
-      const ch = rangeMatch[1].toUpperCase();
+      const ch = rangeMatch[1];
       const lo = Number(rangeMatch[2]);
       const hi = Number(rangeMatch[3]);
+      let matchedAny = false;
       for (let n = Math.min(lo, hi); n <= Math.max(lo, hi); n++) {
-        const hit = resByChainNum.get(`${ch}:${n}`);
-        if (hit) out.add(hit);
+        const hit = lookupChainRes(ch, String(n));
+        if (hit) {
+          out.add(hit);
+          matchedAny = true;
+        }
       }
+      if (!matchedAny) unmatched.push(tok);
       continue;
     }
-    // Single residue with chain prefix: A45, A:45, A100A
+    // Single residue with chain prefix: A45, a45, A:45, A100A
     const singleChain = tok.match(/^([A-Za-z]):?(\d+)([A-Za-z]?)$/);
     if (singleChain) {
-      const hit = resByChainNum.get(
-        `${singleChain[1].toUpperCase()}:${singleChain[2]}${singleChain[3].toUpperCase()}`,
-      );
-      if (hit) out.add(hit);
+      const hit = lookupChainRes(singleChain[1], `${singleChain[2]}${singleChain[3]}`);
+      if (hit) {
+        out.add(hit);
+      } else {
+        unmatched.push(tok);
+      }
       continue;
     }
     // Bare residue number or range (match first/all chains)
@@ -720,16 +785,32 @@ export function parsePocketResidueTokens(spec: string, receptorPdb: string): str
     if (bareRange) {
       const lo = Number(bareRange[1]);
       const hi = Number(bareRange[2]);
+      let matchedAny = false;
       for (let n = Math.min(lo, hi); n <= Math.max(lo, hi); n++) {
-        for (const hit of resByNumOnly.get(String(n)) ?? []) out.add(hit);
+        for (const hit of resByNumOnly.get(String(n)) ?? []) {
+          out.add(hit);
+          matchedAny = true;
+        }
       }
+      if (!matchedAny) unmatched.push(tok);
       continue;
     }
     if (/^\d+$/.test(tok)) {
-      for (const hit of resByNumOnly.get(tok) ?? []) out.add(hit);
+      const hits = resByNumOnly.get(tok) ?? [];
+      if (hits.length > 0) {
+        for (const hit of hits) out.add(hit);
+      } else {
+        unmatched.push(tok);
+      }
+      continue;
     }
+    unmatched.push(tok);
   }
-  return [...out];
+  return { keys: [...out], unmatched };
+}
+
+export function parsePocketResidueTokens(spec: string, receptorPdb: string): string[] {
+  return parsePocketResidueTokensStrict(spec, receptorPdb).keys;
 }
 
 /**

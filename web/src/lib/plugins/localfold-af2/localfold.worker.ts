@@ -18,7 +18,9 @@ import {
   clampLocalFoldRecycles,
   computeAf2MsaBudgets,
   createMsaSearchCache,
+  parseCandidateProteinChains,
   resolveAf2Tolerance,
+  resolveMsaChainIdsSafely,
   resolveMsaForCandidate,
   selectLocalFoldRepresentative,
   type MmseqsApi,
@@ -447,6 +449,37 @@ createWorkerHarness({
     if (!isAf2Mono && !isAf2Multi && !isAf3 && !isEsmfold2) {
       throw new Error(`Unsupported LocalFold model "${modelKey}"`);
     }
+    // Reject non-canonical DNA/RNA letters explicitly instead of silently stripping them (e.g. ACNGT -> ACGT)
+    if (isAf3 || isEsmfold2) {
+      const rawDnaTokens = Array.isArray(p.dnaSequences)
+        ? (p.dnaSequences as unknown[]).map((s) => String(s ?? '').trim()).filter(Boolean)
+        : String(p.dnaSequences ?? '')
+            .split(/[:,;\s]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+      for (let dIdx = 0; dIdx < rawDnaTokens.length; dIdx++) {
+        const bad = rawDnaTokens[dIdx].toUpperCase().match(/[^ACGT]/);
+        if (bad) {
+          throw new Error(
+            `Invalid DNA base "${bad[0]}" in DNA chain #${dIdx + 1} ("${rawDnaTokens[dIdx]}"). Only canonical A, C, G, T are supported.`,
+          );
+        }
+      }
+      const rawRnaTokens = Array.isArray(p.rnaSequences)
+        ? (p.rnaSequences as unknown[]).map((s) => String(s ?? '').trim()).filter(Boolean)
+        : String(p.rnaSequences ?? '')
+            .split(/[:,;\s]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+      for (let rIdx = 0; rIdx < rawRnaTokens.length; rIdx++) {
+        const bad = rawRnaTokens[rIdx].toUpperCase().match(/[^ACGU]/);
+        if (bad) {
+          throw new Error(
+            `Invalid RNA base "${bad[0]}" in RNA chain #${rIdx + 1} ("${rawRnaTokens[rIdx]}"). Only canonical A, C, G, U are supported.`,
+          );
+        }
+      }
+    }
     const lockedChains: string[] | undefined = Array.isArray(seqSet.lockedChains)
       ? seqSet.lockedChains
       : Array.isArray(p.lockedChains)
@@ -681,36 +714,34 @@ createWorkerHarness({
         const target = targets[i];
         const cand = target.cand;
         const itemSeed = target.seed;
-        const stripped = cand.sequence.toUpperCase().replace(/[\s/:,]+/g, '');
-        if (stripped.length === 0) {
+        const parsedCand = parseCandidateProteinChains(cand.sequence, cand.chainLengths);
+        const cleanSeq = parsedCand.cleanSeq;
+        if (cleanSeq.length === 0) {
           throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
         }
-        const validCount = (stripped.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
-        if (validCount / stripped.length < 0.5) {
+        const validCount = (cleanSeq.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
+        if (validCount / cleanSeq.length < 0.5) {
           throw new Error(
-            `Refusing to fold "${cand.id}": ${stripped.length - validCount}/${stripped.length} residues are unknown/non-canonical (>50% unknown). Check the upstream generator output.`,
+            `Refusing to fold "${cand.id}": ${cleanSeq.length - validCount}/${cleanSeq.length} residues are unknown/non-canonical (>50% unknown). Check the upstream generator output.`,
           );
         }
-        // Preserve 'X' natively (LocalFold encodes 'X' as aatype=20); map any other non-canonical char to 'X'
-        const cleanSeq = stripped.replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, 'X');
-        const chainLengths =
-          Array.isArray(cand.chainLengths) &&
-          cand.chainLengths.length > 0 &&
-          cand.chainLengths.every((n) => Number.isInteger(n) && n > 0) &&
-          cand.chainLengths.reduce((a, b) => a + b, 0) === cleanSeq.length
-            ? cand.chainLengths
-            : [cleanSeq.length];
-        const chainSeqs = splitChainSequences(cleanSeq, chainLengths);
+        const { chainLengths, chainSeqs } = parsedCand;
         const chainIds = chainIdsFromLengths(chainLengths);
         const uniqueChains = [...new Set(chainIds)];
+        const msaChainInfo = resolveMsaChainIdsSafely({
+          chainCount: chainSeqs.length,
+          candidateChainIds: cand.chainIds,
+          lockedChains,
+          chainRoles,
+        });
 
         const msa = await resolveMsaForCandidate({
           msaMode,
           modelKey,
           chainSeqs,
-          chainIds: uniqueChains,
-          lockedChains,
-          chainRoles,
+          chainIds: msaChainInfo.chainIds,
+          lockedChains: msaChainInfo.ambiguous ? undefined : lockedChains,
+          chainRoles: msaChainInfo.ambiguous ? undefined : chainRoles,
           msaA3mText,
           mmseqsApi,
           cache: msaCache,
@@ -885,34 +916,32 @@ createWorkerHarness({
         const target = targets[i];
         const cand = target.cand;
         const itemSeed = target.seed;
-        const stripped = cand.sequence.toUpperCase().replace(/[\s/:,]+/g, '');
-        if (stripped.length === 0) {
+        const parsedCand = parseCandidateProteinChains(cand.sequence, cand.chainLengths);
+        const cleanSeq = parsedCand.cleanSeq;
+        if (cleanSeq.length === 0) {
           throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
         }
-        const validCount = (stripped.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
-        if (validCount / stripped.length < 0.5) {
+        const validCount = (cleanSeq.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
+        if (validCount / cleanSeq.length < 0.5) {
           throw new Error(
-            `Refusing to fold "${cand.id}": ${stripped.length - validCount}/${stripped.length} residues are unknown/non-canonical (>50% unknown). Check the upstream generator output.`,
+            `Refusing to fold "${cand.id}": ${cleanSeq.length - validCount}/${cleanSeq.length} residues are unknown/non-canonical (>50% unknown). Check the upstream generator output.`,
           );
         }
-        const cleanSeq = stripped.replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, 'X');
-        const chainLengths =
-          Array.isArray(cand.chainLengths) &&
-          cand.chainLengths.length > 0 &&
-          cand.chainLengths.every((n) => Number.isInteger(n) && n > 0) &&
-          cand.chainLengths.reduce((a, b) => a + b, 0) === cleanSeq.length
-            ? cand.chainLengths
-            : [cleanSeq.length];
-        const proteinChainSeqs = splitChainSequences(cleanSeq, chainLengths);
-        const proteinUniqueChains = [...new Set(chainIdsFromLengths(chainLengths))];
+        const { chainLengths, chainSeqs: proteinChainSeqs } = parsedCand;
+        const msaChainInfo = resolveMsaChainIdsSafely({
+          chainCount: proteinChainSeqs.length,
+          candidateChainIds: cand.chainIds,
+          lockedChains,
+          chainRoles,
+        });
 
         const msa = await resolveMsaForCandidate({
           msaMode,
           modelKey,
           chainSeqs: proteinChainSeqs,
-          chainIds: proteinUniqueChains,
-          lockedChains,
-          chainRoles,
+          chainIds: msaChainInfo.chainIds,
+          lockedChains: msaChainInfo.ambiguous ? undefined : lockedChains,
+          chainRoles: msaChainInfo.ambiguous ? undefined : chainRoles,
           msaA3mText,
           mmseqsApi,
           cache: msaCache,
@@ -1023,6 +1052,17 @@ createWorkerHarness({
             ? parsed.chainIds
             : chainIdsFromLengths(chainLengths);
         const uniqueChains = [...new Set(chainIds)];
+        // Build distinct labels for EVERY polymer & ligand entity (1-based asymId order: protein, DNA, RNA, ligands)
+        const entityLabels: string[] = [...uniqueChains];
+        for (let d = 0; d < dnaSeqs.length; d++) entityLabels.push(`DNA${d + 1}`);
+        for (let r = 0; r < rnaSeqs.length; r++) entityLabels.push(`RNA${r + 1}`);
+        const ligLabelCounts = new Map<string, number>();
+        for (let lIdx = 0; lIdx < parsedLigands.length; lIdx++) {
+          const base = (ligandCcdCodes[lIdx] || `LIG${lIdx + 1}`).trim();
+          const seen = (ligLabelCounts.get(base) ?? 0) + 1;
+          ligLabelCounts.set(base, seen);
+          entityLabels.push(seen > 1 ? `${base}#${seen}` : base);
+        }
         const chainScores = normalizeLocalFoldChainScores(
           {
             ptm: ptmVal,
@@ -1031,20 +1071,43 @@ createWorkerHarness({
             chainIptm: result.chainIptm,
             chainPairIptm: result.chainPairIptm,
           },
-          uniqueChains,
+          entityLabels,
           1,
         );
 
-        // For AF3/RF3 protein+ligand/nucleic complexes, PAE is (L_protein + N_nonpoly)^2;
-        // append the non-polymer token span so interface PAE & ipSAE compute across protein<->ligand.
+        // For AF3/RF3 protein+DNA/RNA/ligand complexes, preserve per-entity chain IDs from batch.asymId
+        // so distinct non-protein entities are NEVER pooled into one synthetic 'LIG' chain for ipSAE!
         let ipsaeChainLengths = chainLengths;
         let ipsaeChainIds = chainIds;
         if (paeRaw && paeRaw.length > cleanSeq.length * cleanSeq.length) {
           const paeDim = Math.round(Math.sqrt(paeRaw.length));
           if (paeDim * paeDim === paeRaw.length && paeDim > cleanSeq.length) {
-            const extraTokens = paeDim - cleanSeq.length;
-            ipsaeChainLengths = [...chainLengths, extraTokens];
-            ipsaeChainIds = [...chainIds, ...Array<string>(extraTokens).fill('LIG')];
+            const asymArr = batch?.asymId as ArrayLike<number> | undefined;
+            if (asymArr && asymArr.length === paeDim) {
+              const tokenLabels: string[] = new Array(paeDim);
+              const entityLens: number[] = [];
+              let prevLabel = '';
+              for (let t = 0; t < paeDim; t++) {
+                const asymIdx = Number(asymArr[t]) - 1;
+                const lbl =
+                  t < chainIds.length
+                    ? chainIds[t]
+                    : entityLabels[asymIdx] ?? `ENT${asymIdx + 1}`;
+                tokenLabels[t] = lbl;
+                if (lbl !== prevLabel) {
+                  entityLens.push(1);
+                  prevLabel = lbl;
+                } else {
+                  entityLens[entityLens.length - 1] += 1;
+                }
+              }
+              ipsaeChainIds = tokenLabels;
+              ipsaeChainLengths = entityLens;
+            } else {
+              const extraTokens = paeDim - cleanSeq.length;
+              ipsaeChainLengths = [...chainLengths, extraTokens];
+              ipsaeChainIds = [...chainIds, ...Array<string>(extraTokens).fill('LIG')];
+            }
           }
         }
         const ipsaeRes = computeCandidateIpsae(paeRaw, ipsaeChainLengths, ipsaeChainIds);
@@ -1159,7 +1222,9 @@ createWorkerHarness({
         id: `foldstruct-${modelKey}-${bestFold.sequenceId}-${runHash}`,
         label: `${bestFold.sequenceId} (${modelKey}, ${confTag})`,
         sourceModelId: 'localfold-af2',
-        parentStructureId: sourceStructureId,
+        parentStructureId: bestFold.sourceStructureId ?? sourceStructureId,
+        ...(bestFold.designKey ? { designKey: bestFold.designKey } : {}),
+        ...(bestFold.designIndex !== undefined ? { designIndex: bestFold.designIndex } : {}),
         representativeSelection: rep.selection,
         bfactorSemantics: 'plddt-0-100',
         atomGranularity: 'all-atom',
