@@ -118,12 +118,24 @@ export async function loadEsmfold2(
       ipsaeChainIds = [...parsed.chainIds, ...Array<string>(extraTokens).fill('LIG')];
     }
     const ipsaeRes = computeCandidateIpsae(pae, ipsaeChainLengths, ipsaeChainIds);
+    // Vendor featurise.js:289 zero-bases asymId (0..totalEntities-1) in entity order: protein, DNA, RNA, ligands.
+    const entityLabels: string[] = [...new Set(parsed.chainIds)];
+    for (let i = 0; i < dnaSeqs.length; i++) entityLabels.push(`DNA${i + 1}`);
+    for (let i = 0; i < rnaSeqs.length; i++) entityLabels.push(`RNA${i + 1}`);
+    const ligCounts = new Map<string, number>();
+    for (let i = 0; i < parsedLigands.length; i++) {
+      const lig = parsedLigands[i] as { ccdCode?: string; name?: string; id?: string } | undefined;
+      const base = String(lig?.ccdCode ?? lig?.name ?? lig?.id ?? `LIG${i + 1}`).trim() || `LIG${i + 1}`;
+      const seen = (ligCounts.get(base) ?? 0) + 1;
+      ligCounts.set(base, seen);
+      entityLabels.push(seen > 1 ? `${base}#${seen}` : base);
+    }
     return {
       sequence, pdbText, caCoords: parsed.caCoords, plddt, meanPlddt, confidence: meanPlddt,
       confidenceAvailable: true, ptm, iptm, pae,
       chainIds: parsed.chainIds, chainLengths, resNums: parsed.resNums,
       ...(ipsaeRes ? { ipsae: ipsaeRes.ipsae, ipsaeMin: ipsaeRes.ipsaeMin } : {}),
-      ...normalizeLocalFoldChainScores({ ...confidence, ptm, iptm }, [...new Set(parsed.chainIds)], 1),
+      ...normalizeLocalFoldChainScores({ ...confidence, ptm, iptm }, entityLabels, 0),
       provenance: {
         quantization: 'int5' as const, languageModelQuantization: 'int3' as const,
         confidenceHead: 'Synthyra', recyclesRun: loaded.shape.loops - 1,

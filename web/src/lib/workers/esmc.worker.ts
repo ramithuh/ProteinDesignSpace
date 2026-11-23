@@ -437,10 +437,15 @@ self.onmessage = async (ev: MessageEvent) => {
         }),
       );
 
+      const isTrueMaskedPpl = mode === 'masked';
       const mutations: MutationMatrixArtifact = {
         kind: 'MutationMatrix',
         id: `esmc-llr-${mode}-${precision}-${runHash}`,
-        label: `ESM-C 300M ${mode === 'masked' ? 'Masked LLR' : mode === 'fill' ? 'Fill LLR' : 'WT LLR'} (${precision.toUpperCase()} · PPPL ${primaryPpl.toFixed(2)})`,
+        label: isTrueMaskedPpl
+          ? `ESM-C 300M Masked LLR (${precision.toUpperCase()} · PPPL ${primaryPpl.toFixed(2)})`
+          : mode === 'fill'
+            ? `ESM-C 300M Fill LLR (${precision.toUpperCase()})`
+            : `ESM-C 300M WT LLR (${precision.toUpperCase()} · 1-pass approx)`,
         sourceModelId: 'esmc',
         parentStructureId,
         metric: 'llr-fitness',
@@ -459,7 +464,9 @@ self.onmessage = async (ev: MessageEvent) => {
       const track: ResidueTrackArtifact = {
         kind: 'ResidueTrack',
         id: `esmc-track-${mode}-${precision}-${runHash}`,
-        label: `ESM-C WT Log-Prob (Naturalness ${primaryNaturalness.toFixed(3)} · PPPL ${primaryPpl.toFixed(2)})`,
+        label: isTrueMaskedPpl
+          ? `ESM-C Masked Log-Prob (Naturalness ${primaryNaturalness.toFixed(3)} · PPPL ${primaryPpl.toFixed(2)})`
+          : `ESM-C WT Log-Prob (Mean ${primaryNaturalness.toFixed(3)} · 1-pass WT approx)`,
         sourceModelId: 'esmc',
         parentStructureId,
         quantity: 'wt-log-prob',
@@ -471,7 +478,7 @@ self.onmessage = async (ev: MessageEvent) => {
           mean: primaryNaturalness,
           min: Number.isFinite(minWt) ? minWt : primaryNaturalness,
           max: Number.isFinite(maxWt) ? maxWt : primaryNaturalness,
-          pseudoPerplexity: primaryPpl,
+          ...(isTrueMaskedPpl ? { pseudoPerplexity: primaryPpl } : {}),
         },
       };
 

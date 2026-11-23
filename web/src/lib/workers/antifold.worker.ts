@@ -8,6 +8,7 @@ import {
   detectAntibodyHeavyLightChains,
   normalizeAntiFoldNumberingParam,
   parseFixedPositionsAndChains,
+  remapSequentialAntibodyRegions,
   resolveAntibodyNumbering,
   type AntiFoldNumberingParam,
   type NumberedChainInfo,
@@ -272,9 +273,11 @@ function resolveAntiFoldPlan(
           .filter(Boolean)
       : [];
 
+  const firstNonLight = availableChains.find((c) => c !== detectedLight && !lockedChainSet.has(c))
+    ?? availableChains.find((c) => c !== detectedLight);
   const heavyChain =
     variant === 'antifold'
-      ? detectedHeavy ?? explicitTarget ?? firstUnlocked
+      ? detectedHeavy ?? explicitTarget ?? (!detectedLight ? firstUnlocked : firstNonLight ?? firstUnlocked)
       : undefined;
   const lightChain =
     variant === 'antifold'
@@ -287,15 +290,31 @@ function resolveAntiFoldPlan(
 
   const resolvedNumbering =
     variant === 'antifold'
-      ? resolveAntibodyNumbering(numberingParam, chainInfos, heavyChain, lightChain)
+      ? resolveAntibodyNumbering(
+          numberingParam,
+          chainInfos,
+          detectedHeavy ?? (heavyChain !== detectedLight ? heavyChain : undefined),
+          detectedLight ?? lightChain,
+        )
       : 'imgt';
+
+  const remapped =
+    variant === 'antifold' && regionList.length > 0
+      ? remapSequentialAntibodyRegions(
+          regionList,
+          chainInfos,
+          detectedHeavy ?? (heavyChain !== detectedLight ? heavyChain : undefined),
+          detectedLight ?? lightChain,
+          numberingParam,
+        )
+      : { regions: regionList, remappedChains: [] };
 
   const combineOpts: Record<string, unknown> = {
     ...(effectiveTargetChain ? { targetChain: effectiveTargetChain } : {}),
     ...(heavyChain ? { heavyChain } : {}),
     ...(lightChain ? { lightChain } : {}),
     ...(variant === 'antifold' ? { numbering: resolvedNumbering } : {}),
-    ...(regionList.length > 0 ? { regions: regionList } : {}),
+    ...(remapped.regions.length > 0 ? { regions: remapped.regions } : {}),
   };
 
   const prepared = sharedMod.prepareInput(parsed, combineOpts) as PreparedAntiFoldInput;

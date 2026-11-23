@@ -67,7 +67,8 @@ describe('ESMFold2 worker contract', () => {
         const confidence = {
           plddt: new Float32Array(f.tokens).fill(0.75), plddtPerAtom: new Float32Array(f.atoms).fill(0.875),
           pae: new Float32Array(f.tokens ** 2).fill(3.25), ptm: 0.6, iptm: 0.5,
-          chainPtm: { '1': 0.6, '2': 0.7 },
+          chainPtm: { '0': 0.6, '1': 0.7 },
+          chainPairIptm: { '0|1': 0.55 },
         };
         return { features: f, coordinates: f.refPos, steps: 11, confidence: missingConfidence ? null : confidence };
       } };
@@ -130,6 +131,8 @@ describe('ESMFold2 worker contract', () => {
             pae: new Float32Array(f.tokens ** 2).fill(2.5),
             ptm: 0.72,
             iptm: 0.68,
+            chainPtm: { '0': 0.93, '1': 0.19 },
+            chainPairIptm: { '0|1': 0.925 },
           };
           return { features: f, coordinates: f.refPos, steps: 11, confidence };
         },
@@ -148,6 +151,8 @@ describe('ESMFold2 worker contract', () => {
     expect(holoRes.plddt).toHaveLength(6);
     expect(holoRes.meanPlddt).toBeCloseTo(80, 4);
     expect(holoRes.iptm).toBeCloseTo(0.68, 4);
+    expect(holoRes.chainPtm).toEqual({ A: 0.93, DNA1: 0.19 });
+    expect(holoRes.chainPairIptm?.[0]?.[1]).toBeCloseTo(0.925, 4);
     expect(holoRes.ipsae).toBeGreaterThan(0);
   });
 });

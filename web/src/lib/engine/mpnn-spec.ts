@@ -778,6 +778,86 @@ function scoreChainAntibodyHallmarks(chain: NumberedChainInfo) {
   return { kabatVH, kabatVL, imgt };
 }
 
+export interface IgSequenceHallmarkResult {
+  role: 'H' | 'L' | 'unknown';
+  score: number;
+  c1Idx: number;
+  wIdx: number;
+  c2Idx: number;
+  jIdx: number;
+  hasCanonicalNumbering: boolean;
+}
+
+/**
+ * Numbering-agnostic Ig variable-domain motif detector (FR1 Cys -> FR2 Trp -> FR3 Cys -> FR4 WGxG/FGxG).
+ * Reliably identifies VH/VHH vs VL even on sequentially numbered RCSB entries (e.g. 1N8Z, 1MEL)
+ * and rejects non-Ig antigens that happen to carry chain ID "L" (e.g. Lysozyme in 1MEL).
+ */
+export function scoreIgSequenceHallmarks(chain: NumberedChainInfo): IgSequenceHallmarkResult {
+  const n = Math.min(chain.residues.length, 155);
+  const empty: IgSequenceHallmarkResult = {
+    role: 'unknown',
+    score: 0,
+    c1Idx: -1,
+    wIdx: -1,
+    c2Idx: -1,
+    jIdx: -1,
+    hasCanonicalNumbering: false,
+  };
+  if (n < 85) return empty;
+  const seq = chain.residues
+    .slice(0, n)
+    .map((r) => (r.aa1 || 'X').toUpperCase())
+    .join('');
+
+  let best: IgSequenceHallmarkResult = empty;
+  for (let c1 = 14; c1 <= Math.min(34, n - 70); c1++) {
+    if (seq[c1] !== 'C') continue;
+    for (let w = c1 + 10; w <= Math.min(c1 + 20, n - 55); w++) {
+      if (seq[w] !== 'W') continue;
+      const fr2Trip = seq.slice(w, w + 3);
+      const isHFr2 = /^W[VFILY][RQK]$/.test(fr2Trip);
+      const isLFr2 = /^W[YFL][QLH]$/.test(fr2Trip);
+      for (let c2 = w + 44; c2 <= Math.min(w + 72, n - 8); c2++) {
+        if (seq[c2] !== 'C') continue;
+        const fr3Pre = c2 >= 2 ? seq.slice(c2 - 2, c2 + 1) : '';
+        const hasYyc = /^[YFHT][YFVIALM]C$/.test(fr3Pre);
+        for (let j = c2 + 5; j <= Math.min(c2 + 30, n - 4); j++) {
+          const j4 = seq.slice(j, j + 4);
+          const isH = j4[0] === 'W' && j4[1] === 'G' && j4[3] === 'G';
+          const isL = j4[0] === 'F' && j4[1] === 'G' && j4[3] === 'G';
+          if (!isH && !isL) continue;
+          let score = 4; // C1 + W + C2 + WGxG/FGxG with canonical spacing
+          if (hasYyc) score += 1;
+          if ((isH && isHFr2) || (isL && isLFr2)) score += 1;
+          const rC1 = chain.residues[c1]?.number;
+          const rW = chain.residues[w]?.number;
+          const rC2 = chain.residues[c2]?.number;
+          const rJ = chain.residues[j]?.number;
+          const kabatHits = isH
+            ? (rC1 === 22 ? 1 : 0) + (rW === 36 ? 1 : 0) + (rC2 === 92 ? 1 : 0) + (rJ === 103 ? 1 : 0)
+            : (rC1 === 23 ? 1 : 0) + (rW === 35 ? 1 : 0) + (rC2 === 88 ? 1 : 0) + (rJ === 98 ? 1 : 0);
+          const imgtHits =
+            (rC1 === 23 ? 1 : 0) + (rW === 41 ? 1 : 0) + (rC2 === 104 ? 1 : 0) + (rJ === 118 ? 1 : 0);
+          const hasCanonicalNumbering = kabatHits >= 3 || imgtHits >= 3;
+          if (score > best.score) {
+            best = {
+              role: isH ? 'H' : 'L',
+              score,
+              c1Idx: c1,
+              wIdx: w,
+              c2Idx: c2,
+              jIdx: j,
+              hasCanonicalNumbering,
+            };
+          }
+        }
+      }
+    }
+  }
+  return best;
+}
+
 export function detectAntibodyHeavyLightChains(
   chains: readonly NumberedChainInfo[],
   chainTypes: Readonly<Record<string, string>>,
@@ -789,42 +869,197 @@ export function detectAntibodyHeavyLightChains(
   for (const c of chains) if (!upperToId.has(c.id.toUpperCase())) upperToId.set(c.id.toUpperCase(), c.id);
   const resolve = (k: string) => (byId.has(k) ? k : upperToId.get(k.toUpperCase()));
 
-  let heavyChain =
-    chains.find((c) => chainTypes[c.id] === 'antibody-H' || chainTypes[c.id] === 'nanobody')?.id ??
-    resolve('H');
+  const numScores = new Map(chains.map((c) => [c.id, scoreChainAntibodyHallmarks(c)]));
+  const seqScores = new Map(chains.map((c) => [c.id, scoreIgSequenceHallmarks(c)]));
+  const anyStrongIg = chains.some((c) => {
+    const ss = seqScores.get(c.id)!;
+    const ns = numScores.get(c.id)!;
+    return ss.score >= 4 || Math.max(ns.kabatVH, ns.kabatVL, ns.imgt) >= 3;
+  });
+
+  // 1. Explicit molecularContext chainTypes take highest precedence
+  let heavyChain = chains.find(
+    (c) => chainTypes[c.id] === 'antibody-H' || chainTypes[c.id] === 'nanobody',
+  )?.id;
   let lightChain = chains.find(
     (c) => chainTypes[c.id] === 'antibody-L' && c.id !== (explicitTarget ?? heavyChain),
   )?.id;
-  if (!lightChain) {
-    const l = resolve('L');
-    if (l && l !== (explicitTarget ?? heavyChain)) lightChain = l;
-  }
 
-  // Fallback for Fab complexes like 1N8Z (A=VL, B=VH, C=antigen) lacking H/L chain IDs:
+  // 2. Ig sequence + numbering hallmarks across all chains (handles 1N8Z, 1MEL, and locked-H 6W41)
   if (!heavyChain) {
-    let bestHScore = 2; // require >= 3 points so non-antibodies never trigger
+    let bestHScore = 0;
     for (const c of chains) {
-      if (lockedChainSet.has(c.id)) continue;
-      const s = scoreChainAntibodyHallmarks(c);
-      const vhScore = Math.max(s.kabatVH, s.imgt);
-      if (vhScore > bestHScore && s.kabatVH >= s.kabatVL) {
-        bestHScore = vhScore;
+      const ns = numScores.get(c.id)!;
+      const ss = seqScores.get(c.id)!;
+      const isSeqH = ss.role === 'H' && ss.score >= 4;
+      const isNumH = Math.max(ns.kabatVH, ns.imgt) >= 3 && ns.kabatVH >= ns.kabatVL && ss.role !== 'L';
+      if (!isSeqH && !isNumH) continue;
+      const combined = (isSeqH ? ss.score * 10 : 0) + Math.max(ns.kabatVH, ns.imgt) + (c.id.toUpperCase() === 'H' ? 0.5 : 0);
+      if (combined > bestHScore) {
+        bestHScore = combined;
         heavyChain = c.id;
       }
     }
   }
   if (!lightChain) {
-    let bestLScore = 2;
+    let bestLScore = 0;
     for (const c of chains) {
-      if (c.id === (explicitTarget ?? heavyChain) || lockedChainSet.has(c.id)) continue;
-      const s = scoreChainAntibodyHallmarks(c);
-      if (s.kabatVL > bestLScore && s.kabatVL > s.kabatVH) {
-        bestLScore = s.kabatVL;
+      if (c.id === (explicitTarget ?? heavyChain)) continue;
+      const ns = numScores.get(c.id)!;
+      const ss = seqScores.get(c.id)!;
+      const isSeqL = ss.role === 'L' && ss.score >= 4;
+      const isNumL = ns.kabatVL >= 3 && ns.kabatVL > ns.kabatVH && ss.role !== 'H';
+      if (!isSeqL && !isNumL) continue;
+      const combined = (isSeqL ? ss.score * 10 : 0) + ns.kabatVL + (c.id.toUpperCase() === 'L' ? 0.5 : 0);
+      if (combined > bestLScore) {
+        bestLScore = combined;
         lightChain = c.id;
       }
     }
   }
+
+  // 3. Fallback to conventional H / L chain IDs only when safe (never mistake an antigen chain "L"
+  //    like Lysozyme in 1MEL for a light chain when real Ig hallmarks exist elsewhere in the complex).
+  if (!heavyChain) {
+    const h = resolve('H');
+    if (h) {
+      const ss = seqScores.get(h)!;
+      const ns = numScores.get(h)!;
+      if (!anyStrongIg || ss.score >= 3 || Math.max(ns.kabatVH, ns.imgt) >= 2) {
+        heavyChain = h;
+      }
+    }
+  }
+  if (!lightChain) {
+    const l = resolve('L');
+    if (l && l !== (explicitTarget ?? heavyChain)) {
+      const ss = seqScores.get(l)!;
+      const ns = numScores.get(l)!;
+      if (!anyStrongIg || ss.score >= 3 || Math.max(ns.kabatVL, ns.imgt) >= 2) {
+        lightChain = l;
+      }
+    }
+  }
+
   return { heavyChain, lightChain };
+}
+
+/**
+ * When an RCSB antibody uses sequential 1..N numbering instead of IMGT/Kabat (e.g. 1N8Z),
+ * translate symbolic CDR/FW region names (CDR1-3, CDRH1-3, CDRL1-3, FW1-4, all) into explicit
+ * `CHAIN:start-end` ranges anchored on the conserved Ig Cys/Trp/WGxG/FGxG motif positions.
+ */
+export function remapSequentialAntibodyRegions(
+  regions: readonly string[],
+  chains: readonly NumberedChainInfo[],
+  heavyChain: string | undefined,
+  lightChain: string | undefined,
+  numberingParam: AntiFoldNumberingParam,
+): { regions: string[]; remappedChains: string[] } {
+  if (numberingParam !== 'auto' || regions.length === 0) {
+    return { regions: [...regions], remappedChains: [] };
+  }
+  const byId = new Map(chains.map((c) => [c.id, c]));
+  type AnchorBounds = {
+    chain: NumberedChainInfo;
+    cdrs: Array<[number, number]>;
+    maxIdx: number;
+  };
+  const seqAnchored = new Map<'H' | 'L', AnchorBounds>();
+  for (const [role, chId] of [
+    ['H', heavyChain],
+    ['L', lightChain],
+  ] as const) {
+    if (!chId) continue;
+    const ch = byId.get(chId);
+    if (!ch) continue;
+    const h = scoreIgSequenceHallmarks(ch);
+    if (h.score >= 4 && !h.hasCanonicalNumbering) {
+      const n = ch.residues.length;
+      const cdr1: [number, number] =
+        role === 'H'
+          ? [Math.min(h.c1Idx + 4, h.wIdx - 1), h.wIdx - 1]
+          : [Math.min(h.c1Idx + 1, h.wIdx - 1), h.wIdx - 1];
+      const cdr2Start = role === 'H' ? h.wIdx + 14 : h.wIdx + 15;
+      const cdr2End = Math.max(cdr2Start + 5, role === 'H' ? h.c2Idx - 31 : h.c2Idx - 32);
+      const cdr2: [number, number] = [cdr2Start, Math.min(cdr2End, h.c2Idx - 1)];
+      const cdr3Start = role === 'H' ? h.c2Idx + 3 : h.c2Idx + 1;
+      const cdr3: [number, number] = [Math.min(cdr3Start, h.jIdx - 1), h.jIdx - 1];
+      const maxIdx = Math.min(n - 1, h.jIdx + (role === 'H' ? 10 : 9));
+      seqAnchored.set(role, { chain: ch, cdrs: [cdr1, cdr2, cdr3], maxIdx });
+    }
+  }
+  if (seqAnchored.size === 0) {
+    return { regions: [...regions], remappedChains: [] };
+  }
+
+  const fmtSpan = (ch: NumberedChainInfo, aIdx: number, bIdx: number): string | null => {
+    const lo = Math.max(0, Math.min(aIdx, bIdx));
+    const hi = Math.min(ch.residues.length - 1, Math.max(aIdx, bIdx));
+    const ra = ch.residues[lo];
+    const rb = ch.residues[hi];
+    if (!ra || !rb) return null;
+    const aTok = `${ra.number}${ra.insertion || ''}`;
+    const bTok = `${rb.number}${rb.insertion || ''}`;
+    return aTok === bTok ? aTok : `${aTok}-${bTok}`;
+  };
+
+  const out: string[] = [];
+  const usedChains = new Set<string>();
+  for (const reg of regions) {
+    const m = /^(all|CDR|FW)([HL]?)([1-4]?)$/.exec(reg);
+    if (!m) {
+      out.push(reg);
+      continue;
+    }
+    const [, type, roleSpec, numStr] = m;
+    const targetRoles: Array<'H' | 'L'> =
+      roleSpec === 'H' ? ['H'] : roleSpec === 'L' ? ['L'] : ['H', 'L'];
+    let emittedAny = false;
+    for (const r of targetRoles) {
+      const anchor = seqAnchored.get(r);
+      const chId = r === 'H' ? heavyChain : lightChain;
+      if (!chId) continue;
+      if (!anchor) {
+        // Keep canonical IMGT/Kabat token scoped to the non-sequential chain
+        out.push(`${type}${r}${numStr}`);
+        emittedAny = true;
+        continue;
+      }
+      usedChains.add(chId);
+      const spans: string[] = [];
+      if (type === 'all') {
+        const sp = fmtSpan(anchor.chain, 0, anchor.maxIdx);
+        if (sp) spans.push(sp);
+      } else if (type === 'CDR') {
+        const list = numStr ? [anchor.cdrs[Number(numStr) - 1]] : anchor.cdrs;
+        for (const pair of list) {
+          if (!pair) continue;
+          const sp = fmtSpan(anchor.chain, pair[0], pair[1]);
+          if (sp) spans.push(sp);
+        }
+      } else {
+        const fws: Array<[number, number]> = [
+          [0, anchor.cdrs[0][0] - 1],
+          [anchor.cdrs[0][1] + 1, anchor.cdrs[1][0] - 1],
+          [anchor.cdrs[1][1] + 1, anchor.cdrs[2][0] - 1],
+          [anchor.cdrs[2][1] + 1, anchor.maxIdx],
+        ];
+        const list = numStr ? [fws[Number(numStr) - 1]] : fws;
+        for (const pair of list) {
+          if (!pair || pair[1] < pair[0]) continue;
+          const sp = fmtSpan(anchor.chain, pair[0], pair[1]);
+          if (sp) spans.push(sp);
+        }
+      }
+      if (spans.length > 0) {
+        out.push(`${chId}:${spans.join(',')}`);
+        emittedAny = true;
+      }
+    }
+    if (!emittedAny) out.push(reg);
+  }
+  return { regions: out, remappedChains: [...usedChains] };
 }
 
 export function resolveAntibodyNumbering(
