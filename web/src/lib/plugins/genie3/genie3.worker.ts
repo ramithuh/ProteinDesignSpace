@@ -135,7 +135,7 @@ createWorkerHarness({
     };
     const taskMode = String(rawParams.taskMode ?? 'unconditional');
     const inlineContig = String(rawParams.contig ?? '').trim();
-    const inlineLock = String(rawParams.lockChain ?? '').trim().toUpperCase();
+    const inlineLock = String(rawParams.lockChain ?? '').trim();
     const inlineHotspots = String(rawParams.hotspots ?? '').trim();
     const inlineMotif = String(rawParams.motifSpan ?? '').trim();
 
@@ -483,6 +483,7 @@ createWorkerHarness({
     };
     const structArtifact: StructureArtifact = {
       ...representative,
+      id: `genie3-batch-${designs.length}-${plan.planDigest.slice(0, 16)}`,
       label: compiledSummary
         ? `Genie 3 (${numDesigns} designs · ${compiledSummary})`
         : `Genie 3 (${numDesigns} designs · L=${representative.length})`,

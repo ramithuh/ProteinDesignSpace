@@ -48,7 +48,10 @@ export function parsePDB(pdb) {
       out.push(r);
     }
     if (!residues[name].atoms[atom]) continue;
-    const xyz = [30, 38, 46].map((i) => Number(line.slice(i, i + 8).trim()));
+    const xyz = [30, 38, 46].map((i) => {
+      const raw = line.slice(i, i + 8).trim();
+      return raw === "" ? NaN : Number(raw);
+    });
     if (!xyz.every(Number.isFinite))
       throw Error(`Invalid PDB coordinate ${key} ${atom}`);
     r.atoms[atom] ??= xyz;

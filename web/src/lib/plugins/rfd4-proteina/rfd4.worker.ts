@@ -423,7 +423,7 @@ createWorkerHarness({
       customSpecYaml: p.customSpecYaml,
     };
     const inlineContig = String(rawParams.contig ?? '').trim();
-    const inlineLock = String(rawParams.lockChain ?? '').trim().toUpperCase();
+    const inlineLock = String(rawParams.lockChain ?? '').trim();
     const inlineHotspots = String(rawParams.hotspots ?? '').trim();
     const inlineMotif = String(rawParams.motifSpan ?? '').trim();
     const inlineUnidx = Boolean(rawParams.unindexedMotif);
@@ -461,6 +461,20 @@ createWorkerHarness({
       needEncoder,
     } = preResolved;
     const earlyStop = mode === 'inverse-folding' ? false : requestedEarlyStop;
+
+    // Validate partial trajectory step count (round-half-to-even matching vendor partial.js)
+    // BEFORE downloading 330-468 MB weights!
+    if (preResolved.effectivePartialFraction != null) {
+      const prod = preResolved.effectivePartialFraction * nsteps;
+      const fl = Math.floor(prod);
+      const diff = prod - fl;
+      const roundedSteps = Math.abs(diff - 0.5) < 1e-12 ? (fl % 2 === 0 ? fl : fl + 1) : Math.round(prod);
+      if (roundedSteps < 1) {
+        throw new Error(
+          `RFD4 partial diffusion fraction (${preResolved.effectivePartialFraction}) with nsteps=${nsteps} rounds to 0 denoising steps. Increase partialFraction or nsteps.`,
+        );
+      }
+    }
 
     await ensureLoaded(ctx, needEncoder);
 
@@ -569,7 +583,9 @@ createWorkerHarness({
         }
         buildBatchForSeed = (itemSeed: number) =>
           rfd4Mod.buildBatch(
-            parsedYaml?.contig ? parsedYaml : { input: 'template', conditions: yamlConds },
+            parsedYaml?.contig || parsedYaml?.input_as_annotated_cif
+              ? parsedYaml
+              : { input: 'template', conditions: yamlConds },
             { inputAtomArray: prepared!.atomArray, seed: itemSeed },
           );
       } else if (resolved.kind === 'template-spec') {
@@ -685,6 +701,7 @@ createWorkerHarness({
       }
       if (gpuValErr) {
         console.error('[rfd4] WebGPU validation error during generate():', gpuValErr.message);
+        throw new Error(`RFD4-Proteina WebGPU validation error: ${gpuValErr.message}`);
       }
 
       // Inspect trunk sequence logits & decoded residueType to catch all-zero / poly-ALA collapse
@@ -721,7 +738,6 @@ createWorkerHarness({
           logitsMax,
           uniqueNativeAAs,
           seqSample: nativeSeq.slice(0, 24),
-          gpuValErr: gpuValErr?.message ?? null,
         });
         try {
           const rawCondSeq = built.batch.condition_sequence_1_residue?.data ?? built.batch.condition_sequence_1_residue;
@@ -783,13 +799,12 @@ createWorkerHarness({
         `[rfd4] L=${parsed.nResidues} steps=${res.stepsRun}/${res.nsteps} half=true logits=[${logitsMin.toFixed(2)},${logitsMax.toFixed(2)}] nz=${logitsNonZero} uniqueAA=${uniqueFinal} seq=${finalSeq.slice(0, 25)}...`,
       );
       if (parsed.nResidues >= 15 && uniqueFinal <= 1) {
-        const errHint = gpuValErr ? ` (WebGPU validation error: ${gpuValErr.message})` : '';
         const stepHint =
           nsteps < 58
             ? ` Steps=${nsteps} is below the recommended minimum (58) — set Steps to 60 and Recycle to none for reliable convergence.`
             : ' Try reloading the page or switching browser/GPU backend.';
         throw new Error(
-          `RFD4-Proteina produced a degenerate single-residue sequence (${finalSeq.slice(0, 12)}…, logits nz=${logitsNonZero}, nan=${logitsNan})${errHint}.${stepHint}`,
+          `RFD4-Proteina produced a degenerate single-residue sequence (${finalSeq.slice(0, 12)}…, logits nz=${logitsNonZero}, nan=${logitsNan}).${stepHint}`,
         );
       }
 
@@ -863,7 +878,10 @@ createWorkerHarness({
         atomPresence: parsed.atomPresence,
         observedBackboneMask: parsed.observedBackboneMask,
         diagnostics: parsed.diagnostics,
-        bfactorSemantics: mode === 'partial' || mode === 'inverse-folding' ? 'crystal-b' : 'none',
+        bfactorSemantics:
+          mode === 'partial' || mode === 'inverse-folding'
+            ? (template?.bfactorSemantics ?? 'none')
+            : 'none',
         atomGranularity: 'all-atom',
         provenance: {
           quantization: 'int8',
@@ -982,6 +1000,7 @@ createWorkerHarness({
     };
     const structArtifact: StructureArtifact = {
       ...representative,
+      id: `rfd4-batch-${designs.length}-${plan.planDigest.slice(0, 16)}`,
       label: `${runLabel} (${numDesigns} designs · L=${representative.length})`,
       representativeSelection: repSelection,
       collection: {

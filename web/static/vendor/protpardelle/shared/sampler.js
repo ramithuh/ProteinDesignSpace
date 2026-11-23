@@ -127,7 +127,7 @@ function prepareMotif(options, replay, n) {
             : strategy === "sidechain-tip"
               ? !bb && (!tip || tip.includes(C.atomTypes[atom]))
               : true;
-      cropSelection[target * 37 + atom] = +keep;
+      cropSelection[target * 37 + atom] = present > 0.5 && keep ? 1 : 0;
       for (let c = 0; c < 3; c++) {
         const xyz = f(
           f(f(rot[c * 3] * v[0]) + f(rot[c * 3 + 1] * v[1])) +
@@ -135,13 +135,16 @@ function prepareMotif(options, replay, n) {
         );
         const value = f(f(xyz * present) + translation[c]);
         full[target * 111 + atom * 3 + c] = value;
-        crop[target * 111 + atom * 3 + c] = keep ? value : 0;
+        crop[target * 111 + atom * 3 + c] = keep && present > 0.5 ? value : 0;
       }
-      lossMask[target * 37 + atom] = options.tipAtomConditioning
-        ? tip?.includes(C.atomTypes[atom])
-          ? 1
-          : 0
-        : 1;
+      lossMask[target * 37 + atom] =
+        present > 0.5
+          ? options.tipAtomConditioning
+            ? tip?.includes(C.atomTypes[atom])
+              ? 1
+              : 0
+            : 1
+          : 0;
     }
   });
   return { full, crop, cropSelection, lossMask, fixed, hotspots };

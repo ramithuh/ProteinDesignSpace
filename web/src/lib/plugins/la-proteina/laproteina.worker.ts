@@ -68,6 +68,13 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
     },
   });
   ownedDevice = device;
+  void device.lost.then(() => {
+    if (ownedDevice === device) {
+      engine = null;
+      ownedDevice = null;
+      loadedPrecision = null;
+    }
+  });
 
   const envBaseUrl = (import.meta.env.VITE_LAPROTEINA_WEIGHTS_URL as string | undefined)?.trim();
   const baseUrl = envBaseUrl || DEFAULT_BASE_URL;
@@ -201,6 +208,9 @@ createWorkerHarness({
           }) => {
             if (abortRequested || ctx.signal.aborted) return;
             const isAe1 = info.phase === 'ae1' || info.phase === 'decode';
+            const isSampling = info.phase === 'sampling' || (!info.phase && info.step !== undefined);
+            // Ignore inner LD1 layer progress ticks so the overall sampling progress bar never jumps backward
+            if (!isAe1 && !isSampling) return;
             const step = isAe1 ? (info.layer ?? info.step ?? 0) : (info.step ?? 0);
             const totalSteps = isAe1
               ? (info.total ?? info.steps ?? 12)
@@ -282,6 +292,7 @@ createWorkerHarness({
     }
 
     const primary = items[0];
+    const batchHash = fnv1a(`${items.map((it) => it.id).join('|')}:${items.length}`);
     const repSelection = {
       selectedKey: primary.designKey ?? primary.id,
       criterion: 'lowest-creation-ordinal',
@@ -293,12 +304,13 @@ createWorkerHarness({
       items.length > 1
         ? {
             ...primary,
+            id: `laproteina-batch-${items.length}-${batchHash}`,
             representativeSelection: repSelection,
             collection: {
               kind: 'Collection',
               schema: 'denovo.collection/v1',
-              id: `laproteina-col-${primary.id}`,
-              familyKey: 'la-proteina',
+              id: `laproteina-col-${batchHash}`,
+              familyKey: `la-proteina-${batchHash}`,
               collectionKind: 'independent-candidates',
               requestedCount: numDesigns,
               complete: true,
@@ -311,7 +323,7 @@ createWorkerHarness({
 
     const seqSet: SequenceSet = {
       kind: 'SequenceSet',
-      id: `seqset-${primary.id}`,
+      id: items.length > 1 ? `seqset-laproteina-batch-${items.length}-${batchHash}` : `seqset-${primary.id}`,
       parentStructureId: primary.id,
       sourceStructureId: primary.id,
       sourceStructureIds: items.map((it) => it.id),

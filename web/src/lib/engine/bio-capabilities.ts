@@ -2380,7 +2380,11 @@ export function validateBioCapabilities(
         const sym = String(node.params.symmetry ?? 'c3').trim().toLowerCase();
         const copies = SYM_COPIES[sym] ?? 3;
         const rawLen = Math.max(16, Math.min(256, Math.round(Number(node.params.length ?? 80))));
-        const effectiveLen = Math.max(copies * 8, Math.round(rawLen / copies) * copies);
+        const maxSymLen = Math.floor(256 / copies) * copies;
+        const effectiveLen = Math.min(
+          maxSymLen,
+          Math.max(copies * 8, Math.round(rawLen / copies) * copies),
+        );
         if (effectiveLen !== rawLen) {
           issues.push({
             severity: 'warning',

@@ -72,16 +72,30 @@ export function choose(logits, position, u) {
     sum = 0;
   const p = new Float64Array(21),
     offset = position * 31;
-  for (let i = 0; i < 21; i++) max = Math.max(max, logits[offset + i]);
+  for (let i = 0; i < 21; i++) {
+    const v = logits[offset + i];
+    if (!Number.isFinite(v)) {
+      throw new RangeError(
+        `Non-finite EvoDiff logit at position ${position}, token ${i}: ${v}`,
+      );
+    }
+    if (v > max) max = v;
+  }
   for (let i = 0; i < 21; i++) {
     p[i] = Math.exp(logits[offset + i] - max);
     sum += p[i];
+  }
+  if (!(sum > 0) || !Number.isFinite(sum)) {
+    throw new RangeError(
+      `Degenerate EvoDiff softmax partition at position ${position}: ${sum}`,
+    );
   }
   let cumulative = 0;
   for (let i = 0; i < 21; i++) {
     cumulative += p[i] / sum;
     if (u < cumulative || i === 20) return i;
   }
+  return 20;
 }
 export async function generate(forward, options) {
   const start = performance.now(),

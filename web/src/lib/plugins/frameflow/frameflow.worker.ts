@@ -165,6 +165,15 @@ createWorkerHarness({
     const precision = normalizePrecision(p.precision);
     const numDesigns = Math.max(1, Math.min(8, Math.round(Number(p.numDesigns ?? 1))));
 
+    if (schedule === 'exp') {
+      const dt = 0.99 / Math.max(1, steps - 1);
+      if (dt * expRate > 1.0) {
+        throw new Error(
+          `FrameFlow exponential rotation schedule is unstable for steps=${steps} and expRate=${expRate} (dt*expRate=${(dt * expRate).toFixed(2)} > 1.0). Increase steps or lower expRate.`,
+        );
+      }
+    }
+
     if (abortRequested || ctx.signal.aborted) {
       throw new Error('Run aborted');
     }
@@ -233,11 +242,21 @@ createWorkerHarness({
 
         const pdbText = String(res.pdb ?? '');
         const parsed = parseStructureText(pdbText);
+        if (parsed.nResidues !== length) {
+          throw new Error(
+            `FrameFlow returned ${parsed.nResidues} valid residue(s) instead of requested ${length} aa (possible non-finite coordinates).`,
+          );
+        }
+        for (let i = 0; i < parsed.caCoords.length; i++) {
+          if (!Number.isFinite(parsed.caCoords[i])) {
+            throw new Error(`FrameFlow generated non-finite Cα coordinates for design #${d + 1}.`);
+          }
+        }
         const geom = computeGeometryStats(parsed.caCoords);
         const runHash = fnv1a(
           JSON.stringify({ length, steps, schedule, expRate, selfCondition, seed: designSeed, precision }),
         );
-        const resolvedLen = parsed.nResidues || length;
+        const resolvedLen = parsed.nResidues;
         items.push({
           kind: 'StructureArtifact',
           id: `frameflow-${length}aa-s${designSeed}-${runHash}`,
@@ -271,6 +290,7 @@ createWorkerHarness({
     }
 
     const primary = items[0];
+    const batchHash = fnv1a(`${items.map((it) => it.id).join('|')}:${items.length}`);
     const repSelection = {
       selectedKey: primary.designKey ?? primary.id,
       criterion: 'lowest-creation-ordinal',
@@ -282,12 +302,13 @@ createWorkerHarness({
       items.length > 1
         ? {
             ...primary,
+            id: `frameflow-batch-${items.length}-${batchHash}`,
             representativeSelection: repSelection,
             collection: {
               kind: 'Collection',
               schema: 'denovo.collection/v1',
-              id: `frameflow-col-${primary.id}`,
-              familyKey: 'frameflow',
+              id: `frameflow-col-${batchHash}`,
+              familyKey: `frameflow-${batchHash}`,
               collectionKind: 'independent-candidates',
               requestedCount: numDesigns,
               complete: true,

@@ -149,6 +149,14 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
       }
       const device = await adapter.requestDevice();
       ownedDevice = device;
+      void device.lost.then(() => {
+        if (ownedDevice === device) {
+          engine = null;
+          ownedDevice = null;
+          loadedPrecision = null;
+          loadedBackend = null;
+        }
+      });
       engine = await loadWithFactory(evoWebgpuMod.createEvoDiffEngine, { device }, false);
       loadedPrecision = precision;
       loadedBackend = 'webgpu';
@@ -181,13 +189,27 @@ createWorkerHarness({
     const seed = Math.max(0, Math.round(Number(p.seed ?? 42)));
 
     const upstreamSeqs = ctx.inputs?.sequences as SequenceSet | undefined;
+    const usedUpstreamWire =
+      taskMode === 'infill' && !rawFixedSeq && Boolean(upstreamSeqs?.candidates?.length);
+    const upstreamFirst = usedUpstreamWire ? upstreamSeqs!.candidates[0] : undefined;
     let templateSeq = rawFixedSeq;
-    if (taskMode === 'infill' && !templateSeq && upstreamSeqs?.candidates?.length) {
-      templateSeq = sanitizeEvoDiffFixedSequence(upstreamSeqs.candidates[0].sequence).replace(
-        /[:/,-]+/g,
-        '',
-      );
+    if (usedUpstreamWire && upstreamFirst) {
+      templateSeq = sanitizeEvoDiffFixedSequence(upstreamFirst.sequence).replace(/[:/,-]+/g, '');
     }
+    const inheritedChainLengths =
+      usedUpstreamWire &&
+      upstreamFirst?.chainLengths &&
+      upstreamFirst.chainLengths.length > 1 &&
+      upstreamFirst.chainLengths.reduce((a, b) => a + b, 0) === templateSeq.length
+        ? [...upstreamFirst.chainLengths]
+        : undefined;
+    const inheritedChainIds =
+      usedUpstreamWire &&
+      inheritedChainLengths &&
+      upstreamFirst?.chainIds &&
+      upstreamFirst.chainIds.length === inheritedChainLengths.length
+        ? [...upstreamFirst.chainIds]
+        : undefined;
 
     let maskPositions: number[] | undefined;
     if (taskMode === 'infill') {
@@ -268,17 +290,18 @@ createWorkerHarness({
           throw new Error('Run aborted');
         }
 
-        // Replace any rare ambiguous 'B' from upstream 21-token vocabulary with 'D' for downstream folders
-        const seq = String(res.sequence ?? '').replace(/B/g, 'D');
+        const seq = String(res.sequence ?? '');
         // Sequence-only generators do not produce distinct 3D backbones: share one designKey across
-        // candidates in the run while keeping unique sequenceKeys so LocalFold strictly honors maxSequences.
+        // candidates in the run while using a run-unique family key so independent runs never collide.
         const designKey = 'evodiff';
-        const seqKey = makeSequenceKey('evodiff-oa-dm-38m', designKey, s);
+        const seqKey = makeSequenceKey(`evodiff-oa-dm-38m-${runHash}`, designKey, s);
         candidates.push({
           id: `evodiff-s${s + 1}-${runHash}`,
           key: seqKey,
           sequenceKey: seqKey,
           sequence: seq,
+          ...(inheritedChainLengths ? { chainLengths: inheritedChainLengths } : {}),
+          ...(inheritedChainIds ? { chainIds: inheritedChainIds } : {}),
           score: null,
           globalScore: null,
           sourceModelId: 'evodiff',
@@ -296,7 +319,9 @@ createWorkerHarness({
     const sequencesOut: SequenceSet = {
       kind: 'SequenceSet',
       id: `evodiff-seqs-${runHash}`,
-      parentStructureId: upstreamSeqs?.parentStructureId ?? 'evodiff-de-novo',
+      parentStructureId: usedUpstreamWire
+        ? (upstreamSeqs?.parentStructureId ?? 'evodiff-de-novo')
+        : 'evodiff-de-novo',
       sourceModelId: 'evodiff',
       collectionKind: candidates.length > 1 ? 'multi-sample' : undefined,
       candidates,

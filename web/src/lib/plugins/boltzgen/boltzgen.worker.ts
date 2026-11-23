@@ -150,6 +150,13 @@ async function ensureEngine(ctx: WorkerRunContext, variant: Variant, precision: 
     },
   });
   ownedDevice = device;
+  void device.lost.then(() => {
+    if (ownedDevice === device) {
+      engine = null;
+      ownedDevice = null;
+      loadedKey = null;
+    }
+  });
 
   const envBaseUrl = (import.meta.env.VITE_BOLTZGEN_WEIGHTS_URL as string | undefined)?.trim();
   const baseRoot = (envBaseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
@@ -290,9 +297,31 @@ createWorkerHarness({
     let motifIndices: number[] | undefined;
     if (taskMode === 'motif' && upstreamStruct) {
       const targetLen = upstreamStruct.length;
-      effectiveLength = Math.max(length, targetLen + motifOffset + 4);
-      const startIdx = Math.min(motifOffset, effectiveLength - targetLen);
-      motifIndices = Array.from({ length: targetLen }, (_, i) => startIdx + i);
+      const srcRes =
+        upstreamStruct.sourceResidues && upstreamStruct.sourceResidues.length === targetLen
+          ? upstreamStruct.sourceResidues
+          : parseStructureText(upstreamStruct.pdbText).sourceResidues;
+      // Preserve same-chain author-numbering gaps between split motif islands (e.g. 1PRW A16-35 & A52-71)
+      const relOffsets: number[] = [];
+      let cursor = 0;
+      for (let i = 0; i < targetLen; i++) {
+        if (i > 0) {
+          const prev = srcRes[i - 1];
+          const cur = srcRes[i];
+          if (prev && cur && prev.authChainId === cur.authChainId) {
+            const delta = cur.resNum - prev.resNum;
+            const gap = delta > 1 && delta <= 65 ? delta - 1 : 0;
+            cursor += 1 + gap;
+          } else {
+            cursor += 1;
+          }
+        }
+        relOffsets.push(cursor);
+      }
+      const motifSpan = relOffsets.length > 0 ? relOffsets[relOffsets.length - 1] + 1 : targetLen;
+      effectiveLength = Math.max(length, motifSpan + motifOffset + 4);
+      const startIdx = Math.min(motifOffset, effectiveLength - motifSpan);
+      motifIndices = relOffsets.map((off) => startIdx + off);
     }
 
     const activeEngine = await ensureEngine(ctx, variant, precision);
@@ -443,15 +472,27 @@ createWorkerHarness({
       };
       items.push(artifact);
 
-      if (d === 0 && Array.isArray(genRes.denoised)) {
-        primaryTrajFrames = (genRes.denoised as Float32Array[]).map((arr) =>
-          extractCaFrame(arr, atoms),
+      if (d === 0 && (Array.isArray(genRes.trajectory) || Array.isArray(genRes.denoised))) {
+        const rawFrames = (
+          Array.isArray(genRes.trajectory) && genRes.trajectory.length > 0
+            ? genRes.trajectory
+            : genRes.denoised
+        ) as Float32Array[];
+        // Upstream sampler appends a trailing duplicate of the final state (numSteps + 2 entries);
+        // keep the ordered reverse-diffusion trajectory cleanly without duplicating the final frame.
+        const trimmedFrames =
+          Array.isArray(genRes.trajectory) && rawFrames.length === numSteps + 2
+            ? rawFrames.slice(0, numSteps + 1)
+            : rawFrames;
+        primaryTrajFrames = trimmedFrames.map((arr) => extractCaFrame(arr, atoms));
+        primaryTrajLabels = primaryTrajFrames.map((_, idx) =>
+          idx === 0 ? 'initial noise' : `step ${idx}/${numSteps}`,
         );
-        primaryTrajLabels = primaryTrajFrames.map((_, idx) => `step ${idx + 1}/${numSteps}`);
       }
     }
 
     const primary = items[0];
+    const batchHash = fnv1a(`${items.map((it) => it.id).join('|')}:${items.length}`);
     const repSelection = {
       selectedKey: primary.designKey ?? primary.id,
       criterion: 'lowest-creation-ordinal',
@@ -463,13 +504,14 @@ createWorkerHarness({
       items.length > 1
         ? {
             ...primary,
+            id: `bg-batch-${variant}-${items.length}-${batchHash}`,
             label: `BoltzGen ${variant} (${items.length} designs · L=${primary.length})`,
             representativeSelection: repSelection,
             collection: {
               kind: 'Collection',
               schema: 'denovo.collection/v1',
-              id: `bg-col-${variant}-${runHash}`,
-              familyKey: `boltzgen-${variant}`,
+              id: `bg-col-${variant}-${batchHash}`,
+              familyKey: `boltzgen-${variant}-${batchHash}`,
               collectionKind: 'independent-candidates',
               requestedCount: numDesigns,
               complete: true,

@@ -64,6 +64,13 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
     },
   });
   ownedDevice = device;
+  void device.lost.then(() => {
+    if (ownedDevice === device) {
+      engine = null;
+      ownedDevice = null;
+      loadedPrecision = null;
+    }
+  });
 
   const envBaseUrl = (import.meta.env.VITE_SIDPROTEIN_WEIGHTS_URL as string | undefined)?.trim();
   const rootUrl = (envBaseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
@@ -207,11 +214,23 @@ createWorkerHarness({
 
         const pdbText = String(res.pdb ?? '');
         const parsed = parseStructureText(pdbText);
+        if (parsed.nResidues !== length) {
+          throw new Error(
+            `SiD-Protein returned ${parsed.nResidues} valid residue(s) instead of requested ${length} aa.`,
+          );
+        }
         const geom = computeGeometryStats(parsed.caCoords);
         const runHash = fnv1a(
-          JSON.stringify({ length, steps, noiseScale, seed: designSeed, precision }),
+          JSON.stringify({
+            length,
+            steps,
+            // 1-step distilled mode ignores noiseScale (onestepGamma=1)
+            noiseScale: steps === 1 ? null : noiseScale,
+            seed: designSeed,
+            precision,
+          }),
         );
-        const resolvedLen = parsed.nResidues || length;
+        const resolvedLen = parsed.nResidues;
         items.push({
           kind: 'StructureArtifact',
           id: `sidprotein-${length}aa-s${designSeed}-${runHash}`,
@@ -245,6 +264,7 @@ createWorkerHarness({
     }
 
     const primary = items[0];
+    const batchHash = fnv1a(`${items.map((it) => it.id).join('|')}:${items.length}`);
     const repSelection = {
       selectedKey: primary.designKey ?? primary.id,
       criterion: 'lowest-creation-ordinal',
@@ -256,12 +276,13 @@ createWorkerHarness({
       items.length > 1
         ? {
             ...primary,
+            id: `sidprotein-batch-${items.length}-${batchHash}`,
             representativeSelection: repSelection,
             collection: {
               kind: 'Collection',
               schema: 'denovo.collection/v1',
-              id: `sidprotein-col-${primary.id}`,
-              familyKey: 'sid-protein',
+              id: `sidprotein-col-${batchHash}`,
+              familyKey: `sid-protein-${batchHash}`,
               collectionKind: 'independent-candidates',
               requestedCount: numDesigns,
               complete: true,

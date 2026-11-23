@@ -68,6 +68,13 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
     },
   });
   ownedDevice = device;
+  void device.lost.then(() => {
+    if (ownedDevice === device) {
+      engine = null;
+      ownedDevice = null;
+      loadedPrecision = null;
+    }
+  });
 
   const envBaseUrl = (import.meta.env.VITE_GENIE2_WEIGHTS_URL as string | undefined)?.trim();
   const rootUrl = (envBaseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
@@ -161,14 +168,30 @@ function buildOptionalMotifs(
   if (!match) {
     throw new Error(`Invalid Genie 2 motifRange "${trimmed}" (expected e.g. A10-25 or 10-25).`);
   }
-  const chainFilter = match[1]?.toUpperCase();
+  const rawChainFilter = match[1];
+  const uniqueChains = [...new Set(parsed.chainIds)];
+  if (!rawChainFilter && uniqueChains.length > 1) {
+    throw new Error(
+      `Ambiguous Genie 2 motifRange "${trimmed}" on multi-chain template (chains ${uniqueChains.join(', ')}). Prefix with a chain ID such as "${uniqueChains[0]}${trimmed}".`,
+    );
+  }
+  let resolvedChainFilter: string | undefined;
+  if (rawChainFilter) {
+    if (uniqueChains.includes(rawChainFilter)) {
+      resolvedChainFilter = rawChainFilter;
+    } else {
+      const upper = rawChainFilter.toUpperCase();
+      const ciMatches = uniqueChains.filter((c) => c.toUpperCase() === upper);
+      resolvedChainFilter = ciMatches.length === 1 ? ciMatches[0] : rawChainFilter;
+    }
+  }
   const startRes = Number(match[2]);
   const endRes = match[3] ? Number(match[3]) : startRes;
   const lo = Math.min(startRes, endRes);
   const hi = Math.max(startRes, endRes);
   const picked: number[] = [];
   for (let i = 0; i < parsed.nResidues; i++) {
-    if (chainFilter && parsed.chainIds[i]?.toUpperCase() !== chainFilter) continue;
+    if (resolvedChainFilter && parsed.chainIds[i] !== resolvedChainFilter) continue;
     const r = parsed.resNums[i];
     if (r >= lo && r <= hi) picked.push(i);
   }
@@ -192,6 +215,9 @@ function buildOptionalMotifs(
     const x = parsed.caCoords[idx * 3];
     const y = parsed.caCoords[idx * 3 + 1];
     const z = parsed.caCoords[idx * 3 + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      throw new Error(`Genie 2 motif template has non-finite Cα coordinates at residue index ${idx}.`);
+    }
     cx += x;
     cy += y;
     cz += z;
@@ -309,11 +335,29 @@ createWorkerHarness({
 
         const pdbText = String(sharedMod.writePDB(res));
         const parsed = parseStructureText(pdbText);
+        if (parsed.nResidues !== length) {
+          throw new Error(
+            `Genie 2 returned ${parsed.nResidues} valid Cα residue(s) instead of requested ${length} aa (possible non-finite coordinates).`,
+          );
+        }
+        for (let i = 0; i < parsed.caCoords.length; i++) {
+          if (!Number.isFinite(parsed.caCoords[i])) {
+            throw new Error(`Genie 2 generated non-finite Cα coordinates for design #${d + 1}.`);
+          }
+        }
         const geom = computeGeometryStats(parsed.caCoords);
         const runHash = fnv1a(
-          JSON.stringify({ length, steps, scale, seed: designSeed, precision, motifRange }),
+          JSON.stringify({
+            length,
+            steps,
+            scale,
+            seed: designSeed,
+            precision,
+            motifRange,
+            templateId: motifMeta ? (template?.id ?? null) : null,
+          }),
         );
-        const resolvedLen = parsed.nResidues || length;
+        const resolvedLen = parsed.nResidues;
         items.push({
           kind: 'StructureArtifact',
           id: `genie2-${length}aa-s${designSeed}-${runHash}`,
@@ -322,6 +366,7 @@ createWorkerHarness({
               ? `Genie 2 #${d + 1} (${length} aa)`
               : `Genie 2 (${length} aa, ${steps} steps)`,
           sourceModelId: `genie2/${precision}`,
+          ...(motifMeta && template?.id ? { parentStructureId: template.id } : {}),
           pdbText,
           length: resolvedLen,
           chainIds:
@@ -354,6 +399,7 @@ createWorkerHarness({
     }
 
     const primary = items[0];
+    const batchHash = fnv1a(`${items.map((it) => it.id).join('|')}:${items.length}`);
     const repSelection = {
       selectedKey: primary.designKey ?? primary.id,
       criterion: 'lowest-creation-ordinal',
@@ -365,12 +411,13 @@ createWorkerHarness({
       items.length > 1
         ? {
             ...primary,
+            id: `genie2-batch-${items.length}-${batchHash}`,
             representativeSelection: repSelection,
             collection: {
               kind: 'Collection',
               schema: 'denovo.collection/v1',
-              id: `genie2-col-${primary.id}`,
-              familyKey: 'genie2',
+              id: `genie2-col-${batchHash}`,
+              familyKey: `genie2-${batchHash}`,
               collectionKind: 'independent-candidates',
               requestedCount: numDesigns,
               complete: true,

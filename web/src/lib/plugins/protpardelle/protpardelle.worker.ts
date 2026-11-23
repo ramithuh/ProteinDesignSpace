@@ -78,9 +78,10 @@ let ppSamplerMod: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let engine: any = null;
 let loadedKey: string | null = null;
+let lastMiniMpnnUrls: string[] = [];
 
 function makeSeededReplay(seed: number) {
-  let state = (seed >>> 0) || 1;
+  let state = seed >>> 0;
   const nextRand = () => {
     state = (state + 0x6d2b79f5) | 0;
     let t = Math.imul(state ^ (state >>> 15), 1 | state);
@@ -147,6 +148,7 @@ async function ensureEngine(ctx: WorkerRunContext, checkpoint: string, precision
     let anyFromCache = false;
     const cachedFetch = makeCachedFetch((u, fromCache) => {
       fetchedUrls.push(u);
+      if (u.includes('minimpnn')) lastMiniMpnnUrls.push(u);
       if (fromCache) anyFromCache = true;
     });
 
@@ -223,6 +225,11 @@ createWorkerHarness({
         `ProtPardelle-1c in "${taskMode}" mode requires a connected upstream structure.`,
       );
     }
+    if (taskMode === 'motif' && motifGuidance === 'crop-only' && checkpoint === 'bb81_epoch450') {
+      throw new Error(
+        'ProtPardelle backbone-only checkpoint (bb81_epoch450) does not support crop-only motif conditioning; use "replacement" guidance or a crop-conditioned checkpoint (e.g. cc91_epoch383).',
+      );
+    }
 
     const activeEngine = await ensureEngine(ctx, checkpoint, precision);
     const chainGap = Number(activeEngine.config?.data?.chain_residx_gap ?? 200);
@@ -253,9 +260,28 @@ createWorkerHarness({
             `Motif selection "${motifSelection}" matched 0 residues in "${upstreamStruct.label}".`,
           );
         }
-        sampleLen = Math.max(length, sourceIndices.length + 10);
-        const padLeft = Math.floor((sampleLen - sourceIndices.length) / 2);
-        targetIndices = sourceIndices.map((_, i) => padLeft + i);
+        // Preserve same-chain author-numbering gaps between split motif islands (e.g. 1PRW A16-35 & A52-71)
+        const relOffsets: number[] = [];
+        let cursor = 0;
+        const tplRes = parsedTemplate.residues as Array<{ chain?: string; resid?: number }> | undefined;
+        for (let i = 0; i < sourceIndices.length; i++) {
+          if (i > 0) {
+            const prev = tplRes?.[sourceIndices[i - 1]];
+            const cur = tplRes?.[sourceIndices[i]];
+            if (prev && cur && prev.chain === cur.chain && typeof prev.resid === 'number' && typeof cur.resid === 'number') {
+              const delta = cur.resid - prev.resid;
+              const gap = delta > 1 && delta <= 65 ? delta - 1 : 0;
+              cursor += 1 + gap;
+            } else {
+              cursor += 1;
+            }
+          }
+          relOffsets.push(cursor);
+        }
+        const motifSpan = relOffsets.length > 0 ? relOffsets[relOffsets.length - 1] + 1 : sourceIndices.length;
+        sampleLen = Math.max(length, motifSpan + 10);
+        const padLeft = Math.floor((sampleLen - motifSpan) / 2);
+        targetIndices = relOffsets.map((off) => padLeft + off);
       }
     }
 
@@ -290,14 +316,27 @@ createWorkerHarness({
     );
 
     const effectiveStepsRun = taskMode === 'partial' ? Math.min(numSteps, rewindSteps) : numSteps;
+    // Extract native motif Cα directly from parsedTemplate.coords (atom index 1 = CA) so interleaved
+    // multi-chain templates never suffer index misalignment between parsedTemplate and upstreamStruct.
+    let templateCaCoords: Float32Array | undefined;
+    if (parsedTemplate?.coords && parsedTemplate?.aatype?.length) {
+      const tplN = parsedTemplate.aatype.length as number;
+      templateCaCoords = new Float32Array(tplN * 3);
+      for (let i = 0; i < tplN; i++) {
+        templateCaCoords[i * 3] = parsedTemplate.coords[i * 111 + 3];
+        templateCaCoords[i * 3 + 1] = parsedTemplate.coords[i * 111 + 4];
+        templateCaCoords[i * 3 + 2] = parsedTemplate.coords[i * 111 + 5];
+      }
+    }
     const motifLineage =
       taskMode === 'motif' && targetIndices.length > 0
         ? buildMotifLineage(
             targetIndices,
             sourceIndices,
-            upstreamStruct && upstreamStruct.caCoords?.length >= upstreamStruct.length * 3
-              ? upstreamStruct.caCoords
-              : undefined,
+            templateCaCoords ??
+              (upstreamStruct && upstreamStruct.caCoords?.length >= upstreamStruct.length * 3
+                ? upstreamStruct.caCoords
+                : undefined),
           )
         : undefined;
 
@@ -345,33 +384,51 @@ createWorkerHarness({
           : {}),
       };
 
-      const sampled = await activeEngine.sample(sampleInput, {
-        signal: ctx.signal,
-        onProgress: (prog: {
-          phase?: string;
-          step?: number;
-          totalSteps?: number;
-          loaded?: number;
-          total?: number;
-        }) => {
-          const isWeights = prog.phase === 'weights';
-          if (isWeights) {
-            const mb = ((prog.loaded ?? 0) / 1024 / 1024).toFixed(1);
-            const totMb = prog.total ? ` / ${(prog.total / 1024 / 1024).toFixed(1)} MB` : ' MB';
-            ctx.progress('weights', 0.47, `Loading MiniMPNN (${precision.toUpperCase()}): ${mb}${totMb}`);
-            return;
+      const runSampleOnce = async (retriedMiniMpnn: boolean) => {
+        try {
+          return await activeEngine.sample(sampleInput, {
+            signal: ctx.signal,
+            onProgress: (prog: {
+              phase?: string;
+              step?: number;
+              totalSteps?: number;
+              loaded?: number;
+              total?: number;
+            }) => {
+              const isWeights = prog.phase === 'weights';
+              if (isWeights) {
+                const mb = ((prog.loaded ?? 0) / 1024 / 1024).toFixed(1);
+                const totMb = prog.total ? ` / ${(prog.total / 1024 / 1024).toFixed(1)} MB` : ' MB';
+                ctx.progress('weights', 0.47, `Loading MiniMPNN (${precision.toUpperCase()}): ${mb}${totMb}`);
+                return;
+              }
+              const step = prog.step ?? prog.loaded ?? 0;
+              const tot = prog.totalSteps ?? prog.total ?? effectiveStepsRun;
+              const stepFrac = tot > 0 ? Math.min(1, step / tot) : 0;
+              const overall = 0.48 + ((d + stepFrac) / numDesigns) * 0.5;
+              ctx.progress(
+                'diffuse',
+                Math.min(0.98, overall),
+                `ProtPardelle design ${d + 1}/${numDesigns}: step ${step}/${tot}`,
+              );
+            },
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          if (
+            !retriedMiniMpnn &&
+            lastMiniMpnnUrls.length > 0 &&
+            /integrity|sha-?256|manifest|mismatch|corrupt/i.test(errMsg)
+          ) {
+            const toEvict = [...new Set(lastMiniMpnnUrls)];
+            lastMiniMpnnUrls = [];
+            await evictCachedUrls(toEvict);
+            return await runSampleOnce(true);
           }
-          const step = prog.step ?? prog.loaded ?? 0;
-          const tot = prog.totalSteps ?? prog.total ?? effectiveStepsRun;
-          const stepFrac = tot > 0 ? Math.min(1, step / tot) : 0;
-          const overall = 0.48 + ((d + stepFrac) / numDesigns) * 0.5;
-          ctx.progress(
-            'diffuse',
-            Math.min(0.98, overall),
-            `ProtPardelle design ${d + 1}/${numDesigns}: step ${step}/${tot}`,
-          );
-        },
-      });
+          throw err;
+        }
+      };
+      const sampled = await runSampleOnce(false);
 
       const pdbText = ppStructMod.toPDB({
         ...layout,
@@ -449,6 +506,7 @@ createWorkerHarness({
     }
 
     const primary = items[0];
+    const batchHash = fnv1a(`${items.map((it) => it.id).join('|')}:${items.length}`);
     const repSelection = {
       selectedKey: primary.designKey ?? primary.id,
       criterion: 'lowest-creation-ordinal',
@@ -460,13 +518,14 @@ createWorkerHarness({
       items.length > 1
         ? {
             ...primary,
+            id: `pp-batch-${checkpoint}-${items.length}-${batchHash}`,
             label: `ProtPardelle ${checkpoint} (${items.length} designs · L=${primary.length})`,
             representativeSelection: repSelection,
             collection: {
               kind: 'Collection',
               schema: 'denovo.collection/v1',
-              id: `pp-col-${checkpoint}-${runHash}`,
-              familyKey: `protpardelle-${checkpoint}`,
+              id: `pp-col-${checkpoint}-${batchHash}`,
+              familyKey: `protpardelle-${checkpoint}-${batchHash}`,
               collectionKind: 'independent-candidates',
               requestedCount: numDesigns,
               complete: true,

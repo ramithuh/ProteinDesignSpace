@@ -75,6 +75,13 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
     },
   });
   ownedDevice = device;
+  void device.lost.then(() => {
+    if (ownedDevice === device) {
+      engine = null;
+      ownedDevice = null;
+      loadedPrecision = null;
+    }
+  });
 
   const envBaseUrl = (import.meta.env.VITE_PROTEINA_WEIGHTS_URL as string | undefined)?.trim();
   const baseUrl = envBaseUrl || DEFAULT_BASE_URL;
@@ -223,11 +230,21 @@ createWorkerHarness({
 
         const pdbText = String(sharedMod.toPDB(res.coordinates));
         const parsed = parseStructureText(pdbText);
+        if (parsed.nResidues !== length) {
+          throw new Error(
+            `Proteina returned ${parsed.nResidues} valid residue(s) instead of requested ${length} aa.`,
+          );
+        }
+        for (let i = 0; i < parsed.caCoords.length; i++) {
+          if (!Number.isFinite(parsed.caCoords[i])) {
+            throw new Error(`Proteina generated non-finite Cα coordinates for design #${d + 1}.`);
+          }
+        }
         const geom = computeGeometryStats(parsed.caCoords);
         const runHash = fnv1a(
           JSON.stringify({ length, steps, mode, noiseScale, selfCondition, seed: designSeed, precision }),
         );
-        const resolvedLen = parsed.nResidues || length;
+        const resolvedLen = parsed.nResidues;
         items.push({
           kind: 'StructureArtifact',
           id: `proteina-${length}aa-s${designSeed}-${runHash}`,
@@ -261,6 +278,7 @@ createWorkerHarness({
     }
 
     const primary = items[0];
+    const batchHash = fnv1a(`${items.map((it) => it.id).join('|')}:${items.length}`);
     const repSelection = {
       selectedKey: primary.designKey ?? primary.id,
       criterion: 'lowest-creation-ordinal',
@@ -272,12 +290,13 @@ createWorkerHarness({
       items.length > 1
         ? {
             ...primary,
+            id: `proteina-batch-${items.length}-${batchHash}`,
             representativeSelection: repSelection,
             collection: {
               kind: 'Collection',
               schema: 'denovo.collection/v1',
-              id: `proteina-col-${primary.id}`,
-              familyKey: 'proteina',
+              id: `proteina-col-${batchHash}`,
+              familyKey: `proteina-${batchHash}`,
               collectionKind: 'independent-candidates',
               requestedCount: numDesigns,
               complete: true,

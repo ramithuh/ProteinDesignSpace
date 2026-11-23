@@ -3,13 +3,17 @@ export function parsePDB(text) {
   const residues = [],
     map = new Map();
   for (const line of text.split(/\r?\n/)) {
-    if (line.slice(0, 6).trim() !== "ATOM") continue;
+    const rec = line.slice(0, 6).trim();
+    if (rec === "ENDMDL") break;
+    if (rec !== "ATOM") continue;
     if (![" ", "A", ""].includes(line[16] ?? "")) continue;
     const chain = line.slice(21, 22),
-      number = Number(line.slice(22, 26)),
-      icode = line.slice(26, 27),
+      rawNum = line.slice(22, 26).trim(),
+      number = rawNum === "" ? NaN : Number(rawNum),
+      icode = line.slice(26, 27).trim(),
       name = line.slice(17, 20),
-      key = chain + number + icode;
+      key = `${chain}:${number}:${icode}`;
+    if (!Number.isInteger(number)) throw Error("Invalid PDB residue number");
     let r = map.get(key);
     if (!r) {
       r = {
@@ -30,7 +34,10 @@ export function parsePDB(text) {
         .slice(0, 14)
         .findIndex((x) => x?.trim() === atom);
     if (a >= 0) {
-      const xyz = [30, 38, 46].map((k) => Number(line.slice(k, k + 8)));
+      const xyz = [30, 38, 46].map((k) => {
+        const s = line.slice(k, k + 8).trim();
+        return s === "" ? NaN : Number(s);
+      });
       if (!xyz.every(Number.isFinite)) throw Error("Invalid PDB coordinates");
       r.coords.set(xyz, a * 3);
     }
@@ -55,21 +62,45 @@ export function parseContig(contig, { pdb, random = () => 0.5 } = {}) {
       idx += 200;
       continue;
     }
-    let m = /^([A-Za-z])(-?\d+)(?:-(-?\d+))?$/.exec(token);
+    let m = /^([A-Za-z])(-?\d+)([A-Za-z])?(?:-(-?\d+)([A-Za-z])?)?$/.exec(token);
     if (m) {
-      const start = +m[2],
-        end = m[3] === undefined ? start : +m[3];
-      if (end < start) throw Error("Descending motif range");
-      for (let j = start; j <= end; j++) {
-        const source = pdb?.residues.find(
-          (r) => r.chain === m[1] && r.number === j,
+      const ch = m[1],
+        start = +m[2],
+        startIns = (m[3] ?? "").trim(),
+        end = m[4] === undefined ? start : +m[4],
+        endIns = m[4] === undefined ? startIns : (m[5] ?? "").trim();
+      if (end < start || (end === start && startIns && endIns && endIns < startIns))
+        throw Error("Descending motif range");
+      const hasIns = Boolean(startIns || endIns);
+      if (hasIns) {
+        const chainRes = (pdb?.residues ?? []).filter((r) => r.chain === ch);
+        const startIdx = chainRes.findIndex(
+          (r) => r.number === start && (r.icode ?? "").trim() === startIns,
         );
-        if (
-          !source ||
-          !Array.from(source.coords.slice(0, 9)).every(Number.isFinite)
-        )
-          throw Error(`Missing backbone in motif ${m[1]}${j}`);
-        residues.push({ source, chain, idx: idx++ });
+        const endIdx = chainRes.findIndex(
+          (r) => r.number === end && (r.icode ?? "").trim() === endIns,
+        );
+        if (startIdx < 0 || endIdx < startIdx)
+          throw Error(`Missing backbone in motif ${token}`);
+        for (let k = startIdx; k <= endIdx; k++) {
+          const source = chainRes[k];
+          if (!Array.from(source.coords.slice(0, 9)).every(Number.isFinite))
+            throw Error(`Missing backbone in motif ${ch}${source.number}${source.icode ?? ""}`);
+          residues.push({ source, chain, idx: idx++ });
+        }
+      } else {
+        for (let j = start; j <= end; j++) {
+          const source =
+            pdb?.residues.find(
+              (r) => r.chain === ch && r.number === j && !(r.icode ?? "").trim(),
+            ) ?? pdb?.residues.find((r) => r.chain === ch && r.number === j);
+          if (
+            !source ||
+            !Array.from(source.coords.slice(0, 9)).every(Number.isFinite)
+          )
+            throw Error(`Missing backbone in motif ${ch}${j}`);
+          residues.push({ source, chain, idx: idx++ });
+        }
       }
     } else {
       m = /^(\d+)(?:-(\d+))?$/.exec(token);

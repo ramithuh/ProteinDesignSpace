@@ -81,6 +81,13 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
     },
   });
   ownedDevice = device;
+  void device.lost.then(() => {
+    if (ownedDevice === device) {
+      engine = null;
+      ownedDevice = null;
+      loadedPrecision = null;
+    }
+  });
 
   const envBaseUrl = (import.meta.env.VITE_RFDIFFUSION_WEIGHTS_URL as string | undefined)?.trim();
   const baseUrl = envBaseUrl || DEFAULT_BASE_URL;
@@ -171,7 +178,8 @@ createWorkerHarness({
     let effectiveLength = rawLength;
     if (symmetry) {
       const copies = SYMMETRY_COPIES[symmetry] ?? 3;
-      effectiveLength = Math.max(copies * 8, Math.round(rawLength / copies) * copies);
+      const maxSymLen = Math.floor(256 / copies) * copies;
+      effectiveLength = Math.min(maxSymLen, Math.max(copies * 8, Math.round(rawLength / copies) * copies));
     }
 
     let effectiveContig: string | undefined;
@@ -353,6 +361,7 @@ createWorkerHarness({
     }
 
     const primary = items[0];
+    const batchHash = fnv1a(`${items.map((it) => it.id).join('|')}:${items.length}`);
     const repSelection = {
       selectedKey: primary.designKey ?? primary.id,
       criterion: 'lowest-creation-ordinal',
@@ -364,13 +373,14 @@ createWorkerHarness({
       items.length > 1
         ? {
             ...primary,
+            id: `rfd-batch-${items.length}-${batchHash}`,
             label: `RFdiffusion (${items.length} designs · L=${primary.length})`,
             representativeSelection: repSelection,
             collection: {
               kind: 'Collection',
               schema: 'denovo.collection/v1',
-              id: `rfd-col-${runHash}`,
-              familyKey: 'rfdiffusion',
+              id: `rfd-col-${batchHash}`,
+              familyKey: `rfdiffusion-${batchHash}`,
               collectionKind: 'independent-candidates',
               requestedCount: numDesigns,
               complete: true,

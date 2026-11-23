@@ -302,6 +302,7 @@ createWorkerHarness({
     }
 
     const primary = items[0];
+    const batchHash = fnv1a(`${items.map((it) => it.id).join('|')}:${items.length}`);
     const repSelection = {
       selectedKey: primary.designKey ?? primary.id,
       criterion: 'lowest-creation-ordinal',
@@ -313,12 +314,13 @@ createWorkerHarness({
       items.length > 1
         ? {
             ...primary,
+            id: `foldflow2-batch-${items.length}-${batchHash}`,
             representativeSelection: repSelection,
             collection: {
               kind: 'Collection',
               schema: 'denovo.collection/v1',
-              id: `foldflow2-col-${primary.id}`,
-              familyKey: 'foldflow2',
+              id: `foldflow2-col-${batchHash}`,
+              familyKey: `foldflow2-${batchHash}`,
               collectionKind: 'independent-candidates',
               requestedCount: numDesigns,
               complete: true,
