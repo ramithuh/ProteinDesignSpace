@@ -393,13 +393,18 @@
     </div>
   {:else if draftPreview}
     <div class="above-strip note-stack">
-      <div class="warn-pill" role="status">
-        <span class="warn-icon" aria-hidden="true">⚠</span>
-        <span>
-          {isAiDraft
-            ? "AI-drafted (gemma-4) — double-check each block's parameters, PDB/chain IDs & wiring before running."
-            : "Auto-drafted workflow — double-check each block's parameters, PDB/chain IDs & wiring before running."}
-        </span>
+      <div class="draft-notice" class:is-ai={isAiDraft} role="status">
+        {#if isAiDraft}
+          <span class="draft-badge is-ai" aria-hidden="true">⚠ AI draft</span>
+          <span class="draft-copy">
+            Review parameters, PDB/chain IDs &amp; wiring before running.
+          </span>
+        {:else}
+          <span class="draft-badge" aria-hidden="true">✦ Starter</span>
+          <span class="draft-copy">
+            Review parameters, PDB/chain IDs &amp; wiring before running.
+          </span>
+        {/if}
       </div>
       {#if draftPreview.unsupported.length > 0}
         <div
@@ -735,21 +740,64 @@
     align-items: center;
     gap: 6px;
   }
+  .draft-notice {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 11px 5px 6px;
+    border-radius: 10px;
+    border: 1px solid var(--border-strong);
+    background: color-mix(in srgb, var(--bg-surface) 95%, transparent);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    color: var(--text-secondary);
+    font-size: 11.5px;
+    line-height: 1.35;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+    max-width: min(560px, calc(100vw - 28px));
+    text-align: left;
+  }
+  .draft-notice.is-ai {
+    border-color: color-mix(in srgb, var(--warn-border) 60%, var(--border-strong));
+    background: color-mix(in srgb, var(--warn-bg) 32%, var(--bg-surface));
+  }
+  .draft-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface-2));
+    color: var(--accent-bright, var(--accent));
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .draft-badge.is-ai {
+    background: color-mix(in srgb, var(--warn-bg) 90%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warn-border) 65%, transparent);
+    color: var(--warn-text);
+  }
+  .draft-copy {
+    color: var(--text-secondary);
+  }
   .warn-pill {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 5px 12px;
-    border-radius: 999px;
+    gap: 7px;
+    padding: 6px 12px;
+    border-radius: 10px;
     border: 1px solid var(--warn-border);
     background: var(--warn-bg);
     color: var(--warn-text);
     font-size: 11.5px;
     line-height: 1.35;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
     white-space: normal;
-    text-align: center;
-    max-width: min(600px, calc(100vw - 28px));
+    text-align: left;
+    max-width: min(560px, calc(100vw - 28px));
   }
   .warn-card {
     display: flex;
