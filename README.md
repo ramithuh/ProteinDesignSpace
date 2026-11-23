@@ -2,7 +2,7 @@
 
 **A browser-native WebGPU node-graph workbench for *de novo* protein design, inverse folding, structure prediction, and biophysical evaluation.**
 
-Run state-of-the-art generative, inverse-folding, folding, and scoring models **directly on your local GPU inside the browser via WebGPU** — zero server compute, zero conda environments, zero local installs, and zero sequence/structure uploads (except optional user-confirmed ColabFold MSA lookups).
+Run generative, inverse-folding, folding, and scoring models **directly on your local GPU inside the browser via WebGPU** — zero server compute, zero conda environments, zero local installs, and zero sequence/structure uploads (except optional user-confirmed ColabFold MSA lookups).
 
 🌐 **Live Workbench:** [https://denovo.run](https://denovo.run) · 🤗 **WebGPU Weight Mirrors:** [`huggingface.co/ramithuh`](https://huggingface.co/ramithuh) · ⚙️ **Standalone WebGPU Ports:** [`denovo-webgpu-models`](https://github.com/ramithuh/denovo-webgpu-models)
 
@@ -10,53 +10,26 @@ Run state-of-the-art generative, inverse-folding, folding, and scoring models **
 
 ![ProteinDesignSpace visual workflow canvas and live Mol* 3D viewer](assets/workbench-3d.png)
 
-*Visual DAG workflow canvas with typed color-coded ports, live Mol\* 3D structure viewport, and parameter inspector — running locally on WebGPU.*
+*Visual DAG workflow canvas with typed ports, live Mol\* 3D structure viewport, and parameter inspector — running locally on WebGPU.*
+
+---
+
+## Story & Inspiration
+
+When I first started this, I kind of gave up since models at the time weren't great at writing WebGPU kernels. Seeing **Martin Steinegger** and **Sergey Ovchinnikov**'s pioneering WebGPU implementations ([[1]](https://github.com/martin-steinegger/alphafold2-webgpu), [[2]](https://github.com/sokrypton/localfold), [[3]](https://github.com/sokrypton/rfd4-proteina-webgpu)) recently inspired me to pick it back up—and `denovo.run` grew out of that push.
 
 ---
 
 ## Highlights
 
-- **Visual DAG Workflow Canvas** (`@xyflow/svelte`): Compose linear or branched protein design pipelines (e.g., comparing **AlphaFold 3 vs AlphaFold 2 vs RoseTTAFold 3**, or **SolubleMPNN vs LigandMPNN vs AntiFold** on a shared backbone), with typed color-coded ports, smart auto-wiring (`+ Add Block` / `/`), resizable split panes, and automatic layout.
-- **25 Composable Blocks Across 6 Categories** — all neural inference executes in sequential, VRAM-isolated Dedicated Web Workers with OPFS / CacheStorage weight persistence:
-  - **Structure Generation**: **RFD4-Proteina**, **La-Proteina (LD1 + AE1)**, **Proteina v1.2 (200M)**, **SiD-Protein (16-Step)**, **Genie 3**, **Genie 2**, **RFdiffusion (Base)**, **FrameFlow**, **FoldFlow 2 (ReFT + ESM-2)**, **BoltzGen-1**, and **ProtPardelle-1c**.
-  - **Sequence Design**: **ProteinMPNN / SolubleMPNN / Cα-MPNN**, **LigandMPNN**, **LASErMPNN**, **AntiFold & ESM-IF1**, and **EvoDiff-Seq (OA-DM 38M)**.
-  - **Structure Prediction** (via LocalFold): **AlphaFold 2** (Monomer & Multimer v3), **AlphaFold 3**, **Boltz-2**, **RoseTTAFold 3**, **Protenix v2**, **OpenFold 3**, **IntelliFold 2**, **OpenDDE**, **Mol1**, and **ESMFold2** (300M & 600M fast single-sequence).
-  - **Property Prediction**: **ThermoMPNN** (full L×20 site-saturation ΔΔG stability scan & B-factor painting), **ESM-C 300M** (zero-shot L×20 LLR fitness & naturalness), and **Dyna-1** (millisecond conformational exchange & flexibility).
-  - **Evaluation & 3D Compare**: **Top-K Filter**, **Designability Scorer** (exact Kabsch SVD `scRMSD`, `scTM`, Motif RMSD, pLDDT, ipSAE), and **3D Superpose / Compare** (multi-model up to 6-way Kabsch & motif overlay).
-- **Natural-Language Workflow Planner**: Describe a pipeline in plain English (`+ Describe`) to draft or edit multi-block graphs directly on the canvas.
-- **Shareable Links & Reproducible Recipes**: Compact `#p=` / `#g=` deflate-raw URLs, editable YAML/JSON workflow recipes, live intermediate peeking, diffusion trajectory playback, and a multi-round Campaign Inspector.
+- **Visual DAG Workflow Canvas** (`@xyflow/svelte`): Build linear or branched protein design pipelines with typed ports, auto-wiring (`+ Add Block` / `/`), and live intermediate peeking.
+- **25 Composable Local WebGPU Blocks** across structure generation, sequence design, structure prediction, property prediction, and 3D evaluation — see [**MODELS_AND_CREDITS.md**](MODELS_AND_CREDITS.md) for the full list of models, licenses, and citations.
+- **Natural-Language Workflow Planner**: Describe a pipeline in plain English (`+ Describe`) to draft or edit graphs directly on the canvas.
+- **Reproducible & Shareable**: Compact `#p=` / `#g=` URLs, editable YAML/JSON recipes, diffusion trajectory playback, and a multi-round Campaign Inspector.
 
 ![ProteinDesignSpace + Add Block catalog](assets/block-catalog.png)
 
-*Browse all 25 blocks and model presets by stage from `+ Add Block` or `/`.*
-
----
-
-## Included Models & Browser Engines
-
-| Stage | Model | Capabilities | Weights / Port | Upstream License |
-| --- | --- | --- | --- | --- |
-| **Generation** | **RFD4-Proteina** | All-atom sequence-structure co-design, motif, binder, partial diffusion | [`sokrypton/rfd4-proteina-webgpu`](https://github.com/sokrypton/rfd4-proteina-webgpu) · [`nvidia/RFD4-Proteina`](https://huggingface.co/nvidia/RFD4-Proteina) | NVIDIA Open / MIT |
-| **Generation** | **La-Proteina (LD1 + AE1)** | All-atom latent diffusion (LD1) + atom37/sequence decoder (AE1) | [`ramithuh/la-proteina-webgpu`](https://huggingface.co/ramithuh/la-proteina-webgpu) | Apache-2.0 / NVIDIA Open |
-| **Generation** | **Proteina v1.2 (200M)** | Scalable 200M pair-biased transformer flow matching (Cα backbones) | [`ramithuh/proteina-webgpu`](https://huggingface.co/ramithuh/proteina-webgpu) | NVIDIA Research (NC) |
-| **Generation** | **SiD-Protein (16-Step)** | Score-identity distilled 200M Proteina generator (16-step Cα sampling) | [`ramithuh/sid-protein-webgpu`](https://huggingface.co/ramithuh/sid-protein-webgpu) | SiD-Protein / Proteina |
-| **Generation** | **Genie 3** | Fast 23.3M SE(3) DDIM backbone diffusion + SequenceNet | [`ramithuh/genie3-webgpu`](https://huggingface.co/ramithuh/genie3-webgpu) | Apache-2.0 |
-| **Generation** | **Genie 2** | Compact 15.7M Cα diffusion & soft motif scaffolding | [`ramithuh/genie2-webgpu`](https://huggingface.co/ramithuh/genie2-webgpu) | Apache-2.0 |
-| **Generation** | **RFdiffusion (Base)** | Original SE(3) backbone diffusion, motif contigs, Cn/Dn symmetry | [`ramithuh/rfdiffusion-webgpu`](https://huggingface.co/ramithuh/rfdiffusion-webgpu) | BSD |
-| **Generation** | **FrameFlow** | Fast 16.8M SE(3) rigid-frame flow matching (5-atom N/CA/C/O/CB) | [`ramithuh/frameflow-webgpu`](https://huggingface.co/ramithuh/frameflow-webgpu) | MIT / Apache-2.0 |
-| **Generation** | **FoldFlow 2 (ReFT)** | SE(3) flow matching + frozen ESM-2 650M (unconditional & seq-conditioned) | [`ramithuh/foldflow2-webgpu`](https://huggingface.co/ramithuh/foldflow2-webgpu) | CC BY-NC 4.0 / MIT |
-| **Generation** | **BoltzGen-1** | All-atom unconditional, binder & motif diffusion (`diverse`, `adherence`) | [`ramithuh/boltzgen-webgpu`](https://huggingface.co/ramithuh/boltzgen-webgpu) | MIT |
-| **Generation** | **ProtPardelle-1c** | All-atom & backbone EDM diffusion, tip-atom motif, MiniMPNN co-design | [`ramithuh/protpardelle-webgpu`](https://huggingface.co/ramithuh/protpardelle-webgpu) | MIT / CC-BY-4.0 |
-| **Sequence** | **ProteinMPNN / SolubleMPNN / Cα** | Backbone-conditioned inverse folding (ONNX WebGPU / WASM) | [`MurrellGroup/webProteinMPNN`](https://github.com/MurrellGroup/webProteinMPNN) | MIT |
-| **Sequence** | **LigandMPNN** | Ligand-, metal- & nucleic-acid-aware sequence design | [`ramithuh/ligandmpnn-webgpu`](https://huggingface.co/ramithuh/ligandmpnn-webgpu) | MIT |
-| **Sequence** | **LASErMPNN** | Ligand-aware sequence & all-atom sidechain rotamer co-design | [`ramithuh/lasermpnn-webgpu`](https://huggingface.co/ramithuh/lasermpnn-webgpu) | MIT |
-| **Sequence** | **AntiFold & ESM-IF1** | Antibody CDR inverse folding & GVP-Transformer inverse folding | [`ramithuh/antifold-esmif1-webgpu`](https://huggingface.co/ramithuh/antifold-esmif1-webgpu) | BSD-3 / MIT |
-| **Sequence** | **EvoDiff-Seq (38M)** | MSA-free order-agnostic discrete sequence diffusion & inpainting | [`ramithuh/evodiff-webgpu`](https://huggingface.co/ramithuh/evodiff-webgpu) | MIT / CC-BY-4.0 |
-| **Prediction** | **LocalFold Suite** | AF2, AF2-Multimer, AF3*, Boltz-2, RF3, Protenix-v2, OpenFold 3, IntelliFold 2, ESMFold2 | [`sokrypton/localfold`](https://github.com/sokrypton/localfold) | Beer-Ware (code) · Apache-2.0 / MIT / CC-BY-4.0 (*AF3 non-commercial) |
-| **Property** | **ThermoMPNN** | Full L×20 site-saturation ΔΔG stability scan & 3D B-factor painting | [`ramithuh/thermompnn-webgpu`](https://huggingface.co/ramithuh/thermompnn-webgpu) | MIT |
-| **Property** | **ESM-C 300M** | Zero-shot L×20 LLR fitness heatmap, pseudo-perplexity & masked fill | [`ramithuh/esmc-webgpu`](https://huggingface.co/ramithuh/esmc-webgpu) | MIT |
-| **Property** | **Dyna-1** | Millisecond conformational exchange & flexibility prediction | [`ramithuh/dyna1-webgpu`](https://huggingface.co/ramithuh/dyna1-webgpu) | MIT / ESM-3 Open |
-| **Evaluation** | **Designability / 3D Compare** | Kabsch SVD `scRMSD`, `scTM`, ipSAE, multi-model & motif 3D superposition | Built-in CPU | MIT |
+*See [**MODELS_AND_CREDITS.md**](MODELS_AND_CREDITS.md) for all 25 blocks, upstream weights, licenses, and paper citations.*
 
 ---
 
@@ -70,8 +43,6 @@ npm run dev
 
 Open `http://localhost:5173` in a WebGPU-capable browser (Chrome, Edge, Arc, or Firefox 145+ on macOS).
 
-### Tests & Production Build
-
 ```bash
 cd web
 npm test              # Vitest unit & upstream integration suite (offline)
@@ -80,74 +51,15 @@ npm run build         # Syncs pinned upstreams & builds static SPA -> web/build/
 npm run check:deploy  # Verifies required vendor engines & Cloudflare 25 MiB limit
 ```
 
-### Deploying to Cloudflare Pages
-
-Connect this repository in **Cloudflare Dashboard → Workers & Pages → Create → Pages → Connect to Git**:
-
-| Setting | Value |
-| --- | --- |
-| **Production branch** | `main` |
-| **Root directory** | `web` |
-| **Build command** | `npm run build && npm run check:deploy` |
-| **Build output directory** | `build` |
-| **Node.js version** | `22` (via `web/.node-version`) |
-
-Model weights are **never** bundled in `web/build/` — sharded safetensors stream on demand from Hugging Face and cache locally in browser OPFS / CacheStorage.
+Model weights are **never** bundled in `web/build/` — sharded safetensors stream on demand from Hugging Face and cache locally in browser OPFS / CacheStorage. To add a new block to the workbench, see [ADDING_A_METHOD.md](ADDING_A_METHOD.md).
 
 ---
 
-## Credits, Upstream Repositories & Citations
+## Credits
 
-`denovo.run` stands on the shoulders of extraordinary open-source protein science and WebGPU engineering work. Please cite the original authors and upstream tools when using any model from this workbench:
+Huge thanks to **Martin Steinegger** ([`alphafold2-webgpu`](https://github.com/martin-steinegger/alphafold2-webgpu)) and **Sergey Ovchinnikov** ([`localfold`](https://github.com/sokrypton/localfold), [`rfd4-proteina-webgpu`](https://github.com/sokrypton/rfd4-proteina-webgpu)) for pioneering browser-native WebGPU protein models, to the **Ben Murrell Lab** ([`webProteinMPNN`](https://github.com/MurrellGroup/webProteinMPNN)), and to all the open-source protein science authors whose models power this workbench.
 
-### Core Browser WebGPU Engines
-- **LocalFold & RFD4-Proteina WebGPU** — Sergey Ovchinnikov et al.: [`sokrypton/localfold`](https://github.com/sokrypton/localfold) · [`sokrypton/rfd4-proteina-webgpu`](https://github.com/sokrypton/rfd4-proteina-webgpu)
-- **webProteinMPNN** — Ben Murrell Lab: [`MurrellGroup/webProteinMPNN`](https://github.com/MurrellGroup/webProteinMPNN)
-
-### Generative, Inverse-Folding, Folding & Evaluation Models
-- **RFdiffusion** — Watson et al. (2023), *De novo design of protein structure and function with RFdiffusion*, Nature 620, 1089–1100 · [`RosettaCommons/RFdiffusion`](https://github.com/RosettaCommons/RFdiffusion)
-- **La-Proteina & Proteina** — Geffner et al. (2025), *Proteina: Scaling Flow-based Protein Structure Generative Models* & *La-Proteina: Atomistic Protein Generation via Partially Latent Flow Matching* · [`NVIDIA-BioNeMo/la-proteina`](https://github.com/NVIDIA-BioNeMo/la-proteina) · [`NVIDIA-BioNeMo/proteina`](https://github.com/NVIDIA-BioNeMo/proteina)
-- **SiD-Protein (SPID)** — Xie et al. (2025), *SPID: Distilled Protein Backbone Generation*, arXiv:2510.03095 · [`LY-Xie/SiD_Protein`](https://github.com/LY-Xie/SiD_Protein)
-- **Genie 2 & Genie 3** — Lin et al. (2024, 2026), *Genie 2* (arXiv:2405.15489) & *Genie 3* (bioRxiv) · [`aqlaboratory/genie2`](https://github.com/aqlaboratory/genie2) · [`aqlaboratory/genie3`](https://github.com/aqlaboratory/genie3)
-- **FrameFlow** — Yim et al. (2023), *Fast protein backbone generation with SE(3) flow matching*, arXiv:2310.05297 · [`microsoft/protein-frame-flow`](https://github.com/microsoft/protein-frame-flow)
-- **FoldFlow 2** — Huguet et al. (2024), *Sequence-Augmented SE(3)-Flow Matching For Conditional Protein Generation*, NeurIPS 2024 · [`DreamFold/FoldFlow`](https://github.com/DreamFold/FoldFlow)
-- **BoltzGen** — Stärk et al. (2025), *BoltzGen: Toward Universal Binder Design* · [`HannesStark/boltzgen`](https://github.com/HannesStark/boltzgen)
-- **ProtPardelle-1c** — Chu et al. (2024), *An all-atom protein generative model*, PNAS · [`ProteinDesignLab/protpardelle-1c`](https://github.com/ProteinDesignLab/protpardelle-1c)
-- **EvoDiff** — Alamdari et al. (2023), *Protein generation with evolutionary diffusion: sequence is all you need*, bioRxiv · [`microsoft/evodiff`](https://github.com/microsoft/evodiff)
-- **ProteinMPNN & SolubleMPNN** — Dauparas et al. (2022), *Robust deep learning–based protein sequence design using ProteinMPNN*, Science · [`dauparas/ProteinMPNN`](https://github.com/dauparas/ProteinMPNN)
-- **LigandMPNN** — Dauparas et al. (2025), *Atomic context-conditioned protein sequence design using LigandMPNN*, Nature Methods · [`dauparas/LigandMPNN`](https://github.com/dauparas/LigandMPNN)
-- **LASErMPNN** — Polizzi Lab · [`polizzilab/LASErMPNN`](https://github.com/polizzilab/LASErMPNN)
-- **AntiFold & ESM-IF1** — Høie et al. (2024), *AntiFold: Improved antibody structure-based design using inverse folding*, Bioinformatics · [`oxpig/AntiFold`](https://github.com/oxpig/AntiFold); Hsu et al. (2022), *Learning inverse folding from millions of predicted structures*, ICML · [`facebookresearch/esm`](https://github.com/facebookresearch/esm)
-- **ThermoMPNN** — Dieckhaus et al. (2024), *Transfer learning to leverage larger datasets for improving prediction of protein stability changes*, PNAS · [`Kuhlman-Lab/ThermoMPNN`](https://github.com/Kuhlman-Lab/ThermoMPNN)
-- **ESM-C & ESM-3** — EvolutionaryScale / Chan Zuckerberg Biohub · [`Biohub/esm`](https://github.com/Biohub/esm)
-- **Dyna-1** — Wayment-Steele et al. (2026), *Learning millisecond protein dynamics from what is missing in NMR spectra*, Nature · [`WaymentSteeleLab/Dyna-1`](https://github.com/WaymentSteeleLab/Dyna-1)
-- **Structure Predictors (via LocalFold)** — AlphaFold 2 & 3 (Google DeepMind), Boltz-2 (MIT / Recursion), RoseTTAFold 3 (IPD), Protenix (ByteDance), OpenFold 3 (OpenFold Consortium), IntelliFold 2, ESMFold2.
-- **Optional MSA Server** — MMseqs2 / ColabFold API (Mirdita et al., 2022, *ColabFold: making protein folding accessible to all*, Nature Methods) — disabled by default and only used after explicit user confirmation.
-
-### Frontend & Visualization Infrastructure
-- [**Mol\***](https://molstar.org/) (3D molecular viewer) · [**XYFlow (`@xyflow/svelte`)**](https://svelteflow.dev/) (visual node-graph canvas) · [**SvelteKit 5**](https://svelte.dev/) · [**ONNX Runtime Web**](https://onnxruntime.ai/)
-
----
-
-## Repository Layout
-
-```text
-ProteinDesignSpace/
-├── assets/                     # README screenshots
-├── tools/
-│   ├── sync-upstream.mjs       # Pinned sparse sync of vendored JS/WGSL runtimes
-│   ├── sync-ort-wasm.mjs       # Same-origin ONNX Runtime WASM sync
-│   └── check-deploy.mjs        # Verifies vendor engines & Cloudflare 25 MiB cap
-└── web/                        # SvelteKit 5 + TypeScript static SPA
-    ├── src/lib/
-    │   ├── engine/             # Scheduler, registry, catalog, model cards, planner, OPFS cache
-    │   ├── protein-ops/        # PDB/mmCIF parser, Kabsch SVD, ipSAE, B-factor painting
-    │   ├── workers/            # Dedicated VRAM-isolated WebGPU/CPU workers
-    │   ├── ui/                 # Canvas, block catalog, node inspector, peek & campaign UI
-    │   ├── viewer/             # Headless Mol* superposition viewer & PAE/mutation heatmaps
-    │   └── __tests__/          # Vitest unit & integration suite (368 tests)
-    └── static/vendor/          # Vendored zero-dep upstream JS/WGSL modules
-```
+For the full table of models, upstream repositories, licenses, and paper citations, see [**MODELS_AND_CREDITS.md**](MODELS_AND_CREDITS.md).
 
 ---
 
@@ -156,4 +68,3 @@ ProteinDesignSpace/
 The **ProteinDesignSpace (`denovo.run`)** workbench code is licensed under the [MIT License](LICENSE) — *and unofficially under the Ice-Cream-Ware License: if we meet someday and `denovo.run` saved you a conda install or helped design a protein, you can buy me an ice cream in return 🍦*
 
 Vendored third-party inference engines under `web/static/vendor/` (such as LocalFold under Beer-Ware, FoldFlow 2 under CC BY-NC 4.0, and NVIDIA Research components) and model weights downloaded at runtime are **not** covered by this license and remain subject to their respective upstream licenses.
-
