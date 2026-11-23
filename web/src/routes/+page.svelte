@@ -108,7 +108,6 @@
     DEFAULT_HOST_MAX_FOLD_RESIDUES,
     defaultComputeBackendConfig,
     formatHostGpuDetail,
-    formatHostGpuPillLabel,
     loadComputeBackendConfig,
     logoutRemoteServerSession,
     releaseRemoteServerGpu,
@@ -177,6 +176,11 @@
       : computeBackend.remotePreset === 'colab'
         ? 'colab'
         : 'self-host',
+  );
+  const remoteShortGpu = $derived(
+    remoteHealth?.ok
+      ? (remoteHealth.gpu?.shortName?.trim() || remoteHealth.gpu?.name?.trim() || '')
+      : '',
   );
 
   function buildFoldLimitOpts(
@@ -278,6 +282,29 @@
     const nextUrl = lastSelfHostUrl;
     remoteHealth = null;
     updateComputeBackend({ mode: 'remote', remotePreset: 'self-host', serverUrl: nextUrl });
+  }
+
+  function handleHeaderComputeClick(choice: 'local' | 'colab' | 'self-host') {
+    moreMenuOpen = false;
+    shareMenuOpen = false;
+    const switching = choice !== activeComputeChoice;
+    const canSwitch = !isRunning && !activeRunState.leaseHeld;
+    if (switching && canSwitch) {
+      selectComputeChoice(choice);
+    }
+    const nextOpen = switching ? (canSwitch ? choice !== 'local' || sysMenuOpen : true) : !sysMenuOpen;
+    if (nextOpen && sysWrapEl) {
+      const rect = sysWrapEl.getBoundingClientRect();
+      sysPopAlignLeft = rect.right < 330;
+    }
+    sysMenuOpen = nextOpen;
+    const waitingForColabUrl =
+      computeBackend.remotePreset === 'colab' &&
+      !computeBackend.serverUrl.trim() &&
+      !isOnColabOrigin;
+    if (!switching && nextOpen && computeBackend.mode !== 'local' && !waitingForColabUrl) {
+      void probeRemoteBackend(computeBackend);
+    }
   }
 
   function updateComputeBackend(patch: Partial<ComputeBackendConfig>) {
@@ -3571,46 +3598,80 @@
   </div>
 
   <div class="hdr-right">
-    <!-- System Status Pill & Popover -->
+    <!-- 3-Way Compute Switch Pill & System Popover -->
     <div class="pop-wrap" bind:this={sysWrapEl}>
-      <button
-        type="button"
-        class="hdr-pill"
-        class:ok={((computeBackend.mode !== 'local' && remoteHealth?.ok) || (computeBackend.mode === 'local' && webgpuSupported && !webgpuIsFallback)) && !activeGpuWorker}
-        class:warn={computeBackend.mode === 'local' && webgpuSupported && webgpuIsFallback && !activeGpuWorker}
-        class:bad={(computeBackend.mode === 'local' && webgpuSupported === false) || (computeBackend.mode !== 'local' && remoteHealth?.ok === false)}
-        class:gpu={Boolean(activeGpuWorker)}
-        aria-expanded={sysMenuOpen}
-        onclick={() => {
-          moreMenuOpen = false;
-          shareMenuOpen = false;
-          const nextOpen = !sysMenuOpen;
-          if (nextOpen && sysWrapEl) {
-            const rect = sysWrapEl.getBoundingClientRect();
-            sysPopAlignLeft = rect.right < 330;
-          }
-          sysMenuOpen = nextOpen;
-          const waitingForColabUrl =
-            computeBackend.remotePreset === 'colab' &&
-            !computeBackend.serverUrl.trim() &&
-            !isOnColabOrigin;
-          if (nextOpen && computeBackend.mode !== 'local' && !waitingForColabUrl) {
-            void probeRemoteBackend(computeBackend);
-          }
-        }}
-        title={computeBackend.mode !== 'local' && remoteHealth?.ok
-          ? `${formatHostGpuDetail(remoteHealth)} (${activeComputeChoice === 'colab' ? 'Colab' : 'Self-Host'} WebGPU · click for compute settings)`
-          : 'WebGPU, Google Colab & Self-Hosted GPU compute settings'}
-      >
-        <span class="status-dot"></span>
-        {activeGpuWorkerLabel
-          ? `GPU: ${activeGpuWorkerLabel}`
-          : computeBackend.mode !== 'local'
-            ? formatHostGpuPillLabel(remoteHealth, computeBackend.mode, computeBackend.remotePreset)
-            : webgpuIsFallback
+      <div class="hdr-compute-switch" role="group" aria-label="Compute backend switch">
+        <button
+          type="button"
+          class="hdr-compute-seg"
+          class:active={activeComputeChoice === 'local'}
+          class:ok={activeComputeChoice === 'local' && webgpuSupported && !webgpuIsFallback && !activeGpuWorker}
+          class:warn={activeComputeChoice === 'local' && webgpuSupported && webgpuIsFallback && !activeGpuWorker}
+          class:bad={activeComputeChoice === 'local' && webgpuSupported === false && !activeGpuWorker}
+          class:gpu={activeComputeChoice === 'local' && Boolean(activeGpuWorker)}
+          aria-pressed={activeComputeChoice === 'local'}
+          aria-expanded={activeComputeChoice === 'local' && sysMenuOpen}
+          onclick={() => handleHeaderComputeClick('local')}
+          title="Browser WebGPU (local in-tab GPU · click active tab for status & cache)"
+        >
+          {#if activeComputeChoice === 'local'}
+            <span class="status-dot"></span>
+          {/if}
+          {activeComputeChoice === 'local' && activeGpuWorkerLabel
+            ? `GPU: ${activeGpuWorkerLabel}`
+            : activeComputeChoice === 'local' && webgpuIsFallback
               ? 'WebGPU (SW)'
               : 'WebGPU'}
-      </button>
+        </button>
+
+        <button
+          type="button"
+          class="hdr-compute-seg"
+          class:active={activeComputeChoice === 'colab'}
+          class:ok={activeComputeChoice === 'colab' && remoteHealth?.ok && !activeGpuWorker}
+          class:bad={activeComputeChoice === 'colab' && remoteHealth?.ok === false && !activeGpuWorker}
+          class:gpu={activeComputeChoice === 'colab' && Boolean(activeGpuWorker)}
+          aria-pressed={activeComputeChoice === 'colab'}
+          aria-expanded={activeComputeChoice === 'colab' && sysMenuOpen}
+          onclick={() => handleHeaderComputeClick('colab')}
+          title={activeComputeChoice === 'colab' && remoteHealth?.ok
+            ? `${formatHostGpuDetail(remoteHealth)} (Colab GPU · click for settings)`
+            : 'Google Colab GPU backend (experimental)'}
+        >
+          {#if activeComputeChoice === 'colab'}
+            <span class="status-dot"></span>
+          {/if}
+          {activeComputeChoice === 'colab' && activeGpuWorkerLabel
+            ? `GPU: ${activeGpuWorkerLabel}`
+            : activeComputeChoice === 'colab' && remoteShortGpu
+              ? `Colab · ${remoteShortGpu}`
+              : 'Colab'}
+        </button>
+
+        <button
+          type="button"
+          class="hdr-compute-seg"
+          class:active={activeComputeChoice === 'self-host'}
+          class:ok={activeComputeChoice === 'self-host' && remoteHealth?.ok && !activeGpuWorker}
+          class:bad={activeComputeChoice === 'self-host' && remoteHealth?.ok === false && !activeGpuWorker}
+          class:gpu={activeComputeChoice === 'self-host' && Boolean(activeGpuWorker)}
+          aria-pressed={activeComputeChoice === 'self-host'}
+          aria-expanded={activeComputeChoice === 'self-host' && sysMenuOpen}
+          onclick={() => handleHeaderComputeClick('self-host')}
+          title={activeComputeChoice === 'self-host' && remoteHealth?.ok
+            ? `${formatHostGpuDetail(remoteHealth)} (Self-Hosted GPU · click for settings)`
+            : 'Self-hosted workstation or cluster GPU'}
+        >
+          {#if activeComputeChoice === 'self-host'}
+            <span class="status-dot"></span>
+          {/if}
+          {activeComputeChoice === 'self-host' && activeGpuWorkerLabel
+            ? `GPU: ${activeGpuWorkerLabel}`
+            : activeComputeChoice === 'self-host' && remoteShortGpu
+              ? `Self-Host · ${remoteShortGpu}`
+              : 'Self-Host'}
+        </button>
+      </div>
 
       {#if sysMenuOpen}
         <div
@@ -3648,27 +3709,14 @@
           <div class="pop-divider"></div>
           <div class="pop-compute-sec">
             <div class="pop-row">
-              <span class="pop-k">Compute</span>
+              <span class="pop-k">Active backend</span>
               <span class="pop-mode-hint">
                 {activeComputeChoice === 'local'
-                  ? 'Local WebGPU'
+                  ? 'Browser WebGPU'
                   : activeComputeChoice === 'colab'
-                    ? 'Experimental'
-                    : 'Your GPU'}
+                    ? 'Colab (Experimental)'
+                    : 'Self-Hosted GPU'}
               </span>
-            </div>
-            <div class="compute-seg" role="group" aria-label="Compute backend mode">
-              {#each [['local', 'Browser'], ['colab', 'Colab'], ['self-host', 'Self-Host']] as [cVal, cLbl] (cVal)}
-                <button
-                  type="button"
-                  class="compute-seg-btn"
-                  class:active={activeComputeChoice === cVal}
-                  disabled={isRunning || activeRunState.leaseHeld}
-                  onclick={() => selectComputeChoice(cVal as 'local' | 'colab' | 'self-host')}
-                >
-                  {cLbl}
-                </button>
-              {/each}
             </div>
 
             {#if activeComputeChoice === 'local' && sameOriginHostDetected?.ok}
@@ -5272,40 +5320,60 @@
   .pop-wrap {
     position: relative;
   }
-  .hdr-pill {
+  .hdr-compute-switch {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 2px;
+    padding: 2px;
+    height: 30px;
+    box-sizing: border-box;
+    border-radius: 999px;
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border);
+  }
+  .hdr-compute-seg {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 24px;
+    padding: 0 9px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-muted);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
-    color: var(--text-muted);
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    padding: 5px 10px;
-    border-radius: 999px;
+    font-weight: 500;
     cursor: pointer;
     white-space: nowrap;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
   }
-  .hdr-pill:hover {
-    border-color: var(--border-strong);
+  .hdr-compute-seg:hover:not(.active) {
     color: var(--text-primary);
+    background: var(--bg-surface-hover);
   }
-  .hdr-pill.ok {
+  .hdr-compute-seg.active {
+    color: var(--text-primary);
+    background: var(--bg-surface);
+    border-color: var(--border-strong);
+    font-weight: 600;
+  }
+  .hdr-compute-seg.active.ok {
     color: var(--ok-text);
     border-color: var(--ok-border);
     background: var(--ok-bg);
   }
-  .hdr-pill.warn {
+  .hdr-compute-seg.active.warn {
     color: var(--warn-text);
     border-color: var(--warn-border);
     background: var(--warn-bg);
   }
-  .hdr-pill.bad {
+  .hdr-compute-seg.active.bad {
     color: var(--err-strong);
     border-color: var(--err-border);
     background: var(--err-bg);
   }
-  .hdr-pill.gpu {
+  .hdr-compute-seg.active.gpu {
     color: var(--accent-soft);
     border-color: var(--accent);
     background: var(--bg-pill);
@@ -5551,37 +5619,6 @@
     font-size: 10px;
     color: var(--text-muted);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-  }
-  .compute-seg {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    width: 100%;
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    padding: 2px;
-    gap: 2px;
-    background: var(--bg-surface-2);
-    box-sizing: border-box;
-  }
-  .compute-seg-btn {
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 10.5px;
-    font-weight: 600;
-    padding: 4px 6px;
-    border-radius: 5px;
-    cursor: pointer;
-    font-family: inherit;
-    white-space: nowrap;
-    transition: background 0.12s ease, color 0.12s ease;
-  }
-  .compute-seg-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-  }
-  .compute-seg-btn.active {
-    background: var(--accent);
-    color: #fff;
   }
   .pop-colab-card {
     display: flex;
