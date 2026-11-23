@@ -297,6 +297,10 @@ function buildMinimalChromiumEnv(vulkanIcd) {
       env[k] = process.env[k];
     }
   }
+  if (process.platform === 'linux') {
+    delete env.DISPLAY;
+    delete env.WAYLAND_DISPLAY;
+  }
   if (vulkanIcd) {
     env.VK_ICD_FILENAMES = vulkanIcd;
   }
@@ -1147,26 +1151,39 @@ async function startPlaywrightRunner(localOrigin, { repoRoot, dataDir, disableSa
 
   const vulkanIcd = detectLinuxVulkanIcd();
   const minimalEnv = buildMinimalChromiumEnv(vulkanIcd);
+  const disableGpuSandbox = disableSandbox || process.env.DENOVO_DISABLE_GPU_SANDBOX === '1';
 
   const launchArgs = [
+    '--headless=new',
     '--enable-unsafe-webgpu',
     '--ignore-gpu-blocklist',
     '--disable-dev-shm-usage',
   ];
   if (process.platform === 'linux') {
-    launchArgs.push('--enable-features=Vulkan', '--use-angle=vulkan', '--use-vulkan=native');
+    launchArgs.push(
+      '--ozone-platform=headless',
+      '--enable-features=Vulkan',
+      '--use-angle=vulkan',
+      '--use-vulkan=native',
+      '--disable-vulkan-surface',
+    );
   }
   if (disableSandbox) {
-    launchArgs.push('--no-sandbox', '--disable-gpu-sandbox');
+    launchArgs.push('--no-sandbox');
+  }
+  if (disableGpuSandbox) {
+    launchArgs.push('--disable-gpu-sandbox');
   }
 
-  console.log(`[denovo-selfhost] Launching host WebGPU Chromium (${executablePath || 'bundled'}, sandbox=${!disableSandbox})...`);
+  console.log(
+    `[denovo-selfhost] Launching host WebGPU Chromium (${executablePath || 'bundled'}, sandbox=${!disableSandbox}, gpuSandbox=${!disableGpuSandbox})...`,
+  );
   if (vulkanIcd) {
     console.log(`[denovo-selfhost] Vulkan ICD: ${vulkanIcd}`);
   }
 
   const context = await chromium.launchPersistentContext(dataDir, {
-    headless: true,
+    headless: false,
     chromiumSandbox: !disableSandbox,
     ...(executablePath ? { executablePath } : {}),
     args: launchArgs,
