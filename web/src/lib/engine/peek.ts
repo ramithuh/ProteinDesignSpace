@@ -2,12 +2,14 @@
 // extracting ancestor subgraphs for partial runs, and analyzing intermediate modalities.
 
 import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
+import { AA1_TO_AA3 } from '$lib/protein-ops/pdb';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import type {
   CanonicalArtifact,
   DesignabilityRow,
   PortType,
   StructureArtifact,
+  TrajectoryFramesArtifact,
   WorkflowEdge,
   WorkflowGraph,
 } from './types';
@@ -193,21 +195,29 @@ export function extractSubgraphUpTo(graph: WorkflowGraph, targetNodeId: string):
 /**
  * Walk upstream from `nodeId` (breadth-first) to find the closest available
  * StructureArtifact for 3D context or sequence-recovery comparison.
+ *
+ * When `opts.excludeSelf` is `true`, skip reading `outputsByNode[nodeId]` and only inspect
+ * upstream ancestors (so co-packing inverse folders like `LASErMPNN` resolve their upstream
+ * WT input structure rather than their own packed output).
  */
 export function findContextStructure(
   graph: WorkflowGraph,
   nodeId: string,
   outputsByNode: Record<string, Record<string, CanonicalArtifact>>,
+  opts?: { excludeSelf?: boolean },
 ): StructureArtifact | null {
   const visited = new Set<string>([nodeId]);
   const queue: string[] = [nodeId];
+  const excludeSelf = Boolean(opts?.excludeSelf);
 
   while (queue.length > 0) {
     const cur = queue.shift()!;
-    const outs = outputsByNode[cur];
-    if (outs) {
-      for (const art of Object.values(outs)) {
-        if (art.kind === 'StructureArtifact') return art;
+    if (!excludeSelf || cur !== nodeId) {
+      const outs = outputsByNode[cur];
+      if (outs) {
+        for (const art of Object.values(outs)) {
+          if (art.kind === 'StructureArtifact') return art;
+        }
       }
     }
     const incoming = graph.edges.filter((e) => e.toNode === cur && !visited.has(e.fromNode));
@@ -466,4 +476,111 @@ export function resolveFoldIpsae(fold: {
   if (!sliced) return null;
   const res = computeIpsae(sliced, perResChains, 10);
   return res ? { ipsae: res.ipsae, ipsaeMin: res.ipsaeMin } : null;
+}
+
+/** Infer residue count for a TrajectoryFramesArtifact from frame coordinates, PDB text, or parent structure. */
+export function inferTrajectoryResidueCount(
+  traj: TrajectoryFramesArtifact,
+  contextStruct?: Pick<StructureArtifact, 'id' | 'length'> | null,
+): number | null {
+  const firstFrameWithCoords = traj.frames?.find((f) => f.caCoords && f.caCoords.length >= 3);
+  if (firstFrameWithCoords?.caCoords) {
+    return Math.floor(firstFrameWithCoords.caCoords.length / 3);
+  }
+  const samplePdb = traj.frames?.find((f) => f.pdbText?.trim())?.pdbText ?? traj.pdbText;
+  if (samplePdb) {
+    const seen = new Set<string>();
+    for (const line of samplePdb.split('\n')) {
+      if (line.startsWith('ENDMDL')) break;
+      if (!line.startsWith('ATOM  ') || line.length < 27) continue;
+      if (line.slice(12, 16).trim() !== 'CA') continue;
+      seen.add(`${line[21] || 'A'}:${line.slice(22, 27)}`);
+    }
+    if (seen.size > 0) return seen.size;
+  }
+  if (contextStruct && contextStruct.length > 0 && contextStruct.id === traj.parentStructureId) {
+    return contextStruct.length;
+  }
+  return null;
+}
+
+function stripPdbModelEnvelope(pdbText: string): string {
+  const out: string[] = [];
+  for (const line of pdbText.split(/\r?\n/)) {
+    const tr = line.trim();
+    if (!tr) continue;
+    if (line.startsWith('MODEL ') || tr === 'MODEL' || tr === 'ENDMDL' || tr === 'END') continue;
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+/**
+ * Build a downloadable multi-MODEL PDB string from a TrajectoryFramesArtifact:
+ * uses pre-serialized `pdbText` when present, wraps per-frame `pdbText` entries, or
+ * synthesizes clean Cα multi-MODEL PDB records directly from per-frame `caCoords`.
+ */
+export function buildTrajectoryMultiModelPdb(
+  traj: TrajectoryFramesArtifact,
+  contextStruct?: Pick<StructureArtifact, 'id' | 'length' | 'sequence' | 'chainIds' | 'sourceResidues'> | null,
+): string | null {
+  if (traj.pdbText && traj.pdbText.trim().length > 0) {
+    return traj.pdbText;
+  }
+  const frames = traj.frames ?? [];
+  if (frames.length === 0) return null;
+
+  const chunks: string[] = [
+    `REMARK   1 DENOVO.RUN TRAJECTORY EXPORT (${frames.length} FRAMES)`,
+  ];
+  let emittedModels = 0;
+
+  for (let idx = 0; idx < frames.length; idx++) {
+    const frame = frames[idx];
+    const modelNum = idx + 1;
+    if (frame.pdbText && frame.pdbText.trim().length > 0) {
+      const body = stripPdbModelEnvelope(frame.pdbText);
+      if (!body) continue;
+      emittedModels++;
+      chunks.push(`MODEL     ${String(modelNum).padStart(4, ' ')}`);
+      chunks.push(body);
+      chunks.push('ENDMDL');
+      continue;
+    }
+    if (frame.caCoords && frame.caCoords.length >= 3) {
+      const nRes = Math.floor(frame.caCoords.length / 3);
+      const useCtx = Boolean(contextStruct && contextStruct.length === nRes);
+      emittedModels++;
+      const stepNote =
+        typeof frame.timeStep === 'number' && Number.isFinite(frame.timeStep)
+          ? ` T=${frame.timeStep}`
+          : '';
+      chunks.push(`REMARK   2 FRAME ${modelNum}/${frames.length} KEY=${frame.key}${stepNote}`);
+      chunks.push(`MODEL     ${String(modelNum).padStart(4, ' ')}`);
+      for (let r = 0; r < nRes; r++) {
+        const x = frame.caCoords[r * 3];
+        const y = frame.caCoords[r * 3 + 1];
+        const z = frame.caCoords[r * 3 + 2];
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+        const aa1 = useCtx ? (contextStruct!.sequence[r]?.toUpperCase() ?? 'A') : 'A';
+        const resName = (AA1_TO_AA3[aa1] ?? 'ALA').padStart(3, ' ');
+        const rawChain = useCtx ? (contextStruct!.chainIds?.[r] ?? 'A') : 'A';
+        const chain = (rawChain.trim()[0] || 'A');
+        const resNum = useCtx ? (contextStruct!.sourceResidues?.[r]?.resNum ?? r + 1) : r + 1;
+        const serialStr = String((r + 1) % 100000).padStart(5, ' ');
+        const resSeqStr = String(resNum).padStart(4, ' ');
+        const xStr = x.toFixed(3).padStart(8, ' ');
+        const yStr = y.toFixed(3).padStart(8, ' ');
+        const zStr = z.toFixed(3).padStart(8, ' ');
+        chunks.push(
+          `ATOM  ${serialStr}  CA  ${resName} ${chain}${resSeqStr}    ${xStr}${yStr}${zStr}  1.00  0.00           C  `,
+        );
+      }
+      chunks.push('ENDMDL');
+    }
+  }
+
+  if (emittedModels === 0) return null;
+  chunks.push('END');
+  return `${chunks.join('\n')}\n`;
 }

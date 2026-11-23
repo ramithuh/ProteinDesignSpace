@@ -284,7 +284,9 @@ self.onmessage = async (ev: MessageEvent) => {
 
           // Replace any rare ambiguous 'B' from upstream 21-token vocabulary with 'D' for downstream folders
           const seq = String(res.sequence ?? '').replace(/B/g, 'D');
-          const designKey = `evodiff-${s + 1}`;
+          // Sequence-only generators do not produce distinct 3D backbones: share one designKey across
+          // candidates in the run while keeping unique sequenceKeys so LocalFold strictly honors maxSequences.
+          const designKey = 'evodiff';
           const seqKey = makeSequenceKey('evodiff-oa-dm-38m', designKey, s);
           candidates.push({
             id: `evodiff-s${s + 1}-${runHash}`,
@@ -295,7 +297,7 @@ self.onmessage = async (ev: MessageEvent) => {
             globalScore: null,
             sourceModelId: 'evodiff',
             designKey,
-            designIndex: s,
+            designIndex: 0,
             sampleIndex: s,
             seed: seed + s,
           });

@@ -683,27 +683,35 @@ export function normalizeToCollection(
             ? cand.sampleIndex
             : i;
         const candParentId = (cand.sourceStructureId ?? setParentId).trim();
+        const explicitDesignKey = (cand.designKey ?? '').trim();
+        const designKey = explicitDesignKey || (candParentId.length > 0 ? candParentId : undefined);
         const hasParent = candParentId.length > 0;
-        const designKey = hasParent ? candParentId : undefined;
-        let sequenceKey = (cand.key ?? cand.id ?? '').trim();
+        let sequenceKey = (cand.sequenceKey ?? cand.key ?? cand.id ?? '').trim();
         if (!sequenceKey || usedKeys.has(sequenceKey)) {
           sequenceKey = makeSequenceKey(familyKey, designKey, ordinal);
         }
         usedKeys.add(sequenceKey);
         const lineage: ItemLineage = {
-          ...(hasParent
+          ...(designKey
             ? {
                 designKey,
+                ...(typeof cand.designIndex === 'number' && Number.isInteger(cand.designIndex) && cand.designIndex >= 0
+                  ? { designIndex: cand.designIndex }
+                  : {}),
+              }
+            : {}),
+          ...(hasParent
+            ? {
                 sourceStructure: {
                   artifactId: candParentId,
                   payloadDigest: '',
-                  designKey,
+                  ...(designKey ? { designKey } : {}),
                 },
               }
             : {}),
           sequenceKey,
           sequenceIndex: ordinal,
-          parentKeys: hasParent && designKey ? [designKey] : [],
+          parentKeys: designKey ? [designKey] : [],
         };
         return {
           key: sequenceKey,
@@ -771,14 +779,25 @@ export function normalizeToCollection(
       const setParentId = (artifact.sourceStructureId ?? artifact.parentStructureId ?? '').trim();
       const sourceModelId = artifact.folds[0]?.foldModelId ?? 'localfold';
 
+      const usedFoldKeys = new Set<string>();
       const members: CollectionMember<FoldedCandidate>[] = artifact.folds.map((fold, i) => {
         const sampleOrdinal =
           typeof fold.sampleIndex === 'number' && Number.isInteger(fold.sampleIndex) && fold.sampleIndex >= 0
             ? fold.sampleIndex
             : i;
-        const sequenceKey = (fold.key ?? fold.sequenceId).trim() || `seq-legacy-${i}`;
-        const foldKey = makeFoldKey(familyKey, sequenceKey, sampleOrdinal, fold.foldModelId || sourceModelId);
+        const sequenceKey = (fold.sequenceKey ?? fold.key ?? fold.sequenceId).trim() || `seq-legacy-${i}`;
+        const explicitFoldKey = (fold.foldKey ?? '').trim();
+        let foldKey =
+          explicitFoldKey && explicitFoldKey !== sequenceKey && !usedFoldKeys.has(explicitFoldKey)
+            ? explicitFoldKey
+            : makeFoldKey(familyKey, sequenceKey, sampleOrdinal, fold.foldModelId || sourceModelId);
+        if (usedFoldKeys.has(foldKey)) {
+          foldKey = makeFoldKey(familyKey, `${sequenceKey}#${i}`, sampleOrdinal, fold.foldModelId || sourceModelId);
+        }
+        usedFoldKeys.add(foldKey);
         const candParentId = (fold.sourceStructureId ?? setParentId).trim();
+        const explicitDesignKey = (fold.designKey ?? '').trim();
+        const designKey = explicitDesignKey || (candParentId.length > 0 ? candParentId : undefined);
         const hasParent = candParentId.length > 0;
         const confidenceAvailable =
           fold.confidenceAvailable !== false &&
@@ -793,13 +812,20 @@ export function normalizeToCollection(
             : fold.meanPlddt;
 
         const lineage: ItemLineage = {
+          ...(designKey
+            ? {
+                designKey,
+                ...(typeof fold.designIndex === 'number' && Number.isInteger(fold.designIndex) && fold.designIndex >= 0
+                  ? { designIndex: fold.designIndex }
+                  : {}),
+              }
+            : {}),
           ...(hasParent
             ? {
-                designKey: candParentId,
                 sourceStructure: {
                   artifactId: candParentId,
                   payloadDigest: '',
-                  designKey: candParentId,
+                  ...(designKey ? { designKey } : {}),
                 },
               }
             : {}),
@@ -813,6 +839,14 @@ export function normalizeToCollection(
           ordinal: sampleOrdinal,
           memberKind: 'FoldedCandidate',
           lineage,
+          ...(typeof fold.seed === 'number' && Number.isFinite(fold.seed)
+            ? {
+                provenance: {
+                  seedScheme: 'legacy-v1' as const,
+                  seed: fold.seed,
+                },
+              }
+            : {}),
           payload: fold,
           summary: {
             label: `${fold.sequenceId} (${fold.foldModelId})`,
@@ -831,20 +865,47 @@ export function normalizeToCollection(
         attempt: 1,
         lineage: m.lineage,
       }));
-      const completedSeqKeys = new Set(members.map((m) => m.lineage.sequenceKey));
+      const completedKeys = new Set<string>();
+      for (const m of members) {
+        completedKeys.add(m.key);
+        if (m.lineage.foldKey) completedKeys.add(m.lineage.foldKey);
+        if (m.lineage.sequenceKey) completedKeys.add(m.lineage.sequenceKey);
+        if (m.payload?.foldKey) completedKeys.add(m.payload.foldKey);
+        if (m.payload?.sequenceKey) completedKeys.add(m.payload.sequenceKey);
+        if (m.payload?.key) completedKeys.add(m.payload.key);
+        if (m.payload?.sequenceId) completedKeys.add(m.payload.sequenceId);
+      }
+      const seenNonCompletedKeys = new Set<string>();
       for (const excl of artifact.excludedCandidates ?? []) {
+        const exclKey = (excl.key || excl.id || '').trim();
+        if (!exclKey || seenNonCompletedKeys.has(exclKey)) continue;
+        seenNonCompletedKeys.add(exclKey);
+        const extExcl = excl as typeof excl & { designKey?: string; sourceStructureId?: string };
+        const exclDesignKey = (extExcl.designKey ?? extExcl.sourceStructureId ?? '').trim() || undefined;
         outcomes.push({
-          key: excl.key || excl.id,
+          key: exclKey,
           status: 'excluded',
           attempt: 0,
           reason: excl.reason,
+          lineage: {
+            ...(exclDesignKey ? { designKey: exclDesignKey } : {}),
+            sequenceKey: exclKey,
+            parentKeys: exclDesignKey ? [exclDesignKey] : [],
+          },
         });
       }
       for (const itemOutcome of artifact.itemOutcomes ?? []) {
-        if (itemOutcome.status === 'completed' && completedSeqKeys.has(itemOutcome.key)) continue;
-        if (itemOutcome.status === 'excluded' && outcomes.some((o) => o.key === itemOutcome.key)) continue;
+        const k = (itemOutcome.key ?? '').trim();
+        if (!k) continue;
+        if (itemOutcome.status === 'completed') {
+          // Completed folds are already committed in `members`; never duplicate them as
+          // trailing blank phantom rows (`fold:...:s0`) during CSV export.
+          if (completedKeys.has(k) || members.length > 0) continue;
+        }
+        if (seenNonCompletedKeys.has(k) || outcomes.some((o) => o.key === k)) continue;
+        seenNonCompletedKeys.add(k);
         outcomes.push({
-          key: itemOutcome.key,
+          key: k,
           status: itemOutcome.status,
           attempt: itemOutcome.status === 'excluded' ? 0 : 1,
           reason: itemOutcome.reason,
@@ -873,7 +934,10 @@ export function normalizeToCollection(
         ? members.find(
             (m) =>
               m.key === artifact.representativeSelection?.selectedKey ||
-              m.lineage.sequenceKey === artifact.representativeSelection?.selectedKey,
+              m.lineage.foldKey === artifact.representativeSelection?.selectedKey ||
+              m.lineage.sequenceKey === artifact.representativeSelection?.selectedKey ||
+              m.payload?.key === artifact.representativeSelection?.selectedKey ||
+              m.payload?.sequenceId === artifact.representativeSelection?.selectedKey,
           )?.key
         : undefined;
       const rep = selectRepresentativeMember(collection, { explicitKey });
@@ -892,20 +956,38 @@ export function normalizeToCollection(
           referenceStructureId: artifact.referenceStructureId ?? null,
         }),
       );
+      const usedFoldKeys = new Set<string>();
       const members: CollectionMember<DesignabilityRow>[] = artifact.rows.map((row, i) => {
-        const sequenceKey = (row.candidateKey ?? row.sequenceId).trim() || `seq-row-${i}`;
-        const foldKey = makeFoldKey(familyKey, sequenceKey, i, 'scorer');
+        const sequenceKey = (row.sequenceKey ?? row.candidateKey ?? row.sequenceId).trim() || `seq-row-${i}`;
+        const explicitFoldKey = (row.foldKey ?? '').trim();
+        let foldKey =
+          explicitFoldKey && explicitFoldKey !== sequenceKey && !usedFoldKeys.has(explicitFoldKey)
+            ? explicitFoldKey
+            : makeFoldKey(familyKey, sequenceKey, i, 'scorer');
+        if (usedFoldKeys.has(foldKey)) {
+          foldKey = makeFoldKey(familyKey, `${sequenceKey}#${i}`, i, 'scorer');
+        }
+        usedFoldKeys.add(foldKey);
         const refId = (row.sourceStructureId ?? row.structureId ?? '').trim();
+        const explicitDesignKey = (row.designKey ?? '').trim();
+        const designKey = explicitDesignKey || (refId.length > 0 ? refId : undefined);
         const hasParent = refId.length > 0;
         const confidenceAvailable = row.confidenceAvailable !== false && Number.isFinite(row.meanPlddt);
         const lineage: ItemLineage = {
+          ...(designKey
+            ? {
+                designKey,
+                ...(typeof row.designIndex === 'number' && Number.isInteger(row.designIndex) && row.designIndex >= 0
+                  ? { designIndex: row.designIndex }
+                  : {}),
+              }
+            : {}),
           ...(hasParent
             ? {
-                designKey: refId,
                 sourceStructure: {
                   artifactId: refId,
                   payloadDigest: '',
-                  designKey: refId,
+                  ...(designKey ? { designKey } : {}),
                 },
               }
             : {}),

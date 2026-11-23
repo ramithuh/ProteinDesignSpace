@@ -30,6 +30,8 @@ export interface UpstreamLockSummary {
   designingChains: string[];
   fixedResidueCount: number;
   hasFixedMotif: boolean;
+  tiedPositionGroupCount?: number;
+  symmetryLabel?: string;
   chainRoles: Record<string, string>;
   chainLengths: Record<string, number>;
   nodeBadge: string;
@@ -438,6 +440,8 @@ export function computeUpstreamLockSummary(
   let designingChains: string[] = [];
   let fixedResidueCount = 0;
   let hasFixedMotif = false;
+  let tiedPositionGroupCount = 0;
+  let symmetryLabel: string | undefined;
   let chainRoles: Record<string, string> = {};
   const chainLengths: Record<string, number> = {};
 
@@ -445,6 +449,22 @@ export function computeUpstreamLockSummary(
     lockedChains = [...new Set((materializedStruct.lockedChains ?? []).map((c) => c.trim()).filter(Boolean))];
     fixedResidueCount = materializedStruct.fixedResidueIndices?.length ?? 0;
     hasFixedMotif = fixedResidueCount > 0;
+    const rawTied = (materializedStruct.tiedPositions ?? '').trim();
+    if (rawTied.length > 0) {
+      tiedPositionGroupCount = rawTied
+        .split(';')
+        .map((s) => s.trim())
+        .filter(Boolean).length;
+      const labelSymMatch = /\((C\d|D\d)\)/i.exec(materializedStruct.label ?? '');
+      if (labelSymMatch) {
+        symmetryLabel = labelSymMatch[1].toUpperCase();
+      } else if (
+        sourceNode.adapterId === 'rfdiffusion' &&
+        String(sourceNode.params?.taskMode ?? '') === 'symmetry'
+      ) {
+        symmetryLabel = String(sourceNode.params?.symmetry ?? 'c3').trim().toUpperCase();
+      }
+    }
     chainRoles = { ...(materializedStruct.chainRoles ?? {}) };
 
     const uniqueChains: string[] = [];
@@ -465,7 +485,7 @@ export function computeUpstreamLockSummary(
       }
     }
     designingChains = uniqueChains.filter((c) => !lockedChains.includes(c));
-    if (lockedChains.length === 0 && !hasFixedMotif) {
+    if (lockedChains.length === 0 && !hasFixedMotif && tiedPositionGroupCount === 0) {
       return null;
     }
   } else if (sourceNode.adapterId === 'genie3') {
@@ -496,13 +516,13 @@ export function computeUpstreamLockSummary(
       tm === 'unconditional' && Boolean(tplEdge) && (!bench || bench.category !== 'motif');
 
     if (tm === 'binder' || Boolean(lockChainParam) || contig.includes('/0') || autoBinder) {
-      const lockCh = lockChainParam || 'B';
-      const desCh = lockCh === 'A' ? 'B' : 'A';
-      lockedChains = [lockCh];
-      designingChains = [desCh];
-      chainRoles = { [desCh]: 'binder', [lockCh]: 'target' };
-      if (Number.isFinite(binderLen) && binderLen > 0) chainLengths[desCh] = binderLen;
-      if (targetLen && targetLen > 0) chainLengths[lockCh] = targetLen;
+      // Genie 3 binder-first output convention ALWAYS emits Chain A = binder, Chain B = target,
+      // regardless of which input PDB chain (`lockChainParam`) supplied the target.
+      lockedChains = ['B'];
+      designingChains = ['A'];
+      chainRoles = { A: 'binder', B: 'target' };
+      if (Number.isFinite(binderLen) && binderLen > 0) chainLengths.A = binderLen;
+      if (targetLen && targetLen > 0) chainLengths.B = targetLen;
     } else if (tm === 'motif' || Boolean(motifSpan) || autoMotif) {
       hasFixedMotif = true;
       designingChains = ['A'];
@@ -565,6 +585,24 @@ export function computeUpstreamLockSummary(
       hasFixedMotif = true;
       designingChains = ['A'];
       chainRoles = { A: 'scaffold' };
+    } else if (tm === 'symmetry') {
+      const sym = String(gp.symmetry ?? 'c3').trim().toUpperCase();
+      const symCopies: Record<string, number> = { C2: 2, C3: 3, C4: 4, C6: 6, D2: 4, D3: 6 };
+      const copies = symCopies[sym] ?? 3;
+      const rawLen = Number(gp.length ?? 80);
+      const effLen =
+        Number.isFinite(rawLen) && rawLen > 0
+          ? Math.max(copies * 8, Math.round(rawLen / copies) * copies)
+          : copies * 24;
+      const unitLen = Math.floor(effLen / copies);
+      symmetryLabel = sym;
+      tiedPositionGroupCount = unitLen;
+      const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      designingChains = Array.from({ length: copies }, (_, idx) => alphabet[idx] ?? `C${idx}`);
+      for (const ch of designingChains) {
+        chainRoles[ch] = 'scaffold';
+        chainLengths[ch] = unitLen;
+      }
     } else {
       return null;
     }
@@ -644,17 +682,31 @@ export function computeUpstreamLockSummary(
     detailText = `Explicit designChains (${explicitDesignChains.join(', ')}) overrides inherited locks from ${sourceLabel}.`;
   } else if (lockedChains.length > 0) {
     status = 'active';
-    nodeBadge = `🔒 Lock ${lockedChains.join(',')} · Design ${designingChains.join(',') || 'none'}`;
+    const tiedSuffix =
+      tiedPositionGroupCount > 0
+        ? ` · 🔗 ${symmetryLabel ? `${symmetryLabel} tied` : `${tiedPositionGroupCount} tied`}`
+        : '';
+    nodeBadge = `🔒 Lock ${lockedChains.join(',')} · Design ${designingChains.join(',') || 'none'}${tiedSuffix}`;
     const lockDesc = lockedChains.map((c) => formatChainDetail(c, 'target')).join(', ');
     const desDesc =
       designingChains.length > 0
         ? designingChains.map((c) => formatChainDetail(c, 'binder')).join(', ')
         : 'none';
-    detailText = `Inherited from ${sourceLabel}: Chain ${lockDesc} locked · Chain ${desDesc} designed.`;
+    detailText = `Inherited from ${sourceLabel}: Chain ${lockDesc} locked · Chain ${desDesc} designed.${tiedPositionGroupCount > 0 ? ` ${tiedPositionGroupCount} tied residue group(s) linked.` : ''}`;
+  } else if (hasFixedMotif) {
+    status = 'active';
+    const tiedSuffix =
+      tiedPositionGroupCount > 0
+        ? ` · 🔗 ${symmetryLabel ? `${symmetryLabel} tied` : `${tiedPositionGroupCount} tied`}`
+        : '';
+    nodeBadge = `🔒 ${fixedResidueCount > 0 ? `${fixedResidueCount} motif aa` : 'Motif'} fixed${tiedSuffix}`;
+    detailText = `Inherited from ${sourceLabel}: ${fixedResidueCount > 0 ? `${fixedResidueCount} motif residue(s)` : 'Motif residues'} automatically fixed; scaffold residues designed.${tiedPositionGroupCount > 0 ? ` ${tiedPositionGroupCount} tied residue group(s) linked.` : ''}`;
   } else {
     status = 'active';
-    nodeBadge = `🔒 ${fixedResidueCount > 0 ? `${fixedResidueCount} motif aa` : 'Motif'} fixed`;
-    detailText = `Inherited from ${sourceLabel}: ${fixedResidueCount > 0 ? `${fixedResidueCount} motif residue(s)` : 'Motif residues'} automatically fixed; scaffold residues designed.`;
+    nodeBadge = symmetryLabel
+      ? `🔗 ${symmetryLabel} tied (${tiedPositionGroupCount} pos)`
+      : `🔗 ${tiedPositionGroupCount} tied positions`;
+    detailText = `Inherited from ${sourceLabel}: ${symmetryLabel ? `${symmetryLabel} symmetry — ` : ''}${tiedPositionGroupCount} tied residue group${tiedPositionGroupCount === 1 ? '' : 's'} automatically linked across subunits.`;
   }
 
   return {
@@ -665,6 +717,8 @@ export function computeUpstreamLockSummary(
     designingChains,
     fixedResidueCount,
     hasFixedMotif,
+    ...(tiedPositionGroupCount > 0 ? { tiedPositionGroupCount } : {}),
+    ...(symmetryLabel ? { symmetryLabel } : {}),
     chainRoles,
     chainLengths,
     nodeBadge,

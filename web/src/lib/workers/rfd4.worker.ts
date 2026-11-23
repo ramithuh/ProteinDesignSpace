@@ -4,7 +4,7 @@
 // Upstream Benchmark Presets (PD-L1 binder, 1PRW motif, SAM H-bond pocket, DNA, CATH),
 // and custom ConditionSpec / YAML / JSON conditioning.
 
-import { AA3_TO_AA1, parsePdbBackbone } from '$lib/protein-ops/pdb';
+import { AA3_TO_AA1, parsePdbBackbone, type SourceResidueId } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { fetchCachedBytes } from '$lib/engine/opfs-cache';
 import {
@@ -335,6 +335,104 @@ async function prepareTemplateForRfd4(
   return { atomArray, templateContext, cifText };
 }
 
+/**
+ * Format RFD4's output runLabel (e.g. `RFD4 · 20-20,A5-12,20-20 · motif:A5-12`) using
+ * author PDB residue numbering (`sourceResidues` / `templateContext.byLabelRes` / input `motifSpans`)
+ * instead of internal 1-based `label_seq_id` indices when the input PDB uses negative or
+ * non-1-based residue numbers.
+ */
+export function formatRfd4AuthorRunLabel(
+  runLabel: string,
+  opts?: {
+    motifSpans?: readonly string[];
+    templateContext?: Rfd4TemplateContext | null;
+    sourceResidues?: readonly SourceResidueId[] | null;
+  },
+): string {
+  const parts = runLabel.split(' · ');
+  if (parts.length <= 1) return runLabel;
+
+  const byLabel = new Map<string, { authChain: string; authSeqId: number; insCode: string }>();
+  if (opts?.templateContext) {
+    for (const [k, entry] of opts.templateContext.byLabelRes.entries()) {
+      byLabel.set(k, {
+        authChain: entry.authChain,
+        authSeqId: entry.authSeqId,
+        insCode: entry.insCode ?? '',
+      });
+    }
+  } else if (opts?.sourceResidues && opts.sourceResidues.length > 0) {
+    const perChainCount = new Map<string, number>();
+    for (const sr of opts.sourceResidues) {
+      const ch = sr.labelChainId ?? sr.authChainId;
+      const seqId = sr.labelSeqId ?? (perChainCount.get(ch) ?? 0) + 1;
+      perChainCount.set(ch, seqId);
+      byLabel.set(`${ch}:${seqId}`, {
+        authChain: sr.authChainId,
+        authSeqId: sr.resNum,
+        insCode: sr.insCode ?? '',
+      });
+    }
+  }
+
+  const remapLabelTokenToAuthor = (rawTok: string): string => {
+    const tok = rawTok.trim();
+    const m = /^([A-Za-z][A-Za-z0-9]*)(\d+)(?:-(\d+))?$/.exec(tok);
+    if (!m) return rawTok;
+    const ch = m[1];
+    const lo = parseInt(m[2], 10);
+    const hi = m[3] !== undefined ? parseInt(m[3], 10) : lo;
+    const startEntry = byLabel.get(`${ch}:${lo}`);
+    const endEntry = byLabel.get(`${ch}:${hi}`);
+    if (!startEntry || !endEntry) return rawTok;
+    const startStr = `${startEntry.authChain}${startEntry.authSeqId}${startEntry.insCode}`;
+    if (lo === hi) return startStr;
+    return `${startStr}-${endEntry.authSeqId}${endEntry.insCode}`;
+  };
+
+  const cleanAuthorMotifs = (opts?.motifSpans ?? []).map((s) => s.trim()).filter(Boolean);
+  const outParts = [parts[0]];
+  for (let i = 1; i < parts.length; i++) {
+    const seg = parts[i];
+    const motifMatch = /^(unidx-motif|motif):(.*)$/.exec(seg);
+    if (motifMatch) {
+      const prefix = motifMatch[1];
+      if (byLabel.size > 0) {
+        const remapped = motifMatch[2]
+          .split(',')
+          .map((t) => remapLabelTokenToAuthor(t))
+          .join(', ');
+        outParts.push(`${prefix}:${remapped}`);
+      } else if (cleanAuthorMotifs.length > 0) {
+        outParts.push(`${prefix}:${cleanAuthorMotifs.join(', ')}`);
+      } else {
+        outParts.push(seg);
+      }
+      continue;
+    }
+    const hotMatch = /^hot:(.*)$/.exec(seg);
+    if (hotMatch && byLabel.size > 0) {
+      const remapped = hotMatch[1]
+        .split(',')
+        .map((t) => remapLabelTokenToAuthor(t))
+        .join(', ');
+      outParts.push(`hot:${remapped}`);
+      continue;
+    }
+    if (byLabel.size > 0 && !seg.includes(':')) {
+      const remapped = seg
+        .split(',')
+        .map((t) => remapLabelTokenToAuthor(t))
+        .join(',');
+      outParts.push(remapped);
+      continue;
+    }
+    outParts.push(seg);
+  }
+  return outParts.join(' · ');
+}
+
+if (typeof self !== 'undefined') {
 self.onmessage = async (ev: MessageEvent) => {
   const msg = ev.data;
   try {
@@ -505,7 +603,11 @@ self.onmessage = async (ev: MessageEvent) => {
         const resolved = prepared
           ? resolveRfd4CompiledInput(rawParams, template, condArtifact, prepared.templateContext)
           : preResolved;
-        runLabel = resolved.runLabel;
+        runLabel = formatRfd4AuthorRunLabel(resolved.runLabel, {
+          motifSpans: resolved.intent?.motifSpans,
+          templateContext: prepared?.templateContext ?? resolved.templateContext,
+          sourceResidues: template?.sourceResidues,
+        });
 
         if (resolved.effectivePartialFraction != null) {
           baseGenOpts.partialTrajectoryFractionSteps = resolved.effectivePartialFraction;
@@ -1005,5 +1107,4 @@ self.onmessage = async (ev: MessageEvent) => {
     });
   }
 };
-
-export {};
+}

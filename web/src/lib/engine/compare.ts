@@ -1655,11 +1655,112 @@ interface BranchAlignOutcome {
   result: KabschResult;
   alignedResidues: number;
   isSubstructure: boolean;
+  alignmentLabel?: string;
+}
+
+/**
+ * Detect matching equal-length `target` chain pairs across two multi-chain complexes when
+ * their `target` chain order/offset differs (e.g., RFD4 `A=target, B=binder` vs BoltzGen-1 /
+ * Genie 3 `A=binder, B=target` on a shared target like 5O45 PD-L1).
+ */
+function findReorderedTargetChainPairs(
+  anchorSegs: readonly ChainSegment[],
+  mobileSegs: readonly ChainSegment[],
+): Array<{ aSeg: ChainSegment; mSeg: ChainSegment }> {
+  if (anchorSegs.length < 2 || mobileSegs.length < 2) return [];
+
+  const matchByRole = (
+    aList: readonly ChainSegment[],
+    mList: readonly ChainSegment[],
+  ): Array<{ aSeg: ChainSegment; mSeg: ChainSegment }> => {
+    const usedMobile = new Set<number>();
+    const pairs: Array<{ aSeg: ChainSegment; mSeg: ChainSegment }> = [];
+    for (const aSeg of aList) {
+      if (aSeg.length < 3) continue;
+      let bestIdx = -1;
+      let bestScore = -Infinity;
+      for (let j = 0; j < mList.length; j++) {
+        if (usedMobile.has(j)) continue;
+        const mSeg = mList[j];
+        if (mSeg.length !== aSeg.length) continue;
+        const seqId = sequenceIdentity(aSeg.seq, mSeg.seq);
+        const score = seqId * 100 + (aSeg.chainId === mSeg.chainId ? 1 : 0);
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = j;
+        }
+      }
+      if (bestIdx >= 0) {
+        usedMobile.add(bestIdx);
+        pairs.push({ aSeg, mSeg: mList[bestIdx] });
+      }
+    }
+    return pairs;
+  };
+
+  // 1. Explicit `chainRoles` target matching
+  const anchorTargets = anchorSegs.filter((s) => s.role === 'target');
+  const mobileTargets = mobileSegs.filter((s) => s.role === 'target');
+  if (anchorTargets.length > 0 && mobileTargets.length > 0) {
+    const rolePairs = matchByRole(anchorTargets, mobileTargets);
+    if (
+      rolePairs.length > 0 &&
+      rolePairs.some(({ aSeg, mSeg }) => aSeg.start !== mSeg.start || aSeg.chainId !== mSeg.chainId)
+    ) {
+      return rolePairs;
+    }
+    return [];
+  }
+
+  // 2. Fallback when chainRoles are absent: match a conserved shared target chain (>=10 aa, >=80% seq id)
+  // that sits at a different offset/chain while the remaining chain(s) are distinct de novo binders (<50% seq id).
+  const usedMobile = new Set<number>();
+  const highIdPairs: Array<{ aSeg: ChainSegment; mSeg: ChainSegment; aIdx: number; mIdx: number }> = [];
+  for (let i = 0; i < anchorSegs.length; i++) {
+    const aSeg = anchorSegs[i];
+    if (aSeg.length < 10) continue;
+    let bestJ = -1;
+    let bestId = 0;
+    for (let j = 0; j < mobileSegs.length; j++) {
+      if (usedMobile.has(j)) continue;
+      const mSeg = mobileSegs[j];
+      if (mSeg.length !== aSeg.length) continue;
+      const id = sequenceIdentity(aSeg.seq, mSeg.seq);
+      if (id >= 0.8 && id > bestId) {
+        bestId = id;
+        bestJ = j;
+      }
+    }
+    if (bestJ >= 0) {
+      usedMobile.add(bestJ);
+      highIdPairs.push({ aSeg, mSeg: mobileSegs[bestJ], aIdx: i, mIdx: bestJ });
+    }
+  }
+
+  if (
+    highIdPairs.length > 0 &&
+    highIdPairs.length < Math.min(anchorSegs.length, mobileSegs.length) &&
+    highIdPairs.some(({ aSeg, mSeg }) => aSeg.start !== mSeg.start || aSeg.chainId !== mSeg.chainId)
+  ) {
+    const matchedAnchor = new Set(highIdPairs.map((p) => p.aIdx));
+    const matchedMobile = new Set(highIdPairs.map((p) => p.mIdx));
+    const remAnchor = anchorSegs.filter((_, idx) => !matchedAnchor.has(idx));
+    const remMobile = mobileSegs.filter((_, idx) => !matchedMobile.has(idx));
+    const hasDivergentPartner = remAnchor.some((ra) =>
+      remMobile.every((rm) => ra.length !== rm.length || sequenceIdentity(ra.seq, rm.seq) < 0.5),
+    );
+    if (hasDivergentPartner) {
+      return highIdPairs.map(({ aSeg, mSeg }) => ({ aSeg, mSeg }));
+    }
+  }
+
+  return [];
 }
 
 /**
  * Align `mobile` onto `anchor`, matching multi-chain complexes by `chainRoles` / sequence
- * similarity / chain length (#9) with a Kabsch RMSD tie-breaker for symmetric equal-sequence
+ * similarity / chain length (#9, #84) with target-chain Kabsch alignment when heterodimer
+ * target chain ordering differs, and a Kabsch RMSD tie-breaker for symmetric equal-sequence
  * homodimers/homomers so opposite chain ordering superimposes cleanly.
  */
 function alignBranchPair(
@@ -1674,6 +1775,35 @@ function alignBranchPair(
 
   const mobileSegs = getBranchChainSegments(mobile);
   const anchorSegs = getBranchChainSegments(anchor);
+
+  // Case 0 (#84): Both are multi-chain heterodimers/complexes with matching equal-length target
+  // chain(s) at different offsets/orders (e.g. RFD4 [Target=A, Binder=B] vs BoltzGen-1/Genie 3
+  // [Binder=A, Target=B]): align Kabsch strictly on the matching target chain residues so the
+  // shared target superimposes cleanly and de novo binders are shown in their true relative poses.
+  const reorderedTargetPairs = findReorderedTargetChainPairs(anchorSegs, mobileSegs);
+  if (reorderedTargetPairs.length > 0) {
+    const totalMatched = reorderedTargetPairs.reduce((sum, p) => sum + p.aSeg.length, 0);
+    const subMob = new Float32Array(totalMatched * 3);
+    const subTgt = new Float32Array(totalMatched * 3);
+    let cursor = 0;
+    for (const { aSeg, mSeg } of reorderedTargetPairs) {
+      subMob.set(
+        mobileCoords.subarray(mSeg.start * 3, (mSeg.start + mSeg.length) * 3),
+        cursor * 3,
+      );
+      subTgt.set(
+        anchorCoords.subarray(aSeg.start * 3, (aSeg.start + aSeg.length) * 3),
+        cursor * 3,
+      );
+      cursor += aSeg.length;
+    }
+    return {
+      result: kabschAlign(subMob, subTgt),
+      alignedResidues: totalMatched,
+      isSubstructure: totalMatched < Math.max(mLen, aLen),
+      alignmentLabel: 'Target-chain Kabsch',
+    };
+  }
 
   // Case 1: Both are multi-chain with matching chain count and equal per-matched-chain lengths
   if (mobileSegs.length > 1 && mobileSegs.length === anchorSegs.length) {
@@ -1748,6 +1878,7 @@ function alignBranchPair(
         result: kabschAlign(subMob, subTgt),
         alignedResidues: totalMatched,
         isSubstructure: true,
+        alignmentLabel: 'Target-chain Kabsch',
       };
     }
   }
@@ -2237,11 +2368,13 @@ export function buildComparisonState(
           alignedResidues: outcome.alignedResidues,
           isSubstructure: outcome.isSubstructure,
           hasSharedTemplate: sharedTpl,
-          alignmentLabel: outcome.isSubstructure
-            ? sharedTpl
-              ? 'Motif Kabsch'
-              : 'Substructure Kabsch'
-            : 'Inter-model Kabsch',
+          alignmentLabel:
+            outcome.alignmentLabel ??
+            (outcome.isSubstructure
+              ? sharedTpl
+                ? 'Motif Kabsch'
+                : 'Substructure Kabsch'
+              : 'Inter-model Kabsch'),
         });
       } catch {
         /* skip degenerate pair */

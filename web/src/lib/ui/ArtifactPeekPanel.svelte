@@ -4,10 +4,12 @@
   import { mmcifToPdb } from '$lib/protein-ops/pdb';
   import {
     analyzeSequence,
+    buildTrajectoryMultiModelPdb,
     foldModelSlug,
     formatCandidateSequence,
     formatFoldModelName,
     inferPdbChainLengths,
+    inferTrajectoryResidueCount,
     previewTextLines,
     resolveActiveRowChainLengths,
     resolveFoldIpsae,
@@ -43,6 +45,7 @@
     SequenceEmbeddingArtifact,
     SequenceSet,
     StructureArtifact,
+    TrajectoryFramesArtifact,
     WorkflowNode,
   } from '$lib/engine/types';
   import MutationHeatmap, { type HeatmapHighlightSpec } from '$lib/viewer/MutationHeatmap.svelte';
@@ -54,6 +57,7 @@
     slots: PeekSlot[];
     activeSlot: PeekSlot | null;
     contextStructure?: StructureArtifact | null;
+    upstreamStructure?: StructureArtifact | null;
     selectedRowIdx: number;
     selectedFoldIdx: number;
     selectedDesignKey?: string;
@@ -81,6 +85,7 @@
     slots,
     activeSlot,
     contextStructure = null,
+    upstreamStructure = null,
     selectedRowIdx,
     selectedFoldIdx,
     selectedDesignKey = undefined,
@@ -262,7 +267,15 @@
   let mutArt = $derived(artifact?.kind === 'MutationMatrix' ? (artifact as MutationMatrixArtifact) : null);
   let trackArt = $derived(artifact?.kind === 'ResidueTrack' ? (artifact as ResidueTrackArtifact) : null);
   let embArt = $derived(artifact?.kind === 'SequenceEmbedding' ? (artifact as SequenceEmbeddingArtifact) : null);
+  let trajArt = $derived(artifact?.kind === 'TrajectoryFrames' ? (artifact as TrajectoryFramesArtifact) : null);
   let embStats = $derived(embArt ? embeddingSummary(embArt.pooled) : null);
+  let trajResCount = $derived(trajArt ? inferTrajectoryResidueCount(trajArt, contextStructure) : null);
+  let trajPdbText = $derived(
+    trajArt ? buildTrajectoryMultiModelPdb(trajArt, contextStructure) : null,
+  );
+  let trajRawPrev = $derived(
+    rawPreviewOpen && trajPdbText ? previewTextLines(trajPdbText, 36) : null,
+  );
 
   $effect(() => {
     void artifact?.id;
@@ -618,10 +631,58 @@
           (contextStructure?.id === seqArt.parentStructureId && isSelfGeneratorId(seqArt.sourceModelId))),
     ),
   );
+  let selfOutputStructIds = $derived(
+    new Set(
+      outSlots
+        .filter((s) => s.artifact?.kind === 'StructureArtifact')
+        .map((s) => (s.artifact as StructureArtifact).id),
+    ),
+  );
+  let inputSlotStructure = $derived(
+    (inSlots.find((s) => s.artifact?.kind === 'StructureArtifact')?.artifact as
+      | StructureArtifact
+      | undefined) ?? null,
+  );
+  let recoveryRefStructure = $derived.by((): StructureArtifact | null => {
+    if (!seqArt || skipSelfRecovery) return null;
+    const seqParentId = (seqArt.sourceStructureId ?? seqArt.parentStructureId ?? '').trim();
+    const isSelfPackedContext = (st: StructureArtifact | null | undefined): boolean => {
+      if (!st) return true;
+      if (activeSlot?.direction === 'out' && selfOutputStructIds.has(st.id)) return true;
+      // Co-packing inverse folders (e.g. LASErMPNN) emit both SequenceSet & a packed
+      // StructureArtifact whose id differs from the upstream WT input (`parentStructureId`).
+      if (
+        st.sourceModelId &&
+        seqArt.sourceModelId &&
+        st.sourceModelId === seqArt.sourceModelId &&
+        seqParentId &&
+        st.id !== seqParentId
+      ) {
+        return true;
+      }
+      return false;
+    };
+    if (upstreamStructure && !isSelfPackedContext(upstreamStructure)) {
+      return upstreamStructure;
+    }
+    if (activeSlot?.direction === 'out' && inputSlotStructure && !isSelfPackedContext(inputSlotStructure)) {
+      return inputSlotStructure;
+    }
+    if (contextStructure && !isSelfPackedContext(contextStructure)) {
+      return contextStructure;
+    }
+    return null;
+  });
   let seqCandidateStats = $derived.by(() => {
     if (!seqArt) return [];
-    const refSeq = skipSelfRecovery ? undefined : contextStructure?.sequence;
-    return seqArt.candidates.map((c) => analyzeSequence(c.sequence, refSeq));
+    const colItems = extractCollectionStructures(recoveryRefStructure);
+    const byId = colItems.length > 0 ? new Map(colItems.map((s) => [s.id, s.sequence])) : null;
+    return seqArt.candidates.map((c) => {
+      const refSeq =
+        (c.sourceStructureId && byId?.get(c.sourceStructureId)) ??
+        recoveryRefStructure?.sequence;
+      return analyzeSequence(c.sequence, refSeq);
+    });
   });
   let rawStructText = $derived(displayedStruct ? (displayedStruct.cifText ?? displayedStruct.pdbText) : '');
   let rawPrev = $derived(
@@ -2089,6 +2150,112 @@
       </div>
       <div class="seq-text">{embArt.sequence}</div>
     </div>
+  {:else if trajArt}
+    {@const frames = trajArt.frames ?? []}
+    {@const effectiveFrameCount = frames.length > 0 ? frames.length : trajArt.frameCount}
+    {@const trajColLabel = formatCollectionKind(trajArt.collectionKind ?? trajArt.ordering)}
+    {@const firstStep = frames[0]?.timeStep}
+    {@const lastStep = frames[frames.length - 1]?.timeStep}
+    {@const previewFrames =
+      frames.length <= 10
+        ? frames
+        : [
+            ...frames.slice(0, 4),
+            frames[Math.floor(frames.length / 2)],
+            ...frames.slice(-4),
+          ]}
+    <div class="meta-bar">
+      <span>
+        <b>{trajArt.label ?? 'Diffusion Trajectory'}</b>
+        {#if trajArt.sourceModelId}
+          · <span>{formatAdapterName(trajArt.sourceModelId)}</span>
+        {/if}
+      </span>
+      <div class="dl-links">
+        {#if trajPdbText}
+          <button
+            class="link-btn"
+            onclick={() =>
+              onDownloadText(trajPdbText, safeFilename(`${trajArt.id}_trajectory.pdb`))}
+          >
+            ↓ Trajectory PDB
+          </button>
+        {/if}
+        {#if trajArt.cifText}
+          <button
+            class="link-btn"
+            onclick={() =>
+              onDownloadText(trajArt.cifText!, safeFilename(`${trajArt.id}_trajectory.cif`))}
+          >
+            ↓ Trajectory mmCIF
+          </button>
+        {/if}
+      </div>
+    </div>
+
+    <div class="stat-chips">
+      <span class="stat-chip cond-key">
+        {effectiveFrameCount} {effectiveFrameCount === 1 ? 'frame' : 'frames'}
+      </span>
+      {#if trajResCount !== null}
+        <span class="stat-chip">L = {trajResCount} aa</span>
+      {/if}
+      {#if trajColLabel}
+        <span class="stat-chip">{trajColLabel}</span>
+      {/if}
+      {#if isFiniteNum(firstStep) && isFiniteNum(lastStep)}
+        <span class="stat-chip">t: {firstStep} → {lastStep}</span>
+      {/if}
+      {#if !trajArt.pdbText && frames.some((f) => f.caCoords && !f.pdbText)}
+        <span class="stat-chip">Cα trace</span>
+      {/if}
+    </div>
+
+    {#if previewFrames.length > 0}
+      <table class="scores">
+        <thead>
+          <tr>
+            <th>Frame</th>
+            <th>Key</th>
+            <th>Step (t)</th>
+            <th>Residues</th>
+            {#if frames.some((f) => isFiniteNum(f.confidence))}
+              <th>Conf</th>
+            {/if}
+          </tr>
+        </thead>
+        <tbody>
+          {#each previewFrames as fr (`${fr.key}_${fr.frameIndex}`)}
+            {@const frameRes = fr.caCoords ? Math.floor(fr.caCoords.length / 3) : trajResCount}
+            <tr>
+              <td>#{fr.frameIndex + 1}</td>
+              <td><code>{fr.key}</code></td>
+              <td>{isFiniteNum(fr.timeStep) ? fr.timeStep : '—'}</td>
+              <td>{frameRes !== null ? `${frameRes} aa` : '—'}</td>
+              {#if frames.some((f) => isFiniteNum(f.confidence))}
+                <td>{isFiniteNum(fr.confidence) ? fr.confidence.toFixed(1) : '—'}</td>
+              {/if}
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+
+    {#if trajPdbText}
+      <details class="raw-details" bind:open={rawPreviewOpen}>
+        <summary>
+          Raw Trajectory PDB preview
+          {#if trajRawPrev}
+            ({trajRawPrev.totalLines} lines)
+          {:else}
+            ({(trajPdbText.length / 1024).toFixed(1)} KB)
+          {/if}
+        </summary>
+        {#if trajRawPrev}
+          <pre class="raw-pre">{trajRawPrev.preview}{trajRawPrev.truncated ? `\n… (${trajRawPrev.totalLines - 36} more lines)` : ''}</pre>
+        {/if}
+      </details>
+    {/if}
   {:else}
     <div class="placeholder-box">
       {#if activeSlot && !activeSlot.wired}
