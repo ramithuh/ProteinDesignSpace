@@ -49,6 +49,10 @@ sudo tailscale serve --bg --https=8790 http://127.0.0.1:8790
 
 > Binding `HOST=0.0.0.0` without `DENOVO_API_TOKEN` is rejected by default. Same-origin visitors sign in once via `POST /api/auth` (`HttpOnly; Secure; SameSite=Strict` cookie); cross-origin clients authenticate via `Authorization: Bearer <token>`.
 
+## Google Colab (Experimental)
+
+See [`colab/denovo_host_gpu.ipynb`](../colab/denovo_host_gpu.ipynb) for a 3-cell test notebook that enables the NVIDIA Vulkan ICD inside a Colab T4/L4/A100 runtime, runs `server/selfhost-server.mjs` with `DENOVO_DISABLE_SANDBOX=1`, and exposes it over a token-protected Cloudflare Quick Tunnel.
+
 ## Environment Variables
 
 | Variable | Default | Description |
