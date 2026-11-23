@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import type { MutationMatrixArtifact } from '$lib/engine/types';
   import {
     formatMutationLabel,
@@ -53,6 +54,7 @@
     matrix: MutationMatrixArtifact;
     onDownloadText?: (text: string, filename: string) => void;
     onSelectResidue?: (positionIndex: number, residueId: string) => void;
+    onNotify?: (message: string, tone?: 'ok' | 'error') => void;
     topLimit?: number;
     highlightSpec?: HeatmapHighlightSpec | null;
   }
@@ -61,6 +63,7 @@
     matrix,
     onDownloadText = undefined,
     onSelectResidue = undefined,
+    onNotify = undefined,
     topLimit = 10,
     highlightSpec = null,
   }: Props = $props();
@@ -112,6 +115,7 @@
   } | null>(null);
 
   let copiedRank = $state<number | null>(null);
+  let copyFailedRank = $state<number | null>(null);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
   let residues = $derived((matrix.residues ?? '').toUpperCase());
@@ -389,18 +393,32 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  async function copyMutantSeq(seq: string, rank: number) {
+  async function copyMutantSeq(seq: string, rank: number, label?: string) {
     if (copyTimer) clearTimeout(copyTimer);
     try {
-      await navigator.clipboard?.writeText(seq);
+      if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+        throw new Error('Clipboard API unavailable');
+      }
+      await navigator.clipboard.writeText(seq);
+      copyFailedRank = null;
       copiedRank = rank;
+      onNotify?.(label ? `Copied ${label} mutant sequence` : 'Copied mutant sequence', 'ok');
       copyTimer = setTimeout(() => {
         copiedRank = null;
       }, 1500);
     } catch {
       copiedRank = null;
+      copyFailedRank = rank;
+      onNotify?.('Could not copy mutant sequence — clipboard access was blocked.', 'error');
+      copyTimer = setTimeout(() => {
+        copyFailedRank = null;
+      }, 2200);
     }
   }
+
+  onDestroy(() => {
+    if (copyTimer) clearTimeout(copyTimer);
+  });
 </script>
 
 <div class="mh-wrap">
@@ -607,13 +625,14 @@
                     <button
                       type="button"
                       class="mh-copy-btn"
+                      class:copy-failed={copyFailedRank === m.rank}
                       onclick={(ev) => {
                         ev.stopPropagation();
-                        copyMutantSeq(m.mutantSequence, m.rank);
+                        void copyMutantSeq(m.mutantSequence, m.rank, m.label);
                       }}
                       title={`Copy full ${m.mutantSequence.length}-aa sequence with ${m.label}`}
                     >
-                      {copiedRank === m.rank ? '✓ Copied' : 'Copy seq'}
+                      {copiedRank === m.rank ? '✓ Copied' : copyFailedRank === m.rank ? 'Copy failed' : 'Copy seq'}
                     </button>
                   </td>
                 </tr>
@@ -1024,5 +1043,8 @@
   }
   .mh-copy-btn:hover {
     text-decoration: underline;
+  }
+  .mh-copy-btn.copy-failed {
+    color: var(--err-strong, #dc2626);
   }
 </style>

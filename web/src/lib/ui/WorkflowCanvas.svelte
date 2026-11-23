@@ -62,8 +62,9 @@
     onNodeDoubleClick?: (nodeId: string) => void;
     onOpenStudio?: (nodeId: string) => void;
     onOpenTour?: () => void;
-    onApplyPlannedGraph?: (next: WorkflowGraph, summary: string) => void;
+    onApplyPlannedGraph?: (next: WorkflowGraph, summary: string, isAiDraft?: boolean) => void;
     onDraftPreviewChange?: (draft: PlannedWorkflowResult | null) => void;
+    onToast?: (message: string, tone?: 'ok' | 'error') => void;
   }
 
   let {
@@ -92,6 +93,7 @@
     onOpenTour = undefined,
     onApplyPlannedGraph = undefined,
     onDraftPreviewChange = undefined,
+    onToast = undefined,
   }: Props = $props();
 
   let canvasHintDismissed = $state(false);
@@ -104,8 +106,6 @@
     smart: SmartEdge as unknown as EdgeTypes[string],
   };
 
-  let validationToast = $state<string | null>(null);
-  let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let canvasEl: HTMLDivElement | null = $state(null);
   let dockEl: HTMLDivElement | null = $state(null);
   let dockMorphTimer: ReturnType<typeof setTimeout> | null = null;
@@ -123,7 +123,6 @@
   let plannerHasText = $state(false);
   let plannerLoading = $state(false);
   let draftPreview = $state<PlannedWorkflowResult | null>(null);
-  let draftNotice = $state<{ graphId: string; isAiDraft: boolean } | null>(null);
   let lastNotifiedDraft: PlannedWorkflowResult | null = null;
   function notifyDraftPreview(next: PlannedWorkflowResult | null) {
     if (lastNotifiedDraft === next) return;
@@ -328,7 +327,6 @@
   // Cleanup timers/rAFs on destroy
   $effect(() => {
     return () => {
-      if (toastTimer) clearTimeout(toastTimer);
       if (clearConfirmTimer) clearTimeout(clearConfirmTimer);
       if (dockMorphTimer) clearTimeout(dockMorphTimer);
       cancelPendingFit();
@@ -477,24 +475,18 @@
     if (typeof document === 'undefined') return false;
     return Boolean(
       document.querySelector(
-        '.onb-backdrop, .fr-backdrop, .cr-backdrop, .modal-backdrop, .expand-backdrop, .expanded-pane, .drawer-backdrop',
+        '.onb-backdrop, .fr-backdrop, .cr-backdrop, .gal-backdrop, .mc-backdrop, .pw-coach, .modal-backdrop, .expand-backdrop, .expanded-pane, .drawer-backdrop',
       ),
     );
   }
 
-  // Clear stale ghost proposals, planner preview & AI draft banner when starting a run or switching graphs
+  // Clear stale ghost proposals & planner preview when starting a run
   $effect(() => {
     if (isRunning) {
       clearProposals();
-      draftNotice = null;
       if (draftPreview || plannerOpen) {
         closeInlinePlanner();
       }
-    }
-  });
-  $effect(() => {
-    if (draftNotice && (graph.id !== draftNotice.graphId || graph.nodes.length === 0)) {
-      draftNotice = null;
     }
   });
 
@@ -519,25 +511,35 @@
         plannerBarRef.handleEscape();
         return;
       }
+      if (catalogOpen) {
+        ev.preventDefault();
+        catalogOpen = false;
+        return;
+      }
+      if (wireLegendOpen) {
+        ev.preventDefault();
+        wireLegendOpen = false;
+        return;
+      }
       if (clearConfirmPending) {
+        ev.preventDefault();
         cancelClearConfirm();
         return;
       }
       if (proposedEdges.length > 0) {
+        ev.preventDefault();
         clearProposals();
         return;
       }
-      if (wireLegendOpen) {
-        wireLegendOpen = false;
-      }
-      if (catalogOpen) {
-        catalogOpen = false;
+      if (selectedEdgeId) {
+        ev.preventDefault();
+        onSelectNode(selectedNodeId);
+        return;
       }
       if (selectedNodeIds.length > 1 && onSelectNodes) {
+        ev.preventDefault();
         onSelectNodes(selectedNodeId ? [selectedNodeId] : []);
-      }
-      if (selectedEdgeId) {
-        onSelectNode(selectedNodeId);
+        return;
       }
       return;
     }
@@ -618,11 +620,7 @@
   }
 
   function flashToast(msg: string) {
-    validationToast = msg;
-    if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => {
-      validationToast = null;
-    }, 3000);
+    onToast?.(msg, 'error');
   }
 
   function edgeColor(fromNodeId: string, fromPort: string, sourceGraph: WorkflowGraph = graph): string {
@@ -982,9 +980,37 @@
     catalogOpen = false;
     // Guard against Enter keystroke from BlockCatalogPopover immediately auto-committing
     blockAcceptUntil = performance.now() + 180;
-    proposedEdges = autoCommitProposed ? [] : nextProposals;
-    proposedForNodeId = !autoCommitProposed && nextProposals.length > 0 ? nodeId : null;
-    onGraphChange(nextGraph);
+    // Auto-commit a single unambiguous 1-to-1 proposed edge immediately so benchmark seeding
+    // and downstream parameter resolution run synchronously (`WF-01`), reserving ghost wires
+    // for multi-port/ambiguous proposals (`proposedEdges.length > 1`).
+    let committedGraph = nextGraph;
+    let remainingProposals = autoCommitProposed ? [] : nextProposals;
+    if (!autoCommitProposed && nextProposals.length === 1) {
+      const singleEdge = nextProposals[0];
+      const dstNode = nextGraph.nodes.find((n) => n.id === singleEdge.toNode);
+      const dstInSpec = dstNode
+        ? ADAPTER_REGISTRY[dstNode.adapterId]?.inputs?.[singleEdge.toPort]
+        : undefined;
+      const filteredEdges = dstInSpec?.multiple
+        ? nextGraph.edges
+        : nextGraph.edges.filter(
+            (e) => !(e.toNode === singleEdge.toNode && e.toPort === singleEdge.toPort),
+          );
+      const check = validateConnection(
+        { ...nextGraph, edges: filteredEdges },
+        singleEdge.fromNode,
+        singleEdge.fromPort,
+        singleEdge.toNode,
+        singleEdge.toPort,
+      );
+      if (check.valid) {
+        committedGraph = { ...nextGraph, edges: [...filteredEdges, singleEdge] };
+        remainingProposals = [];
+      }
+    }
+    proposedEdges = remainingProposals;
+    proposedForNodeId = remainingProposals.length > 0 ? nodeId : null;
+    onGraphChange(committedGraph);
     if (onBlockAdded) {
       onBlockAdded(nodeId);
     } else {
@@ -1156,34 +1182,6 @@
     />
   {/if}
 
-  {#if draftPreview && !draftPreview.isIncrementalEdit}
-    <div class="draft-preview-banner canvas-overlay" role="status">
-      <span class="dpb-spark" aria-hidden="true">✦</span>
-      <span>
-        Preview: <strong>New graph</strong> · {draftPreview.graph.nodes.length} blocks
-        {#if graph.nodes.length > 0}
-          — current graph kept until applied
-        {/if}
-      </span>
-    </div>
-  {:else if draftNotice && draftNotice.graphId === graph.id && !draftPreview && !isRunning && graph.nodes.length > 0}
-    <div class="ai-draft-warning canvas-overlay" role="status">
-      <span class="adw-icon" aria-hidden="true">⚠</span>
-      <span>
-        <strong>{draftNotice.isAiDraft ? 'AI-drafted (gemma-4)' : 'Auto-drafted workflow'}</strong> — double-check each step's inputs, residue ranges &amp; parameters before running.
-      </span>
-      <button
-        type="button"
-        class="adw-dismiss"
-        onclick={() => (draftNotice = null)}
-        aria-label="Dismiss draft warning"
-        title="Dismiss"
-      >
-        ×
-      </button>
-    </div>
-  {/if}
-
   <!-- Floating Top-Right: Utility controls (Wire legend & Clear) -->
   <div class="canvas-tools canvas-overlay">
     <button
@@ -1227,10 +1225,6 @@
     </div>
   {/if}
 
-  {#if validationToast}
-    <div class="toast">{validationToast}</div>
-  {/if}
-
   {#if proposedEdges.length > 1 && !isRunning}
     <div class="ghost-bar canvas-overlay" role="region" aria-label="Proposed connections">
       <button type="button" class="gbar-accept" onclick={commitAllProposedEdges}>
@@ -1268,9 +1262,8 @@
           clearProposals();
           draftPreview = null;
           notifyDraftPreview(null);
-          draftNotice = { graphId: nextGraph.id, isAiDraft: Boolean(isAiDraft) };
           if (onApplyPlannedGraph) {
-            onApplyPlannedGraph(nextGraph, summary);
+            onApplyPlannedGraph(nextGraph, summary, Boolean(isAiDraft));
           } else {
             onGraphChange(nextGraph);
           }
@@ -1381,8 +1374,8 @@
             if (cur.length > 1) {
               onSelectNodes(cur.filter((id) => id !== node.id));
             }
-          } else if (cur.length >= 4) {
-            flashToast('Compare mode supports up to 4 blocks at once');
+          } else if (cur.length >= 6) {
+            flashToast('Compare mode supports up to 6 blocks at once');
           } else {
             onSelectNodes([...cur, node.id]);
           }
@@ -1538,77 +1531,6 @@
       height: 290px;
       min-height: 260px;
     }
-  }
-  .draft-preview-banner {
-    position: absolute;
-    top: 12px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 26;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 12px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
-    -webkit-backdrop-filter: blur(10px);
-    backdrop-filter: blur(10px);
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-strong));
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
-    font-size: 11.5px;
-    color: var(--text-secondary);
-    white-space: nowrap;
-    max-width: calc(100% - 28px);
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .draft-preview-banner strong {
-    color: var(--text-primary);
-    font-weight: 600;
-  }
-  .dpb-spark {
-    color: var(--accent-bright);
-    flex-shrink: 0;
-  }
-  .ai-draft-warning {
-    position: absolute;
-    top: 12px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 26;
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    padding: 5px 10px 5px 12px;
-    border-radius: 999px;
-    background: var(--warn-bg);
-    border: 1px solid var(--warn-border);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
-    font-size: 11.5px;
-    line-height: 1.35;
-    color: var(--warn-text);
-    max-width: min(640px, calc(100% - 170px));
-  }
-  .ai-draft-warning strong {
-    font-weight: 600;
-  }
-  .adw-icon {
-    flex-shrink: 0;
-    font-size: 12px;
-  }
-  .adw-dismiss {
-    background: none;
-    border: none;
-    color: inherit;
-    opacity: 0.72;
-    cursor: pointer;
-    font-size: 14px;
-    line-height: 1;
-    padding: 0 2px;
-    flex-shrink: 0;
-  }
-  .adw-dismiss:hover {
-    opacity: 1;
   }
   .canvas-action-dock {
     position: absolute;
@@ -1936,19 +1858,5 @@
   .gbar-dismiss kbd {
     border-color: var(--border-strong);
     background: var(--bg-surface-2);
-  }
-  .toast {
-    position: absolute;
-    top: 12px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 30;
-    background: var(--err-bg);
-    border: 1px solid var(--err-border);
-    color: var(--err-text);
-    padding: 6px 12px;
-    border-radius: 6px;
-    font-size: 12px;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
 </style>

@@ -31,6 +31,10 @@
   import { parseStructureText, type ParsedStructure } from '$lib/protein-ops/pdb';
   import { resolveMotifSourceResidues, type SelectedMotifSourceResidue } from '$lib/engine/conditioning';
   import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
+  import {
+    buildBenchmarkPdbParams,
+    detectQuickPdbBenchmarkMatch,
+  } from '$lib/engine/benchmark-sync';
   import { MAX_DESIGNS } from '$lib/engine/work-plan';
   import NumericInput from './NumericInput.svelte';
   import SchemaParamFields from './SchemaParamFields.svelte';
@@ -54,6 +58,7 @@
     upstreamStructure?: StructureArtifact | null;
     upstreamSequences?: SequenceSet | null;
     upstreamLockSummary?: UpstreamLockSummary | null;
+    upstreamBenchmarkId?: string | null;
     hasStructureInput?: boolean;
     siblingGeneratorIds?: string[];
     onUpdate: (nodeId: string, params: Record<string, unknown>) => void;
@@ -61,6 +66,7 @@
     onSyncTaskToSiblings?: (nodeId: string) => void;
     onRunUpTo?: (nodeId: string) => void;
     onOpenStudio?: () => void;
+    onNotify?: (message: string, tone?: 'ok' | 'error') => void;
   }
 
   let {
@@ -72,6 +78,7 @@
     upstreamStructure = null,
     upstreamSequences = null,
     upstreamLockSummary = null,
+    upstreamBenchmarkId = null,
     hasStructureInput = false,
     siblingGeneratorIds = [],
     onUpdate,
@@ -79,6 +86,7 @@
     onSyncTaskToSiblings = undefined,
     onRunUpTo = undefined,
     onOpenStudio = undefined,
+    onNotify = undefined,
   }: Props = $props();
 
   const NUM_DESIGNS_SPEC: NumericFieldSpec = {
@@ -292,6 +300,75 @@
         ))
     );
   });
+
+  // Provenance pill & 1-click reset for benchmark-seeded downstream generators (`WF-04`)
+  let benchmarkSyncInfo = $derived.by((): {
+    benchId: string;
+    benchLabel: string;
+    state: 'synced' | 'edited';
+    canReset: boolean;
+  } | null => {
+    if (node.adapterId !== 'rfd4-proteina' && node.adapterId !== 'genie3') return null;
+    const upstreamBench = upstreamBenchmarkId ? getBenchmarkById(upstreamBenchmarkId) : undefined;
+    const applicableUpstream =
+      upstreamBench && (node.adapterId !== 'genie3' || upstreamBench.supportsGenie3)
+        ? upstreamBench
+        : undefined;
+    const seededId = String(
+      node.params.autoSeededBenchmarkId ?? node.params.autoSeededFromBenchmark ?? '',
+    ).trim();
+    const seededBench = seededId ? getBenchmarkById(seededId) : undefined;
+    const userLocked = Boolean(node.params.userEditedTask);
+    const userEditedLen = Boolean(node.params.userEditedLength);
+    if (applicableUpstream) {
+      const isSynced = !userLocked && seededId === applicableUpstream.id;
+      return {
+        benchId: applicableUpstream.id,
+        benchLabel: applicableUpstream.shortLabel || applicableUpstream.name,
+        state: isSynced ? 'synced' : 'edited',
+        canReset: !isSynced || userEditedLen,
+      };
+    }
+    if (seededBench) {
+      return {
+        benchId: seededBench.id,
+        benchLabel: seededBench.shortLabel || seededBench.name,
+        state: userLocked ? 'edited' : 'synced',
+        canReset: false,
+      };
+    }
+    return null;
+  });
+
+  function handleResetToBenchmark() {
+    if (node.adapterId !== 'rfd4-proteina' && node.adapterId !== 'genie3') return;
+    const next: Record<string, unknown> = { ...node.params };
+    delete next.userEditedTask;
+    delete next.userEditedLength;
+    delete next.autoSeededBenchmarkId;
+    delete next.autoSeededFromBenchmark;
+    delete next.autoSeededLength;
+    if (node.adapterId === 'rfd4-proteina') {
+      next.mode = 'unconditional';
+      next.length = 70;
+      next.contig = '';
+      next.lockChain = '';
+      next.hotspots = '';
+      next.motifSpan = '';
+      next.unindexedMotif = false;
+      next.hbondMode = 'none';
+      next.hbondSelection = '';
+      next.cathCode = '';
+    } else {
+      next.taskMode = 'unconditional';
+      next.length = 80;
+      next.contig = '';
+      next.lockChain = '';
+      next.hotspots = '';
+      next.motifSpan = '';
+    }
+    onUpdate(node.id, next);
+  }
 
   let titleDraft = $state('');
   $effect(() => {
@@ -910,6 +987,10 @@
       {#if node.params.mode === 'pdb-id'}
         {@const pdbIdVal = String(node.params.pdbId ?? '')}
         {@const pdbIdCheck = validatePdbId(pdbIdVal)}
+        {@const activeBenchId = String(node.params.benchmarkId ?? '').trim()}
+        {@const quickBenchMatch = !activeBenchId
+          ? detectQuickPdbBenchmarkMatch(normalizePdbId(pdbIdVal))
+          : null}
         {@const isAutoFetching = nodeState?.status === 'loading'}
         {@const isBusy = curPdbStatus.busy || isAutoFetching}
         {@const isAlreadyLoaded =
@@ -976,6 +1057,28 @@
               </button>
             {/each}
           </div>
+          {#if quickBenchMatch}
+            <div class="bench-match-row" role="status">
+              <span class="bench-match-hint">
+                Curated benchmark available for <code>{quickBenchMatch.pdbId}</code>
+              </span>
+              <button
+                type="button"
+                class="bench-apply-btn"
+                disabled={disabled || isBusy}
+                onclick={() => {
+                  patchPdbStatus(node.id, { error: null, summary: null });
+                  if (isAutoPdbLabel(node.label, String(node.params.filename ?? ''))) {
+                    onUpdateLabel?.(node.id, `PDB: ${quickBenchMatch.name} (${quickBenchMatch.pdbId})`);
+                  }
+                  onUpdate(node.id, buildBenchmarkPdbParams(node.params, quickBenchMatch));
+                }}
+                title={`Apply ${quickBenchMatch.shortLabel} crop & auto-seed downstream generators without re-fetching`}
+              >
+                Apply {quickBenchMatch.shortLabel} benchmark
+              </button>
+            </div>
+          {/if}
           <label class="bench-pick">
             <span>Or pick a curated benchmark target</span>
             <select
@@ -989,16 +1092,7 @@
                 if (isAutoPdbLabel(node.label, String(node.params.filename ?? ''))) {
                   onUpdateLabel?.(node.id, `PDB: ${bench.name} (${bench.pdbId})`);
                 }
-                onUpdate(node.id, {
-                  ...node.params,
-                  mode: 'pdb-id',
-                  pdbId: bench.pdbId,
-                  fetchedPdbId: '',
-                  filename: `${bench.pdbId}.cif`,
-                  pdbText: '',
-                  benchmarkId: bench.id,
-                  cropSegments: bench.cropSegments ?? '',
-                });
+                onUpdate(node.id, buildBenchmarkPdbParams(node.params, bench));
               }}
             >
               <option value="">Select a curated benchmark PDB…</option>
@@ -1206,6 +1300,7 @@
           validation={seqCheck}
           onChange={(nextVal) => scheduleTextParam('sequence', nextVal)}
           onBlur={flushPendingTextCommit}
+          {onNotify}
         />
       </div>
 
@@ -1256,6 +1351,27 @@
           <option value="preset">All-Atom / Built-In Task Preset</option>
         </select>
       </label>
+
+      {#if benchmarkSyncInfo}
+        <div class="bench-sync-pill full" class:is-edited={benchmarkSyncInfo.state === 'edited'} role="status">
+          <span class="bench-sync-lbl">
+            {benchmarkSyncInfo.state === 'synced'
+              ? `Synced from ${benchmarkSyncInfo.benchLabel}`
+              : `Custom task · ${benchmarkSyncInfo.benchLabel}`}
+          </span>
+          {#if benchmarkSyncInfo.canReset}
+            <button
+              type="button"
+              class="bench-reset-btn"
+              {disabled}
+              onclick={handleResetToBenchmark}
+              title={`Reset task parameters and re-sync from ${benchmarkSyncInfo.benchLabel}`}
+            >
+              ↺ Reset to benchmark
+            </button>
+          {/if}
+        </div>
+      {/if}
 
       {#if siblingGeneratorIds.length > 0 && onSyncTaskToSiblings}
         <div class="full">
@@ -1684,6 +1800,27 @@
           <option value="binder">PPI Binder (target + hotspots)</option>
         </select>
       </label>
+
+      {#if benchmarkSyncInfo}
+        <div class="bench-sync-pill full" class:is-edited={benchmarkSyncInfo.state === 'edited'} role="status">
+          <span class="bench-sync-lbl">
+            {benchmarkSyncInfo.state === 'synced'
+              ? `Synced from ${benchmarkSyncInfo.benchLabel}`
+              : `Custom task · ${benchmarkSyncInfo.benchLabel}`}
+          </span>
+          {#if benchmarkSyncInfo.canReset}
+            <button
+              type="button"
+              class="bench-reset-btn"
+              {disabled}
+              onclick={handleResetToBenchmark}
+              title={`Reset task parameters and re-sync from ${benchmarkSyncInfo.benchLabel}`}
+            >
+              ↺ Reset to benchmark
+            </button>
+          {/if}
+        </div>
+      {/if}
 
       {#if siblingGeneratorIds.length > 0 && onSyncTaskToSiblings}
         <div class="full">
@@ -2818,6 +2955,87 @@
     color: var(--text-primary);
   }
   .quick-chip:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .bench-match-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    background: var(--bg-pill);
+    border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border-strong));
+    font-size: 10.5px;
+    color: var(--text-secondary);
+  }
+  .bench-match-hint {
+    line-height: 1.3;
+  }
+  .bench-apply-btn {
+    background: var(--bg-surface);
+    color: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: 2px 9px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .bench-apply-btn:hover:not(:disabled) {
+    background: var(--accent);
+    color: #fff;
+  }
+  .bench-apply-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .bench-sync-pill {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: var(--ok-bg);
+    border: 1px solid var(--ok-border);
+    color: var(--ok-text);
+    font-size: 10.5px;
+    line-height: 1.3;
+  }
+  .bench-sync-pill.is-edited {
+    background: var(--bg-surface-2);
+    border-color: var(--border-strong);
+    color: var(--text-secondary);
+  }
+  .bench-sync-lbl {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .bench-reset-btn {
+    background: var(--bg-surface);
+    color: var(--accent-soft);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .bench-reset-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #fff;
+  }
+  .bench-reset-btn:disabled {
     opacity: 0.45;
     cursor: not-allowed;
   }

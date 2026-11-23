@@ -23,6 +23,8 @@
     onApplyFix?: (fix: BioCompatibilityFix) => void;
     onHoverToken?: (token: string | null) => void;
     onFocusToken?: (token: string) => void;
+    onActiveBrushChange?: (brush: StudioBrushOption | null) => void;
+    onNotify?: (message: string, tone?: 'ok' | 'error') => void;
     controlsSlot?: Snippet;
     outputSlot?: Snippet;
   }
@@ -42,6 +44,8 @@
     onApplyFix = undefined,
     onHoverToken = undefined,
     onFocusToken = undefined,
+    onActiveBrushChange = undefined,
+    onNotify = undefined,
     controlsSlot = undefined,
     outputSlot = undefined,
   }: Props = $props();
@@ -74,6 +78,10 @@
       if (found) return found;
     }
     return availableBrushes[0];
+  });
+
+  $effect(() => {
+    onActiveBrushChange?.(activeBrush);
   });
 
   let nodeChipsEl = $state<HTMLDivElement | null>(null);
@@ -205,19 +213,27 @@
     onUpdateNodeParams(node.id, { ...node.params, omitAminoAcids: nextOmit });
   }
 
-  let copiedRaw = $state(false);
+  let copyRawState = $state<'idle' | 'copied' | 'failed'>('idle');
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
   async function copyRawSpec() {
     if (!preview?.payload.rawSpecText) return;
     if (copyTimer) clearTimeout(copyTimer);
     try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+        throw new Error('Clipboard API unavailable');
+      }
       await navigator.clipboard.writeText(preview.payload.rawSpecText);
-      copiedRaw = true;
+      copyRawState = 'copied';
+      onNotify?.('Copied compiled spec to clipboard', 'ok');
       copyTimer = setTimeout(() => {
-        copiedRaw = false;
+        copyRawState = 'idle';
       }, 1500);
     } catch {
-      copiedRaw = false;
+      copyRawState = 'failed';
+      onNotify?.('Could not copy compiled spec — clipboard access was blocked.', 'error');
+      copyTimer = setTimeout(() => {
+        copyRawState = 'idle';
+      }, 2200);
     }
   }
 
@@ -484,9 +500,10 @@
               <button
                 type="button"
                 class="raw-copy-btn raw-copy-floating"
+                class:copy-failed={copyRawState === 'failed'}
                 onclick={() => void copyRawSpec()}
               >
-                {copiedRaw ? '✓ Copied' : 'Copy'}
+                {copyRawState === 'copied' ? '✓ Copied' : copyRawState === 'failed' ? 'Copy failed' : 'Copy'}
               </button>
             </div>
           {/if}
@@ -941,6 +958,10 @@
   .raw-copy-btn:hover {
     border-color: var(--accent);
     color: var(--text-primary);
+  }
+  .raw-copy-btn.copy-failed {
+    border-color: var(--err-border);
+    color: var(--err-strong);
   }
   .raw-pre {
     margin: 0;

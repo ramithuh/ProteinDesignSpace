@@ -64,17 +64,18 @@
   import OnboardingModal from '$lib/ui/OnboardingModal.svelte';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
   import NodeStudioPopover from '$lib/ui/NodeStudioPopover.svelte';
+  import type { StudioBrushOption } from '$lib/ui/AnnotatedFastaView.svelte';
   import { hasInvalidNumericInputs } from '$lib/ui/NumericInput.svelte';
   import WorkflowCanvas from '$lib/ui/WorkflowCanvas.svelte';
   import RecipeDrawer from '$lib/ui/RecipeDrawer.svelte';
   import {
     classifyParamUndoAction,
-    computeBenchmarkAutoSeedPatches,
     computeChangedParamKeys,
     computePreviewChecks,
     isCompareDisplayOnlyParamChange,
     isSharedWorkflowHash,
     parseLengthFromContig,
+    reconcileBenchmarkSeeding,
     resolveResidueFocusToken,
     shouldAllowNativeTextUndo,
     shouldSuppressOnboardingForHash,
@@ -98,6 +99,7 @@
   let studioTab = $state<'input' | 'controls' | 'output'>('input');
   let studioHoveredToken = $state<string | null>(null);
   let studioFocusToken = $state<string | null>(null);
+  let studioActiveBrush = $state<StudioBrushOption | null>(null);
   let viewerFocusToken = $state<string | null>(null);
   let selectedDesignKey = $state<string>('all');
   let multiDesignViewMode = $state<'grid' | 'overlay' | 'single'>('grid');
@@ -137,6 +139,13 @@
   let sysWrapEl: HTMLDivElement | null = $state(null);
   let moreWrapEl: HTMLDivElement | null = $state(null);
   let shareWrapEl: HTMLDivElement | null = $state(null);
+  let brandBtnEl: HTMLButtonElement | null = $state(null);
+  let cacheClearBtnEl: HTMLButtonElement | null = $state(null);
+  let brandClearConfirmPending = $state(false);
+  let brandClearConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+  let cacheClearConfirmPending = $state(false);
+  let cacheClearConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+  let appliedDraftNotice = $state<{ graphId: string; isAiDraft: boolean } | null>(null);
   let importFileInput: HTMLInputElement | null = $state(null);
   let firstRunAck = $state(false);
   let showOnboarding = $state(false);
@@ -170,9 +179,25 @@
     preflight: RunPreflightSummary;
   } | null>(null);
 
+  function mergeAdapterDefaults(g: WorkflowGraph): WorkflowGraph {
+    return {
+      ...g,
+      nodes: g.nodes.map((n) => {
+        const defaults = defaultParamsForAdapter(n.adapterId);
+        const merged: Record<string, unknown> = { ...defaults };
+        for (const [k, v] of Object.entries(n.params ?? {})) {
+          if (v !== undefined) merged[k] = v;
+        }
+        return { ...n, params: merged };
+      }),
+    };
+  }
+
   // Active workflow state
   let selectedPresetId = $state(WORKFLOW_PRESETS[0].id);
-  let graph = $state<WorkflowGraph>(autoLayoutGraph(structuredClone(WORKFLOW_PRESETS[0].graph)));
+  let graph = $state<WorkflowGraph>(
+    autoLayoutGraph(mergeAdapterDefaults(structuredClone(WORKFLOW_PRESETS[0].graph))),
+  );
   let activeDraftPreview = $state<PlannedWorkflowResult | null>(null);
   interface GraphHistoryEntry {
     graph: WorkflowGraph;
@@ -483,18 +508,81 @@
     }
   }
 
-  function resetToHomeCanvas() {
-    if (isRunning) return;
-    sysMenuOpen = false;
-    moreMenuOpen = false;
-    showRecipe = false;
-    expandedPane = 'none';
-    hashError = null;
-    activePaperInsight = null;
-    showPaperWalkthrough = false;
+  function clearStaleUrlHash() {
     if (typeof window !== 'undefined' && window.location.hash) {
       window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
     }
+  }
+
+  function cancelBrandClearConfirm() {
+    brandClearConfirmPending = false;
+    if (brandClearConfirmTimer) {
+      clearTimeout(brandClearConfirmTimer);
+      brandClearConfirmTimer = null;
+    }
+  }
+
+  function cancelCacheClearConfirm() {
+    cacheClearConfirmPending = false;
+    if (cacheClearConfirmTimer) {
+      clearTimeout(cacheClearConfirmTimer);
+      cacheClearConfirmTimer = null;
+    }
+  }
+
+  function handleBrandLogoClick() {
+    if (isRunning) return;
+    if (graph.nodes.length === 0 && graph.edges.length === 0) {
+      cancelBrandClearConfirm();
+      resetToHomeCanvas();
+      return;
+    }
+    if (!brandClearConfirmPending) {
+      brandClearConfirmPending = true;
+      if (brandClearConfirmTimer) clearTimeout(brandClearConfirmTimer);
+      brandClearConfirmTimer = setTimeout(() => {
+        brandClearConfirmPending = false;
+        brandClearConfirmTimer = null;
+      }, 10000);
+      return;
+    }
+    cancelBrandClearConfirm();
+    resetToHomeCanvas();
+  }
+
+  function handleClearCacheClick() {
+    if (isRunning || activeRunState.leaseHeld) return;
+    if (!cacheClearConfirmPending) {
+      cacheClearConfirmPending = true;
+      if (cacheClearConfirmTimer) clearTimeout(cacheClearConfirmTimer);
+      cacheClearConfirmTimer = setTimeout(() => {
+        cacheClearConfirmPending = false;
+        cacheClearConfirmTimer = null;
+      }, 10000);
+      return;
+    }
+    cancelCacheClearConfirm();
+    void handleClearCache();
+  }
+
+  function resetToHomeCanvas() {
+    if (isRunning) return;
+    cancelBrandClearConfirm();
+    cancelCacheClearConfirm();
+    sysMenuOpen = false;
+    moreMenuOpen = false;
+    shareMenuOpen = false;
+    sharePopoverState = null;
+    showRecipe = false;
+    expandedPane = 'none';
+    studioHoveredToken = null;
+    studioFocusToken = null;
+    studioActiveBrush = null;
+    appliedDraftNotice = null;
+    hashError = null;
+    activePaperInsight = null;
+    showPaperWalkthrough = false;
+    clearStaleUrlHash();
     if (graph.nodes.length === 0 && graph.edges.length === 0) {
       selectedPresetId = 'custom-workflow';
       setSingleSelection('');
@@ -516,8 +604,15 @@
   function handleWindowPointerDown(ev: PointerEvent) {
     const target = ev.target as Node | null;
     if (!target) return;
+    if (brandClearConfirmPending && !brandBtnEl?.contains(target)) {
+      cancelBrandClearConfirm();
+    }
+    if (cacheClearConfirmPending && !cacheClearBtnEl?.contains(target)) {
+      cancelCacheClearConfirm();
+    }
     if (sysMenuOpen && !sysWrapEl?.contains(target)) {
       sysMenuOpen = false;
+      cancelCacheClearConfirm();
     }
     if (moreMenuOpen && !moreWrapEl?.contains(target)) {
       moreMenuOpen = false;
@@ -533,22 +628,91 @@
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
   }
 
+  function isInteractiveOrEditableElement(el: EventTarget | null): boolean {
+    if (!(el instanceof Element)) return false;
+    if (el instanceof HTMLElement && isEditableElement(el)) return true;
+    return Boolean(
+      el.closest(
+        'button, a[href], summary, [role="button"], input, textarea, select, [contenteditable]:not([contenteditable="false"])',
+      ),
+    );
+  }
+
   function handleWindowKeydown(ev: KeyboardEvent) {
     if (ev.key === 'Escape') {
-      if (expandedPane !== 'none') {
-        expandedPane = 'none';
+      if (ev.defaultPrevented) return;
+      // Top-most ModelCardPopover manages its own Escape; never collapse Studio/overlays underneath it
+      if (typeof document !== 'undefined' && document.querySelector('.mc-backdrop')) {
+        return;
+      }
+      if (pendingRun) {
+        ev.preventDefault();
+        cancelPendingRun();
+        return;
+      }
+      if (showExamplesGallery) {
+        ev.preventDefault();
+        showExamplesGallery = false;
+        return;
+      }
+      if (showOnboarding) {
+        if (
+          onboardingInteractive &&
+          typeof document !== 'undefined' &&
+          document.querySelector('.catalog-shell')
+        ) {
+          return;
+        }
+        ev.preventDefault();
+        dismissOnboarding();
+        return;
+      }
+      if (activePaperInsight && showPaperWalkthrough && !showCredits) {
+        ev.preventDefault();
+        showPaperWalkthrough = false;
         return;
       }
       if (showCredits) {
+        ev.preventDefault();
         showCredits = false;
         return;
       }
-      sysMenuOpen = false;
-      moreMenuOpen = false;
-      shareMenuOpen = false;
+      if (expandedPane !== 'none') {
+        ev.preventDefault();
+        expandedPane = 'none';
+        studioHoveredToken = null;
+        studioFocusToken = null;
+        studioActiveBrush = null;
+        return;
+      }
+      if (sysMenuOpen || moreMenuOpen || shareMenuOpen) {
+        ev.preventDefault();
+        sysMenuOpen = false;
+        moreMenuOpen = false;
+        shareMenuOpen = false;
+        cancelCacheClearConfirm();
+        return;
+      }
+      if (brandClearConfirmPending) {
+        ev.preventDefault();
+        cancelBrandClearConfirm();
+        return;
+      }
+      if (showRecipe) {
+        ev.preventDefault();
+        showRecipe = false;
+        return;
+      }
       return;
     }
-    if (pendingRun || showCredits || (showOnboarding && !onboardingInteractive)) return;
+    if (
+      pendingRun ||
+      showCredits ||
+      showExamplesGallery ||
+      (showOnboarding && !onboardingInteractive)
+    ) {
+      return;
+    }
 
     // Cmd/Ctrl + Z undo, Cmd/Ctrl + Shift + Z or Ctrl + Y redo (when not typing in a text field or previewing a draft)
     if (
@@ -589,19 +753,22 @@
       return;
     }
 
-    // Space toggles Node Studio when a block is selected and not typing in an input
+    // Space toggles Node Studio when a block is selected and focus is not on an interactive/editable control
     if (
       ev.key === ' ' &&
       !ev.metaKey &&
       !ev.ctrlKey &&
       !ev.altKey &&
-      !isEditableElement(ev.target) &&
-      !isEditableElement(document.activeElement)
+      !isInteractiveOrEditableElement(ev.target) &&
+      !isInteractiveOrEditableElement(document.activeElement)
     ) {
       if (selectedNode) {
         ev.preventDefault();
         if (expandedPane === 'studio') {
           expandedPane = 'none';
+          studioHoveredToken = null;
+          studioFocusToken = null;
+          studioActiveBrush = null;
         } else {
           openStudioForNode(selectedNode.id);
         }
@@ -675,7 +842,7 @@
       if (decoded) {
         hashError = null;
         showOnboarding = false;
-        loadFullWorkflowGraph(decoded, { clearOutputs: true });
+        loadFullWorkflowGraph(decoded, { clearOutputs: true, preserveHash: true });
         canvasFitViewTrigger += 1;
         showToastMessage('Loaded shared workflow from URL', 3000, 'ok');
         return { loadedFromHash: true, attemptedSharedHash: isSharedHash };
@@ -799,6 +966,8 @@
       cancelAnimationFrame(splitMoveRafId);
     }
     if (shareToastTimer) clearTimeout(shareToastTimer);
+    if (brandClearConfirmTimer) clearTimeout(brandClearConfirmTimer);
+    if (cacheClearConfirmTimer) clearTimeout(cacheClearConfirmTimer);
     if (!activeRunState.leaseHeld) {
       void scheduler.releaseActiveGpu();
     }
@@ -856,6 +1025,10 @@
     if (isRunning) return;
     const preset = WORKFLOW_PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
+    clearStaleUrlHash();
+    cancelBrandClearConfirm();
+    sharePopoverState = null;
+    appliedDraftNotice = null;
     showExamplesGallery = false;
     activePaperInsight = null;
     showPaperWalkthrough = false;
@@ -865,7 +1038,8 @@
     lastLabelUndo = null;
     hashError = null;
     selectedPresetId = presetId;
-    const g = structuredClone(preset.graph);
+    const merged = mergeAdapterDefaults(structuredClone(preset.graph));
+    const { graph: g } = reconcileBenchmarkSeeding(merged, { teardown: false });
     graph = g.nodes.some((n) => !n.position) ? autoLayoutGraph(g) : g;
     setSingleSelection(graph.nodes[0]?.id ?? '');
     branchCandidateIdx = {};
@@ -917,6 +1091,8 @@
       showToastMessage('Could not load example workflow.', 3200, 'error');
       return;
     }
+    clearStaleUrlHash();
+    appliedDraftNotice = null;
     showExamplesGallery = false;
     activePaperInsight = example;
     paperWalkthroughIdx = 0;
@@ -942,6 +1118,9 @@
 
   function prepareTourStarter() {
     if (isRunning) return;
+    clearStaleUrlHash();
+    appliedDraftNotice = null;
+    sharePopoverState = null;
     graphUndoStack = [];
     graphRedoStack = [];
     lastParamUndo = null;
@@ -1000,7 +1179,8 @@
       undefined,
       opts,
     );
-    const laid = autoLayoutGraph(nextGraph);
+    const { graph: reconciled } = reconcileBenchmarkSeeding(nextGraph);
+    const laid = autoLayoutGraph(reconciled);
     graph = laid;
     scheduler.invalidateEditedGraph(prevGraph, laid);
     setSingleSelection(nodeId);
@@ -1180,10 +1360,11 @@
     showToastMessage('Redid graph edit', 1800);
   }
 
-  function handleApplyPlannedGraph(next: WorkflowGraph, summary: string) {
+  function handleApplyPlannedGraph(next: WorkflowGraph, summary: string, isAiDraft = false) {
     if (isRunning) return;
     const prevPresetId = selectedPresetId;
     hashError = null;
+    appliedDraftNotice = { graphId: next.id, isAiDraft: Boolean(isAiDraft) };
     handleGraphChange(next, { prevPresetId });
     selectedPresetId = next.id;
     const firstId = next.nodes[0]?.id ?? '';
@@ -1201,7 +1382,16 @@
     if (opts?.recordHistory !== false) {
       pushGraphUndo(prevSnapshot, opts?.prevPresetId ?? selectedPresetId);
     }
-    const nextById = new Map(next.nodes.map((n) => [n.id, n]));
+    clearStaleUrlHash();
+    sharePopoverState = null;
+
+    // Synchronously reconcile benchmark auto-seeding (for unconfigured hasNoTaskParams or previously
+    // auto-seeded Genie 3 & RFD4-Proteina blocks) and symmetric teardown on forward graph edits
+    // so adding/wiring a generator seeds immediately before Parameters opens and 1 ⌘Z undoes both.
+    const reconciledNext =
+      opts?.recordHistory !== false ? reconcileBenchmarkSeeding(next).graph : next;
+
+    const nextById = new Map(reconciledNext.nodes.map((n) => [n.id, n]));
     const prevById = new Map(prevSnapshot.nodes.map((n) => [n.id, n]));
 
     const dirtySeeds = new Set<string>();
@@ -1224,9 +1414,9 @@
       prevSnapshot.edges.map((e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)),
     );
     const nextEdgeKeys = new Set(
-      next.edges.map((e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)),
+      reconciledNext.edges.map((e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)),
     );
-    for (const e of next.edges) {
+    for (const e of reconciledNext.edges) {
       if (!prevEdgeKeys.has(makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort))) {
         dirtySeeds.add(e.toNode);
       }
@@ -1237,7 +1427,7 @@
       }
     }
 
-    const staleIds = getDownstreamNodeIds(next, dirtySeeds);
+    const staleIds = getDownstreamNodeIds(reconciledNext, dirtySeeds);
 
     const nextOutputs: Record<string, Record<string, CanonicalArtifact>> = {};
     for (const [id, outs] of Object.entries(outputsByNode)) {
@@ -1264,16 +1454,20 @@
 
     // Reset stale workflow id/name/preset whenever the canvas becomes empty (e.g. Clear or deleting last node)
     const normalizedNext: WorkflowGraph =
-      next.nodes.length === 0 && prevSnapshot.nodes.length > 0
+      reconciledNext.nodes.length === 0 && prevSnapshot.nodes.length > 0
         ? {
-            ...next,
+            ...reconciledNext,
             id: 'custom-workflow',
             name: 'Custom Workflow',
             description: '',
           }
-        : next;
-    if (next.nodes.length === 0 && prevSnapshot.nodes.length > 0) {
+        : reconciledNext;
+    if (reconciledNext.nodes.length === 0 && prevSnapshot.nodes.length > 0) {
       selectedPresetId = 'custom-workflow';
+      appliedDraftNotice = null;
+      cancelBrandClearConfirm();
+    } else if (appliedDraftNotice && normalizedNext.id !== appliedDraftNotice.graphId) {
+      appliedDraftNotice = null;
     }
 
     if (selectedEdgeId && !nextEdgeKeys.has(selectedEdgeId)) {
@@ -1295,7 +1489,7 @@
     if (selectedNodeIds.length > 0) {
       const kept = selectedNodeIds.filter((id) => nextById.has(id));
       if (kept.length !== selectedNodeIds.length) {
-        nextSelected = kept.length > 0 ? kept : next.nodes[0]?.id ? [next.nodes[0].id] : [];
+        nextSelected = kept.length > 0 ? kept : reconciledNext.nodes[0]?.id ? [reconciledNext.nodes[0].id] : [];
         selectedNodeIds = nextSelected;
       }
     }
@@ -1325,6 +1519,8 @@
     const paramsChanged = !prevNode || !shallowParamsEqual(prevNode.params, params);
     const displayOnlyCompare = isCompareDisplayOnlyParamChange(prevNode, params);
     if (paramsChanged) {
+      clearStaleUrlHash();
+      sharePopoverState = null;
       const changedKeys = computeChangedParamKeys(prevNode?.params, params);
       if (changedKeys.length > 0) {
         const now = Date.now();
@@ -1345,14 +1541,22 @@
         }
       }
     }
-    const nextGraph: WorkflowGraph = {
+    const rawNextGraph: WorkflowGraph = {
       ...prevSnapshot,
       nodes: prevSnapshot.nodes.map((n) => (n.id === nodeId ? { ...n, params } : n)),
     };
+    const { graph: nextGraph, changedNodeIds } = reconcileBenchmarkSeeding(rawNextGraph);
     graph = nextGraph;
+    const invalidatedSeeds = new Set<string>();
     if (paramsChanged && !displayOnlyCompare) {
+      invalidatedSeeds.add(nodeId);
+    }
+    for (const cid of changedNodeIds) {
+      invalidatedSeeds.add(cid);
+    }
+    if (invalidatedSeeds.size > 0) {
       scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
-      invalidateNodes(getDownstreamNodeIds(nextGraph, [nodeId]));
+      invalidateNodes(getDownstreamNodeIds(nextGraph, invalidatedSeeds));
     }
   }
 
@@ -1360,6 +1564,8 @@
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
     const prevNode = prevSnapshot.nodes.find((n) => n.id === nodeId);
     if (prevNode?.label === label) return;
+    clearStaleUrlHash();
+    sharePopoverState = null;
     const now = Date.now();
     if (lastLabelUndo && lastLabelUndo.nodeId === nodeId && now - lastLabelUndo.at < 800) {
       lastLabelUndo.at = now;
@@ -1434,24 +1640,6 @@
     return null;
   }
 
-  // Auto-seed unconfigured (hasNoTaskParams) or previously auto-seeded Genie 3 & RFD4-Proteina blocks
-  // when wired to a curated benchmark PDB Input on their unified `structure` port, adapting the benchmark
-  // contig to preserve custom/planned lengths (e.g. 65 aa on 5O45, 80 aa on 1YCR) without pushing undo.
-  $effect(() => {
-    if (isRunning) return;
-    const patches = computeBenchmarkAutoSeedPatches(graph);
-    if (patches) {
-      const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
-      const nextGraph: WorkflowGraph = {
-        ...prevSnapshot,
-        nodes: prevSnapshot.nodes.map((n) => (patches[n.id] ? { ...n, params: patches[n.id] } : n)),
-      };
-      graph = nextGraph;
-      scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
-      invalidateNodes(getDownstreamNodeIds(nextGraph, Object.keys(patches)));
-    }
-  });
-
   function getSiblingGeneratorIds(nodeId: string): string[] {
     const structEdge = graph.edges.find(
       (e) => e.toNode === nodeId && (e.toPort === 'structure' || e.toPort === 'template'),
@@ -1489,6 +1677,8 @@
 
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
     pushGraphUndo(prevSnapshot);
+    clearStaleUrlHash();
+    sharePopoverState = null;
     const nextGraph: WorkflowGraph = {
       ...prevSnapshot,
       nodes: prevSnapshot.nodes.map((n) => {
@@ -1717,7 +1907,9 @@
     const { nodeId, paramsPatch, nodeLabel } = fix;
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
     pushGraphUndo(prevSnapshot);
-    const nextGraph: WorkflowGraph = {
+    clearStaleUrlHash();
+    sharePopoverState = null;
+    const rawNextGraph: WorkflowGraph = {
       ...prevSnapshot,
       nodes: prevSnapshot.nodes.map((n) =>
         n.id === nodeId
@@ -1729,9 +1921,10 @@
           : n,
       ),
     };
+    const { graph: nextGraph, changedNodeIds } = reconcileBenchmarkSeeding(rawNextGraph);
     graph = nextGraph;
     scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
-    invalidateNodes(getDownstreamNodeIds(nextGraph, [nodeId]));
+    invalidateNodes(getDownstreamNodeIds(nextGraph, new Set([nodeId, ...changedNodeIds])));
     runError = null;
   }
 
@@ -1747,6 +1940,7 @@
     studioTab = 'input';
     studioHoveredToken = null;
     studioFocusToken = null;
+    studioActiveBrush = null;
     expandedPane = 'studio';
   }
 
@@ -1799,6 +1993,7 @@
       }
     }
     localRunning = true;
+    appliedDraftNotice = null;
     runTargetIds = targetGraph.nodes.map((n) => n.id);
     runError = null;
     hashError = null;
@@ -1949,18 +2144,38 @@
 
   async function freeVram() {
     if (isRunning || activeRunState.leaseHeld) return;
-    await scheduler.releaseActiveGpu();
-    activeGpuWorker = null;
+    const releasedLabel = activeGpuWorkerLabel ?? 'GPU worker';
+    try {
+      await scheduler.releaseActiveGpu();
+      activeGpuWorker = null;
+      showToastMessage(`Released GPU memory (${releasedLabel})`, 2600, 'ok');
+    } catch (err) {
+      showToastMessage(
+        `Failed to release GPU memory: ${err instanceof Error ? err.message : String(err)}`,
+        4200,
+        'error',
+      );
+    }
   }
 
   async function handleClearCache() {
     if (isRunning || activeRunState.leaseHeld) return;
-    await scheduler.releaseActiveGpu();
-    scheduler.clearMemo();
-    clearRcsbCache();
-    await clearAllModelCaches({ preserveCheckpoints: true });
-    await refreshCacheStats();
-    activeGpuWorker = null;
+    cancelCacheClearConfirm();
+    try {
+      await scheduler.releaseActiveGpu();
+      scheduler.clearMemo();
+      clearRcsbCache();
+      await clearAllModelCaches({ preserveCheckpoints: true });
+      await refreshCacheStats();
+      activeGpuWorker = null;
+      showToastMessage('Cleared cached model weights and structures', 2800, 'ok');
+    } catch (err) {
+      showToastMessage(
+        `Failed to clear cached weights: ${err instanceof Error ? err.message : String(err)}`,
+        4200,
+        'error',
+      );
+    }
   }
 
   async function openSharePopover() {
@@ -2004,11 +2219,17 @@
           : `Copied ${url.length}-char link (${mode})`,
       );
     } catch {
+      sharePopoverState = {
+        ...sharePopoverState,
+        copied: false,
+        error: 'Clipboard access was blocked — copy the link directly from the field below.',
+      };
       showToastMessage(
         strippedPdb
-          ? `Share link updated in address bar (${mode}; large PDB omitted — copy from URL bar)`
-          : `Share link updated in address bar (${mode} — copy from URL bar)`,
+          ? `Clipboard blocked — copy ${mode} link from URL bar (large PDB omitted)`
+          : `Clipboard blocked — copy ${mode} link from URL bar`,
         4200,
+        'error',
       );
     }
   }
@@ -2042,13 +2263,22 @@
 
   function loadFullWorkflowGraph(
     next: WorkflowGraph,
-    opts?: { clearOutputs?: boolean; keepPaperInsight?: boolean },
+    opts?: { clearOutputs?: boolean; keepPaperInsight?: boolean; preserveHash?: boolean },
   ) {
+    if (!opts?.preserveHash) {
+      clearStaleUrlHash();
+    }
+    cancelBrandClearConfirm();
+    sharePopoverState = null;
+    appliedDraftNotice = null;
     if (!opts?.keepPaperInsight) {
       activePaperInsight = null;
       showPaperWalkthrough = false;
     }
-    const laid = next.nodes.some((n) => !n.position) ? autoLayoutGraph(next) : next;
+    const withDefaults = mergeAdapterDefaults(next);
+    const laid = withDefaults.nodes.some((n) => !n.position)
+      ? autoLayoutGraph(withDefaults)
+      : withDefaults;
     graphUndoStack = [];
     graphRedoStack = [];
     lastParamUndo = null;
@@ -2119,6 +2349,130 @@
     a.download = safeName;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function toggleTokenInList(prevRaw: unknown, tag: string): { next: string; added: boolean } {
+    const prev = String(prevRaw ?? '').trim();
+    const parts = prev ? prev.split(/[,\s]+/).filter(Boolean) : [];
+    const idx = parts.findIndex((p) => p.toUpperCase() === tag.toUpperCase());
+    if (idx >= 0) {
+      parts.splice(idx, 1);
+      return { next: parts.join(', '), added: false };
+    }
+    parts.push(tag);
+    return { next: parts.join(', '), added: true };
+  }
+
+  function toggleTokenInTiedList(prevRaw: unknown, tag: string): { next: string; added: boolean } {
+    const prev = String(prevRaw ?? '').trim();
+    const groups = prev
+      ? prev
+          .split(';')
+          .map((g) => g.trim())
+          .filter(Boolean)
+          .map((g) => g.split(/[=,\s]+/).map((t) => t.trim()).filter(Boolean))
+      : [];
+    const upper = tag.toUpperCase();
+    let existed = false;
+    const pruned = groups
+      .map((g) => {
+        const filtered = g.filter((t) => {
+          if (t.toUpperCase() === upper) {
+            existed = true;
+            return false;
+          }
+          return true;
+        });
+        return filtered;
+      })
+      .filter((g) => g.length > 0);
+    if (existed) {
+      return { next: pruned.map((g) => g.join('=')).join('; '), added: false };
+    }
+    if (pruned.length === 0) {
+      pruned.push([tag]);
+    } else {
+      pruned[pruned.length - 1].push(tag);
+    }
+    return { next: pruned.map((g) => g.join('=')).join('; '), added: true };
+  }
+
+  /**
+   * Isolated 3D residue click router for Node Studio's `'input'` tab (`UX-09`):
+   * strictly routes clicks to the active Studio brush on `selectedNode` (or inspect-only
+   * when no Studio brush is active), never mutating unrelated nodes via global `molPickMode`.
+   */
+  function handleStudioInputResidueClick(info: {
+    chain: string;
+    seqId: number;
+    insCode?: string;
+    residueToken?: string;
+    compId: string;
+    atomName?: string;
+    isNonPolymer?: boolean;
+    entityType?: 'protein' | 'dna' | 'rna' | 'ligand';
+  }) {
+    if (!selectedNode) return;
+    const tag =
+      (info.residueToken && info.residueToken.trim()) ||
+      `${info.chain}${info.seqId}${info.insCode ?? ''}`;
+    const nodeName =
+      selectedNode.label || ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName || selectedNode.adapterId;
+    const brush = studioActiveBrush;
+
+    if (info.isNonPolymer || info.entityType === 'ligand') {
+      const ligToken = `${info.chain}:${info.compId}`;
+      const atomSelector = `${info.chain}/${info.compId}/*/${info.atomName || '*'}`;
+      if (brush?.role === 'crop') {
+        const { next, added } = toggleTokenInList(selectedNode.params[brush.fieldKey], ligToken);
+        updateNodeParams(selectedNode.id, { ...selectedNode.params, [brush.fieldKey]: next });
+        lastPickedResidue = `${ligToken} ${added ? 'added to' : 'removed from'} ${brush.label} (${nodeName})`;
+        return;
+      }
+      if (
+        selectedNode.adapterId === 'rfd4-proteina' &&
+        String(selectedNode.params.hbondMode ?? 'none') !== 'none'
+      ) {
+        updateNodeParams(selectedNode.id, {
+          ...selectedNode.params,
+          hbondSelection: atomSelector,
+          userEditedTask: true,
+        });
+        lastPickedResidue = `${atomSelector} → H-Bond target (${nodeName})`;
+        showToastMessage(`Set RFD4 H-bond target to ${atomSelector}`, 2800);
+        return;
+      }
+      lastPickedResidue = `${ligToken}${info.atomName ? `.${info.atomName}` : ''} (ligand)`;
+      return;
+    }
+
+    if (info.entityType === 'dna' || info.entityType === 'rna') {
+      lastPickedResidue = `${tag} (${info.compId} · ${info.entityType.toUpperCase()})`;
+      return;
+    }
+
+    const baseLabel = `${tag} (${info.compId})`;
+    if (!brush) {
+      lastPickedResidue = baseLabel;
+      return;
+    }
+
+    const { next, added } =
+      brush.role === 'tied'
+        ? toggleTokenInTiedList(selectedNode.params[brush.fieldKey], tag)
+        : toggleTokenInList(selectedNode.params[brush.fieldKey], tag);
+    const nextParams: Record<string, unknown> = {
+      ...selectedNode.params,
+      [brush.fieldKey]: next,
+    };
+    if (
+      (selectedNode.adapterId === 'rfd4-proteina' || selectedNode.adapterId === 'genie3') &&
+      ['contig', 'lockChain', 'hotspots', 'motifSpan'].includes(brush.fieldKey)
+    ) {
+      nextParams.userEditedTask = true;
+    }
+    updateNodeParams(selectedNode.id, nextParams);
+    lastPickedResidue = `${baseLabel} ${added ? '→' : '✕'} ${brush.label} (${nodeName})`;
   }
 
   function appendToken(prevRaw: unknown, tag: string): string | null {
@@ -2373,6 +2727,17 @@
   let selectedNode = $derived(
     selectedNodeId ? (graph.nodes.find((n) => n.id === selectedNodeId) ?? null) : null,
   );
+  let selectedUpstreamBenchmarkId = $derived.by((): string | null => {
+    if (!selectedNode) return null;
+    const edge = graph.edges.find(
+      (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
+    );
+    if (!edge) return null;
+    const src = graph.nodes.find((n) => n.id === edge.fromNode);
+    if (src?.adapterId !== 'pdb-input') return null;
+    const bid = String(src.params.benchmarkId ?? '').trim();
+    return bid || null;
+  });
 
   // Lazy single-source-of-truth compiled input preview (computed only while Node Studio is open)
   let studioOpen = $derived(expandedPane === 'studio' && Boolean(selectedNode));
@@ -2976,13 +3341,22 @@
   <div class="hdr-left">
     <h1 class="brand-logo">
       <button
+        bind:this={brandBtnEl}
         type="button"
         class="brand-logo-btn"
+        class:confirm-danger={brandClearConfirmPending}
         disabled={isRunning}
-        onclick={resetToHomeCanvas}
-        title="Start a clean empty canvas"
+        onclick={handleBrandLogoClick}
+        title={brandClearConfirmPending
+          ? 'Click again to clear all blocks and start a clean canvas'
+          : graph.nodes.length > 0
+            ? 'Start a clean empty canvas (click twice to confirm)'
+            : 'Start a clean empty canvas'}
+        aria-label={brandClearConfirmPending
+          ? 'Confirm clearing canvas'
+          : 'denovo.run — start a clean empty canvas'}
       >
-        <span class="accent">denovo</span>.run
+        <span class="accent">denovo</span>.run{#if brandClearConfirmPending}<span class="brand-confirm-pill">Clear? Confirm</span>{/if}
       </button>
     </h1>
 
@@ -3114,13 +3488,17 @@
           <div class="pop-row">
             <span class="pop-k">Cache: {cacheUsedMB.toFixed(0)} MB</span>
             <button
+              bind:this={cacheClearBtnEl}
               type="button"
               class="pop-action danger"
+              class:confirm-danger={cacheClearConfirmPending}
               disabled={isRunning || activeRunState.leaseHeld}
-              onclick={handleClearCache}
-              title="Clear cached model weights from browser storage"
+              onclick={handleClearCacheClick}
+              title={cacheClearConfirmPending
+                ? 'Click again to clear cached model weights from browser storage'
+                : 'Clear cached model weights from browser storage (click twice to confirm)'}
             >
-              Clear
+              {cacheClearConfirmPending ? 'Clear? Confirm' : 'Clear'}
             </button>
           </div>
         </div>
@@ -3442,6 +3820,7 @@
           onGraphChange={handleGraphChange}
           onApplyPlannedGraph={handleApplyPlannedGraph}
           onDraftPreviewChange={(draft) => (activeDraftPreview = draft)}
+          onToast={(msg, tone) => showToastMessage(msg, 3200, tone ?? 'error')}
           onSelectNode={handleSelectNode}
           onSelectNodes={handleSelectNodes}
           onBlockAdded={handleBlockAdded}
@@ -3453,13 +3832,44 @@
         />
       </SvelteFlowProvider>
 
-      {#if shareToast}
-        <div
-          class="share-toast"
-          class:is-error={shareToastTone === 'error'}
-          role={shareToastTone === 'error' ? 'alert' : 'status'}
-        >
-          {shareToast}
+      {#if shareToast || (activeDraftPreview && !activeDraftPreview.isIncrementalEdit) || (appliedDraftNotice && !activeDraftPreview && !isRunning && graph.nodes.length > 0)}
+        <div class="canvas-top-spine">
+          {#if shareToast}
+            <div
+              class="share-toast"
+              class:is-error={shareToastTone === 'error'}
+              role={shareToastTone === 'error' ? 'alert' : 'status'}
+            >
+              {shareToast}
+            </div>
+          {/if}
+          {#if activeDraftPreview && !activeDraftPreview.isIncrementalEdit}
+            <div class="draft-preview-banner" role="status">
+              <span class="dpb-spark" aria-hidden="true">✦</span>
+              <span>
+                Preview: <strong>New graph</strong> · {activeDraftPreview.graph.nodes.length} blocks
+                {#if graph.nodes.length > 0}
+                  — current graph kept until applied
+                {/if}
+              </span>
+            </div>
+          {:else if appliedDraftNotice && !activeDraftPreview && !isRunning && graph.nodes.length > 0}
+            <div class="ai-draft-warning" role="status">
+              <span class="adw-icon" aria-hidden="true">⚠</span>
+              <span>
+                <strong>{appliedDraftNotice.isAiDraft ? 'AI-drafted (gemma-4)' : 'Auto-drafted workflow'}</strong> — double-check each step's inputs, residue ranges &amp; parameters before running.
+              </span>
+              <button
+                type="button"
+                class="adw-dismiss"
+                onclick={() => (appliedDraftNotice = null)}
+                aria-label="Dismiss draft warning"
+                title="Dismiss"
+              >
+                ×
+              </button>
+            </div>
+          {/if}
         </div>
       {/if}
 
@@ -3755,7 +4165,18 @@
               {/if}
             {/if}
 
-            {#if hasConditionerNode || hasMpnnNode}
+            {#if studioInputViewerActive}
+              <span
+                class="studio-brush-tag"
+                title={studioActiveBrush
+                  ? `Clicking 3D residues toggles them in ${studioActiveBrush.label} on ${selectedNode?.label ?? selectedNode?.adapterId ?? 'this block'}`
+                  : 'Inspect-only in Studio Input view (this block has no editable residue brush)'}
+              >
+                {studioActiveBrush
+                  ? `Studio brush: ${studioActiveBrush.label}`
+                  : 'Studio view (inspect)'}
+              </span>
+            {:else if hasConditionerNode || hasMpnnNode}
               <label class="pick-mode" title="Choose what clicking a 3D protein residue modifies">
                 Pick:
                 <select class="pick-select" name="viewer-pick-mode" bind:value={molPickMode}>
@@ -3854,11 +4275,16 @@
               ? 'Preview parent backbone'
               : undefined}
             onEmptyAction={() => (showSeqParentBackbone = true)}
-            onResidueClick={isCompareMode || isMultiDesignAll3d ? undefined : handleResidueClick}
+            onResidueClick={isCompareMode || isMultiDesignAll3d
+              ? undefined
+              : studioInputViewerActive
+                ? handleStudioInputResidueClick
+                : handleResidueClick}
             onToggleModelVisibility={isMultiDesignAll3d
               ? toggleMultiDesignModelVisibility
               : toggleCompareModelVisibility}
             onSoloModel={isMultiDesignAll3d ? soloMultiDesignModel : soloCompareModel}
+            onNotify={(msg, tone) => showToastMessage(msg, tone === 'error' ? 4000 : 2400, tone ?? 'ok')}
           />
         </div>
 
@@ -3894,11 +4320,13 @@
               selectedEdgeId = null;
               studioHoveredToken = null;
               studioFocusToken = null;
+              studioActiveBrush = null;
             }}
             onClose={() => {
               expandedPane = 'none';
               studioHoveredToken = null;
               studioFocusToken = null;
+              studioActiveBrush = null;
             }}
             onRunUpstreamAndThis={() => runWorkflow(false, selectedNode.id)}
             onUpdateNodeParams={updateNodeParams}
@@ -3910,6 +4338,8 @@
                 studioFocusToken = tok;
               });
             }}
+            onActiveBrushChange={(brush) => (studioActiveBrush = brush)}
+            onNotify={(msg, tone) => showToastMessage(msg, tone === 'error' ? 3600 : 2200, tone ?? 'ok')}
           >
             {#snippet controlsSlot()}
               <NodeInspector
@@ -3921,6 +4351,7 @@
                 upstreamStructure={selectedUpstreamStructure}
                 upstreamSequences={selectedUpstreamSequences}
                 upstreamLockSummary={selectedUpstreamLockSummary}
+                upstreamBenchmarkId={selectedUpstreamBenchmarkId}
                 hasStructureInput={graph.edges.some(
                   (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
                 )}
@@ -3933,6 +4364,7 @@
                 onUpdateLabel={updateNodeLabel}
                 onSyncTaskToSiblings={handleSyncTaskToSiblings}
                 onRunUpTo={(id) => runWorkflow(false, id)}
+                onNotify={(msg, tone) => showToastMessage(msg, tone === 'error' ? 3600 : 2200, tone ?? 'ok')}
               />
             {/snippet}
             {#snippet outputSlot()}
@@ -4055,6 +4487,7 @@
                 upstreamStructure={selectedUpstreamStructure}
                 upstreamSequences={selectedUpstreamSequences}
                 upstreamLockSummary={selectedUpstreamLockSummary}
+                upstreamBenchmarkId={selectedUpstreamBenchmarkId}
                 hasStructureInput={graph.edges.some(
                   (e) => e.toNode === selectedNode.id && (e.toPort === 'structure' || e.toPort === 'template'),
                 )}
@@ -4068,6 +4501,7 @@
                 onSyncTaskToSiblings={handleSyncTaskToSiblings}
                 onRunUpTo={(id) => runWorkflow(false, id)}
                 onOpenStudio={() => openStudioForNode(selectedNode.id)}
+                onNotify={(msg, tone) => showToastMessage(msg, tone === 'error' ? 3600 : 2200, tone ?? 'ok')}
               />
             {:else}
               <div class="empty-inspector">
@@ -4098,6 +4532,7 @@
               onFocusSingle={(nodeId) => handleSelectNode(nodeId)}
               onRunUpToNode={(id) => runWorkflow(false, id)}
               onDownloadText={downloadText}
+              onNotify={(msg, tone) => showToastMessage(msg, tone === 'error' ? 3600 : 2200, tone ?? 'ok')}
               onExitCompare={() => setSingleSelection(selectedNodeId)}
             />
           {:else}
@@ -4233,17 +4668,32 @@
     margin: 0;
     padding: 2px 4px;
     margin-left: -4px;
-    border: none;
+    border: 1px solid transparent;
     border-radius: 6px;
     background: transparent;
     color: inherit;
     font: inherit;
     letter-spacing: inherit;
     cursor: pointer;
-    transition: opacity 0.12s ease, background 0.12s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: opacity 0.12s ease, background 0.12s ease, border-color 0.12s ease;
   }
   .brand-logo-btn:hover:not(:disabled) {
     background: var(--bg-surface-hover);
+  }
+  .brand-logo-btn.confirm-danger {
+    border-color: var(--err-border);
+    background: var(--err-bg);
+    padding: 2px 7px;
+  }
+  .brand-confirm-pill {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0;
+    color: var(--err-strong);
   }
   .brand-logo-btn:focus-visible {
     outline: 2px solid var(--accent);
@@ -4686,9 +5136,12 @@
     background: var(--bg-surface-hover);
     border-color: var(--accent);
   }
-  .pop-action.danger:hover:not(:disabled) {
+  .pop-action.danger:hover:not(:disabled),
+  .pop-action.confirm-danger {
     border-color: var(--err-border);
     color: var(--err-strong);
+    background: var(--err-bg);
+    font-weight: 600;
   }
   .pop-action:disabled {
     opacity: 0.5;
@@ -4912,13 +5365,22 @@
     max-width: 100%;
     margin-bottom: 0;
   }
-  .share-toast {
+  .canvas-top-spine {
     position: absolute;
     top: 12px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 40;
-    max-width: calc(100% - 24px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    max-width: min(640px, calc(100% - 170px));
+    pointer-events: none;
+  }
+  .share-toast {
+    pointer-events: auto;
+    max-width: 100%;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
@@ -4932,6 +5394,80 @@
     color: var(--err-text);
     background: var(--err-bg);
     border-color: var(--err-border);
+  }
+  .draft-preview-banner {
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .draft-preview-banner strong {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  .dpb-spark {
+    color: var(--accent-bright);
+    flex-shrink: 0;
+  }
+  .ai-draft-warning {
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 10px 5px 12px;
+    border-radius: 999px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+    font-size: 11.5px;
+    line-height: 1.35;
+    color: var(--warn-text);
+    max-width: 100%;
+  }
+  .ai-draft-warning strong {
+    font-weight: 600;
+  }
+  .adw-icon {
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .adw-dismiss {
+    background: none;
+    border: none;
+    color: inherit;
+    opacity: 0.72;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+    flex-shrink: 0;
+  }
+  .adw-dismiss:hover {
+    opacity: 1;
+  }
+  .studio-brush-tag {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--accent-soft);
+    background: var(--bg-pill);
+    border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border-strong));
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
   }
   .warn-banner {
     background: var(--warn-bg);

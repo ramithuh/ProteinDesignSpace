@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import {
     AA_BY_CODE,
     STANDARD_AAS,
@@ -20,6 +21,7 @@
     validation: SequenceValidationResult;
     onChange: (nextValue: string) => void;
     onBlur?: () => void;
+    onNotify?: (message: string, tone?: 'ok' | 'error') => void;
   }
 
   let {
@@ -29,6 +31,7 @@
     validation,
     onChange,
     onBlur = undefined,
+    onNotify = undefined,
   }: Props = $props();
 
   const MAX_INTERACTIVE_RESIDUES = 2000;
@@ -41,7 +44,7 @@
   let cmdInput = $state('');
   let cmdError = $state<string | null>(null);
   let rawCursor = $state<CursorResidueInfo | null>(null);
-  let copied = $state(false);
+  let copyState = $state<'idle' | 'copied' | 'failed'>('idle');
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Baseline sequence per nodeId so we can highlight point mutations (e.g. Y45L) and offer 1-click Revert
@@ -193,16 +196,30 @@
     rawCursor = cursorToResiduePosition(el.value, pos);
   }
 
-  function copySequence() {
-    if (typeof navigator === 'undefined' || !navigator.clipboard) return;
-    void navigator.clipboard.writeText(value).then(() => {
-      copied = true;
-      if (copyTimer) clearTimeout(copyTimer);
+  async function copySequence() {
+    if (copyTimer) clearTimeout(copyTimer);
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+        throw new Error('Clipboard API unavailable');
+      }
+      await navigator.clipboard.writeText(value);
+      copyState = 'copied';
+      onNotify?.('Copied sequence to clipboard', 'ok');
       copyTimer = setTimeout(() => {
-        copied = false;
+        copyState = 'idle';
       }, 1500);
-    });
+    } catch {
+      copyState = 'failed';
+      onNotify?.('Could not copy sequence — clipboard access was blocked.', 'error');
+      copyTimer = setTimeout(() => {
+        copyState = 'idle';
+      }, 2200);
+    }
   }
+
+  onDestroy(() => {
+    if (copyTimer) clearTimeout(copyTimer);
+  });
 
   function revertChanges() {
     if (disabled || !baselineValue) return;
@@ -262,10 +279,11 @@
       <button
         type="button"
         class="seq-copy-btn"
-        onclick={copySequence}
+        class:copy-failed={copyState === 'failed'}
+        onclick={() => void copySequence()}
         title="Copy sequence text"
       >
-        {copied ? 'Copied' : 'Copy'}
+        {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy'}
       </button>
     </div>
   </div>
@@ -545,6 +563,10 @@
   .seq-copy-btn:hover {
     color: var(--text-primary);
     border-color: var(--border-strong);
+  }
+  .seq-copy-btn.copy-failed {
+    color: var(--err-strong, #dc2626);
+    border-color: var(--err-border, #ef4444);
   }
 
   .seq-toolbar {

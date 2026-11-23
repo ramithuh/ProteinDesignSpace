@@ -52,6 +52,7 @@
     onFocusSingle: (nodeId: string) => void;
     onRunUpToNode?: (nodeId: string) => void;
     onDownloadText?: (text: string, filename: string) => void;
+    onNotify?: (message: string, tone?: 'ok' | 'error') => void;
     onExitCompare: () => void;
   }
 
@@ -71,6 +72,7 @@
     onFocusSingle,
     onRunUpToNode = undefined,
     onDownloadText = undefined,
+    onNotify = undefined,
     onExitCompare,
   }: Props = $props();
 
@@ -147,17 +149,25 @@
 
   function handleExportJoinedCsv() {
     if (!onDownloadText || comparison.pairedCandidates.length === 0) return;
-    const completeRowCount = comparison.pairedCandidates.filter(
-      (r) => r.missingBranchIds.length === 0,
-    ).length;
-    const csv = exportJoinedCollectionCsv({
-      keys: comparison.candidateKeys,
-      branchIds: branches.map((b) => b.nodeId),
-      rows: comparison.pairedCandidates,
-      completeRowCount,
-      partialRowCount: comparison.pairedCandidates.length - completeRowCount,
-    });
-    onDownloadText(csv, 'denovo_compare_joined.csv');
+    try {
+      const completeRowCount = comparison.pairedCandidates.filter(
+        (r) => r.missingBranchIds.length === 0,
+      ).length;
+      const csv = exportJoinedCollectionCsv({
+        keys: comparison.candidateKeys,
+        branchIds: branches.map((b) => b.nodeId),
+        rows: comparison.pairedCandidates,
+        completeRowCount,
+        partialRowCount: comparison.pairedCandidates.length - completeRowCount,
+      });
+      onDownloadText(csv, 'denovo_compare_joined.csv');
+      onNotify?.('Exported joined comparison CSV', 'ok');
+    } catch (err) {
+      onNotify?.(
+        `Failed to export comparison CSV: ${err instanceof Error ? err.message : String(err)}`,
+        'error',
+      );
+    }
   }
 
   // Best-value highlights per metric row (strictly finite-guarded to avoid NaN/Infinity)
@@ -893,7 +903,7 @@
   {/if}
 
   <p class="cmp-tip">
-    Hold <kbd>⌘</kbd>/<kbd>Ctrl</kbd> or <kbd>Shift</kbd> while clicking blocks on the canvas to add/remove up to 4 blocks.
+    Hold <kbd>⌘</kbd>/<kbd>Ctrl</kbd> or <kbd>Shift</kbd> while clicking blocks on the canvas to add/remove up to 6 blocks.
   </p>
 </div>
 

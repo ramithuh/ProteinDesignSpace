@@ -19,10 +19,13 @@ describe('M3 UI & QA regressions (Svelte 5 AST parse, pure validation, and sourc
       'src/lib/ui/NumericInput.svelte',
       'src/lib/ui/SchemaParamFields.svelte',
       'src/lib/ui/NodeInspector.svelte',
+      'src/lib/ui/NodeStudioPopover.svelte',
+      'src/lib/ui/SequenceEditor.svelte',
       'src/lib/ui/ProteinNode.svelte',
       'src/lib/ui/ArtifactPeekPanel.svelte',
       'src/lib/ui/ComparePeekPanel.svelte',
       'src/lib/viewer/MolSuperposeViewer.svelte',
+      'src/lib/viewer/MutationHeatmap.svelte',
       'src/routes/+page.svelte',
     ];
     for (const rel of components) {
@@ -181,5 +184,91 @@ describe('M3 UI & QA regressions (Svelte 5 AST parse, pure validation, and sourc
     expect(pageSrc).toContain('hasNoTaskParams');
     expect(pageSrc).toMatch(/<button[^>]*role="menuitem"[^>]*>[\s\S]*?Import JSON \/ YAML/);
     expect(pageSrc).toMatch(/onChangePairingMode=\{\(mode\) => \{\s*comparePairingMode = mode;\s*branchCandidateIdx = \{\};/);
+  });
+
+  it('Wave 1D (WF-01/WF-03/WF-04/WF-10): unambiguous 1-to-1 auto-commit, synchronous benchmark seeding, preset defaults & inspector chips', () => {
+    const canvasSrc = readSrc('src/lib/ui/WorkflowCanvas.svelte');
+    expect(canvasSrc).toContain('!autoCommitProposed && nextProposals.length === 1');
+    expect(canvasSrc).toContain('committedGraph = { ...nextGraph, edges: [...filteredEdges, singleEdge] }');
+
+    const pageSrc = readSrc('src/routes/+page.svelte');
+    expect(pageSrc).toContain('reconcileBenchmarkSeeding');
+    expect(pageSrc).toContain('function mergeAdapterDefaults');
+    expect(pageSrc).toMatch(/function handleGraphChange[\s\S]*?reconcileBenchmarkSeeding\(next\)/);
+    expect(pageSrc).toMatch(/function updateNodeParams[\s\S]*?reconcileBenchmarkSeeding\(rawNextGraph\)/);
+    expect(pageSrc).toMatch(/function selectPreset[\s\S]*?mergeAdapterDefaults/);
+    expect(pageSrc).toContain('upstreamBenchmarkId={selectedUpstreamBenchmarkId}');
+
+    const inspectorSrc = readSrc('src/lib/ui/NodeInspector.svelte');
+    expect(inspectorSrc).toContain('detectQuickPdbBenchmarkMatch');
+    expect(inspectorSrc).toContain('buildBenchmarkPdbParams');
+    expect(inspectorSrc).toContain('Apply {quickBenchMatch.shortLabel} benchmark');
+    expect(inspectorSrc).toContain('Synced from ${benchmarkSyncInfo.benchLabel}');
+    expect(inspectorSrc).toContain('↺ Reset to benchmark');
+    expect(inspectorSrc).toContain('handleResetToBenchmark');
+  });
+
+  it('Wave 1D (UX-01/UX-02/UX-03/UX-08): top-most Escape router, Space interactive guard, stale URL hash cleanup & 2-click clear confirms', () => {
+    const pageSrc = readSrc('src/routes/+page.svelte');
+    expect(pageSrc).toContain('function isInteractiveOrEditableElement');
+    expect(pageSrc).toContain('!isInteractiveOrEditableElement(ev.target)');
+    expect(pageSrc).toContain("document.querySelector('.mc-backdrop')");
+    expect(pageSrc).toMatch(/if \(pendingRun\) \{\s*ev\.preventDefault\(\);\s*cancelPendingRun\(\);\s*return;\s*\}/);
+    expect(pageSrc).toMatch(/if \(showExamplesGallery\) \{\s*ev\.preventDefault\(\);\s*showExamplesGallery = false;\s*return;\s*\}/);
+    expect(pageSrc).toContain('function clearStaleUrlHash()');
+    expect(pageSrc).toMatch(/function selectPreset[\s\S]*?clearStaleUrlHash\(\)/);
+    expect(pageSrc).toMatch(/async function selectPaperInsight[\s\S]*?clearStaleUrlHash\(\)/);
+    expect(pageSrc).toMatch(/function loadFullWorkflowGraph[\s\S]*?if \(!opts\?\.preserveHash\)/);
+    expect(pageSrc).toContain('preserveHash: true');
+    expect(pageSrc).toContain('brandClearConfirmPending');
+    expect(pageSrc).toContain('handleBrandLogoClick');
+    expect(pageSrc).toContain('cacheClearConfirmPending');
+    expect(pageSrc).toContain('handleClearCacheClick');
+
+    const canvasSrc = readSrc('src/lib/ui/WorkflowCanvas.svelte');
+    expect(canvasSrc).toContain('.mc-backdrop');
+    expect(canvasSrc).toContain('.gal-backdrop');
+    expect(canvasSrc).toContain('.pw-coach');
+    expect(canvasSrc).toMatch(/if \(catalogOpen\) \{\s*ev\.preventDefault\(\);\s*catalogOpen = false;\s*return;\s*\}/);
+    expect(canvasSrc).toMatch(/if \(wireLegendOpen\) \{\s*ev\.preventDefault\(\);\s*wireLegendOpen = false;\s*return;\s*\}/);
+  });
+
+  it('Wave 1D (UX-05/UX-06/UX-07/UX-09/UX-10): unified toast/banner spine, honest action feedback, split Mol* style/PNG, Studio click isolation & 6-block compare cap', () => {
+    const pageSrc = readSrc('src/routes/+page.svelte');
+    expect(pageSrc).toContain('canvas-top-spine');
+    expect(pageSrc).toContain('appliedDraftNotice');
+    expect(pageSrc).toContain('handleStudioInputResidueClick');
+    expect(pageSrc).toContain('studioInputViewerActive\n                ? handleStudioInputResidueClick\n                : handleResidueClick');
+    expect(pageSrc).toContain('onActiveBrushChange={(brush) => (studioActiveBrush = brush)}');
+    expect(pageSrc).toMatch(/async function freeVram[\s\S]*?catch \(err\)[\s\S]*?showToastMessage/);
+    expect(pageSrc).toMatch(/async function handleClearCache[\s\S]*?catch \(err\)[\s\S]*?showToastMessage/);
+
+    const canvasSrc = readSrc('src/lib/ui/WorkflowCanvas.svelte');
+    expect(canvasSrc).not.toContain('class="toast"');
+    expect(canvasSrc).not.toContain('class="ai-draft-warning');
+    expect(canvasSrc).toContain('cur.length >= 6');
+    expect(canvasSrc).toContain('Compare mode supports up to 6 blocks at once');
+
+    const cmpSrc = readSrc('src/lib/ui/ComparePeekPanel.svelte');
+    expect(cmpSrc).toContain('up to 6 blocks.');
+    expect(cmpSrc).not.toContain('up to 4 blocks.');
+
+    const molSrc = readSrc('src/lib/viewer/MolSuperposeViewer.svelte');
+    expect(molSrc).not.toContain('{#if expanded && hasAnyStructure}');
+    expect(molSrc).toContain('{#if hasAnyStructure}');
+    expect(molSrc).toContain('PNG failed');
+    expect(molSrc).toContain('onNotify?.(');
+
+    const seqSrc = readSrc('src/lib/ui/SequenceEditor.svelte');
+    expect(seqSrc).toContain('Copy failed');
+    expect(seqSrc).toContain('onNotify?.(');
+
+    const heatmapSrc = readSrc('src/lib/viewer/MutationHeatmap.svelte');
+    expect(heatmapSrc).toContain('Copy failed');
+    expect(heatmapSrc).toContain('onNotify?.(');
+
+    const studioSrc = readSrc('src/lib/ui/NodeStudioPopover.svelte');
+    expect(studioSrc).toContain('Copy failed');
+    expect(studioSrc).toContain('onActiveBrushChange?.(activeBrush)');
   });
 });

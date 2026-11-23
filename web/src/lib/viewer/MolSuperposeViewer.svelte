@@ -54,6 +54,7 @@
     }) => void;
     onToggleModelVisibility?: (modelId: string) => void;
     onSoloModel?: (modelId: string) => void;
+    onNotify?: (message: string, tone?: 'ok' | 'error') => void;
   }
 
   let {
@@ -84,6 +85,7 @@
     onResidueClick = undefined,
     onToggleModelVisibility = undefined,
     onSoloModel = undefined,
+    onNotify = undefined,
   }: Props = $props();
 
   let containerEl: HTMLDivElement | null = $state(null);
@@ -186,7 +188,33 @@
     | 'sequence-id'
     | 'element-symbol';
 
-  let styleMenuOpen = $state(typeof window !== 'undefined' ? window.innerWidth >= 640 : true);
+  let styleMenuWrapEl: HTMLDivElement | null = $state(null);
+  let styleMenuOpen = $state(false);
+  let lastExpandedState: boolean | null = null;
+  let pngStatus = $state<'idle' | 'saved' | 'failed'>('idle');
+  let pngStatusTimer: ReturnType<typeof setTimeout> | null = null;
+
+  $effect(() => {
+    const exp = expanded;
+    if (lastExpandedState === exp) return;
+    lastExpandedState = exp;
+    styleMenuOpen = exp && (typeof window !== 'undefined' ? window.innerWidth >= 640 : true);
+  });
+
+  // In compact split view, close the floating style popover on click-outside
+  $effect(() => {
+    if (expanded || !styleMenuOpen || typeof window === 'undefined') return;
+    function handleOutsidePointerDown(ev: PointerEvent) {
+      const target = ev.target;
+      if (!(target instanceof globalThis.Node)) return;
+      if (styleMenuWrapEl?.contains(target)) return;
+      styleMenuOpen = false;
+    }
+    window.addEventListener('pointerdown', handleOutsidePointerDown, true);
+    return () => {
+      window.removeEventListener('pointerdown', handleOutsidePointerDown, true);
+    };
+  });
   let repType = $state<PolymerRepType>('cartoon');
   let colorScheme = $state<ColorSchemeOption>('auto');
   let showSidechains = $state(false);
@@ -354,8 +382,21 @@
     resetViewerCamera(plugin, canonicalCamera);
   }
 
+  function flashPngStatus(status: 'saved' | 'failed') {
+    pngStatus = status;
+    if (pngStatusTimer) clearTimeout(pngStatusTimer);
+    pngStatusTimer = setTimeout(() => {
+      pngStatus = 'idle';
+      pngStatusTimer = null;
+    }, status === 'failed' ? 2400 : 1600);
+  }
+
   async function handleSavePng() {
-    if (!canvasEl || !plugin || initError || webglFailed) return;
+    if (!canvasEl || !plugin || initError || webglFailed) {
+      flashPngStatus('failed');
+      onNotify?.('Could not export PNG — 3D WebGL viewer is unavailable.', 'error');
+      return;
+    }
     try {
       let url: string | null = null;
       if (plugin.helpers?.viewportScreenshot?.getImageDataUri) {
@@ -371,13 +412,24 @@
         plugin.canvas3d?.tick?.(performance.now(), { isSynchronous: true, manualDraw: true });
         url = canvasEl.toDataURL('image/png');
       }
-      if (!url) return;
+      if (!url) {
+        flashPngStatus('failed');
+        onNotify?.('Could not capture 3D PNG screenshot from WebGL canvas.', 'error');
+        return;
+      }
+      const filename = `${(label || 'structure').replace(/[^a-z0-9._-]+/gi, '_').slice(0, 48)}.png`;
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${(label || 'structure').replace(/[^a-z0-9._-]+/gi, '_').slice(0, 48)}.png`;
+      a.download = filename;
       a.click();
-    } catch {
-      /* ignore if canvas cannot export */
+      flashPngStatus('saved');
+      onNotify?.(`Saved 3D screenshot (${filename})`, 'ok');
+    } catch (err) {
+      flashPngStatus('failed');
+      onNotify?.(
+        `Could not export 3D PNG screenshot: ${err instanceof Error ? err.message : 'canvas export failed'}`,
+        'error',
+      );
     }
   }
 
@@ -1788,6 +1840,7 @@
   onDestroy(() => {
     destroyed = true;
     loadSeq++;
+    if (pngStatusTimer) clearTimeout(pngStatusTimer);
     try {
       plugin?.dispose();
     } catch {
@@ -1799,7 +1852,7 @@
 
 <div class="mol-card" style="height: {typeof height === 'number' ? `${height}px` : height}">
   {#if label || (atomGranularity === 'ca-only' && hasAnyStructure) || (showSemanticBfactorLegend && models && models.length > 0)}
-    <div class="hud-top-left" class:has-style-menu={expanded && hasAnyStructure}>
+    <div class="hud-top-left" class:has-style-menu={hasAnyStructure}>
       {#if label}
         <div class="badge" title={label}>{label}</div>
       {/if}
@@ -1837,16 +1890,17 @@
       {/if}
     </div>
   {/if}
-  {#if expanded && hasAnyStructure}
-    <div class="style-menu-wrap">
+  {#if hasAnyStructure}
+    <div class="style-menu-wrap" bind:this={styleMenuWrapEl}>
       <button
         type="button"
         class="style-toggle-btn"
         class:active={styleMenuOpen}
         onclick={() => (styleMenuOpen = !styleMenuOpen)}
-        title="Toggle structure representation & view controls"
+        title="Toggle structure representation, view & PNG export controls"
+        aria-expanded={styleMenuOpen}
       >
-        ⚙ Representation {styleMenuOpen ? '▾' : '▸'}
+        ⚙ {expanded ? 'Representation' : 'Style'} {styleMenuOpen ? '▾' : '▸'}
       </button>
       {#if styleMenuOpen}
         <div class="style-panel" role="region" aria-label="Structure representation controls">
@@ -1920,11 +1974,12 @@
             </button>
             <button
               type="button"
+              class:is-failed={pngStatus === 'failed'}
               disabled={!plugin || Boolean(initError)}
-              onclick={handleSavePng}
+              onclick={() => void handleSavePng()}
               title={!plugin || initError ? '3D viewer unavailable' : 'Download PNG screenshot'}
             >
-              📷 PNG
+              {pngStatus === 'saved' ? '✓ Saved' : pngStatus === 'failed' ? 'PNG failed' : '📷 PNG'}
             </button>
             <button type="button" onclick={resetStyleControls} title="Restore default style">
               ↺ Default
@@ -2443,6 +2498,10 @@
   .sp-actions button:disabled {
     opacity: 0.45;
     cursor: not-allowed;
+  }
+  .sp-actions button.is-failed {
+    border-color: var(--err-border);
+    color: var(--err-strong);
   }
   @media (max-width: 640px) {
     .hud-top-left.has-style-menu {
