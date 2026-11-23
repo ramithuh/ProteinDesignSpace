@@ -32,6 +32,7 @@ const ADAPTER_TO_SHORT: Record<string, string> = {
   thermompnn: 'tm',
   esmc: 'ec',
   dyna1: 'dy',
+  gnina: 'gn',
   'top-k-filter': 'tk',
   'designability-scorer': 's',
   'structure-compare': 'c',

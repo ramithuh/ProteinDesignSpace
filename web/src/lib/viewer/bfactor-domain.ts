@@ -139,6 +139,21 @@ export function resolveUncertaintyColorArgFromValues(
     return { color: 'uncertainty', colorParams: { domain: [hi, lo] } };
   }
 
+  if (semantics === 'gnina-contrib') {
+    // GNINA 1.3 pocket residue ablation ΔCNN_VS:
+    // Positive values = favorable receptor contact (removing residue drops CNN_VS);
+    // Negative values = steric clash / unfavorable contact (removing residue raises CNN_VS);
+    // 0 = non-pocket / neutral residue.
+    // Symmetric reversed domain [+lim, -lim] maps favorable -> blue, neutral -> white, clash -> red.
+    let absMax = 0;
+    for (let i = 0; i < finite.length; i++) {
+      const a = Math.abs(finite[i]);
+      if (a <= 20 && a > absMax) absMax = a;
+    }
+    const lim = Math.max(0.25, Math.min(4.0, absMax > 0 ? absMax : 0.5));
+    return { color: 'uncertainty', colorParams: { domain: [lim, -lim] } };
+  }
+
   // 'crystal-b' or undefined: fit observed domain when non-constant
   if (max > min) {
     return { color: 'uncertainty', colorParams: { domain: [min, max] } };

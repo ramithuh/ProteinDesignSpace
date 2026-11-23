@@ -118,6 +118,10 @@
         return `${art.sequence.length} aa · ${art.dim}d`;
       }
       if (art.kind === 'StructureArtifact') {
+        if (art.dockingMetrics?.rows?.[0]) {
+          const r = art.dockingMetrics.rows[0];
+          return `CNN ${r.cnnScore.toFixed(2)} · pK ${r.cnnAffinity.toFixed(2)} · Vina ${r.vinaScore.toFixed(1)}`;
+        }
         const ligNames = art.diagnostics?.ligandNames ?? [];
         const naChains = art.diagnostics?.nucleicAcidChains ?? [];
         if (art.length === 0) {

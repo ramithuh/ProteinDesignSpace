@@ -144,6 +144,9 @@
     if (sem === 'llr-fitness') {
       return `${h.bFactor >= 0 ? '+' : ''}${h.bFactor.toFixed(2)} LLR`;
     }
+    if (sem === 'gnina-contrib') {
+      return `${h.bFactor >= 0 ? '+' : ''}${h.bFactor.toFixed(2)} ΔCNN_VS`;
+    }
     if (sem === 'plddt') return `pLDDT ${h.bFactor.toFixed(1)}`;
     return null;
   });
@@ -254,6 +257,7 @@
   let isSemanticBfactor = $derived(
     bfactorSemantics === 'dynamics-prob' ||
       bfactorSemantics === 'ddg-stability' ||
+      bfactorSemantics === 'gnina-contrib' ||
       (bfactorSemantics as string) === 'llr-fitness',
   );
   let plddtAllowed = $derived(
@@ -1016,6 +1020,7 @@
         const hasOverlay = Boolean(sDesigned && dPdb && sRefold && rPdb && !useTraj);
         const useSemanticUncertainty =
           styleOpts.bfactorSemantics === 'dynamics-prob' ||
+          styleOpts.bfactorSemantics === 'gnina-contrib' ||
           styleOpts.bfactorSemantics === 'ddg-stability' ||
           (styleOpts.bfactorSemantics as string) === 'llr-fitness';
 
@@ -1320,6 +1325,7 @@
 
         const useSemanticUncertainty =
           styleOpts.bfactorSemantics === 'dynamics-prob' ||
+          styleOpts.bfactorSemantics === 'gnina-contrib' ||
           styleOpts.bfactorSemantics === 'ddg-stability' ||
           (styleOpts.bfactorSemantics as string) === 'llr-fitness';
 
@@ -1909,6 +1915,10 @@
             <span>Deleterious</span>
             <span class="bfactor-grad is-reversed" aria-hidden="true"></span>
             <span>Beneficial (LLR)</span>
+          {:else if bfactorSemantics === 'gnina-contrib'}
+            <span>Unfavorable</span>
+            <span class="bfactor-grad is-reversed" aria-hidden="true"></span>
+            <span>Favorable (ΔCNN_VS)</span>
           {:else}
             <span>Stabilizing</span>
             <span class="bfactor-grad" aria-hidden="true"></span>
@@ -2070,6 +2080,10 @@
         <span>Deleterious</span>
         <span class="bfactor-grad is-reversed" aria-hidden="true"></span>
         <span>Beneficial (LLR)</span>
+      {:else if bfactorSemantics === 'gnina-contrib'}
+        <span>Unfavorable</span>
+        <span class="bfactor-grad is-reversed" aria-hidden="true"></span>
+        <span>Favorable (ΔCNN_VS)</span>
       {:else}
         <span>Stabilizing</span>
         <span class="bfactor-grad" aria-hidden="true"></span>

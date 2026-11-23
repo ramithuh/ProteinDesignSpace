@@ -13,6 +13,7 @@ import {
   parseResidueRangeTokens,
 } from './conditioning';
 import {
+  classifyHetatmCompId,
   evaluateProteinOnlyStructurePolicy,
   inspectUnprotonatedOrganicLigands,
 } from '$lib/protein-ops/hetatm-policy';
@@ -1812,7 +1813,8 @@ export function validateBioCapabilities(
       node.adapterId === 'ligandmpnn' ||
       node.adapterId === 'lasermpnn' ||
       node.adapterId === 'antifold-esmif1' ||
-      node.adapterId === 'thermompnn';
+      node.adapterId === 'thermompnn' ||
+      node.adapterId === 'gnina';
 
     if (isFullBackboneConsumer) {
       const edge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
@@ -2321,6 +2323,73 @@ export function validateBioCapabilities(
       }
     }
 
+    // GNINA 1.3: requires a wired all-atom structure and either a holo organic ligand or pasted SDF/MOL2
+    if (node.adapterId === 'gnina') {
+      const structEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
+      const hasExternalLig = String(node.params.ligandSdf ?? '').trim().length > 0;
+      const requestedCode = String(node.params.ligandCode ?? '').trim().toUpperCase();
+      if (!structEdge) {
+        issues.push({
+          severity: 'error',
+          code: 'gnina-missing-input',
+          nodeId: node.id,
+          message: `${node.label ?? 'GNINA 1.3'} requires a wired "structure" input (holo protein–ligand complex or receptor).`,
+        });
+      } else if (!hasExternalLig) {
+        const src = graph.nodes.find((n) => n.id === structEdge.fromNode);
+        if (src) {
+          const liveStruct = outputsByNode?.[src.id]?.[structEdge.fromPort] as StructureArtifact | undefined;
+          let ligandNames: string[] | null = null;
+          let knownApo = false;
+          if (liveStruct?.diagnostics) {
+            ligandNames = liveStruct.diagnostics.ligandNames ?? [];
+            knownApo = true;
+          } else if (src.adapterId === 'pdb-input') {
+            const rawText = String(src.params.pdbText ?? '').trim();
+            if (rawText) {
+              try {
+                ligandNames = getCachedStructureBioSummary(rawText).diagnostics.ligandNames;
+                knownApo = true;
+              } catch {
+                ligandNames = null;
+              }
+            } else if (String(src.params.mode ?? 'demo-bundle') === 'demo-bundle') {
+              ligandNames = [];
+              knownApo = true;
+            }
+          } else {
+            const up = inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
+            if (!up.entities.has('ligand')) {
+              ligandNames = [];
+              knownApo = true;
+            }
+          }
+          if (knownApo && ligandNames !== null) {
+            const organic = ligandNames.filter((c) => classifyHetatmCompId(c) === 'organic-ligand');
+            if (organic.length === 0) {
+              issues.push({
+                severity: 'error',
+                code: 'gnina-no-organic-ligand',
+                nodeId: node.id,
+                message: `${node.label ?? 'GNINA 1.3'} found no organic small-molecule ligand in "${src.label ?? src.id}"${ligandNames.length > 0 ? ` (only ${ligandNames.join(', ')})` : ''}. Wire a holo protein–ligand complex (e.g. 1STP, 1CTT, 184L) or paste a ligand SDF/MOL2 in Advanced parameters.`,
+              });
+            } else if (
+              requestedCode &&
+              !requestedCode.includes(':') &&
+              !organic.some((c) => c.toUpperCase() === requestedCode)
+            ) {
+              issues.push({
+                severity: 'warning',
+                code: 'gnina-ligand-code-mismatch',
+                nodeId: node.id,
+                message: `${node.label ?? 'GNINA 1.3'} target ligand "${requestedCode}" was not found in "${src.label ?? src.id}" (detected organic ligands: ${organic.join(', ')}).`,
+              });
+            }
+          }
+        }
+      }
+    }
+
     if (node.adapterId === 'localfold-af2') {
       const edge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'sequences');
       const src = edge ? graph.nodes.find((n) => n.id === edge.fromNode) : null;
@@ -2631,7 +2700,8 @@ export function validateRuntimeNodeInputs(
     node.adapterId === 'ligandmpnn' ||
     node.adapterId === 'lasermpnn' ||
     node.adapterId === 'antifold-esmif1' ||
-    node.adapterId === 'thermompnn'
+    node.adapterId === 'thermompnn' ||
+    node.adapterId === 'gnina'
   ) {
     const struct = inputs.structure as StructureArtifact | undefined;
     if (struct) {

@@ -60,6 +60,7 @@ export const HOSTED_PORT_CARD_IDS = [
   'genie2-webgpu',
   'frameflow-webgpu',
   'foldflow2-webgpu',
+  'gnina-webgpu',
 ] as const;
 
 interface LocalFoldCheckpointMeta {
@@ -833,6 +834,72 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
       'Outputs prior-corrected conformational exchange probabilities and classifier logits, not calibrated physical exchange rates (s⁻¹).',
       'FP16 mixed keeps classifier blocks 0–1 in FP32 (+62.9 MB) because pure FP16 exceeded the 5e-4 logit/probability relRMS gate.',
       'Parity and latency were measured on Trp-cage (20 aa) and ubiquitin (76 aa), not across every accepted sequence length; INT8 GPU weight buffers require ~844 MB.',
+    ],
+  },
+
+  'gnina-webgpu': {
+    id: 'gnina-webgpu',
+    adapterId: 'gnina',
+    displayName: 'GNINA 1.3',
+    status: 'live',
+    activePrecisionId: 'fp16',
+    precisions: [
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'Full 3-model default GNINA 1.3 3D CNN ensemble (dense_1.3, dense_1.3_PT_KD_3, crossdock_default2018_KD_4; 1,765,065 params, 178 tensors in 1 shard, 3.58 MB; F16 conv/FC weights with F32 accumulation)',
+        approxSizeMB: 4,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU 3D CNN ensemble output relRMS vs Python FP32 reference',
+          value: '1.03e-6 (184L native) · 9.17e-7 (10GS native) · 5.00e-6..1.77e-5 (decoys)',
+          maxAbsDiff: 'CNNscore native 0.900 vs decoy 0.075 (184L) · 0.967 vs 0.022 (10GS)',
+          scope: '48×48×48×28 Gaussian atom-density gridding (0.5 Å) + all 3 ensemble CNNs on 184L & 10GS native/decoy poses',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 153 (Dawn Vulkan)',
+        },
+        latencyHint: '64.2–66.3 ms warm (3-model ensemble)',
+      },
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Symmetric per-output-row I8 weights + colocated F32 scales across all 3 GNINA 1.3 ensemble models (1 shard, 1.84 MB; 1.81 MB resident VRAM)',
+        approxSizeMB: 2,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU 3D CNN ensemble output relRMS vs Python FP32 reference',
+          value: '2.17e-6 (184L native) · 1.08e-6 (10GS native) · 2.13e-5..4.45e-5 (decoys)',
+          scope: 'All 3 ensemble CNNs on 184L & 10GS native and perturbed decoy poses',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 153 (Dawn Vulkan)',
+        },
+        latencyHint: '61.1–67.0 ms warm (3-model ensemble)',
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Full 3-model default GNINA 1.3 ensemble in F32 (1 shard, 7.08 MB; 7.06 MB resident VRAM, 72.15 MB peak VRAM)',
+        approxSizeMB: 7,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU 3D CNN ensemble output relRMS vs Python FP32 reference',
+          value: '2.31e-6 (184L native) · 6.53e-7 (10GS native) · 1.53e-5..2.51e-5 (decoys)',
+          scope: 'All 3 ensemble CNNs + 3D Gaussian gridding (grid relRMS 1.72e-7..1.35e-6)',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 153 (Dawn Vulkan)',
+        },
+        latencyHint: '65.8–68.9 ms warm (3-model ensemble)',
+      },
+    ],
+    upstreamRepo: 'https://github.com/gnina/gnina',
+    upstreamCommit: '97fa6bcc465d62b40d87ccc85d3c53e9921a7cc0',
+    weightsRepo: 'https://huggingface.co/ramithuh/gnina-webgpu',
+    weightsRevision: 'a08e4c569af1',
+    license: 'Dual Apache-2.0 / GPLv2 (gnina/gnina 1.3 · WebGPU port ramithuh/gnina-webgpu)',
+    citation:
+      'McNutt, Li, Meli, Aggarwal & Koes (2025) GNINA 1.3: the next increment in molecular docking with deep learning, Journal of Cheminformatics 17, 28.',
+    limitations: [
+      'Scores existing 3D protein–ligand poses (holo PDB/mmCIF or pasted SDF/MOL2) and performs rigid-body CNN+Vina minimization; full global flexible-torsion Monte Carlo docking search is not included.',
+      'Receptor grids cover a 24 Å × 24 Å × 24 Å box (48³ voxels at 0.5 Å) centered on the ligand centroid; atoms outside the box do not enter the CNN grid.',
+      'When extracting a ligand from a PDB/mmCIF HETATM block lacking explicit bond orders, aromatic rings and carbonyls are inferred geometrically — pasting an explicit SDF/MOL2 gives exact chemistry.',
+      'Water/buffer HETATMs are excluded automatically while monoatomic catalytic metals (e.g. ZN, MG, FE) are kept in the receptor by default.',
     ],
   },
 

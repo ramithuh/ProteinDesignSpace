@@ -20,6 +20,7 @@ const PASSTHROUGH_STRUCTURE_ADAPTERS = new Set([
   'lasermpnn',
   'thermompnn',
   'dyna1',
+  'gnina',
 ]);
 
 export interface UpstreamLockSummary {
@@ -298,6 +299,21 @@ export function formatNodeParamSummary(
               ? 'Struct-only'
               : 'Auto (Seq+Struct)';
       return `${modeLbl} · ${prec}`;
+    }
+    case 'gnina': {
+      const tm = String(p.taskMode ?? 'score');
+      const prec = String(p.precision ?? 'fp16').toUpperCase();
+      const lig = String(p.ligandCode ?? '').trim().toUpperCase();
+      const ligTag = lig ? ` · ${lig}` : '';
+      if (tm === 'pocket-scan') {
+        const rad = num(p.pocketRadius, 5.0);
+        return `Pocket Scan (${rad} Å)${ligTag} · ${prec}`;
+      }
+      if (tm === 'minimize') {
+        const iters = num(p.minimizeIterations, 4);
+        return `Minimize (${iters} iters)${ligTag} · ${prec}`;
+      }
+      return `Score Pose${ligTag} · ${prec}`;
     }
     case 'thermompnn': {
       const chain = String(p.chain ?? '').trim();

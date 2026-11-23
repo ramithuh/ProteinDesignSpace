@@ -56,11 +56,11 @@ describe('engine/catalog & biologist terminology', () => {
     }
   });
 
-  it('organizes all 25 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, AntiFold/ESM-IF1, ProtPardelle-1c, RFdiffusion, BoltzGen-1, EvoDiff-38M, La-Proteina, Proteina, SiD-Protein, Genie 2, FrameFlow, FoldFlow 2, ESM-C 300M, Dyna-1, and 3D Superpose / Compare', () => {
+  it('organizes all 26 blocks into workflow groups with structured sub-items for LocalFold, ProteinMPNN, AntiFold/ESM-IF1, ProtPardelle-1c, RFdiffusion, BoltzGen-1, EvoDiff-38M, La-Proteina, Proteina, SiD-Protein, Genie 2, FrameFlow, FoldFlow 2, ESM-C 300M, Dyna-1, GNINA 1.3, and 3D Superpose / Compare', () => {
     const groupedIds = CATALOG_STAGE_GROUPS.flatMap((g) => g.ids);
     expect(new Set(groupedIds)).toEqual(new Set(Object.keys(ADAPTER_REGISTRY)));
     expect(CATALOG_ITEMS).toHaveLength(Object.keys(ADAPTER_REGISTRY).length);
-    expect(CATALOG_ITEMS).toHaveLength(25);
+    expect(CATALOG_ITEMS).toHaveLength(26);
     expect(ADAPTER_REGISTRY['structure-compare']).toBeDefined();
     expect(ADAPTER_REGISTRY.rfdiffusion).toBeDefined();
     expect(ADAPTER_REGISTRY.boltzgen).toBeDefined();
@@ -218,6 +218,7 @@ describe('engine/catalog & biologist terminology', () => {
       'thermompnn',
       'esmc',
       'dyna1',
+      'gnina',
     ]);
 
     const evalCat = CATALOG_CATEGORIES.find((c) => c.id === 'evaluation')!;

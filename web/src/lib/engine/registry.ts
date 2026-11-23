@@ -2978,6 +2978,164 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       return errs;
     },
   },
+  gnina: {
+    id: 'gnina',
+    displayName: 'GNINA 1.3 (Ligand Docking & Affinity)',
+    shortName: 'GNINA 1.3',
+    stage: 'score',
+    runtime: 'wgsl-custom',
+    estimatedVramMB: 96,
+    approxWeightsMB: 4,
+    precisionWeightsMB: { int8: 2, fp16: 4, fp32: 7 },
+    licenseNote: 'Apache-2.0 / GPLv2 (gnina/gnina 1.3 · WebGPU port ramithuh/gnina-webgpu)',
+    description:
+      'Pure-WebGPU 3D CNN protein–ligand docking scorer & rigid-body pose optimizer (full 3-model default GNINA 1.3 ensemble: dense_1.3, dense_1.3_PT_KD_3, crossdock_default2018_KD_4 + Vina energy decomposition). Supports holo PDB/mmCIF complexes or pasted SDF/MOL2 ligand poses, pocket residue ablation scans (ΔCNN_VS painted onto 3D pocket & residue track), and rigid-body pose minimization.',
+    inputs: {
+      structure: { type: 'StructureArtifact' },
+    },
+    outputs: {
+      structure: { type: 'StructureArtifact' },
+      track: { type: 'ResidueTrack', required: false },
+    },
+    modeParamKey: 'taskMode',
+    modes: [
+      {
+        id: 'score',
+        label: 'Score Pose',
+        description:
+          'Score holo ligand (or pasted SDF/MOL2 poses) with the 3-model GNINA 1.3 CNN ensemble (CNNscore, CNNaffinity pK, CNN_VS) + Vina energy breakdown (~65 ms warm).',
+        requiredInputs: ['structure'],
+      },
+      {
+        id: 'pocket-scan',
+        label: 'Pocket Contribution Scan',
+        description:
+          'Per-residue CNN ablation (ΔCNN_VS) across binding-pocket residues within pocketRadius Å — paints favorable/unfavorable contacts onto 3D B-factors and emits a ResidueTrack.',
+        requiredInputs: ['structure'],
+      },
+      {
+        id: 'minimize',
+        label: 'Minimize Pose',
+        description:
+          'Rigid-body pose optimization minimizing Vina − cnnWeight·log(CNNscore) and emitting the refined holo 3D complex with before→after score deltas.',
+        requiredInputs: ['structure'],
+      },
+    ],
+    paramSchema: [
+      {
+        key: 'taskMode',
+        label: 'Task Mode',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'score',
+        options: [
+          { value: 'score', label: 'Score Pose (CNN + Vina · ~65 ms)' },
+          { value: 'pocket-scan', label: 'Pocket Contribution Scan (ΔCNN_VS)' },
+          { value: 'minimize', label: 'Minimize Pose (Rigid-body refinement)' },
+        ],
+        description:
+          'Choose fast ensemble scoring, binding-pocket residue CNN ablation mapping, or rigid-body CNN+Vina pose minimization.',
+      },
+      {
+        key: 'precision',
+        label: 'Weight Precision',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'fp16',
+        options: [
+          { value: 'fp16', label: 'FP16 (default · 3.6 MB · relRMS ~1e-6)' },
+          { value: 'int8', label: 'INT8 (compact · 1.8 MB · relRMS ~1e-5)' },
+          { value: 'fp32', label: 'FP32 (reference · 7.1 MB)' },
+        ],
+        description: 'Weight precision streamed into WebGPU (all 3 ensemble models fit in a single <8 MB shard).',
+      },
+      {
+        key: 'ligandCode',
+        label: 'Target Ligand Code',
+        kind: 'text',
+        tier: 'primary',
+        defaultValue: '',
+        placeholder: 'Auto-detect (e.g. BTN, DHZ, or A:300)',
+        description:
+          'Optional CCD code (e.g. BTN, DHZ) or chain:resnum selector to pick a specific organic ligand from a multi-ligand holo structure. Leave blank to auto-select the largest organic ligand.',
+      },
+      {
+        key: 'pocketRadius',
+        label: 'Pocket Radius',
+        kind: 'number',
+        tier: 'primary',
+        modes: ['pocket-scan'],
+        defaultValue: 5.0,
+        min: 3.0,
+        max: 8.0,
+        step: 0.5,
+        unit: 'Å',
+        description: 'Heavy-atom distance cutoff around the ligand for per-residue CNN ablation.',
+      },
+      {
+        key: 'minimizeIterations',
+        label: 'Minimization Iterations',
+        kind: 'integer',
+        tier: 'primary',
+        modes: ['minimize'],
+        defaultValue: 4,
+        min: 1,
+        max: 12,
+        step: 1,
+        description: 'Number of rigid-body coordinate-descent refinement iterations (12 candidate steps per iteration).',
+      },
+      {
+        key: 'ligandSdf',
+        label: 'External Ligand (SDF / MOL2)',
+        kind: 'textarea',
+        tier: 'advanced',
+        defaultValue: '',
+        placeholder: 'Optional V2000/V3000 SDF (single or multi-pose) or MOL2 text to score against the receptor',
+        description:
+          'When provided, scores these external ligand pose(s) against the connected receptor structure instead of extracting a holo HETATM ligand.',
+      },
+      {
+        key: 'includeMetals',
+        label: 'Keep Metal Cofactors in Receptor',
+        kind: 'boolean',
+        tier: 'advanced',
+        defaultValue: true,
+        description:
+          'Retain monoatomic catalytic/structural metal ions (e.g. ZN, MG, FE, CA) in the receptor during scoring (recommended for metalloenzymes like 1CTT).',
+      },
+      {
+        key: 'maxPocketResidues',
+        label: 'Max Pocket Residues',
+        kind: 'integer',
+        tier: 'advanced',
+        modes: ['pocket-scan'],
+        defaultValue: 24,
+        min: 4,
+        max: 48,
+        step: 1,
+        description: 'Maximum closest pocket residues ablated during Pocket Contribution Scan.',
+      },
+      {
+        key: 'cnnWeight',
+        label: 'CNN Objective Weight',
+        kind: 'number',
+        tier: 'advanced',
+        modes: ['minimize'],
+        defaultValue: 1.0,
+        min: 0,
+        max: 5,
+        step: 0.25,
+        description: 'Weight w on −w·log(CNNscore) added to Vina score during rigid-body pose minimization.',
+      },
+    ],
+    crossValidate: (_p, ctx) => {
+      const errs: string[] = [];
+      if (ctx?.connectedInputs !== undefined && !ctx.connectedInputs.has('structure')) {
+        errs.push('GNINA 1.3 requires a connected "structure" input (holo complex or receptor).');
+      }
+      return errs;
+    },
+  },
   'top-k-filter': {
     id: 'top-k-filter',
     displayName: 'Sequence Filter / Top-K Ranker',

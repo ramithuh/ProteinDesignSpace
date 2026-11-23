@@ -78,7 +78,7 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
     ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1', 'evodiff'],
   },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
-  { title: 'Property Prediction', ids: ['thermompnn', 'esmc', 'dyna1'] },
+  { title: 'Property Prediction', ids: ['thermompnn', 'esmc', 'dyna1', 'gnina'] },
   { title: 'Evaluation', ids: ['top-k-filter', 'designability-scorer', 'structure-compare'] },
 ];
 
@@ -105,6 +105,7 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   thermompnn: 'Full L×20 site-saturation ΔΔG stability scan & B-factor painting',
   esmc: 'ESM-C 300M zero-shot L×20 LLR fitness heatmap, naturalness & masked fill',
   dyna1: 'Millisecond conformational exchange & flexibility prediction (ESM-3 + Dyna-1)',
+  gnina: '3D CNN protein–ligand docking score, pocket attribution & pose minimization (GNINA 1.3)',
   'top-k-filter': 'Rank and filter top-K sequences per backbone or globally before folding',
   'designability-scorer': 'Kabsch alignment, scRMSD, scTM & pLDDT pass rate',
   'structure-compare': 'Multi-model 3D Kabsch / motif overlay & pairwise RMSD',
@@ -538,6 +539,54 @@ function buildSubGroupsForAdapter(adapterId: string): {
     };
   }
 
+  if (adapterId === 'gnina') {
+    const items: CatalogSubItem[] = [
+      {
+        key: 'gnina-score',
+        label: 'GNINA 1.3 · Score Pose',
+        subtitle: '3-model 3D CNN ensemble (CNNscore, CNNaffinity pK, CNN_VS) + Vina (~65 ms)',
+        meta: '~4 MB · Apache-2.0 / GPLv2',
+        insert: {
+          adapterId: 'gnina',
+          params: { taskMode: 'score', precision: 'fp16' },
+          label: 'GNINA 1.3',
+        },
+        searchBlob:
+          'gnina gnina1.3 docking ligand affinity cnnscore cnnaffinity cnn_vs vina small molecule holo score pose'.toLowerCase(),
+      },
+      {
+        key: 'gnina-pocket-scan',
+        label: 'GNINA 1.3 · Pocket Contribution Scan',
+        subtitle: 'Per-residue CNN ablation (ΔCNN_VS) painted onto 3D binding pocket & residue track',
+        meta: '~4 MB · Apache-2.0 / GPLv2',
+        insert: {
+          adapterId: 'gnina',
+          params: { taskMode: 'pocket-scan', precision: 'fp16' },
+          label: 'GNINA 1.3 (Pocket Scan)',
+        },
+        searchBlob:
+          'gnina pocket scan ablation contribution delta cnn_vs binding site hotspot residue attribution'.toLowerCase(),
+      },
+      {
+        key: 'gnina-minimize',
+        label: 'GNINA 1.3 · Minimize Pose',
+        subtitle: 'Rigid-body pose refinement minimizing Vina − w·log(CNNscore)',
+        meta: '~4 MB · Apache-2.0 / GPLv2',
+        insert: {
+          adapterId: 'gnina',
+          params: { taskMode: 'minimize', precision: 'fp16' },
+          label: 'GNINA 1.3 (Minimize)',
+        },
+        searchBlob:
+          'gnina minimize refine optimize ligand pose rigid body docking vina cnn'.toLowerCase(),
+      },
+    ];
+    return {
+      subCountLabel: `${items.length} modes`,
+      subGroups: [{ title: 'Modes', items }],
+    };
+  }
+
   return { subGroups: [] };
 }
 
@@ -891,6 +940,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
     const th = ADAPTER_REGISTRY.thermompnn;
     const ec = ADAPTER_REGISTRY.esmc;
     const dy = ADAPTER_REGISTRY.dyna1;
+    const gn = ADAPTER_REGISTRY.gnina;
     const items: CatalogSubItem[] = [
       {
         key: 'thermompnn',
@@ -919,17 +969,26 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         searchBlob:
           `${dy.id} ${dy.shortName} ${dy.displayName} ${CONCISE_BLOCK_ROLES.dyna1} dyna1 dyna-1 dynamics flexibility exchange nmr conformational property`.toLowerCase(),
       },
+      {
+        key: 'gnina',
+        label: gn.displayName,
+        subtitle: CONCISE_BLOCK_ROLES.gnina,
+        meta: `~${gn.approxWeightsMB} MB · Apache-2.0 / GPLv2`,
+        insert: { adapterId: 'gnina', label: 'GNINA 1.3' },
+        searchBlob:
+          `${gn.id} ${gn.shortName} ${gn.displayName} ${CONCISE_BLOCK_ROLES.gnina} gnina docking ligand affinity cnnscore cnnaffinity cnn_vs vina small molecule pocket scan minimize pose property`.toLowerCase(),
+      },
     ];
-    const subGroups: CatalogSubGroup[] = [{ title: 'Stability, Fitness & Dynamics', items }];
-    const identityBlob = 'property prediction properties biophysical stability fitness dynamics flexibility ddg llr nmr';
+    const subGroups: CatalogSubGroup[] = [{ title: 'Stability, Fitness, Dynamics & Docking', items }];
+    const identityBlob = 'property prediction properties biophysical stability fitness dynamics flexibility docking ligand affinity ddg llr nmr vina cnn';
     const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
     return {
       id: 'property-prediction',
       title: 'Property Prediction',
       stage: 'score',
-      subtitle: 'ThermoMPNN (ΔΔG), ESM-C 300M (LLR) & Dyna-1 (dynamics)',
+      subtitle: 'ThermoMPNN (ΔΔG), ESM-C 300M (LLR), Dyna-1 & GNINA 1.3 (ligand)',
       countLabel: `${items.length}`,
-      footnote: 'Runs locally over WebGPU — stability, evolutionary fitness & conformational dynamics',
+      footnote: 'Runs locally over WebGPU — stability, evolutionary fitness, dynamics & protein–ligand docking',
       subGroups,
       identityBlob,
       searchBlob,

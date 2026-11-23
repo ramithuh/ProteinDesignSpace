@@ -51,7 +51,8 @@ export type PdbTaskId =
   | 'proteinmpnn'
   | 'solublempnn'
   | 'esmc'
-  | 'dyna1';
+  | 'dyna1'
+  | 'gnina';
 
 export type EditActionId =
   | 'add_stability_scan'
@@ -948,6 +949,7 @@ function matchesTargetSelector(node: WorkflowNode, rawToken: string): boolean {
   }
   if (tok === 'esmc' || tok === 'esm-c') return node.adapterId === 'esmc';
   if (tok === 'dyna1' || tok === 'dyna-1') return node.adapterId === 'dyna1';
+  if (tok === 'gnina' || tok === 'gnina1.3' || tok === 'gnina-1.3') return node.adapterId === 'gnina';
   if (tok === 'thermompnn') return node.adapterId === 'thermompnn';
   if (tok === 'ligandmpnn') return node.adapterId === 'ligandmpnn';
   if (tok === 'lasermpnn') return node.adapterId === 'lasermpnn';
@@ -1731,6 +1733,8 @@ const SUPPORTED_BLOCK_NAMES: ReadonlySet<string> = (() => {
     'esmc',
     'esmc300m',
     'dyna1',
+    'gnina',
+    'gnina13',
   ]);
   for (const manifest of Object.values(ADAPTER_REGISTRY)) {
     for (const candidate of [manifest.id, manifest.shortName, manifest.displayName]) {
@@ -3252,6 +3256,20 @@ export function compileWorkflowPlanToGraph(
             toPort: 'structure',
           });
         }
+      } else if (task === 'gnina') {
+        const gninaId = nextId('gnina');
+        nodes.push({
+          id: gninaId,
+          adapterId: 'gnina',
+          label: 'GNINA 1.3',
+          params: { ...defaultParamsForAdapter('gnina') },
+        });
+        edges.push({
+          fromNode: pdbNodeId,
+          fromPort: 'structure',
+          toNode: gninaId,
+          toPort: 'structure',
+        });
       } else if (task === 'dyna1') {
         const dynaId = nextId('dyna');
         nodes.push({
@@ -4033,6 +4051,7 @@ function resolveCanvasNodesForKeyword(
   }
   if (/\besm[\s-]*c\b/i.test(clause)) addMatch('esmc', (n) => n.adapterId === 'esmc');
   if (/\bdyna[\s-]*1\b/i.test(clause)) addMatch('dyna1', (n) => n.adapterId === 'dyna1');
+  if (/\bgnina\b/i.test(clause)) addMatch('gnina', (n) => n.adapterId === 'gnina');
   if (/\bthermompnn\b/i.test(clause)) addMatch('thermompnn', (n) => n.adapterId === 'thermompnn');
   if (/\bligandmpnn\b/i.test(clause)) addMatch('ligandmpnn', (n) => n.adapterId === 'ligandmpnn');
   if (/\blasermpnn\b/i.test(clause)) addMatch('lasermpnn', (n) => n.adapterId === 'lasermpnn');
@@ -4771,7 +4790,7 @@ export function reconcilePlannedWorkflow(
   // Rule 3: Explicit PDB inverse-folding/analysis mistakenly routed to conditioned_design (Q3 1CTT)
   let reconciled: WorkflowPlan = plan;
   const hasPdbAnalysisTool =
-    /\b(?:ligandmpnn|lasermpnn|thermompnn|antifold|esm[\s-]*if[\s-]*1|esm[\s-]*c|dyna[\s-]*1)\b/i.test(
+    /\b(?:ligandmpnn|lasermpnn|thermompnn|antifold|esm[\s-]*if[\s-]*1|esm[\s-]*c|dyna[\s-]*1|gnina)\b/i.test(
       trimmed,
     );
   if (
@@ -4791,6 +4810,7 @@ export function reconcilePlannedWorkflow(
     if (/\bthermompnn\b/i.test(trimmed)) tasks.push('thermompnn');
     if (/\besm[\s-]*c\b/i.test(trimmed)) tasks.push('esmc');
     if (/\bdyna[\s-]*1\b/i.test(trimmed)) tasks.push('dyna1');
+    if (/\bgnina\b/i.test(trimmed)) tasks.push('gnina');
 
     reconciled = {
       kind: 'pdb',
@@ -5008,6 +5028,9 @@ export function reconcilePlannedWorkflow(
     }
     if (/\besm[\s-]*if[\s-]*1\b/i.test(trimmed) && !existingTasks.includes('esmif1')) {
       existingTasks.push('esmif1');
+    }
+    if (/\bgnina\b/i.test(trimmed) && !existingTasks.includes('gnina')) {
+      existingTasks.push('gnina');
     }
     if (wantsSolubleMpnn) {
       next.mpnnFamily = 'solublempnn';

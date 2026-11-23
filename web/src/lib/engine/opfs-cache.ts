@@ -23,6 +23,7 @@ const VENDOR_CACHE_NAMES = new Set([
   'sid-protein-v1',
   'dyna1-v1',
   'gvp-transformer-v1',
+  'gnina-v1',
 ]);
 
 const VENDOR_CACHE_PREFIXES = [
@@ -48,6 +49,7 @@ const OPFS_WEIGHT_DIRS = [
   'sid-protein-v1',
   'dyna1-v1',
   'gvp-transformer-v1',
+  'gnina-v1',
 ];
 
 function fnv1a(str: string): string {

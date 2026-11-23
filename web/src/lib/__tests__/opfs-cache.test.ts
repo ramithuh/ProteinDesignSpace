@@ -248,6 +248,7 @@ describe('engine/opfs-cache', () => {
         'sid-protein-v1',
         'dyna1-v1',
         'gvp-transformer-v1',
+        'gnina-v1',
         'unrelated-cache',
       ]),
       delete: vi.fn(async (k: string) => {
@@ -326,6 +327,7 @@ describe('engine/opfs-cache', () => {
       'sid-protein-v1',
       'dyna1-v1',
       'gvp-transformer-v1',
+      'gnina-v1',
     ]);
     expect(deletedCaches).not.toContain('unrelated-cache');
 
@@ -345,6 +347,7 @@ describe('engine/opfs-cache', () => {
       'sid-protein-v1',
       'dyna1-v1',
       'gvp-transformer-v1',
+      'gnina-v1',
     ]);
 
     expect(deletedDbs).toContain('denovo-run-artifacts-v2');

@@ -22,6 +22,7 @@ import FoldFlow2Worker from '$lib/workers/foldflow2.worker?worker';
 import SidProteinWorker from '$lib/workers/sidprotein.worker?worker';
 import EsmcWorker from '$lib/workers/esmc.worker?worker';
 import Dyna1Worker from '$lib/workers/dyna1.worker?worker';
+import GninaWorker from '$lib/workers/gnina.worker?worker';
 import {
   cropRawAllAtomStructure,
   generateSampleHelixBundlePdb,
@@ -1372,6 +1373,8 @@ export class ExecutionScheduler {
         return new EsmcWorker();
       case 'dyna1':
         return new Dyna1Worker();
+      case 'gnina':
+        return new GninaWorker();
       default:
         throw new Error(`No GPU worker registered for adapter "${adapterId}"`);
     }

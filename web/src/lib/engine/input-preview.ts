@@ -16,6 +16,10 @@ import {
 } from '$lib/protein-ops/pdb';
 import { normalizePdbId } from '$lib/protein-ops/rcsb';
 import { evaluateProteinOnlyStructurePolicy } from '$lib/protein-ops/hetatm-policy';
+import {
+  extractHoloReceptorAndLigands,
+  findPocketResidues,
+} from '$lib/protein-ops/gnina-prep';
 import { getBenchmarkById } from './benchmarks';
 import { sanitizeEvoDiffFixedSequence, validateSequenceText } from './param-validation';
 import {
@@ -3018,6 +3022,189 @@ export function compileNodeInputPreview(
         2,
       ),
     };
+  } else if (node.adapterId === 'gnina') {
+    const structure = resolvedInputs.structure as StructureArtifact | undefined;
+    const taskMode = String(node.params.taskMode ?? 'score');
+    const precision = String(node.params.precision ?? 'fp16');
+    const ligandCode = String(node.params.ligandCode ?? '').trim();
+    const ligandSdf = String(node.params.ligandSdf ?? '').trim();
+    const includeMetals = node.params.includeMetals !== false;
+    const pocketRadius = Math.max(3.0, Math.min(8.0, Number(node.params.pocketRadius ?? 5.0)));
+    const maxPocketResidues = Math.max(4, Math.min(48, Math.round(Number(node.params.maxPocketResidues ?? 24))));
+    const minimizeIterations = Math.max(1, Math.min(12, Math.round(Number(node.params.minimizeIterations ?? 4))));
+    const modeLabel =
+      taskMode === 'pocket-scan'
+        ? 'Pocket Scan'
+        : taskMode === 'minimize'
+          ? `Minimize (${minimizeIterations} iters)`
+          : 'Score Pose';
+
+    if (!structure) {
+      const missingUp = missingUpstreamByPort.get('structure');
+      if (missingUp) {
+        availability = 'pending-upstream';
+        missingUpstreamNodeIds = [missingUp];
+      } else {
+        availability = 'error';
+      }
+      payload = {
+        format: 'scorer-mapping',
+        headline: missingUp
+          ? `GNINA 1.3 · ${modeLabel} (${precision.toUpperCase()}) · waiting for upstream structure`
+          : `GNINA 1.3 · ${modeLabel} (${precision.toUpperCase()}) · connect a holo StructureArtifact`,
+        compiledSummary: {
+          taskMode,
+          precision,
+          ligandCode: ligandCode || 'auto',
+          externalLigand: ligandSdf.length > 0,
+          includeMetals,
+        },
+        rawSpecText: JSON.stringify(
+          { taskMode, precision, ligandCode: ligandCode || 'auto', includeMetals },
+          null,
+          2,
+        ),
+      };
+    } else {
+      runRuntimeValidation();
+      const rawText = structure.pdbText || structure.cifText || '';
+      const entry = getOrParseCachedStructure(structure.id, rawText);
+      const parsed = entry.parsed;
+      const prep = extractHoloReceptorAndLigands(rawText, {
+        ligandCode: ligandCode || undefined,
+        includeMetals,
+      });
+
+      const pocketSet = new Set<string>();
+      if (taskMode === 'pocket-scan' && prep.selectedLigand && prep.receptorPdb.trim()) {
+        const pocket = findPocketResidues(
+          prep.receptorPdb,
+          prep.selectedLigand.atoms,
+          pocketRadius,
+          maxPocketResidues,
+        );
+        for (const r of pocket) pocketSet.add(r.residueId);
+      }
+
+      if (!ligandSdf && !prep.selectedLigand) {
+        pushIssue({
+          severity: 'error',
+          source: 'compiler',
+          message:
+            ligandCode && prep.detectedLigandCodes.length > 0
+              ? `Target ligand "${ligandCode}" not found in "${structure.label}" (detected: ${prep.detectedLigandCodes.join(', ')}).`
+              : `No organic small-molecule ligand found in "${structure.label}". Wire a holo complex or paste an SDF/MOL2 in Advanced parameters.`,
+        });
+      }
+
+      const chainMap = new Map<string, PreviewChainTrack>();
+      const allRes: PreviewResidue[] = [];
+      for (let i = 0; i < parsed.nResidues; i++) {
+        const src = parsed.sourceResidues[i];
+        let track = chainMap.get(src.authChainId);
+        if (!track) {
+          const roleTag = structure.chainRoles?.[src.authChainId];
+          track = {
+            chainId: src.authChainId,
+            ...(src.labelChainId ? { labelChainId: src.labelChainId } : {}),
+            entityKind: 'protein',
+            ...(roleTag ? { roleTag } : {}),
+            sequence: '',
+            residues: [],
+          };
+          chainMap.set(src.authChainId, track);
+        }
+        let gapBefore = 0;
+        if (track.residues.length > 0) {
+          const prev = track.residues[track.residues.length - 1];
+          const delta = src.resNum - prev.authSeqId - 1;
+          if (delta > 0) gapBefore = delta;
+        }
+        const rid = `${src.authChainId}${src.resNum}${src.insCode ?? ''}`;
+        const isPocket = pocketSet.has(rid);
+        const aa1 = parsed.sequence[i] ?? AA3_TO_AA1[src.resName] ?? 'X';
+        const pr: PreviewResidue = {
+          flatIndex: i,
+          authChain: src.authChainId,
+          ...(src.labelChainId ? { labelChain: src.labelChainId } : {}),
+          authSeqId: src.resNum,
+          insCode: src.insCode,
+          ...(src.labelSeqId !== undefined ? { labelSeqId: src.labelSeqId } : {}),
+          token: formatResidueToken(src.authChainId, src.resNum, src.insCode),
+          aa1,
+          resName: src.resName,
+          roles: isPocket ? ['hotspot'] : ['fixed-backbone'],
+          ...(gapBefore > 0 ? { gapBefore } : {}),
+          ...(entry.bfactors ? { bfactor: entry.bfactors[i] } : {}),
+          backboneAtoms: formatBackboneAtoms(parsed.atomPresence[i], structure.atomGranularity),
+        };
+        track.residues.push(pr);
+        track.sequence += aa1;
+        allRes.push(pr);
+      }
+
+      chains = [...chainMap.values()];
+      highlightLayers = buildHighlightLayersFromResidues(allRes);
+      const ligClass = classifyLigands(structure.diagnostics?.ligandNames ?? parsed.diagnostics.ligandNames);
+      entities = {
+        includedLigands: [
+          ...(prep.selectedLigand ? [prep.selectedLigand.compId] : prep.detectedLigandCodes),
+          ...prep.keptMetals,
+        ],
+        filteredBuffers: ligClass.filteredBuffers,
+        nucleicChains: [...(structure.diagnostics?.nucleicAcidChains ?? parsed.diagnostics.nucleicAcidChains)],
+      };
+
+      totalResidues = parsed.nResidues;
+      designedResidues = pocketSet.size;
+      fixedResidues = Math.max(0, parsed.nResidues - pocketSet.size);
+      estimatedTokens = parsed.nResidues;
+
+      previewStructurePdb = structure.pdbText;
+      previewStructureMeta = {
+        label: structure.label,
+        atomGranularity: structure.atomGranularity ?? 'all-atom',
+        bfactorSemantics: structure.bfactorSemantics,
+        length: parsed.nResidues,
+      };
+
+      const targetLigLabel = ligandSdf
+        ? 'external SDF/MOL2'
+        : prep.selectedLigand
+          ? `${prep.selectedLigand.compId} (${prep.selectedLigand.heavyAtomCount} heavy atoms)`
+          : 'none detected';
+
+      payload = {
+        format: 'scorer-mapping',
+        headline:
+          taskMode === 'pocket-scan'
+            ? `GNINA 1.3 · Pocket Scan (${pocketSet.size} res ≤ ${pocketRadius.toFixed(1)} Å) · ${targetLigLabel}`
+            : `GNINA 1.3 · ${modeLabel} (${precision.toUpperCase()}) · ${targetLigLabel}`,
+        compiledSummary: {
+          taskMode,
+          precision,
+          selectedLigand: targetLigLabel,
+          detectedLigands: prep.detectedLigandCodes,
+          keptMetals: prep.keptMetals,
+          ...(taskMode === 'pocket-scan' ? { pocketResidues: pocketSet.size, pocketRadius } : {}),
+        },
+        rawSpecText: JSON.stringify(
+          {
+            taskMode,
+            precision,
+            selectedLigand: prep.selectedLigand?.instanceKey ?? (ligandSdf ? 'external' : null),
+            detectedLigands: prep.detectedLigandCodes,
+            keptMetals: prep.keptMetals,
+            ...(taskMode === 'pocket-scan'
+              ? { pocketRadius, maxPocketResidues, pocketResidues: [...pocketSet] }
+              : {}),
+            ...(taskMode === 'minimize' ? { minimizeIterations } : {}),
+          },
+          null,
+          2,
+        ),
+      };
+    }
   } else if (node.adapterId === 'thermompnn') {
     const structure = resolvedInputs.structure as StructureArtifact | undefined;
     const precision = String(node.params.precision ?? 'fp16');

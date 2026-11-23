@@ -75,6 +75,10 @@ const EXPECTED_HOSTED_REVISIONS: Record<(typeof HOSTED_PORT_CARD_IDS)[number], {
     repo: 'https://huggingface.co/ramithuh/foldflow2-webgpu',
     rev: '59cd75ae7a8a',
   },
+  'gnina-webgpu': {
+    repo: 'https://huggingface.co/ramithuh/gnina-webgpu',
+    rev: 'a08e4c569af1',
+  },
 };
 
 describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
@@ -103,7 +107,7 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
 
   it('ensures every card in MODEL_CARDS has a valid activePrecisionId and complete provenance', () => {
     const cards = Object.values(MODEL_CARDS);
-    expect(cards.length).toBe(20); // All 20 GPU/ONNX adapters are live!
+    expect(cards.length).toBe(21); // All 21 GPU/ONNX adapters are live!
 
     for (const card of cards) {
       expect(card.precisions.length).toBeGreaterThan(0);
@@ -121,8 +125,8 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
     }
   });
 
-  it('includes all 16 HF-hosted WebGPU ports with exact measured parity metrics, pinned HF URLs, live promotion, and honest limitations', () => {
-    expect(HOSTED_PORT_CARD_IDS).toHaveLength(16);
+  it('includes all 17 HF-hosted WebGPU ports with exact measured parity metrics, pinned HF URLs, live promotion, and honest limitations', () => {
+    expect(HOSTED_PORT_CARD_IDS).toHaveLength(17);
     const liveWave7Cards: Record<string, { adapterId: string; defaultPrecision: string }> = {
       'thermompnn-webgpu': { adapterId: 'thermompnn', defaultPrecision: 'fp16' },
       'ligandmpnn-webgpu': { adapterId: 'ligandmpnn', defaultPrecision: 'fp16' },
@@ -140,6 +144,7 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
       'genie2-webgpu': { adapterId: 'genie2', defaultPrecision: 'fp16' },
       'frameflow-webgpu': { adapterId: 'frameflow', defaultPrecision: 'fp16' },
       'foldflow2-webgpu': { adapterId: 'foldflow2', defaultPrecision: 'int8' },
+      'gnina-webgpu': { adapterId: 'gnina', defaultPrecision: 'fp16' },
     };
 
     for (const id of HOSTED_PORT_CARD_IDS) {

@@ -75,4 +75,6 @@ web/static/vendor/frameflow/weights/
 web/static/vendor/foldflow2/weights/
 !web/static/vendor/sid-protein/
 web/static/vendor/sid-protein/weights/
+!web/static/vendor/gnina/
+web/static/vendor/gnina/weights/
 .upstream-tmp/

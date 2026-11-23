@@ -36,6 +36,7 @@ export type BfactorSemantics =
   | 'dynamics-prob'
   | 'ddg-stability'
   | 'llr-fitness'
+  | 'gnina-contrib'
   | 'crystal-b';
 
 export type AtomGranularity = 'ca-only' | 'backbone4' | 'all-atom';
@@ -234,6 +235,50 @@ export interface BioCompatibilityIssue {
   fix?: BioCompatibilityFix;
 }
 
+export interface GninaPoseScoreRow {
+  poseId: string;
+  ligandCode: string;
+  ligandSource: 'holo-hetatm' | 'external-sdf' | 'external-mol2';
+  heavyAtoms: number;
+  rotors: number;
+  cnnScore: number;
+  cnnAffinity: number;
+  cnnVS: number;
+  vinaScore: number;
+  /** Present in `minimize` mode: initial pose scores before rigid-body optimization. */
+  initialCnnScore?: number;
+  initialCnnAffinity?: number;
+  initialCnnVS?: number;
+  initialVinaScore?: number;
+  /** Heavy-atom RMSD (Å) moved during rigid-body minimization. */
+  poseRmsd?: number;
+  /** Per-model ensemble breakdown (`dense_1.3`, `dense_1.3_PT_KD_3`, `crossdock_default2018_KD_4`). */
+  models: Record<string, { cnnScore: number; cnnAffinity: number }>;
+  /** Optional Vina empirical energy decomposition. */
+  vinaTerms?: {
+    gauss1: number;
+    gauss2: number;
+    repulsion: number;
+    hydrophobic: number;
+    hydrogen: number;
+    rotors: number;
+  };
+}
+
+export interface DockingScoreSummary {
+  engine: 'gnina-1.3';
+  taskMode: 'score' | 'pocket-scan' | 'minimize';
+  precision: 'int8' | 'fp16' | 'fp32';
+  ensemble: string[];
+  receptorName: string;
+  includeMetals: boolean;
+  detectedLigands: string[];
+  selectedLigand: string;
+  pocketResiduesScanned?: number;
+  pocketRadius?: number;
+  rows: GninaPoseScoreRow[];
+}
+
 export interface StructureArtifact {
   kind: 'StructureArtifact';
   id: string;
@@ -295,6 +340,8 @@ export interface StructureArtifact {
   atomGranularity?: AtomGranularity;
   /** Preserved non-protein / antibody molecular context for holo & specialized models. */
   molecularContext?: StructureMolecularContext;
+  /** Optional GNINA 1.3 protein–ligand docking & affinity summary attached to scored/minimized complexes. */
+  dockingMetrics?: DockingScoreSummary;
   /** Execution provenance (quantization, early stopping, fallback warnings). */
   provenance?: ArtifactProvenance;
   geometry: GeometryStats;
