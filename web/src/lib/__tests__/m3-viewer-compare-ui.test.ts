@@ -161,22 +161,22 @@ describe('M3 §2.1: Mol* B-factor domain auto-ranging (bfactor-domain.ts)', () =
     });
   });
 
-  it('auto-ranges llr-fitness around 0 and filters crystal B-factor outliers', () => {
+  it('auto-ranges llr-fitness adaptively with reversed [hi, lo] polarity and filters crystal B-factor outliers', () => {
     expect(resolveUncertaintyColorArgFromValues([-3.2, -0.5, 0.4], 'llr-fitness')).toEqual({
       color: 'uncertainty',
-      colorParams: { domain: [-3.2, 3.2] },
+      colorParams: { domain: [0.4, -3.2] },
     });
     expect(resolveUncertaintyColorArgFromValues([-12.0, 0.2, 55.0], 'llr-fitness')).toEqual({
       color: 'uncertainty',
-      colorParams: { domain: [-6, 6] },
+      colorParams: { domain: [0.2, -12.0] },
     });
     expect(resolveUncertaintyColorArgFromValues([0.2, 2.4, 4.1], 'llr-fitness')).toEqual({
       color: 'uncertainty',
-      colorParams: { domain: [0, 4.1] },
+      colorParams: { domain: [4.1, 0] },
     });
     expect(resolveUncertaintyColorArgFromValues([0.1, 1.2, 3.0, 62.0], 'llr-fitness')).toEqual({
       color: 'uncertainty',
-      colorParams: { domain: [0, 3.0] },
+      colorParams: { domain: [3.0, 0] },
     });
   });
 

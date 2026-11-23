@@ -77,10 +77,12 @@
   let rowLimit = $state<number>(10);
   let lastAppliedSpecKey = $state<string | null>(null);
   let lastMatrixId = $state<string>('');
+  let userPinnedPosIdx = $state<number | null>(null);
 
   $effect(() => {
     if (matrix.id !== lastMatrixId) {
       lastMatrixId = matrix.id;
+      userPinnedPosIdx = null;
       if (!highlightSpec) {
         sortMode = 'best';
         filterQuery = '';
@@ -164,7 +166,16 @@
   );
   let topMutations = $derived(rankedResult.items);
 
-  let highlightedCols = $derived.by((): Array<{ col: number; label: string }> => {
+  function formatColPinLabel(col: number): string {
+    const resId = (residueIds[col] ?? `A${col + 1}`).toUpperCase();
+    const numMatch = /(\d+[A-Z]?)$/.exec(resId);
+    const numPart = numMatch ? numMatch[1] : String(col + 1);
+    const wt = residues[col] ?? '';
+    const wtNum = `${wt}${numPart}`;
+    return wtNum || resId;
+  }
+
+  let specHighlightedCols = $derived.by((): Array<{ col: number; label: string }> => {
     const raw = highlightSpec?.residues;
     if (!raw || raw.length === 0 || L === 0) return [];
     const want = new Set(raw.map((r) => r.trim().toUpperCase()).filter(Boolean));
@@ -181,12 +192,51 @@
     }
     return hits;
   });
+
+  let highlightedCols = $derived.by((): Array<{ col: number; label: string }> => {
+    const merged = specHighlightedCols.slice();
+    if (
+      userPinnedPosIdx !== null &&
+      userPinnedPosIdx >= 0 &&
+      userPinnedPosIdx < L &&
+      !merged.some((h) => h.col === userPinnedPosIdx)
+    ) {
+      merged.push({
+        col: userPinnedPosIdx,
+        label: formatColPinLabel(userPinnedPosIdx),
+      });
+    }
+    return merged;
+  });
   let highlightedColSet = $derived(new Set(highlightedCols.map((h) => h.col)));
+
+  function scrollColumnIntoView(col: number) {
+    const sc = scrollEl;
+    if (!sc || col < 0 || col >= L || typeof sc.scrollTo !== 'function') return;
+    const colLeft = col * cellW;
+    const colRight = colLeft + cellW;
+    const viewLeft = sc.scrollLeft;
+    const margin = Math.max(24, cellW * 2);
+    const viewRight = viewLeft + sc.clientWidth;
+    if (colLeft < viewLeft + margin || colRight > viewRight - margin) {
+      const targetScroll = Math.max(0, colLeft - Math.max(40, sc.clientWidth * 0.35));
+      sc.scrollTo({ left: targetScroll, behavior: 'smooth' });
+    }
+  }
+
+  function pinAndSelectResidue(posIdx: number, resId: string, ensureVisible: boolean) {
+    if (posIdx < 0 || posIdx >= L) return;
+    userPinnedPosIdx = posIdx;
+    if (ensureVisible) {
+      scrollColumnIntoView(posIdx);
+    }
+    onSelectResidue?.(posIdx, resId);
+  }
 
   // Auto-scroll heatmap horizontally so the first highlighted walkthrough residue is visible
   $effect(() => {
     const specKey = highlightSpec?.key;
-    const cols = highlightedCols;
+    const cols = specHighlightedCols;
     const sc = scrollEl;
     if (!specKey || !sc || cols.length === 0) return;
     const firstX = cols[0].col * cellW;
@@ -359,9 +409,8 @@
   }
 
   function onClick() {
-    if (hoverCell && onSelectResidue) {
-      onSelectResidue(hoverCell.col, hoverCell.residueId);
-    }
+    if (!hoverCell) return;
+    pinAndSelectResidue(hoverCell.col, hoverCell.residueId, false);
   }
 
   function formatSignedScore(score: number): string {
@@ -586,7 +635,7 @@
         <span>
           Showing {topMutations.length} of {rankedResult.totalMatched}{filterQuery.trim() ? ` matching "${filterQuery.trim()}"` : ''} ({rankedResult.totalAll} total)
         </span>
-        <span class="mh-top-sub">Click row to focus 3D</span>
+        <span class="mh-top-sub">Click row to pin &amp; focus 3D</span>
       </div>
 
       {#if topMutations.length > 0}
@@ -608,10 +657,10 @@
                 {@const isBad = lowerBetter ? m.score > 0 : m.score < 0}
                 <tr
                   class:is-pinned={isPinned}
-                  class:is-clickable={Boolean(onSelectResidue) && m.positionIndex >= 0}
+                  class:is-clickable={m.positionIndex >= 0}
                   onclick={() => {
-                    if (onSelectResidue && m.positionIndex >= 0) {
-                      onSelectResidue(m.positionIndex, m.residueId);
+                    if (m.positionIndex >= 0) {
+                      pinAndSelectResidue(m.positionIndex, m.residueId, true);
                     }
                   }}
                 >

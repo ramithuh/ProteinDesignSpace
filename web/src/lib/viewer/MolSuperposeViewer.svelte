@@ -28,6 +28,8 @@
     canonicalCamera?: boolean;
     /** When true (full-view expanded mode), shows the floating Representation & View menu. */
     expanded?: boolean;
+    /** Override whether the Representation menu opens automatically upon entering `expanded` mode (default: true on viewports >= 640px). */
+    defaultStyleMenuOpen?: boolean;
     theme?: 'dark' | 'light';
     height?: number | string;
     label?: string;
@@ -71,6 +73,7 @@
     spinSpeed = 0.02,
     canonicalCamera = false,
     expanded = false,
+    defaultStyleMenuOpen = undefined,
     theme = 'dark',
     height = 420,
     label = undefined,
@@ -190,15 +193,40 @@
 
   let styleMenuWrapEl: HTMLDivElement | null = $state(null);
   let styleMenuOpen = $state(false);
-  let lastExpandedState: boolean | null = null;
+  let lastStyleMenuTrigger: string | null = null;
   let pngStatus = $state<'idle' | 'saved' | 'failed'>('idle');
   let pngStatusTimer: ReturnType<typeof setTimeout> | null = null;
 
   $effect(() => {
     const exp = expanded;
-    if (lastExpandedState === exp) return;
-    lastExpandedState = exp;
-    styleMenuOpen = exp && (typeof window !== 'undefined' ? window.innerWidth >= 640 : true);
+    const defOpen = defaultStyleMenuOpen;
+    const triggerKey = `${exp ? 1 : 0}:${defOpen === undefined ? 'auto' : defOpen ? 1 : 0}`;
+    if (lastStyleMenuTrigger === triggerKey) return;
+    lastStyleMenuTrigger = triggerKey;
+    const shouldAutoOpen = exp && (defOpen ?? true);
+    styleMenuOpen =
+      shouldAutoOpen && (typeof window !== 'undefined' ? window.innerWidth >= 640 : true);
+  });
+
+  // Close Representation / Style menu on Escape before outer overlays or Node Studio collapse
+  $effect(() => {
+    if (!styleMenuOpen || typeof window === 'undefined') return;
+    function handleStyleMenuEscape(ev: KeyboardEvent) {
+      if (ev.key !== 'Escape' || ev.defaultPrevented) return;
+      if (
+        typeof document !== 'undefined' &&
+        document.querySelector('.mc-backdrop, .gal-backdrop, .pw-coach')
+      ) {
+        return;
+      }
+      ev.preventDefault();
+      ev.stopPropagation();
+      styleMenuOpen = false;
+    }
+    window.addEventListener('keydown', handleStyleMenuEscape, true);
+    return () => {
+      window.removeEventListener('keydown', handleStyleMenuEscape, true);
+    };
   });
 
   // In compact split view, close the floating style popover on click-outside
@@ -1879,7 +1907,7 @@
             <span>Flexible 1.0</span>
           {:else if (bfactorSemantics as string) === 'llr-fitness'}
             <span>Deleterious</span>
-            <span class="bfactor-grad" aria-hidden="true"></span>
+            <span class="bfactor-grad is-reversed" aria-hidden="true"></span>
             <span>Beneficial (LLR)</span>
           {:else}
             <span>Stabilizing</span>
@@ -2040,7 +2068,7 @@
         <span>Flexible 1.0</span>
       {:else if (bfactorSemantics as string) === 'llr-fitness'}
         <span>Deleterious</span>
-        <span class="bfactor-grad" aria-hidden="true"></span>
+        <span class="bfactor-grad is-reversed" aria-hidden="true"></span>
         <span>Beneficial (LLR)</span>
       {:else}
         <span>Stabilizing</span>
@@ -2320,6 +2348,9 @@
     border: 1px solid var(--border-subtle);
     background: linear-gradient(90deg, #2563eb 0%, #f8fafc 50%, #dc2626 100%);
     flex-shrink: 0;
+  }
+  .bfactor-grad.is-reversed {
+    background: linear-gradient(90deg, #dc2626 0%, #f8fafc 50%, #2563eb 100%);
   }
   .empty {
     position: absolute;
