@@ -178,7 +178,7 @@ describe('estimateRunRequirements (first-run preflight)', () => {
           return { ...n, params: { ...n.params, numSequences: 2 } };
         }
         if (n.adapterId === 'localfold-af2') {
-          return { ...n, params: { ...n.params, maxSequences: 1, maxTotalFolds: 16 } };
+          return { ...n, params: { ...n.params, capMode: 'fixed', maxSequences: 1, maxTotalFolds: 16 } };
         }
         return n;
       }),

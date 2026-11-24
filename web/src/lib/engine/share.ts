@@ -420,8 +420,8 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
     : undefined;
   const payload = JSON.stringify(
     compactPositions
-      ? { n: compactNodes, e: compactEdges, p: compactPositions }
-      : { n: compactNodes, e: compactEdges },
+      ? { v: 2, n: compactNodes, e: compactEdges, p: compactPositions }
+      : { v: 2, n: compactNodes, e: compactEdges },
   );
   // Avoid trailing `_` or `-` in base64url payloads: GFM/chat/social autolinkers
   // strip trailing `_` from bare URLs. Trailing whitespace is valid JSON and 100%
@@ -579,9 +579,16 @@ export function serializeWorkflowJson(graph: WorkflowGraph): string {
   return JSON.stringify(graph, null, 2);
 }
 
-/** Decode `#p=...` or `#g=...` back into a full WorkflowGraph (with auto-layout). */
+/** Convert a `#p=...` or `#g=...` hash into a social-unfurl-compatible `?p=...` / `?g=...` URL. */
+export function buildShareableWorkflowUrl(origin: string, pathname: string, hash: string): string {
+  const clean = hash.replace(/^[#?]/, '').trim();
+  if (!clean) return `${origin}${pathname}`;
+  return `${origin}${pathname}?${clean}`;
+}
+
+/** Decode `#p=...`, `?p=...`, `#g=...`, or `?g=...` back into a full WorkflowGraph (with auto-layout). */
 export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | null> {
-  const clean = hash.replace(/^#/, '').trim();
+  const clean = hash.replace(/^[#?]/, '').trim();
   if (!clean) return null;
   if (clean.length > MAX_HASH_CHARS) {
     throw new Error(`Shared workflow link is too large (max ${MAX_HASH_CHARS} chars).`);
@@ -594,9 +601,11 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
     if (!preset) return null;
     const g = structuredClone(preset.graph);
     const byId = new Map(g.nodes.map((n) => [n.id, n]));
+    const nodesWithExplicitCapMode = new Set<string>();
+    const nodesWithExplicitMaxSeq = new Set<string>();
     let hasCustomPositions = false;
     for (const [k, v] of qs.entries()) {
-      if (k === 'p') continue;
+      if (k === 'p' || k === 'v') continue;
       const dot = k.lastIndexOf('.');
       if (dot <= 0) continue;
       const nodeId = k.slice(0, dot);
@@ -604,6 +613,8 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
       if (FORBIDDEN_KEYS.has(paramKey)) continue;
       const node = byId.get(nodeId);
       if (!node) continue;
+      if (paramKey === 'capMode') nodesWithExplicitCapMode.add(nodeId);
+      if (paramKey === 'maxSequences') nodesWithExplicitMaxSeq.add(nodeId);
       if (paramKey === '_label') {
         if (v.trim()) node.label = v;
         continue;
@@ -632,6 +643,14 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
               : PARAM_TYPE_HINTS[paramKey];
       node.params[paramKey] = parseParamValue(v, templateVal);
     }
+    for (const nodeId of nodesWithExplicitMaxSeq) {
+      if (!nodesWithExplicitCapMode.has(nodeId)) {
+        const node = byId.get(nodeId);
+        if (node && (node.adapterId === 'localfold-af2' || node.adapterId === 'esmc' || node.adapterId === 'dyna1')) {
+          node.params.capMode = 'fixed';
+        }
+      }
+    }
     if (hasCustomPositions) {
       const laid = preset.graph.nodes.some((n) => !n.position)
         ? autoLayoutGraph(structuredClone(preset.graph))
@@ -655,7 +674,7 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
 
     const tryDecodeCompressedObj = async (
       candidate: string,
-    ): Promise<{ n: unknown[]; e: unknown[]; p?: unknown } | null> => {
+    ): Promise<{ v?: number; n: unknown[]; e: unknown[]; p?: unknown } | null> => {
       let rawBytes: Uint8Array;
       try {
         rawBytes = fromBase64Url(candidate);
@@ -683,7 +702,8 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
       if (!isPlainObject(parsedObj) || !Array.isArray(parsedObj.n) || !Array.isArray(parsedObj.e)) {
         return null;
       }
-      return { n: parsedObj.n, e: parsedObj.e, p: parsedObj.p };
+      const v = typeof parsedObj.v === 'number' ? parsedObj.v : undefined;
+      return { v, n: parsedObj.n, e: parsedObj.e, p: parsedObj.p };
     };
 
     let obj = await tryDecodeCompressedObj(normalizedEncoded);
@@ -722,11 +742,16 @@ export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | n
         Number.isFinite(posTuple[1])
           ? { x: posTuple[0], y: posTuple[1] }
           : undefined;
+      const isLegacyV1 = !obj.v || obj.v < 2;
+      const isSeqCapped =
+        adapterId === 'localfold-af2' || adapterId === 'esmc' || adapterId === 'dyna1';
+      const legacyCapPatch =
+        isLegacyV1 && isSeqCapped && !('capMode' in overrides) ? { capMode: 'fixed' } : {};
       nodes.push({
         id,
         adapterId,
         label,
-        params: { ...defaultParamsForAdapter(adapterId), ...overrides },
+        params: { ...defaultParamsForAdapter(adapterId), ...legacyCapPatch, ...overrides },
         ...(position ? { position } : {}),
       });
     }

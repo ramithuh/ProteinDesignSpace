@@ -44,6 +44,11 @@
     isBenchmarkSupportedForAdapter,
   } from '$lib/engine/benchmark-sync';
   import { MAX_DESIGNS } from '$lib/engine/work-plan';
+  import {
+    resolveSequenceCapMode,
+    type DownstreamImpactNotice,
+    type NodeFlowInfo,
+  } from '$lib/engine/batch-flow';
   import InspectorHeader from './InspectorHeader.svelte';
   import LocalFoldWidget from './inspector/LocalFoldWidget.svelte';
   import NumericInput from './NumericInput.svelte';
@@ -69,10 +74,13 @@
     upstreamSequences?: SequenceSet | null;
     upstreamLockSummary?: UpstreamLockSummary | null;
     upstreamBenchmarkId?: string | null;
+    flowInfo?: NodeFlowInfo | null;
+    downstreamImpacts?: DownstreamImpactNotice[];
     hasStructureInput?: boolean;
     siblingGeneratorIds?: string[];
     onUpdate: (nodeId: string, params: Record<string, unknown>) => void;
     onUpdateLabel?: (nodeId: string, label: string) => void;
+    onSelectNode?: (nodeId: string) => void;
     onSyncTaskToSiblings?: (nodeId: string) => void;
     onRunUpTo?: (nodeId: string) => void;
     onOpenStudio?: () => void;
@@ -89,10 +97,13 @@
     upstreamSequences = null,
     upstreamLockSummary = null,
     upstreamBenchmarkId = null,
+    flowInfo = null,
+    downstreamImpacts = [],
     hasStructureInput = false,
     siblingGeneratorIds = [],
     onUpdate,
     onUpdateLabel = undefined,
+    onSelectNode = undefined,
     onSyncTaskToSiblings = undefined,
     onRunUpTo = undefined,
     onOpenStudio = undefined,
@@ -2193,6 +2204,23 @@
         </div>
       {/if}
 
+      {#if downstreamImpacts.length > 0}
+        {#each downstreamImpacts as imp (imp.targetNodeId)}
+          <div class="full flow-warn-banner" role="status">
+            <span>Downstream cap: <b>{imp.message}</b></span>
+            {#if onSelectNode}
+              <button
+                type="button"
+                class="mini-btn"
+                onclick={() => onSelectNode?.(imp.targetNodeId)}
+              >
+                Inspect {imp.targetLabel}
+              </button>
+            {/if}
+          </div>
+        {/each}
+      {/if}
+
       {#if upstreamLockSummary}
         <div
           class="source-res-badge full"
@@ -2259,6 +2287,7 @@
         {msaA3mDraft}
         {lfMultiDesignInfo}
         {upstreamSequences}
+        {flowInfo}
         maxTotalFoldsSpec={MAX_TOTAL_FOLDS_SPEC}
         {onUpdate}
         {onUpdateLabel}
@@ -2391,13 +2420,76 @@
         </div>
       {/if}
       {#if schemaPrimaryFields.length > 0}
+        {@const filteredPrimaryFields =
+          node.adapterId === 'esmc' || node.adapterId === 'dyna1'
+            ? schemaPrimaryFields.filter(
+                (f) =>
+                  f.key !== 'maxSequences' ||
+                  resolveSequenceCapMode(node.adapterId, node.params) === 'fixed',
+              )
+            : schemaPrimaryFields}
         <SchemaParamFields
-          fields={schemaPrimaryFields}
+          fields={filteredPrimaryFields}
           params={node.params}
           activeMode={schemaActiveMode?.id}
           {disabled}
-          onChange={(key, value) => setParam(key, value)}
+          onChange={(key, value) => {
+            if ((node.adapterId === 'esmc' || node.adapterId === 'dyna1') && key === 'maxSequences') {
+              onUpdate(node.id, { ...node.params, capMode: 'fixed', maxSequences: value });
+              return;
+            }
+            setParam(key, value);
+          }}
         />
+      {/if}
+      {#if (node.adapterId === 'esmc' || node.adapterId === 'dyna1') && flowInfo && flowInfo.droppedCount > 0}
+        <div class="full flow-warn-banner" role="status">
+          <span>
+            {flowInfo.isEstimate ? 'Will score ' : 'Scoring '}<b>{flowInfo.processedCount} of {flowInfo.incomingCount}</b> upstream sequences
+            {#if flowInfo.dropKind === 'latency-budget'}
+              (masked pass budget)
+            {:else if flowInfo.capMode === 'fixed'}
+              (fixed cap {flowInfo.effectiveCap})
+            {:else}
+              (max {flowInfo.effectiveCap})
+            {/if}
+          </span>
+          {#if flowInfo.capMode === 'fixed'}
+            <button
+              type="button"
+              class="mini-btn"
+              {disabled}
+              onclick={() =>
+                onUpdate(node.id, { ...node.params, capMode: 'follow-upstream' })}
+            >
+              Follow upstream
+            </button>
+          {/if}
+        </div>
+      {/if}
+      {#if (node.adapterId === 'esmc' || node.adapterId === 'dyna1') && flowInfo && flowInfo.processedCount > 1}
+        <div class="fanout-chip full" role="status">
+          <span class="fanout-dot" aria-hidden="true"></span>
+          <span>
+            Scores all <b>{flowInfo.processedCount} sequences</b>; {node.adapterId === 'esmc' ? 'mutation matrix, residue track, and 3D paint' : 'residue track and 3D paint'} reflect sequence #1.
+          </span>
+        </div>
+      {/if}
+      {#if downstreamImpacts.length > 0}
+        {#each downstreamImpacts as imp (imp.targetNodeId)}
+          <div class="full flow-warn-banner" role="status">
+            <span>Downstream cap: <b>{imp.message}</b></span>
+            {#if onSelectNode}
+              <button
+                type="button"
+                class="mini-btn"
+                onclick={() => onSelectNode?.(imp.targetNodeId)}
+              >
+                Inspect {imp.targetLabel}
+              </button>
+            {/if}
+          </div>
+        {/each}
       {/if}
       {#if schemaAdvancedFields.length > 0}
         <details class="adv-details full">
@@ -2956,5 +3048,28 @@
     color: var(--warn-text);
     font-size: 11px;
     line-height: 1.35;
+  }
+  .flow-warn-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 10.5px;
+    color: var(--warn-text);
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    padding: 6px 8px;
+    border-radius: 5px;
+  }
+  .flow-warn-banner .mini-btn {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 2px 7px;
+    font-size: 10.5px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    cursor: pointer;
   }
 </style>

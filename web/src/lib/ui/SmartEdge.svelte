@@ -8,6 +8,7 @@
     type EdgeProps,
   } from '@xyflow/svelte';
   import { computeSmartEdgePath, type ObstacleRect } from './edge-routing';
+  import type { EdgeFlowInfo } from '$lib/engine/batch-flow';
 
   let {
     id,
@@ -35,6 +36,11 @@
   let proposedCount = $derived(typeof data?.proposedCount === 'number' ? data.proposedCount : 1);
   let targetPortLabel = $derived(typeof data?.toPort === 'string' ? data.toPort : '');
   let laneStagger = $derived(typeof data?.laneStagger === 'number' ? data.laneStagger : 0);
+  let edgeFlow = $derived((data?.edgeFlow as EdgeFlowInfo | null | undefined) ?? null);
+  let hovered = $state(false);
+  let showFlowPill = $derived(
+    Boolean(!isProposed && edgeFlow && (selected || hovered) && (edgeFlow.incomingCount > 1 || edgeFlow.isTruncated)),
+  );
   let onAccept = $derived(
     typeof data?.onAccept === 'function' ? (data.onAccept as () => void) : undefined,
   );
@@ -101,19 +107,48 @@
   });
 </script>
 
-<BaseEdge
-  {id}
-  path={routed.path}
-  labelX={routed.labelX}
-  labelY={routed.labelY}
-  label={isProposed ? undefined : label}
-  {labelStyle}
-  {markerStart}
-  {markerEnd}
-  interactionWidth={interactionWidth ?? 22}
-  class={isProposed ? 'ghost-wire-path' : undefined}
-  {style}
-/>
+<g
+  role="presentation"
+  onmouseenter={() => (hovered = true)}
+  onmouseleave={() => (hovered = false)}
+>
+  <BaseEdge
+    {id}
+    path={routed.path}
+    labelX={routed.labelX}
+    labelY={routed.labelY}
+    label={isProposed ? undefined : label}
+    {labelStyle}
+    {markerStart}
+    {markerEnd}
+    interactionWidth={interactionWidth ?? 22}
+    class={isProposed ? 'ghost-wire-path' : undefined}
+    {style}
+  />
+  {#if !isProposed && edgeFlow?.isTruncated}
+    <circle
+      cx={targetX - 10}
+      cy={targetY}
+      r="4"
+      class="edge-trunc-dot"
+    >
+      <title>{edgeFlow.hoverLabel}</title>
+    </circle>
+  {/if}
+</g>
+
+{#if showFlowPill && edgeFlow}
+  <EdgeLabel
+    x={routed.labelX}
+    y={selected && onDelete ? routed.labelY - 22 : routed.labelY}
+    transparent
+    selectEdgeOnClick={false}
+  >
+    <span class="edge-flow-pill" class:is-warn={edgeFlow.isTruncated}>
+      {edgeFlow.hoverLabel}
+    </span>
+  </EdgeLabel>
+{/if}
 
 {#if selected && !isProposed && onDelete}
   <EdgeLabel x={routed.labelX} y={routed.labelY} transparent selectEdgeOnClick={false}>
@@ -190,8 +225,37 @@
   }
 
   :global(.svelte-flow__edgelabel-renderer:has(.ghost-pill)),
-  :global(.svelte-flow__edgelabel-renderer:has(.edge-delete-btn)) {
+  :global(.svelte-flow__edgelabel-renderer:has(.edge-delete-btn)),
+  :global(.svelte-flow__edgelabel-renderer:has(.edge-flow-pill)) {
     z-index: 1005 !important;
+  }
+
+  .edge-trunc-dot {
+    fill: var(--warn-text, #d97706);
+    stroke: var(--bg-surface, #ffffff);
+    stroke-width: 1.5;
+    pointer-events: auto;
+  }
+
+  .edge-flow-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  .edge-flow-pill.is-warn {
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border-color: var(--warn-border);
   }
 
   .edge-delete-btn {

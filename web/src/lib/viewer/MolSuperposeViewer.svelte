@@ -423,12 +423,9 @@
     }, status === 'failed' ? 2400 : 1600);
   }
 
-  async function handleSavePng() {
-    if (!canvasEl || !plugin || initError || webglFailed) {
-      flashPngStatus('failed');
-      onNotify?.('Could not export PNG — 3D WebGL viewer is unavailable.', 'error');
-      return;
-    }
+  /** Capture the current Mol* 3D WebGL viewport as a PNG data URL (used by PNG save & social card). */
+  export async function capturePngDataUrl(): Promise<string | null> {
+    if (!canvasEl || !plugin || initError || webglFailed) return null;
     try {
       let url: string | null = null;
       if (plugin.helpers?.viewportScreenshot?.getImageDataUri) {
@@ -444,6 +441,20 @@
         plugin.canvas3d?.tick?.(performance.now(), { isSynchronous: true, manualDraw: true });
         url = canvasEl.toDataURL('image/png');
       }
+      return url && url.startsWith('data:image/') ? url : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function handleSavePng() {
+    if (!canvasEl || !plugin || initError || webglFailed) {
+      flashPngStatus('failed');
+      onNotify?.('Could not export PNG — 3D WebGL viewer is unavailable.', 'error');
+      return;
+    }
+    try {
+      const url = await capturePngDataUrl();
       if (!url) {
         flashPngStatus('failed');
         onNotify?.('Could not capture 3D PNG screenshot from WebGL canvas.', 'error');

@@ -126,7 +126,7 @@ const WAVE7A_SPECS = [
     workerFile: 'src/lib/plugins/esmc/esmc.worker.ts',
     factoryExport: 'createEsmcEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/esmc-webgpu/resolve/main/esmc-300m',
-    expectedParamKeys: ['maskPositions', 'maxSequences', 'mode', 'precision'],
+    expectedParamKeys: ['capMode', 'maskPositions', 'maxSequences', 'mode', 'precision'],
   },
   {
     name: 'Dyna-1',
@@ -134,7 +134,7 @@ const WAVE7A_SPECS = [
     workerFile: 'src/lib/plugins/dyna1/dyna1.worker.ts',
     factoryExport: 'createDyna1Engine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/dyna1-webgpu/resolve/main',
-    expectedParamKeys: ['inputMode', 'maxSequences', 'precision'],
+    expectedParamKeys: ['capMode', 'inputMode', 'maxSequences', 'precision'],
   },
   {
     name: 'GNINA 1.3',

@@ -265,7 +265,7 @@ describe('declarative ParamSchema & modes single source of truth', () => {
       {
         adapterId: 'localfold-af2',
         file: 'src/lib/plugins/localfold-af2/localfold.worker.ts',
-        extraHelperKeys: ['maxSequences'], // read inside selectFoldWorkItems(seqSet, p)
+        extraHelperKeys: ['capMode', 'maxSequences'], // read inside selectFoldWorkItems(seqSet, p)
       },
       { adapterId: 'thermompnn', file: 'src/lib/plugins/thermompnn/thermompnn.worker.ts' },
       { adapterId: 'ligandmpnn', file: 'src/lib/plugins/ligandmpnn/ligandmpnn.worker.ts' },

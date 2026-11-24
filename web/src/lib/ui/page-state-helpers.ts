@@ -91,7 +91,12 @@ export function computePreviewChecks(
 
 export function isSharedWorkflowHash(rawHash: string): boolean {
   const trimmed = rawHash.trim();
-  return trimmed.startsWith('#g=') || trimmed.startsWith('#p=');
+  return (
+    trimmed.startsWith('#g=') ||
+    trimmed.startsWith('#p=') ||
+    trimmed.startsWith('?g=') ||
+    trimmed.startsWith('?p=')
+  );
 }
 
 export function shouldSuppressOnboardingForHash(

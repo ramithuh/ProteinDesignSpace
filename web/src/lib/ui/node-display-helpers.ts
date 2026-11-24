@@ -1,4 +1,5 @@
 import { getBenchmarkById } from '$lib/engine/benchmarks';
+import { resolveEffectiveMaxSequences } from '$lib/engine/batch-flow';
 import { parseFixedPositionsAndChains } from '$lib/engine/mpnn-spec';
 import { LOCALFOLD_MODEL_OPTIONS, MPNN_VARIANT_OPTIONS, RFD4_BENCHMARK_OPTIONS } from '$lib/engine/registry';
 import { validateSequenceText } from '$lib/engine/param-validation';
@@ -289,7 +290,14 @@ export function formatNodeParamSummary(
       const mode = String(p.mode ?? 'wildtype');
       const prec = String(p.precision ?? 'int8').toUpperCase();
       const tag = mode === 'masked' ? 'Masked LLR' : mode === 'fill' ? 'Fill' : 'WT LLR';
-      return `${tag} · ${prec}`;
+      const cap = resolveEffectiveMaxSequences('esmc', p);
+      const capTag =
+        cap.capMode === 'follow-upstream'
+          ? mode === 'masked'
+            ? 'Auto (budget)'
+            : `Auto (≤${cap.limit})`
+          : `Cap ${cap.limit}`;
+      return `${tag} · ${prec} · ${capTag}`;
     }
     case 'dyna1': {
       const prec = String(p.precision ?? 'int8').toUpperCase();
@@ -302,7 +310,10 @@ export function formatNodeParamSummary(
             : mode === 'struct-only'
               ? 'Struct-only'
               : 'Auto (Seq+Struct)';
-      return `${modeLbl} · ${prec}`;
+      if (mode === 'struct-only') return `${modeLbl} · ${prec}`;
+      const cap = resolveEffectiveMaxSequences('dyna1', p);
+      const capTag = cap.capMode === 'follow-upstream' ? `Auto (≤${cap.limit})` : `Cap ${cap.limit}`;
+      return `${modeLbl} · ${prec} · ${capTag}`;
     }
     case 'gnina': {
       const tm = String(p.taskMode ?? 'score');
@@ -390,14 +401,16 @@ export function formatNodeParamSummary(
             : msaMode === 'a3m'
               ? '.a3m'
               : 'single-seq';
+      const cap = resolveEffectiveMaxSequences('localfold-af2', p);
+      const capTag = cap.capMode === 'follow-upstream' ? `Auto (≤${cap.limit})` : `Cap ${cap.limit}`;
       if (meta.family === 'esmfold2') {
-        return `${meta.shortLabel} · single-seq · ${num(p.esmfold2Steps, 15)} scheduled steps`;
+        return `${meta.shortLabel} · ${num(p.esmfold2Steps, 15)} steps · ${capTag}`;
       }
       if (meta.family === 'af3') {
         const steps = num(p.diffusionSteps, 25);
-        return `LocalFold · ${msaTag} · ${steps} steps · ${rec} rec`;
+        return `${msaTag} · ${steps}st · ${rec} rec · ${capTag}`;
       }
-      return `LocalFold · ${msaTag} · ${rec} rec`;
+      return `${msaTag} · ${rec} rec · ${capTag}`;
     }
     case 'top-k-filter': {
       const topK = num(p.topK, 2);

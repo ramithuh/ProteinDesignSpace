@@ -11,6 +11,7 @@
     "dev": "node ../tools/sync-ort-wasm.mjs && vite dev",
     "prebuild": "node ../tools/sync-upstream.mjs && node ../tools/sync-ort-wasm.mjs",
     "build": "vite build",
+    "postbuild": "node ../tools/build-cf-worker.mjs",
     "preview": "vite preview",
     "test": "svelte-kit sync && vitest run",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",

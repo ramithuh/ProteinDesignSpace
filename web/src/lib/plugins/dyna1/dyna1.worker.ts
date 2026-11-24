@@ -20,7 +20,9 @@ import {
 } from '$lib/kernel';
 import { paintStructureBfactors } from '$lib/protein-ops/bfactor-paint';
 import { parseStructureText } from '$lib/protein-ops/pdb';
+import { resolveEffectiveMaxSequences } from '$lib/engine/batch-flow';
 import type {
+  ExcludedCandidateRecord,
   ResidueTrackArtifact,
   SequenceCandidate,
   SequenceSet,
@@ -197,13 +199,20 @@ createWorkerHarness({
     const p = ctx.params ?? {};
     const precision = normalizePrecision(p.precision);
     const requestedInputMode = normalizeDyna1InputMode(p.inputMode);
-    const maxSequences = Math.max(1, Math.min(8, Math.round(Number(p.maxSequences ?? 1))));
+    const capMode = p.capMode;
+    const capInfo = resolveEffectiveMaxSequences('dyna1', {
+      ...p,
+      capMode: p.capMode,
+      maxSequences: p.maxSequences,
+    });
+    const maxSequences = capInfo.limit;
 
     const seqSet = ctx.inputs?.sequences as SequenceSet | undefined;
     const struct = ctx.inputs?.structure as StructureArtifact | undefined;
     const backbone3 = extractDyna1Backbone3Coords(struct);
 
     let sourceCandidates: SequenceCandidate[] = [];
+    let excludedCandidates: ExcludedCandidateRecord[] = [];
     const parentStructureId: string | undefined = struct?.id ?? seqSet?.parentStructureId;
 
     if (requestedInputMode === 'struct-only' && struct) {
@@ -221,6 +230,17 @@ createWorkerHarness({
       ];
     } else if (seqSet && seqSet.candidates.length > 0) {
       sourceCandidates = seqSet.candidates.slice(0, maxSequences);
+      if (seqSet.candidates.length > maxSequences) {
+        excludedCandidates = seqSet.candidates.slice(maxSequences).map((cand, offset) => {
+          const index = maxSequences + offset;
+          return {
+            key: cand.key ?? cand.id,
+            id: cand.id,
+            index,
+            reason: `Excluded by maxSequences=${maxSequences} (candidate #${index + 1} of ${seqSet.candidates.length})`,
+          };
+        });
+      }
     } else if (struct && struct.sequence) {
       sourceCandidates = [
         {
@@ -475,6 +495,7 @@ createWorkerHarness({
       ...(seqSet?.chainRoles ? { chainRoles: seqSet.chainRoles } : {}),
       sourceModelId: 'dyna1',
       candidates: scoredCandidates,
+      ...(excludedCandidates.length > 0 ? { excludedCandidates } : {}),
     };
 
     const outputs: Record<string, unknown> = { track, sequences };

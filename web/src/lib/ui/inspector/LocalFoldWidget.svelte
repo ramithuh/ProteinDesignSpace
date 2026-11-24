@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ESMFOLD2_STEPS, LOCALFOLD_MODEL_OPTIONS } from '$lib/engine/registry';
   import { sanitizeParamsOnModeSwitch } from '$lib/engine/graph-utils';
+  import { resolveSequenceCapMode, type NodeFlowInfo } from '$lib/engine/batch-flow';
   import { NUMERIC_SPECS, type NumericFieldSpec } from '$lib/engine/param-validation';
   import { resolveAutoModelLabelOnChange } from '../node-display-helpers';
   import NumericInput from '../NumericInput.svelte';
@@ -13,6 +14,7 @@
     msaA3mDraft: string;
     lfMultiDesignInfo: { backboneCount: number; sequenceCount: number | null } | null;
     upstreamSequences: SequenceSet | null;
+    flowInfo?: NodeFlowInfo | null;
     maxTotalFoldsSpec: NumericFieldSpec;
     onUpdate: (nodeId: string, params: Record<string, unknown>) => void;
     onUpdateLabel?: (nodeId: string, label: string) => void;
@@ -29,6 +31,7 @@
     msaA3mDraft,
     lfMultiDesignInfo,
     upstreamSequences,
+    flowInfo = null,
     maxTotalFoldsSpec,
     onUpdate,
     onUpdateLabel = undefined,
@@ -94,6 +97,7 @@
   }
 
   let lfModelId = $derived(String(node.params.model ?? 'monomer'));
+  let lfCapMode = $derived(resolveSequenceCapMode('localfold-af2', node.params));
   let lfMeta = $derived(selectedLocalFoldMeta ?? LOCALFOLD_MODEL_OPTIONS[0]);
   let lfMsaMode = $derived(String(node.params.msaMode ?? 'single') as MsaMode);
   let lfMaxRecycles = $derived(localFoldMaxRecycles(lfModelId, lfMeta.family));
@@ -275,18 +279,80 @@
 {/if}
 
 <label>
-  Max seqs to fold
-  <NumericInput
+  Batch limit
+  <select
     {disabled}
-    ariaLabel="Max sequences to fold"
-    spec={NUMERIC_SPECS['localfold-af2'].maxSequences}
-    value={Number(node.params.maxSequences ?? 2)}
-    onChange={(v) => onSetParam('maxSequences', v)}
-  />
+    value={lfCapMode}
+    onchange={(e) => {
+      const nextMode = e.currentTarget.value === 'fixed' ? 'fixed' : 'follow-upstream';
+      onUpdate(node.id, {
+        ...node.params,
+        capMode: nextMode,
+      });
+    }}
+  >
+    <option value="follow-upstream">Follow upstream (≤8)</option>
+    <option value="fixed">Fixed cap</option>
+  </select>
 </label>
 
-{#if lfMultiDesignInfo}
-  {@const lfPerBackboneCap = Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}
+{#if lfCapMode === 'fixed'}
+  <label>
+    Max seqs to fold
+    <NumericInput
+      {disabled}
+      ariaLabel="Max sequences to fold"
+      spec={NUMERIC_SPECS['localfold-af2'].maxSequences}
+      value={Number(node.params.maxSequences ?? 2)}
+      onChange={(v) =>
+        onUpdate(node.id, {
+          ...node.params,
+          capMode: 'fixed',
+          maxSequences: v,
+        })}
+    />
+  </label>
+{/if}
+
+{#if flowInfo && flowInfo.droppedCount > 0}
+  <div class="full lf-warn-banner" role="status">
+    <span>
+      {flowInfo.isEstimate ? 'Will fold ' : 'Folding '}<b>{flowInfo.processedCount} of {flowInfo.incomingCount}</b> upstream sequences
+      {#if flowInfo.dropKind === 'cap-campaign'}
+        (campaign cap {flowInfo.maxTotalFolds ?? 16})
+      {:else if flowInfo.capMode === 'fixed'}
+        (fixed cap {flowInfo.effectiveCap})
+      {:else}
+        (max {flowInfo.effectiveCap}/backbone)
+      {/if}
+    </span>
+    {#if flowInfo.dropKind === 'cap-campaign' && flowInfo.incomingCount <= 64}
+      <button
+        type="button"
+        class="mini-btn"
+        {disabled}
+        onclick={() =>
+          onSetParam('maxTotalFolds', Math.min(64, flowInfo.incomingCount))}
+      >
+        Raise cap to {Math.min(64, flowInfo.incomingCount)}
+      </button>
+    {:else if flowInfo.capMode === 'fixed'}
+      <button
+        type="button"
+        class="mini-btn"
+        {disabled}
+        onclick={() =>
+          onUpdate(node.id, {
+            ...node.params,
+            capMode: 'follow-upstream',
+          })}
+      >
+        Fold all{flowInfo.incomingCount <= 8 ? ` ${flowInfo.incomingCount}` : ''} (auto)
+      </button>
+    {/if}
+  </div>
+{:else if lfMultiDesignInfo}
+  {@const lfPerBackboneCap = lfCapMode === 'follow-upstream' ? 8 : Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}
   {@const lfCampaignCap = Math.max(1, Math.min(64, Math.round(Number(node.params.maxTotalFolds ?? 16)) || 16))}
   {@const lfPlanned = Math.min(
     lfCampaignCap,
@@ -304,19 +370,29 @@
       (≤{lfPerBackboneCap}/backbone, cap {lfCampaignCap})
     </span>
   </div>
-{:else if upstreamSequences && upstreamSequences.candidates.length > Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}
+{:else if flowInfo && flowInfo.incomingCount > 1 && lfCapMode === 'follow-upstream'}
+  <div class="fanout-chip full" role="status">
+    <span class="fanout-dot" aria-hidden="true"></span>
+    <span>
+      Following upstream: {flowInfo.isEstimate ? '~' : ''}<b>{flowInfo.processedCount} sequence{flowInfo.processedCount === 1 ? '' : 's'}</b> will be folded sequentially (weights loaded once).
+    </span>
+  </div>
+{:else if upstreamSequences && lfCapMode === 'fixed' && upstreamSequences.candidates.length > Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}
   {@const lfCapNow = Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}
   {@const lfUpCount = upstreamSequences.candidates.length}
-  {@const lfTargetBump = Math.min(8, lfUpCount)}
   <div class="full lf-warn-banner" role="status">
     <span>Folding <b>{lfCapNow} of {lfUpCount}</b> upstream sequences</span>
     <button
       type="button"
       class="mini-btn"
       {disabled}
-      onclick={() => onSetParam('maxSequences', lfTargetBump)}
+      onclick={() =>
+        onUpdate(node.id, {
+          ...node.params,
+          capMode: 'follow-upstream',
+        })}
     >
-      Fold all {lfTargetBump}
+      Follow upstream
     </button>
   </div>
 {/if}

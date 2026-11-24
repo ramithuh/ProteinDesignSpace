@@ -2669,6 +2669,18 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'All-atom diffusion steps for AF3-lineage models (RF3, Boltz-2, OpenBind-0, AF3, etc.).',
       },
       {
+        key: 'capMode',
+        label: 'Batch limit',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'follow-upstream',
+        options: [
+          { value: 'follow-upstream', label: 'Follow upstream (All, up to 8/backbone)' },
+          { value: 'fixed', label: 'Fixed cap' },
+        ],
+        description: 'Follow upstream sequence counts automatically (bounded by Max total folds), or hold a fixed per-backbone cap.',
+      },
+      {
         key: 'maxSequences',
         label: 'Max seqs to fold',
         kind: 'integer',
@@ -2677,7 +2689,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         min: 1,
         max: 8,
         step: 1,
-        description: 'Maximum top-ranked candidate sequences folded from the incoming SequenceSet.',
+        description: 'Per-backbone fold cap used when Batch limit is set to Fixed cap.',
       },
       {
         key: 'ligandCcdCodes',
@@ -2907,15 +2919,27 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: '1-based residue positions or ranges to mask and predict in Fill mode.',
       },
       {
+        key: 'capMode',
+        label: 'Batch limit',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'follow-upstream',
+        options: [
+          { value: 'follow-upstream', label: 'Follow upstream (All, up to 8)' },
+          { value: 'fixed', label: 'Fixed cap' },
+        ],
+        description: 'Automatically score incoming sequences (bounded by masked pass budget), or hold a fixed cap.',
+      },
+      {
         key: 'maxSequences',
         label: 'Max sequences',
         kind: 'integer',
-        tier: 'advanced',
+        tier: 'primary',
         defaultValue: 1,
         min: 1,
         max: 8,
         step: 1,
-        description: 'Maximum candidate sequences scored from an incoming SequenceSet.',
+        description: 'Maximum candidate sequences scored when Batch limit is set to Fixed cap.',
       },
     ],
     crossValidate: (_p, ctx) => {
@@ -2978,15 +3002,27 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Weight storage precision streamed into WebGPU (INT8 achieves r ≥ 0.9995 vs FP32).',
       },
       {
+        key: 'capMode',
+        label: 'Batch limit',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'follow-upstream',
+        options: [
+          { value: 'follow-upstream', label: 'Follow upstream (All, up to 8)' },
+          { value: 'fixed', label: 'Fixed cap' },
+        ],
+        description: 'Automatically score all incoming sequences (up to 8), or hold a fixed cap.',
+      },
+      {
         key: 'maxSequences',
         label: 'Max sequences',
         kind: 'integer',
-        tier: 'advanced',
+        tier: 'primary',
         defaultValue: 1,
         min: 1,
         max: 8,
         step: 1,
-        description: 'Maximum candidate sequences scored from an incoming SequenceSet.',
+        description: 'Maximum candidate sequences scored when Batch limit is set to Fixed cap.',
       },
     ],
     crossValidate: (p, ctx) => {
@@ -3559,7 +3595,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
           id: 'fold',
           adapterId: 'localfold-af2',
           label: 'AF2 Model 1',
-          params: { model: 'monomer', recycles: 1, maxSequences: 2, seed: 0 },
+          params: { model: 'monomer', recycles: 1, capMode: 'follow-upstream', maxSequences: 2, seed: 0 },
         },
         {
           id: 'score',
@@ -3652,7 +3688,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
           id: 'fold',
           adapterId: 'localfold-af2',
           label: 'AF2 Model 1',
-          params: { recycles: 1, maxSequences: 2, seed: 0 },
+          params: { recycles: 1, capMode: 'follow-upstream', maxSequences: 2, seed: 0 },
         },
         {
           id: 'score',
@@ -3709,7 +3745,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
           id: 'fold',
           adapterId: 'localfold-af2',
           label: 'AF2 Model 1',
-          params: { recycles: 1, maxSequences: 2, seed: 0 },
+          params: { recycles: 1, capMode: 'follow-upstream', maxSequences: 2, seed: 0 },
         },
         {
           id: 'score',
@@ -3754,7 +3790,7 @@ export const WORKFLOW_PRESETS: PresetDefinition[] = [
           id: 'fold_mpnn',
           adapterId: 'localfold-af2',
           label: 'AF2 Model 1 (MPNN)',
-          params: { recycles: 1, maxSequences: 2, seed: 0 },
+          params: { recycles: 1, capMode: 'follow-upstream', maxSequences: 2, seed: 0 },
           position: { x: 640, y: 194 },
         },
         {

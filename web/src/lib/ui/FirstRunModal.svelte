@@ -27,9 +27,13 @@
   let rememberChoice = $state(true);
   let confirmBtn = $state<HTMLButtonElement | null>(null);
   let remoteMsaList = $derived(preflight.remoteMsaTransfers ?? []);
+  let truncationList = $derived(preflight.truncationNotices ?? []);
   let hasRemoteMsa = $derived(remoteMsaList.length > 0);
   let hasRemoteHost = $derived(Boolean(remoteHostOrigin));
   let hasAnyExternalTransfer = $derived(hasRemoteMsa || hasRemoteHost);
+  let hasBatchAlert = $derived(
+    truncationList.some((t) => t.severity === 'warning') || Boolean(preflight.hasHighWorkRisk),
+  );
 
   onMount(() => {
     confirmBtn?.focus();
@@ -120,6 +124,22 @@
       </div>
     {/if}
 
+    {#if preflight.fanoutSummary || hasBatchAlert}
+      <div class="gpu-warn" role="status">
+        <strong>
+          {preflight.hasHighWorkRisk ? 'Large sequential batch:' : 'Batch & cap summary:'}
+        </strong>
+        <span>
+          {#if preflight.fanoutSummary}
+            {preflight.fanoutSummary}.
+          {/if}
+          {#each truncationList as t, idx (t.nodeId)}
+            {idx > 0 || preflight.fanoutSummary ? ' ' : ''}{t.nodeLabel}: {t.message}
+          {/each}
+        </span>
+      </div>
+    {/if}
+
     <div class="stat-grid">
       <div class="stat-box">
         <span class="stat-lbl">Est. one-time download</span>
@@ -140,6 +160,9 @@
           <div class="model-row">
             <span class="model-name">
               {m.label}
+              {#if (m.plannedItems ?? 0) > 1}
+                <span class="nc-tag">×{m.plannedItems}</span>
+              {/if}
               {#if m.nonCommercial}
                 <span class="nc-tag">Non-Commercial</span>
               {/if}

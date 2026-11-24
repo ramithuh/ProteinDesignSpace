@@ -20,6 +20,9 @@ if (!existsSync(resolve(buildDir, 'index.html'))) {
 
 for (const req of [
   '_headers',
+  '_worker.js',
+  '_routes.json',
+  'og-default.png',
   'vendor/ort/ort-wasm-simd-threaded.jspi.mjs',
   'vendor/ort/ort-wasm-simd-threaded.jspi.wasm',
   'vendor/ort/ort-wasm-simd-threaded.mjs',

@@ -7,6 +7,7 @@
   } from '$lib/engine/registry';
   import { PORT_COLORS, STAGE_COLORS, STAGE_LABELS } from '$lib/engine/graph-utils';
   import { selectPrimaryOutputPort } from '$lib/engine/peek';
+  import type { NodeFlowInfo } from '$lib/engine/batch-flow';
   import type { CanonicalArtifact, NodeProgressEvent } from '$lib/engine/types';
   import {
     formatMutationMatrixBadge,
@@ -30,6 +31,7 @@
     activePeekSlotId?: string;
     autoModeHint?: string;
     upstreamLockSummary?: UpstreamLockSummary | null;
+    flowInfo?: NodeFlowInfo | null;
     isDraft?: boolean;
     onDelete?: (nodeId: string) => void;
     onPeekPort?: (nodeId: string, direction: 'in' | 'out', portName: string) => void;
@@ -114,10 +116,20 @@
       }
       if (art.kind === 'FoldedStructure' && art.folds.length > 0) {
         const bestP = Math.max(...art.folds.map((f) => f.meanPlddt));
-        return `${art.folds.length} fold${art.folds.length > 1 ? 's' : ''} · pLDDT ${bestP.toFixed(1)}`;
+        const skipped = art.excludedCandidates?.length ?? 0;
+        const countTag =
+          skipped > 0
+            ? `${art.folds.length}/${art.folds.length + skipped} folds`
+            : `${art.folds.length} fold${art.folds.length > 1 ? 's' : ''}`;
+        return `${countTag} · pLDDT ${bestP.toFixed(1)}`;
       }
       if (art.kind === 'SequenceSet') {
-        return `${art.candidates.length} seq${art.candidates.length > 1 ? 's' : ''} (${art.candidates[0]?.sequence.length ?? 0} aa)`;
+        const skipped = art.excludedCandidates?.length ?? 0;
+        const countTag =
+          skipped > 0
+            ? `${art.candidates.length}/${art.candidates.length + skipped} seqs`
+            : `${art.candidates.length} seq${art.candidates.length > 1 ? 's' : ''}`;
+        return `${countTag} (${art.candidates[0]?.sequence.length ?? 0} aa)`;
       }
       if (art.kind === 'SequenceEmbedding') {
         return `${art.sequence.length} aa · ${art.dim}d`;
@@ -246,6 +258,16 @@
       title={data.upstreamLockSummary.detailText}
     >
       {data.upstreamLockSummary.nodeBadge}
+    </div>
+  {/if}
+  {#if data.flowInfo && data.flowInfo.droppedCount > 0 && data.flowInfo.badgeText}
+    <div
+      class="lock-chip"
+      class:is-warn={data.flowInfo.severity === 'warning'}
+      title={data.flowInfo.detailText ?? data.flowInfo.badgeText}
+      data-flow-drop={data.flowInfo.dropKind}
+    >
+      {data.flowInfo.badgeText}
     </div>
   {/if}
 

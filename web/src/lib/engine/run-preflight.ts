@@ -3,6 +3,7 @@
 // and honest multi-design campaign fan-out / sequential GPU work counts.
 
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS, RFD4_BENCHMARK_OPTIONS } from './registry';
+import { computePlannedFlowMap, resolveEffectiveMaxSequences } from './batch-flow';
 import { validateSequenceText } from './param-validation';
 import { getActivePluginRegistry } from '$lib/kernel/active-registry';
 import type { PluginRegistry } from '$lib/kernel/plugin-registry';
@@ -27,6 +28,16 @@ export interface RemoteMsaTransferNotice {
   destination: string;
 }
 
+export interface BatchTruncationNotice {
+  nodeId: string;
+  nodeLabel: string;
+  incomingCount: number;
+  processedCount: number;
+  droppedCount: number;
+  message: string;
+  severity: 'warning' | 'info';
+}
+
 export interface RunPreflightSummary {
   models: PreflightModelItem[];
   totalDownloadMB: number;
@@ -35,6 +46,10 @@ export interface RunPreflightSummary {
   hasNonCommercialModel: boolean;
   /** External sequence transfers required by remote ColabFold MMseqs2 MSA nodes in this run. */
   remoteMsaTransfers?: RemoteMsaTransferNotice[];
+  /** Implicit downstream truncation notices (excluding intentional Top-K Filters). */
+  truncationNotices?: BatchTruncationNotice[];
+  /** True when the run crosses a high sequential compute threshold (e.g. >16 folds). */
+  hasHighWorkRisk?: boolean;
   /** Total planned backbones across generators. */
   plannedBackbones?: number;
   /** Total planned sequences across inverse-folding / native generator outputs. */
@@ -268,7 +283,7 @@ function estimateGraphWorkload(
       hasLocalFold = true;
       const up = findUpstreamNode(node.id, 'sequences');
       const upInfo = up ? sequencesOut(up) : { backbones: 1, sequences: 1 };
-      const maxSeqs = readClampedInt(node.params?.maxSequences, 2, 1, 8);
+      const maxSeqs = resolveEffectiveMaxSequences('localfold-af2', node.params).limit;
       const maxTotalFolds = readClampedInt(
         node.params?.maxTotalFolds,
         DEFAULT_MAX_TOTAL_FOLDS,
@@ -290,7 +305,7 @@ function estimateGraphWorkload(
     }
 
     if (node.adapterId === 'esmc' || node.adapterId === 'dyna1') {
-      const maxSeqs = readClampedInt(node.params?.maxSequences, 1, 1, 8);
+      const maxSeqs = resolveEffectiveMaxSequences(node.adapterId, node.params).limit;
       const upSeq = findUpstreamNode(node.id, 'sequences');
       const upStruct = findUpstreamNode(node.id, 'structure');
       const rawCount = upSeq
@@ -774,6 +789,25 @@ export function estimateRunRequirements(
     }
   }
 
+  const flowMap = computePlannedFlowMap(graph);
+  const truncationNotices: BatchTruncationNotice[] = [];
+  for (const node of graph.nodes) {
+    const fi = flowMap.nodes.get(node.id);
+    if (!fi || fi.droppedCount <= 0 || fi.dropKind === 'none' || fi.dropKind === 'intentional-filter') {
+      continue;
+    }
+    truncationNotices.push({
+      nodeId: node.id,
+      nodeLabel: node.label || ADAPTER_REGISTRY[node.adapterId]?.shortName || node.adapterId,
+      incomingCount: fi.incomingCount,
+      processedCount: fi.processedCount,
+      droppedCount: fi.droppedCount,
+      message: fi.detailText ?? fi.badgeText ?? `${fi.processedCount} of ${fi.incomingCount} items`,
+      severity: fi.severity ?? 'info',
+    });
+  }
+  const hasHighWorkRisk = workload.plannedFolds > DEFAULT_MAX_TOTAL_FOLDS;
+
   return {
     models,
     totalDownloadMB,
@@ -781,6 +815,8 @@ export function estimateRunRequirements(
     usesWebGpu,
     hasNonCommercialModel,
     ...(remoteMsaTransfers.length > 0 ? { remoteMsaTransfers } : {}),
+    ...(truncationNotices.length > 0 ? { truncationNotices } : {}),
+    ...(hasHighWorkRisk ? { hasHighWorkRisk } : {}),
     plannedBackbones: workload.plannedBackbones,
     plannedSequences: workload.plannedSequences,
     plannedFolds: workload.plannedFolds,

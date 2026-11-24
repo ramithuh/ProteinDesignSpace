@@ -3,6 +3,7 @@
 //          pure-DNA sequence input, and token-ceiling risks before clicking Run).
 // Layer 2: Runtime pre-dispatch artifact validation (called in scheduler.ts before launching GPU workers).
 
+import { resolveEffectiveMaxSequences } from './batch-flow';
 import { esmfold2Chains, esmfold2ParamIssue } from './localfold-esmfold2';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { BENCHMARK_TARGETS, getBenchmarkById, type BenchmarkTargetMeta } from './benchmarks';
@@ -322,8 +323,8 @@ export function selectFoldWorkItems(
   seqSet: SequenceSet | undefined | null,
   params?: Record<string, unknown>,
 ): FoldWorkItemSelection {
-  const rawMax = Number(params?.maxSequences ?? 2);
-  const maxSequences = Math.max(1, Math.min(8, Math.round(Number.isFinite(rawMax) ? rawMax : 2)));
+  const resolvedCap = resolveEffectiveMaxSequences('localfold-af2', params);
+  const maxSequences = resolvedCap.limit;
   const rawTotal = Number(params?.maxTotalFolds ?? 16);
   const maxTotalFolds = Math.max(1, Math.min(64, Math.round(Number.isFinite(rawTotal) ? rawTotal : 16)));
   const all = seqSet?.candidates ?? [];
@@ -812,6 +813,15 @@ function parseProteinCropSpans(cropSpec: string): SimpleResidueSpan[] {
     if (!tok) continue;
     // Skip explicit ligand tokens like A:ZN or A:DHZ (chain + non-numeric CCD code)
     if (/^[A-Za-z0-9_]+:[A-Za-z][A-Za-z0-9]*$/.test(tok)) continue;
+    // Single-character whole-chain crop token e.g. "A", "B", "H", "L", "1", "2"
+    if (/^[A-Za-z0-9_]$/.test(tok)) {
+      out.push({
+        chain: tok.toUpperCase(),
+        start: Number.NEGATIVE_INFINITY,
+        end: Number.POSITIVE_INFINITY,
+      });
+      continue;
+    }
     const parsed = parseResidueRangeTokens(tok);
     if (parsed.length > 0) {
       for (const s of parsed) {
@@ -822,14 +832,6 @@ function parseProteinCropSpans(cropSpec: string): SimpleResidueSpan[] {
         });
       }
       continue;
-    }
-    // Single-letter whole-chain crop token e.g. "A", "B", "H", "L"
-    if (/^[A-Za-z_]$/.test(tok)) {
-      out.push({
-        chain: tok.toUpperCase(),
-        start: Number.NEGATIVE_INFINITY,
-        end: Number.POSITIVE_INFINITY,
-      });
     }
   }
   return out;
@@ -965,7 +967,7 @@ export function summarizeCropSegments(cropSpec: string): CropSegmentsSummary {
       continue;
     }
 
-    if (/^[A-Za-z]$/.test(tok)) {
+    if (/^[A-Za-z0-9]$/.test(tok)) {
       proteinChains.add(tok);
       hasWholeChainProtein = true;
       continue;

@@ -1801,8 +1801,8 @@ function parseRawCropRules(segmentSpec: string): {
       invalidTokens.push(tok);
       continue;
     }
-    // Single chain character e.g. "A", "a", "B", "C" (case-sensitive!)
-    const chainOnly = /^([A-Za-z])$/.exec(tok);
+    // Single chain character e.g. "A", "a", "B", "1", "2" (case-sensitive; PDB allows [A-Za-z0-9])
+    const chainOnly = /^([A-Za-z0-9])$/.exec(tok);
     if (chainOnly) {
       rules.push({ kind: 'chain', tokenIdx, chain: chainOnly[1] });
       continue;
@@ -1817,12 +1817,10 @@ function parseRawCropRules(segmentSpec: string): {
       }
       continue;
     }
-    // Bare ligand comp_id or multi-char chain token e.g. "SAM", "DHZ", "ZN", "1PE", "AA"
+    // Bare ligand comp_id or multi-char chain token e.g. "SAM", "DHZ", "ZN", "1PE", "AA", "1A"
     if (/^[A-Za-z0-9]{2,5}$/.test(tok) && /[A-Za-z]/.test(tok)) {
       rules.push({ kind: 'ligand', tokenIdx, compId: tok.toUpperCase() });
-      if (/^[A-Za-z]/.test(tok)) {
-        rules.push({ kind: 'chain', tokenIdx, chain: tok });
-      }
+      rules.push({ kind: 'chain', tokenIdx, chain: tok });
       continue;
     }
     invalidTokens.push(tok);
@@ -2288,8 +2286,12 @@ export function cropParsedStructure(parsed: ParsedStructure, segmentSpec: string
   const rules: CropRule[] = [];
   const invalidTokens: string[] = [];
   for (const tok of tokens) {
-    const chainOnly = /^([A-Za-z][A-Za-z0-9_]*)$/.exec(tok);
-    if (chainOnly && !/^[A-Za-z]+\d/.test(tok)) {
+    if (/^[A-Za-z0-9]$/.test(tok)) {
+      rules.push({ chain: tok, start: null, end: null });
+      continue;
+    }
+    const chainOnly = /^([A-Za-z0-9_]+)$/.exec(tok);
+    if (chainOnly && /[A-Za-z]/.test(tok) && !/^[A-Za-z]+\d/.test(tok)) {
       rules.push({ chain: chainOnly[1], start: null, end: null });
       continue;
     }

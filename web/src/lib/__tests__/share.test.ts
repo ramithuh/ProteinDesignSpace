@@ -133,6 +133,7 @@ describe('engine/share', () => {
       model: 'monomer',
       recycles: 3,
       diffusionSteps: 25,
+      capMode: 'follow-upstream',
       maxSequences: 1,
       seed: 7,
     });

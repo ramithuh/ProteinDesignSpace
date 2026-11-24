@@ -21,6 +21,7 @@ import {
   reconstructBackboneOxygen,
 } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
+import { summarizeCropSegments } from '$lib/engine/bio-capabilities';
 
 function dist3(a: [number, number, number], b: [number, number, number]): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
@@ -1048,5 +1049,60 @@ describe('protein-ops/pdb', () => {
       expect(line).not.toContain('NaN');
       expect(Number.isFinite(parseFloat(line.slice(30, 38)))).toBe(true);
     }
+  });
+
+  it('supports numeric single-char chain IDs (e.g. 6GRG chains "1" and "2") in mmCIF/PDB raw & parsed crops and summaries', () => {
+    const numericChainCif = [
+      'data_6GRG',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_alt_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.label_asym_id',
+      '_atom_site.label_seq_id',
+      '_atom_site.pdbx_PDB_ins_code',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      '_atom_site.auth_seq_id',
+      '_atom_site.auth_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_atom_id',
+      '_atom_site.pdbx_PDB_model_num',
+      'ATOM 1 CA . ALA A 1 ? 0.0 0.0 0.0 5 ALA A CA 1',
+      'ATOM 2 CA . GLY A 2 ? 3.8 0.0 0.0 6 GLY A CA 1',
+      'ATOM 3 CA . VAL A 3 ? 7.6 0.0 0.0 7 VAL A CA 1',
+      'ATOM 4 CA . MET 1 1 ? 0.0 5.0 0.0 12 MET 1 CA 1',
+      'ATOM 5 CA . LEU 1 2 ? 3.8 5.0 0.0 13 LEU 1 CA 1',
+      'ATOM 6 CA . ILE 1 3 ? 7.6 5.0 0.0 14 ILE 1 CA 1',
+      'ATOM 7 CA . SER 2 1 ? 0.0 10.0 0.0 13 SER 2 CA 1',
+      'ATOM 8 CA . THR 2 2 ? 3.8 10.0 0.0 14 THR 2 CA 1',
+      'ATOM 9 CA . ASP 2 3 ? 7.6 10.0 0.0 15 ASP 2 CA 1',
+      'ATOM 10 CA . GLU 2 4 ? 11.4 10.0 0.0 16 GLU 2 CA 1',
+    ].join('\n');
+
+    const rawChain2 = cropRawAllAtomStructure(numericChainCif, '2');
+    expect(rawChain2.keptAtomLines).toBe(4);
+    const parsedChain2 = parseStructureText(rawChain2.text);
+    expect(parsedChain2.sequence).toBe('STDE');
+    expect(parsedChain2.chainIds).toEqual(['2', '2', '2', '2']);
+
+    const rawRange2 = cropRawAllAtomStructure(numericChainCif, '2:13-15');
+    expect(rawRange2.keptAtomLines).toBe(3);
+
+    const fullParsed = parseStructureText(numericChainCif);
+    const croppedParsed2 = cropParsedStructure(fullParsed, '2');
+    expect(croppedParsed2.sequence).toBe('STDE');
+    expect(croppedParsed2.chainIds).toEqual(['2', '2', '2', '2']);
+
+    const croppedParsed12 = cropParsedStructure(fullParsed, '1, 2');
+    expect(croppedParsed12.sequence).toBe('MLISTDE');
+
+    const summary = summarizeCropSegments('2');
+    expect(summary.valid).toBe(true);
+    expect(summary.hasWholeChainProtein).toBe(true);
+    expect([...summary.proteinChains]).toEqual(['2']);
   });
 });

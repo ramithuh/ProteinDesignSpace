@@ -13,7 +13,9 @@ import {
 } from '$lib/kernel';
 import { paintStructureBfactors } from '$lib/protein-ops/bfactor-paint';
 import { parseStructureText } from '$lib/protein-ops/pdb';
+import { resolveEffectiveMaxSequences } from '$lib/engine/batch-flow';
 import type {
+  ExcludedCandidateRecord,
   MutationMatrixArtifact,
   ResidueTrackArtifact,
   SequenceCandidate,
@@ -212,16 +214,39 @@ createWorkerHarness({
     const mode = normalizeMode(p.mode);
     const precision = normalizePrecision(p.precision);
     const maskPositionsRaw = String(p.maskPositions ?? '').trim();
-    const maxSequences = Math.max(1, Math.min(8, Math.round(Number(p.maxSequences ?? 1))));
-
+    const capMode = p.capMode;
     const seqSet = ctx.inputs?.sequences as SequenceSet | undefined;
     const struct = ctx.inputs?.structure as StructureArtifact | undefined;
 
+    const firstSeqLen =
+      seqSet?.candidates?.[0]?.sequence?.length ?? struct?.sequence?.length ?? null;
+    const capInfo = resolveEffectiveMaxSequences(
+      'esmc',
+      { ...p, capMode: p.capMode, maxSequences: p.maxSequences },
+      { sequenceLength: firstSeqLen },
+    );
+    const maxSequences = capInfo.limit;
+
     let sourceCandidates: SequenceCandidate[] = [];
+    let excludedCandidates: ExcludedCandidateRecord[] = [];
     const parentStructureId: string | undefined = struct?.id ?? seqSet?.parentStructureId;
 
     if (seqSet && seqSet.candidates.length > 0) {
       sourceCandidates = seqSet.candidates.slice(0, maxSequences);
+      if (seqSet.candidates.length > maxSequences) {
+        const reasonPrefix = capInfo.isPassBudgetCapped
+          ? `Excluded by masked LLR pass budget (${maxSequences} of ${seqSet.candidates.length})`
+          : `Excluded by maxSequences=${maxSequences}`;
+        excludedCandidates = seqSet.candidates.slice(maxSequences).map((cand, offset) => {
+          const index = maxSequences + offset;
+          return {
+            key: cand.key ?? cand.id,
+            id: cand.id,
+            index,
+            reason: `${reasonPrefix} (candidate #${index + 1} of ${seqSet.candidates.length})`,
+          };
+        });
+      }
     } else if (struct && struct.sequence) {
       sourceCandidates = [
         {
@@ -537,6 +562,7 @@ createWorkerHarness({
       ...(seqSet?.chainRoles ? { chainRoles: seqSet.chainRoles } : {}),
       sourceModelId: 'esmc',
       candidates: scoredCandidates,
+      ...(excludedCandidates.length > 0 ? { excludedCandidates } : {}),
     };
 
     const outputs: Record<string, unknown> = { mutations, track, sequences };

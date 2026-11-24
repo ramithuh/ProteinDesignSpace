@@ -63,6 +63,7 @@ const LOCALFOLD_DEFAULT_BASELINE_KEYS = new Set([
   'model',
   'recycles',
   'diffusionSteps',
+  'capMode',
   'maxSequences',
   'seed',
 ]);

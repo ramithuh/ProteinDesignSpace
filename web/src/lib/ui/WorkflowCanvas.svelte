@@ -36,6 +36,7 @@
   import BlockCatalogPopover from './BlockCatalogPopover.svelte';
   import WorkflowPlannerBar from './WorkflowPlannerBar.svelte';
   import type { PlannedWorkflowResult } from '$lib/engine/workflow-planner';
+  import { computePlannedFlowMap } from '$lib/engine/batch-flow';
   import { computeUpstreamLockSummary } from './node-display-helpers';
 
   interface Props {
@@ -637,6 +638,7 @@
     const activePreview = draftPreview;
     const activeGraph = activePreview ? activePreview.graph : graph;
     const laid = activeGraph.nodes.some((n) => !n.position) ? autoLayoutGraph(activeGraph) : activeGraph;
+    const plannedFlow = computePlannedFlowMap(laid, activePreview ? {} : outputsByNode);
     const existingNodeIds = activePreview ? new Set(graph.nodes.map((n) => n.id)) : null;
     const existingEdgeIds = activePreview
       ? new Set(graph.edges.map((e) => makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort)))
@@ -704,6 +706,7 @@
         n.id,
         isDraftNode ? {} : outputsByNode,
       );
+      const flowInfo = isDraftNode ? null : (plannedFlow.nodes.get(n.id) ?? null);
       return {
         ...(prevFlow?.measured ? { measured: prevFlow.measured } : {}),
         ...(prevFlow?.width !== undefined ? { width: prevFlow.width } : {}),
@@ -728,6 +731,7 @@
             !activePreview && activePeekPort?.nodeId === n.id ? activePeekPort.slotId : undefined,
           autoModeHint,
           upstreamLockSummary,
+          flowInfo,
           isDraft: isDraftNode,
           onDelete: disabled || activePreview ? undefined : removeNode,
           onPeekPort: activePreview ? undefined : onPeekPort,
@@ -742,6 +746,7 @@
 
     const nextFlowEdges: Edge[] = laid.edges.map((e) => {
       const eid = makeEdgeId(e.fromNode, e.fromPort, e.toNode, e.toPort);
+      const edgeFlow = activePreview ? null : (plannedFlow.edges.get(eid) ?? null);
       const col = edgeColor(e.fromNode, e.fromPort, laid);
       const isDraftEdge = Boolean(
         activePreview && (!activePreview.isIncrementalEdit || !existingEdgeIds?.has(eid)),
@@ -798,6 +803,7 @@
         style,
         data: {
           laneStagger,
+          edgeFlow,
           onDelete: disabled || activePreview ? undefined : () => removeEdge(eid),
         },
       };
