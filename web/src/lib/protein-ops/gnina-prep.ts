@@ -284,8 +284,84 @@ export function buildLigandV2000Sdf(
   });
 
   // Geometric bond-order perception for PDB HETATMs (which lack explicit bond orders):
-  // 1. Detect planar 5- and 6-membered conjugated rings -> mark ring bonds as aromatic (order 4)
   const heavyDeg = ordered.map((_, i) => adj[i].filter((e) => ordered[e.j].element !== 'H').length);
+
+  const atomValence = (idx: number): number =>
+    adj[idx].reduce((sum, e) => sum + (bonds[e.bondIdx][2] === 4 ? 1.5 : bonds[e.bondIdx][2]), 0);
+
+  const maxValence = (idx: number): number => {
+    const { element: el, charge } = ordered[idx];
+    if (el === 'C') return Math.max(1, 4 - Math.abs(charge));
+    if (el === 'N') return Math.max(1, 3 + charge);
+    if (el === 'O') return Math.max(0, 2 + charge);
+    if (el === 'S') return Math.max(2, 6 - Math.abs(charge));
+    if (el === 'P') return Math.max(3, 5 - Math.abs(charge));
+    if (el === 'B') return Math.max(1, 3 - charge);
+    return 4;
+  };
+
+  const canAddOrder = (idx: number, delta: number): boolean =>
+    atomValence(idx) + delta <= maxValence(idx) + 1e-6;
+
+  const isAmideOrUreidoCarbon = (cIdx: number): boolean =>
+    ordered[cIdx].element === 'C' &&
+    adj[cIdx].some((e) => {
+      const nel = ordered[e.j].element;
+      if (nel === 'O') return bonds[e.bondIdx][2] >= 2 || (heavyDeg[e.j] === 1 && e.dist <= 1.32);
+      if (nel === 'S') return bonds[e.bondIdx][2] >= 2 || (heavyDeg[e.j] === 1 && e.dist <= 1.72);
+      return false;
+    });
+
+  // 1. Perceive short exocyclic C=O carbonyls / carboxylates & P=O / S=O first
+  //    (sorted by formal charge magnitude then distance so neutral/shorter oxygens get priority
+  //    over -1-charged oxygens, and carbonyl carbons block false aromaticity in Step 2).
+  const oxoCandidates: Array<{ oIdx: number; edge: { j: number; bondIdx: number; dist: number } }> = [];
+  for (let i = 0; i < ordered.length; i++) {
+    if (ordered[i].element !== 'O' || heavyDeg[i] !== 1) continue;
+    const edge = adj[i].find((e) => ordered[e.j].element !== 'H');
+    if (edge) oxoCandidates.push({ oIdx: i, edge });
+  }
+  oxoCandidates.sort(
+    (a, b) =>
+      Math.abs(ordered[a.oIdx].charge) - Math.abs(ordered[b.oIdx].charge) ||
+      a.edge.dist - b.edge.dist ||
+      a.edge.bondIdx - b.edge.bondIdx,
+  );
+
+  for (const { oIdx, edge } of oxoCandidates) {
+    const parentIdx = edge.j;
+    const parent = ordered[parentIdx];
+    if (parent.element === 'C' && edge.dist <= 1.29 && heavyDeg[parentIdx] <= 3) {
+      // Check if carboxylate (two terminal oxygens on same carbon): mark neutral/shortest C=O and leave other C-O-
+      const termO = adj[parentIdx].filter(
+        (e) => ordered[e.j].element === 'O' && heavyDeg[e.j] === 1 && e.dist <= 1.32,
+      );
+      if (termO.length === 2) {
+        if (!termO.some((t) => bonds[t.bondIdx][2] >= 2)) {
+          const sorted = [...termO].sort(
+            (x, y) =>
+              Math.abs(ordered[x.j].charge) - Math.abs(ordered[y.j].charge) ||
+              x.dist - y.dist ||
+              x.bondIdx - y.bondIdx,
+          );
+          const target = sorted[0];
+          if (bonds[target.bondIdx][2] === 1 && canAddOrder(parentIdx, 1) && canAddOrder(target.j, 1)) {
+            bonds[target.bondIdx][2] = 2;
+          }
+        }
+      } else if (bonds[edge.bondIdx][2] === 1 && canAddOrder(parentIdx, 1) && canAddOrder(oIdx, 1)) {
+        bonds[edge.bondIdx][2] = 2;
+      }
+    } else if ((parent.element === 'P' || parent.element === 'S') && edge.dist <= 1.52) {
+      if (bonds[edge.bondIdx][2] === 1 && canAddOrder(parentIdx, 1) && canAddOrder(oIdx, 1)) {
+        bonds[edge.bondIdx][2] = 2;
+      }
+    }
+  }
+
+  // 2. Detect planar 5- and 6-membered conjugated rings -> mark ring bonds as aromatic (order 4)
+  //    X-ray aromatic ceiling relaxed to 1.49 Å (<= 1.78 Å with S); rejects rings whose atoms
+  //    carry exocyclic double/triple bonds (e.g. C=O in pyrimidinone/2-pyridone) or 4-coord atoms.
   const visitedRings = new Set<string>();
   for (let start = 0; start < ordered.length; start++) {
     if (!['C', 'N', 'O', 'S'].includes(ordered[start].element)) continue;
@@ -298,19 +374,34 @@ export function buildLigandV2000Sdf(
           const sig = [...path].sort((a, b) => a - b).join(',');
           if (visitedRings.has(sig)) continue;
           visitedRings.add(sig);
-          // Check approximate planarity & sp2 bond lengths (1.28–1.46 Å for C/N/O, <=1.78 Å with S)
+
+          const cycleEdgeSet = new Set(cycleEdges);
           const hasOnlyRingEls = path.every((idx) => ['C', 'N', 'O', 'S'].includes(ordered[idx].element));
-          const maxBondLen = Math.max(...cycleEdges.map((bi) => {
-            const [u, v] = bonds[bi];
-            return Math.hypot(
-              ordered[u].x - ordered[v].x,
-              ordered[u].y - ordered[v].y,
-              ordered[u].z - ordered[v].z,
-            );
-          }));
+          const allLowDeg = path.every((idx) => heavyDeg[idx] <= 3 && adj[idx].length <= 3);
+          const hasExocyclicMultiBond = path.some((idx) =>
+            adj[idx].some(
+              (ae) =>
+                !cycleEdgeSet.has(ae.bondIdx) &&
+                (bonds[ae.bondIdx][2] === 2 || bonds[ae.bondIdx][2] === 3),
+            ),
+          );
+          const maxBondLen = Math.max(
+            ...cycleEdges.map((bi) => {
+              const [u, v] = bonds[bi];
+              return Math.hypot(
+                ordered[u].x - ordered[v].x,
+                ordered[u].y - ordered[v].y,
+                ordered[u].z - ordered[v].z,
+              );
+            }),
+          );
           const hasSulfur = path.some((idx) => ordered[idx].element === 'S');
-          const allLowDeg = path.every((idx) => heavyDeg[idx] <= 3);
-          if (hasOnlyRingEls && allLowDeg && maxBondLen <= (hasSulfur ? 1.78 : 1.46)) {
+          if (
+            hasOnlyRingEls &&
+            allLowDeg &&
+            !hasExocyclicMultiBond &&
+            maxBondLen <= (hasSulfur ? 1.78 : 1.49)
+          ) {
             // Check planarity via normal consistency across consecutive triples
             let planar = true;
             const p0 = ordered[path[0]];
@@ -350,30 +441,9 @@ export function buildLigandV2000Sdf(
     walk([start], []);
   }
 
-  // 2. Perceive short exocyclic C=O carbonyls / carboxylates & P=O / S=O
-  for (let i = 0; i < ordered.length; i++) {
-    const a = ordered[i];
-    if (a.element !== 'O' || heavyDeg[i] !== 1) continue;
-    const edge = adj[i].find((e) => ordered[e.j].element !== 'H');
-    if (!edge) continue;
-    const parent = ordered[edge.j];
-    if (parent.element === 'C' && edge.dist <= 1.29 && heavyDeg[edge.j] <= 3) {
-      // Check if carboxylate (two terminal oxygens on same carbon): mark one C=O and one C-O-
-      const termO = adj[edge.j].filter(
-        (e) => ordered[e.j].element === 'O' && heavyDeg[e.j] === 1 && e.dist <= 1.32,
-      );
-      if (termO.length === 2) {
-        const sorted = [...termO].sort((x, y) => x.dist - y.dist);
-        bonds[sorted[0].bondIdx][2] = 2;
-      } else {
-        bonds[edge.bondIdx][2] = 2;
-      }
-    } else if ((parent.element === 'P' || parent.element === 'S') && edge.dist <= 1.52) {
-      bonds[edge.bondIdx][2] = 2;
-    }
-  }
-
   // 3. Perceive short acyclic unsaturated C=C / C=N / C#C / C#N bonds when still marked order 1
+  //    (sorted ascending by distance; enforces per-atom valence budgets & amide/resonance guards).
+  const shortCnCandidates: Array<{ bi: number; u: number; v: number; dist: number }> = [];
   for (let bi = 0; bi < bonds.length; bi++) {
     if (bonds[bi][2] !== 1) continue;
     const [u, v] = bonds[bi];
@@ -384,11 +454,40 @@ export function buildLigandV2000Sdf(
       (av.element === 'C' || av.element === 'N')
     ) {
       const dist = Math.hypot(au.x - av.x, au.y - av.y, au.z - av.z);
-      if (dist <= 1.22 && heavyDeg[u] <= 2 && heavyDeg[v] <= 2) {
-        bonds[bi][2] = 3;
-      } else if (dist <= 1.37 && heavyDeg[u] <= 3 && heavyDeg[v] <= 3) {
-        bonds[bi][2] = 2;
+      if (dist <= 1.37) shortCnCandidates.push({ bi, u, v, dist });
+    }
+  }
+  shortCnCandidates.sort((a, b) => a.dist - b.dist || a.bi - b.bi);
+
+  for (const { bi, u, v, dist } of shortCnCandidates) {
+    if (bonds[bi][2] !== 1) continue;
+    const au = ordered[u];
+    const av = ordered[v];
+    if (
+      dist <= 1.22 &&
+      heavyDeg[u] <= 2 &&
+      heavyDeg[v] <= 2 &&
+      canAddOrder(u, 2) &&
+      canAddOrder(v, 2)
+    ) {
+      bonds[bi][2] = 3;
+      continue;
+    }
+    if (
+      dist <= 1.37 &&
+      heavyDeg[u] <= 3 &&
+      heavyDeg[v] <= 3 &&
+      canAddOrder(u, 1) &&
+      canAddOrder(v, 1)
+    ) {
+      if (au.element !== av.element) {
+        const cIdx = au.element === 'C' ? u : v;
+        const nIdx = au.element === 'N' ? u : v;
+        if (isAmideOrUreidoCarbon(cIdx)) continue;
+        const cNitrogenNeighbors = adj[cIdx].filter((e) => ordered[e.j].element === 'N').length;
+        if (heavyDeg[nIdx] === 1 && ordered[nIdx].charge === 0 && cNitrogenNeighbors >= 2) continue;
       }
+      bonds[bi][2] = 2;
     }
   }
 
