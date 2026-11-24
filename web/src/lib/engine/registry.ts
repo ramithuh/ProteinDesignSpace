@@ -885,11 +885,11 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         label: 'Diffusion steps',
         kind: 'integer',
         tier: 'primary',
-        defaultValue: 100,
+        defaultValue: 200,
         min: 20,
         max: 500,
         step: 10,
-        upstreamDefaultHint: 'Upstream default: 200 (browser fast: 100)',
+        upstreamDefaultHint: 'Upstream default: 200',
         description: 'EDM reverse diffusion steps.',
       },
       {
@@ -974,7 +974,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     crossValidate: (p) => {
       const errs: string[] = [];
       if (String(p.taskMode ?? 'unconditional') === 'partial') {
-        const numSteps = Number(p.numSteps ?? 100);
+        const numSteps = Number(p.numSteps ?? 200);
         const rewindSteps = Number(p.rewindSteps ?? 40);
         if (Number.isFinite(numSteps) && Number.isFinite(rewindSteps) && rewindSteps >= numSteps) {
           errs.push(
@@ -1232,11 +1232,11 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         label: 'Diffusion steps',
         kind: 'integer',
         tier: 'primary',
-        defaultValue: 20,
+        defaultValue: 200,
         min: 3,
-        max: 100,
+        max: 500,
         step: 1,
-        upstreamDefaultHint: 'Browser fast: 20 (higher = sharper geometry)',
+        upstreamDefaultHint: 'Upstream default: 200 steps, 3 recycles (design.yaml: 500)',
         description: 'Number of reverse EDM/AF3 diffusion steps.',
       },
       {
@@ -1244,7 +1244,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         label: 'Trunk recycles',
         kind: 'integer',
         tier: 'advanced',
-        defaultValue: 0,
+        defaultValue: 3,
         min: 0,
         max: 3,
         step: 1,

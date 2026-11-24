@@ -77,7 +77,7 @@ export const boltzgenPlugin: ModelPlugin = {
       const tm = String(params.taskMode ?? 'unconditional');
       const variant = String(params.variant ?? 'diverse');
       const len = Number(params.length ?? 48);
-      const steps = Number(params.numSteps ?? 20);
+      const steps = Number(params.numSteps ?? 200);
       const n = Number(params.numDesigns ?? 1);
       const nTag = n > 1 ? ` · ×${n}` : '';
       if (tm === 'binder') return `Binder (${variant}) · ${len} aa · ${steps} steps${nTag}`;

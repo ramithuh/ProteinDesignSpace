@@ -263,7 +263,7 @@ export function formatNodeParamSummary(
       const tm = String(p.taskMode ?? 'unconditional');
       const variant = String(p.variant ?? 'diverse');
       const len = num(p.length, 48);
-      const steps = num(p.numSteps, 20);
+      const steps = num(p.numSteps, 200);
       const n = num(p.numDesigns, 1);
       const nTag = n > 1 ? ` · ×${n}` : '';
       if (tm === 'binder') return `Binder (${variant}) · ${len} aa · ${steps} steps${nTag}`;
@@ -273,7 +273,7 @@ export function formatNodeParamSummary(
     case 'protpardelle': {
       const ckpt = String(p.checkpoint ?? 'cc91_epoch383').replace(/_epoch\d+$/, '');
       const mode = String(p.taskMode ?? 'unconditional');
-      const steps = num(p.numSteps, 100);
+      const steps = num(p.numSteps, 200);
       if (mode === 'motif') return `${ckpt} · Motif · ${steps} steps`;
       if (mode === 'partial') return `${ckpt} · Partial (${num(p.rewindSteps, 40)})`;
       return `${ckpt} · ${num(p.length, 80)} aa · ${steps} steps`;

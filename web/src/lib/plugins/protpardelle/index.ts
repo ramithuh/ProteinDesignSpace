@@ -86,7 +86,7 @@ export const protpardellePlugin: ModelPlugin = {
     formatCanvasSummary: (params) => {
       const ckpt = String(params.checkpoint ?? 'cc91_epoch383').replace(/_epoch\d+$/, '');
       const mode = String(params.taskMode ?? 'unconditional');
-      const steps = Number(params.numSteps ?? 100);
+      const steps = Number(params.numSteps ?? 200);
       if (mode === 'motif') return `${ckpt} · Motif · ${steps} steps`;
       if (mode === 'partial') return `${ckpt} · Partial (${Number(params.rewindSteps ?? 40)})`;
       return `${ckpt} · ${Number(params.length ?? 80)} aa · ${steps} steps`;

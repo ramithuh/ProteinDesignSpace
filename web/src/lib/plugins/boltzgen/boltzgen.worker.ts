@@ -243,8 +243,8 @@ createWorkerHarness({
     const precision = normalizePrecision(p.precision);
     const length = Math.max(12, Math.min(160, Math.round(Number(p.length ?? 48))));
     const numDesigns = Math.max(1, Math.min(4, Math.round(Number(p.numDesigns ?? 1))));
-    const numSteps = Math.max(3, Math.min(100, Math.round(Number(p.numSteps ?? 20))));
-    const recyclingSteps = Math.max(0, Math.min(3, Math.round(Number(p.recyclingSteps ?? 0))));
+    const numSteps = Math.max(3, Math.min(500, Math.round(Number(p.numSteps ?? 200))));
+    const recyclingSteps = Math.max(0, Math.min(3, Math.round(Number(p.recyclingSteps ?? 3))));
     const hotspotsSpec = String(p.hotspots ?? '').trim();
     const motifOffset = Math.max(0, Math.round(Number(p.motifOffset ?? 10)));
     const seed = Math.max(0, Math.round(Number(p.seed ?? 42)));

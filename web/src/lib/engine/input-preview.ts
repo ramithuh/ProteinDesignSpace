@@ -4393,7 +4393,7 @@ export function compileNodeInputPreview(
     const precision = String(node.params.precision ?? 'int8').trim().toLowerCase() === 'fp16' ? 'fp16' : 'int8';
     const length = Math.max(20, Math.min(256, Math.round(Number(node.params.length ?? 80))));
     const numDesigns = Math.max(1, Math.min(8, Math.round(Number(node.params.numDesigns ?? 1))));
-    const numSteps = Math.max(20, Math.min(500, Math.round(Number(node.params.numSteps ?? 100))));
+    const numSteps = Math.max(20, Math.min(500, Math.round(Number(node.params.numSteps ?? 200))));
     const isAllAtomCkpt = PROTPARDELLE_ALLATOM_CHECKPOINTS.has(checkpoint);
     const sidechainMode = Boolean(node.params.sidechainMode ?? true) && isAllAtomCkpt;
     const motifSelection = String(node.params.motifSelection ?? '').trim();

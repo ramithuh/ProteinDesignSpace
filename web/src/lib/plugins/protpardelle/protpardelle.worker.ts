@@ -212,7 +212,7 @@ createWorkerHarness({
     const precision = normalizePrecision(p.precision);
     const length = Math.max(20, Math.min(256, Math.round(Number(p.length ?? 80))));
     const numDesigns = Math.max(1, Math.min(8, Math.round(Number(p.numDesigns ?? 1))));
-    const numSteps = Math.max(20, Math.min(500, Math.round(Number(p.numSteps ?? 100))));
+    const numSteps = Math.max(20, Math.min(500, Math.round(Number(p.numSteps ?? 200))));
     const sidechainMode = Boolean(p.sidechainMode ?? true) && ALLATOM_CHECKPOINTS.has(checkpoint);
     const motifSelection = String(p.motifSelection ?? '').trim();
     const motifGuidance = normalizeMotifGuidance(p.motifGuidance);
