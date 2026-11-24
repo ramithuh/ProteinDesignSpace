@@ -62,6 +62,8 @@ sudo tailscale serve --bg --https=8790 http://127.0.0.1:8790
 Open the `https://<machine>.<tailnet>.ts.net:8790` URL printed by `tailscale serve`.
 
 > Binding `HOST=0.0.0.0` without `DENOVO_API_TOKEN` is rejected by default. Never expose plain `http://` directly on a public IP.
+>
+> **Connecting from `https://denovo.run` instead of opening the server URL directly?** Pass `DENOVO_ALLOWED_ORIGINS=https://denovo.run` when starting `selfhost-server.mjs`.
 
 ## 3. Connect in Your Browser
 

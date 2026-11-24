@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { decodeWireValue, encodeWireValue } from '$lib/engine/remote-codec';
 import {
+  checkRemoteServerHealth,
   defaultComputeBackendConfig,
   estimateNodeActiveWeightsMB,
   formatHostGpuDetail,
@@ -222,5 +223,19 @@ describe('self-hosted remote WebGPU backend', () => {
     expect(formatHostGpuPillLabel(rtx5090Health, 'hybrid')).toBe('Hybrid · RTX 5090');
     expect(formatHostGpuDetail(rtx5090Health)).toBe('NVIDIA GeForce RTX 5090 · 32 GB');
     expect(formatHostGpuPillLabel({ ok: false, error: 'Unauthorized' }, 'remote')).toBe('Host GPU (!)');
+  });
+
+  it('surfaces an actionable CORS/DENOVO_ALLOWED_ORIGINS hint on cross-origin network errors', async () => {
+    const failingFetch: typeof fetch = async () => {
+      throw new TypeError('NetworkError when attempting to fetch resource.');
+    };
+    const health = await checkRemoteServerHealth(
+      'https://gpu-box.tailnet.ts.net:8790',
+      'dnv_test',
+      failingFetch,
+    );
+    expect(health.ok).toBe(false);
+    expect(health.error).toContain('DENOVO_ALLOWED_ORIGINS=');
+    expect(health.error).toContain('open the server URL directly');
   });
 });

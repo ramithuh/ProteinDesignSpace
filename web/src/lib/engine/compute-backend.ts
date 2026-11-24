@@ -504,9 +504,22 @@ export async function checkRemoteServerHealth(
       error: typeof json.error === 'string' ? json.error : undefined,
     };
   } catch (err) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    const isGenericNetworkErr =
+      /networkerror|failed to fetch|load failed/i.test(rawMsg);
+    if (isGenericNetworkErr && normalizeServerBaseUrl(serverUrl)) {
+      const pageOrigin =
+        typeof window !== 'undefined' && window.location?.origin
+          ? window.location.origin
+          : 'https://denovo.run';
+      return {
+        ok: false,
+        error: `Unreachable or blocked by CORS — open the server URL directly, or start the server with DENOVO_ALLOWED_ORIGINS=${pageOrigin}`,
+      };
+    }
     return {
       ok: false,
-      error: err instanceof Error ? err.message : String(err),
+      error: rawMsg,
     };
   } finally {
     clearTimeout(timer);
