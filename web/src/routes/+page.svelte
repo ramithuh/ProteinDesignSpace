@@ -3753,8 +3753,7 @@
               {/if}
               {#if !remoteHealth?.ok}
                 <div class="pop-help-note">
-                  Run GPU blocks on your workstation or cluster (SSH / Tailscale):
-                  <code>node server/selfhost-server.mjs</code> ·
+                  Have a better GPU? Self-host on that machine, and still use the simple canvas.
                   <a
                     href="https://github.com/ramithuh/ProteinDesignSpace/blob/main/server/README.md"
                     target="_blank"
@@ -5517,11 +5516,6 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 6px 8px;
-  }
-  .pop-help-note code {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 9.5px;
-    color: var(--text-primary);
   }
   .pop-help-note a {
     color: var(--accent);
