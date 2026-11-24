@@ -522,6 +522,8 @@
     viewerFocusToken = null;
     if (selectedNodeIds.length >= 2) {
       rightPanelTab = 'peek';
+    } else if (selectedNodeIds.length === 1) {
+      rightPanelTab = isComputeNodeFinished(selectedNodeIds[0]) ? 'peek' : 'params';
     }
   }
 
@@ -1468,20 +1470,23 @@
     canvasFitViewTrigger += 1;
   }
 
+  function isComputeNodeFinished(nodeId: string | null | undefined): boolean {
+    if (!nodeId) return false;
+    const node = graph.nodes.find((n) => n.id === nodeId);
+    if (!node || node.adapterId === 'pdb-input' || node.adapterId === 'sequence-input') {
+      return false;
+    }
+    const st = nodeStates[nodeId]?.status;
+    const outs = outputsByNode[nodeId];
+    return Boolean(outs && Object.keys(outs).length > 0 && (st === 'done' || st === 'cached'));
+  }
+
   function handleSelectNode(nodeId: string) {
     setSingleSelection(nodeId);
     selectedPeekSlotId = null;
     selectedEdgeId = null;
     showSeqParentBackbone = false;
-    const clicked = graph.nodes.find((n) => n.id === nodeId);
-    const hasOutputs = Boolean(
-      nodeId && outputsByNode[nodeId] && Object.keys(outputsByNode[nodeId]).length > 0,
-    );
-    if (clicked?.adapterId === 'designability-scorer' && hasOutputs) {
-      rightPanelTab = 'peek';
-    } else {
-      rightPanelTab = 'params';
-    }
+    rightPanelTab = isComputeNodeFinished(nodeId) ? 'peek' : 'params';
   }
 
   function handleBlockAdded(nodeId: string) {
@@ -2273,6 +2278,17 @@
         bypassCache,
         onNodeOutput: (nodeId, outs) => {
           outputsByNode = { ...outputsByNode, [nodeId]: outs };
+          if (!isCompareMode && selectedNodeId === nodeId && Object.keys(outs).length > 0) {
+            const node = graph.nodes.find((n) => n.id === nodeId);
+            const isInputNode =
+              node?.adapterId === 'pdb-input' || node?.adapterId === 'sequence-input';
+            const activeTag = document.activeElement?.tagName?.toLowerCase();
+            const isEditingField =
+              activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select';
+            if (node && !isInputNode && !isEditingField) {
+              rightPanelTab = 'peek';
+            }
+          }
         },
       });
       flushPendingProgress();
@@ -3076,7 +3092,7 @@
     const st = nodeStates[selectedNode.id]?.status;
     const outs = outputsByNode[selectedNode.id];
     const hasOutputs = Boolean(outs && Object.keys(outs).length > 0);
-    return !hasOutputs || st !== 'done';
+    return !hasOutputs || (st !== 'done' && st !== 'cached');
   });
   let selectedUpstreamBenchmarkId = $derived.by((): string | null => {
     if (!selectedNode) return null;
@@ -3608,19 +3624,6 @@
       selectedCandidateKey: compareSelectedCandidateKey,
       referenceNodeId: activeCompareRefNodeId ?? undefined,
     });
-  });
-
-  // Discoverable 1-click compare CTA when a graph has >= 2 scorers (or >= 2 folds) with outputs
-  let comparableBranchIds = $derived.by((): string[] => {
-    const scorers = graph.nodes
-      .filter((n) => n.adapterId === 'designability-scorer' && outputsByNode[n.id])
-      .map((n) => n.id);
-    if (scorers.length >= 2) return scorers.slice(0, COMPARE_PALETTE.length);
-    const folds = graph.nodes
-      .filter((n) => n.adapterId === 'localfold-af2' && outputsByNode[n.id])
-      .map((n) => n.id);
-    if (folds.length >= 2) return folds.slice(0, COMPARE_PALETTE.length);
-    return [];
   });
 
   let isCanonicalViewerLayout = $derived(
@@ -5110,16 +5113,7 @@
             </button>
           </div>
           <div class="r-tab-actions">
-            {#if !isCompareMode && comparableBranchIds.length >= 2}
-              <button
-                type="button"
-                class="cmp-launch-btn"
-                title="Compare branches in 3D (or Ctrl/⌘-click / Shift-click blocks on the canvas)"
-                onclick={() => handleSelectNodes(comparableBranchIds)}
-              >
-                Compare branches ({comparableBranchIds.length})
-              </button>
-            {:else if selectedNode && !selectedNodeNeedsRun && (!isCompareMode || rightPanelTab === 'params')}
+            {#if selectedNode && !selectedNodeNeedsRun && (!isCompareMode || rightPanelTab === 'params')}
               <span class="tab-node-ctx" title={selectedNode.label ?? selectedNode.adapterId}>
                 {isCompareMode ? 'Editing: ' : ''}{selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
               </span>
@@ -6807,23 +6801,6 @@
   .cmp-exit-mini:hover {
     color: var(--text-primary);
     border-color: var(--accent);
-  }
-  .cmp-launch-btn {
-    border: 1px solid var(--accent);
-    background: var(--bg-pill);
-    color: var(--accent-soft);
-    border-radius: 999px;
-    padding: 2px 9px;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10.5px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-  .cmp-launch-btn:hover {
-    background: var(--accent);
-    color: #fff;
   }
   .geom-strip {
     display: flex;
