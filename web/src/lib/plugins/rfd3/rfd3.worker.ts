@@ -3,13 +3,22 @@
 // Runs RFdiffusion3 (168M params) natively on WebGPU for all-atom backbone + sidechain + sequence co-design.
 // Wrapped in Layer 1 `createWorkerHarness()`.
 
-import { isCrystallizationBuffer } from '$lib/engine/conditioning';
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
 import { requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import { createWorkerHarness, fnv1a, type WorkerRunContext } from '$lib/kernel';
 import type { SequenceCandidate, SequenceSet, StructureArtifact } from '$lib/engine/types';
+import {
+  buildAutoFlankContigFromResidues,
+  buildFullProteinContigFromResidues,
+  computeRfd3MotifMeta,
+  drainGpuDeviceQueue,
+  isReusableRfd3Engine,
+  normalizeRfd3Contig,
+  resolveRfd3UpstreamStructure,
+  trimRfd3EngineSafely,
+} from './lifecycle';
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -51,177 +60,6 @@ function normalizeSymmetry(raw: unknown): string | null {
 }
 
 /**
- * Normalize contig strings so both comma-separated RFD3 syntax (`25,A16-35,25` or `64,/0,A1-40`)
- * and slash-separated RFdiffusion1 syntax (`25/A16-35/25`) work seamlessly.
- */
-function normalizeRfd3Contig(raw: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) return '';
-  if (trimmed.includes(',')) {
-    return trimmed
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .join(',');
-  }
-  if (trimmed.includes('/')) {
-    const parts = trimmed
-      .split('/')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((part) => (part === '0' ? '/0' : part));
-    return parts.join(',');
-  }
-  return trimmed;
-}
-
-/**
- * Sanitize PDB text for RFD3's upstream parser:
- * - Keep only the first MODEL if multi-model
- * - Strip ATOM/HETATM lines carrying non-blank insertion codes (col 27)
- */
-function sanitizePdbForRfd3(pdbText: string): string {
-  const lines = pdbText.split(/\r?\n/);
-  const out: string[] = [];
-  let sawModel = false;
-  let inModel = false;
-  for (const line of lines) {
-    if (line.startsWith('MODEL')) {
-      if (sawModel) break;
-      sawModel = true;
-      inModel = true;
-      continue;
-    }
-    if (line.startsWith('ENDMDL') && inModel) break;
-    if ((line.startsWith('ATOM  ') || line.startsWith('HETATM')) && (line[26] ?? ' ') !== ' ') {
-      continue;
-    }
-    out.push(line);
-  }
-  return out.join('\n');
-}
-
-interface ParsedCaResidue {
-  chainId: string;
-  resId: number;
-  ca: [number, number, number];
-}
-
-function extractPdbCaResidues(pdbText: string): ParsedCaResidue[] {
-  const out: ParsedCaResidue[] = [];
-  const seen = new Set<string>();
-  let sawModel = false;
-  let inModel = false;
-  for (const line of pdbText.split(/\r?\n/)) {
-    if (line.startsWith('MODEL')) {
-      if (sawModel) break;
-      sawModel = true;
-      inModel = true;
-      continue;
-    }
-    if (line.startsWith('ENDMDL') && inModel) break;
-    if (!line.startsWith('ATOM  ')) continue;
-    const altloc = line[16] ?? ' ';
-    if (altloc !== ' ' && altloc !== 'A' && altloc !== '1') continue;
-    if ((line[26] ?? ' ') !== ' ') continue;
-    if (line.slice(12, 16).trim() !== 'CA') continue;
-    const chainId = (line[21] ?? 'A').trim() || 'A';
-    const resId = Number.parseInt(line.slice(22, 26).trim(), 10);
-    const x = Number.parseFloat(line.slice(30, 38));
-    const y = Number.parseFloat(line.slice(38, 46));
-    const z = Number.parseFloat(line.slice(46, 54));
-    if (!Number.isFinite(resId) || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
-      continue;
-    }
-    const key = `${chainId}:${resId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ chainId, resId, ca: [x, y, z] });
-  }
-  return out;
-}
-
-function buildAutoFlankContig(pdbText: string, targetLength: number): string {
-  const residues = extractPdbCaResidues(pdbText);
-  if (residues.length === 0) {
-    throw new Error('Input structure has no valid ATOM Cα residues for RFdiffusion3 motif scaffolding.');
-  }
-  const primaryChain = residues[0].chainId;
-  const chainRes = residues.filter((r) => r.chainId === primaryChain);
-  let bestStart = 0;
-  let bestLen = 1;
-  let curStart = 0;
-  let curLen = 1;
-  for (let i = 1; i < chainRes.length; i++) {
-    if (chainRes[i].resId === chainRes[i - 1].resId + 1) {
-      curLen++;
-      if (curLen > bestLen) {
-        bestStart = curStart;
-        bestLen = curLen;
-      }
-    } else {
-      curStart = i;
-      curLen = 1;
-    }
-  }
-  let spanStartIdx = bestStart;
-  let spanLen = bestLen;
-  if (spanLen >= targetLength) {
-    const maxMotif = Math.max(8, Math.min(24, Math.floor(targetLength * 0.4)));
-    spanStartIdx = bestStart + Math.max(0, Math.floor((spanLen - maxMotif) / 2));
-    spanLen = Math.min(spanLen, maxMotif);
-  }
-  const startRes = chainRes[spanStartIdx].resId;
-  const endRes = chainRes[spanStartIdx + spanLen - 1].resId;
-  const remaining = Math.max(0, targetLength - spanLen);
-  const flankN = Math.floor(remaining / 2);
-  const flankC = remaining - flankN;
-  const parts: string[] = [];
-  if (flankN > 0) parts.push(String(flankN));
-  parts.push(startRes === endRes ? `${primaryChain}${startRes}` : `${primaryChain}${startRes}-${endRes}`);
-  if (flankC > 0) parts.push(String(flankC));
-  return parts.join(',');
-}
-
-function buildFullProteinContig(pdbText: string): string {
-  const residues = extractPdbCaResidues(pdbText);
-  if (residues.length === 0) {
-    throw new Error('Input structure has no valid ATOM Cα residues for RFdiffusion3 partial diffusion.');
-  }
-  const parts: string[] = [];
-  let prevChain: string | null = null;
-  let runStart: number | null = null;
-  let runEnd: number | null = null;
-  let runChain: string | null = null;
-
-  const flush = () => {
-    if (runChain === null || runStart === null || runEnd === null) return;
-    parts.push(runStart === runEnd ? `${runChain}${runStart}` : `${runChain}${runStart}-${runEnd}`);
-    runStart = null;
-    runEnd = null;
-    runChain = null;
-  };
-
-  for (const r of residues) {
-    if (prevChain !== null && r.chainId !== prevChain) {
-      flush();
-      parts.push('/0');
-    }
-    if (runChain === r.chainId && runEnd !== null && r.resId === runEnd + 1) {
-      runEnd = r.resId;
-    } else {
-      flush();
-      runChain = r.chainId;
-      runStart = r.resId;
-      runEnd = r.resId;
-    }
-    prevChain = r.chainId;
-  }
-  flush();
-  return parts.join(',');
-}
-
-/**
  * Parse flexible user atom/residue selections into RFD3's `selected()` input shape:
  * - `'true'` / `'ALL'` -> `true`
  * - `'false'` / `'NONE'` -> `false`
@@ -255,8 +93,6 @@ function parseAtomOrResidueSelection(
     }
     throw new Error('Atom selection JSON must be a residue-to-atoms object.');
   }
-  // Check for per-residue atom map syntax like "A102:ND1,CG,CE1; A104:BKBN"
-  // Distinguish from colon-delimited residue keys like "A:102" by verifying RHS contains non-digits/letters
   const entries = text
     .split(/[;\n]+/)
     .map((s) => s.trim())
@@ -294,37 +130,6 @@ function buildSymmetryTiedPositions(copies: number, unitLength: number): string 
   return groups.join('; ');
 }
 
-function extractNativeCaMap(pdbText: string): Map<string, [number, number, number]> {
-  const map = new Map<string, [number, number, number]>();
-  for (const r of extractPdbCaResidues(pdbText)) {
-    map.set(`${r.chainId}${r.resId}`, r.ca);
-    map.set(`${r.chainId}:${r.resId}`, r.ca);
-  }
-  return map;
-}
-
-function extractNativeMotifCaCoordsFromContig(pdbText: string, contig: string): number[][] {
-  const residues = extractPdbCaResidues(pdbText);
-  const selected: number[][] = [];
-  const seen = new Set<string>();
-  for (const part of contig.split(',').map((s) => s.trim()).filter(Boolean)) {
-    if (part === '/0' || /^\d+$/.test(part)) continue;
-    const m = /^([^:]+):(-?\d+)(?:-(-?\d+))?$/.exec(part) ?? /^([A-Za-z0-9]+?)(-?\d+)(?:-(-?\d+))?$/.exec(part);
-    if (!m) continue;
-    const chainId = m[1];
-    const start = Number(m[2]);
-    const end = m[3] != null ? Number(m[3]) : start;
-    for (const r of residues) {
-      if (r.chainId !== chainId || r.resId < start || r.resId > end) continue;
-      const key = `${r.chainId}:${r.resId}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      selected.push(r.ca);
-    }
-  }
-  return selected;
-}
-
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let mod: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -353,7 +158,9 @@ function disposeEngine() {
 }
 
 async function ensureEngine(ctx: WorkerRunContext, precision: Precision, signal: AbortSignal) {
-  if (engine && loadedPrecision === precision) return engine;
+  if (engine && !engine.resources?.closed && isReusableRfd3Engine(engine, loadedPrecision, precision)) {
+    return engine;
+  }
   disposeEngine();
 
   const vendorBase = `${self.location.origin}/vendor/rfd3`;
@@ -493,27 +300,13 @@ createWorkerHarness({
       );
     }
 
-    let structureText: string | undefined;
-    let structureFormat: 'pdb' | 'cif' | undefined;
-    let fallbackResKeys: string[] = [];
-    let autoLigandNames: string[] = [];
-
-    if (needsStructure && upstreamStruct) {
-      const hasRawPdb = Boolean(upstreamStruct.pdbText?.trim());
-      if (hasRawPdb) {
-        structureText = sanitizePdbForRfd3(upstreamStruct.pdbText!);
-        structureFormat = 'pdb';
-        fallbackResKeys = extractPdbCaResidues(structureText).map((r) => `${r.chainId}${r.resId}`);
-      } else if (upstreamStruct.cifText?.trim()) {
-        structureText = upstreamStruct.cifText;
-        structureFormat = 'cif';
-      }
-      if (!rawLigand && upstreamStruct.diagnostics?.ligandNames?.length) {
-        autoLigandNames = upstreamStruct.diagnostics.ligandNames.filter(
-          (name) => !isCrystallizationBuffer(name),
-        );
-      }
-    }
+    const {
+      structureText,
+      structureFormat,
+      caResidues: inputCaResidues,
+      fallbackResKeys,
+      autoLigandNames,
+    } = resolveRfd3UpstreamStructure(upstreamStruct, needsStructure, rawLigand);
 
     const effectiveLigand = rawLigand || (autoLigandNames.length > 0 ? autoLigandNames.join(',') : '');
     const parsedFixedAtoms = parseAtomOrResidueSelection(rawFixedAtoms, fallbackResKeys);
@@ -531,8 +324,8 @@ createWorkerHarness({
       rfd3Mode = 'motif';
       if (rawContig) {
         effectiveContig = normalizeRfd3Contig(rawContig);
-      } else if (!rawUnindex && !effectiveLigand && structureText && structureFormat === 'pdb') {
-        effectiveContig = buildAutoFlankContig(structureText, length);
+      } else if (!rawUnindex && !effectiveLigand && inputCaResidues.length > 0) {
+        effectiveContig = buildAutoFlankContigFromResidues(inputCaResidues, length);
       }
     } else if (mode === 'binder') {
       rfd3Mode = 'binder';
@@ -544,8 +337,8 @@ createWorkerHarness({
       effectivePartialT = partialT;
       if (rawContig) {
         effectiveContig = normalizeRfd3Contig(rawContig);
-      } else if (structureText && structureFormat === 'pdb') {
-        effectiveContig = buildFullProteinContig(structureText);
+      } else if (inputCaResidues.length > 0) {
+        effectiveContig = buildFullProteinContigFromResidues(inputCaResidues);
       }
       // In partial diffusion, default fixedAtoms to false so the backbone actually diffuses
       if (effectiveFixedAtoms === undefined) {
@@ -580,7 +373,7 @@ createWorkerHarness({
         if (abortRequested || ctx.signal.aborted) {
           throw new Error('Run aborted');
         }
-        if (d > 0) {
+        if (d > 0 && !eng.resources?.closed) {
           eng.trim();
         }
 
@@ -689,58 +482,15 @@ createWorkerHarness({
           }),
         );
 
-        // Motif metadata for downstream RMSD / MPNN auto-locking
-        let motifMeta: {
-          fixedResidueIndices?: number[];
-          motifIndices?: number[];
-          nativeMotifCoords?: number[][];
-        } | null = null;
-
-        if (mode === 'motif' && structureText && structureFormat === 'pdb') {
-          if (Array.isArray(res.motifAssignments) && res.motifAssignments.length > 0) {
-            const nativeMap = extractNativeCaMap(structureText);
-            const matchedIndices: number[] = [];
-            const nativeCoords: number[][] = [];
-            for (const asgn of res.motifAssignments as Array<{ source?: string; token?: number }>) {
-              if (typeof asgn.token === 'number' && asgn.token >= 0 && asgn.token < resolvedLen) {
-                const ca = asgn.source ? nativeMap.get(asgn.source) : undefined;
-                if (ca) {
-                  matchedIndices.push(asgn.token);
-                  nativeCoords.push(ca);
-                }
-              }
-            }
-            if (matchedIndices.length > 0) {
-              motifMeta = {
-                motifIndices: matchedIndices,
-                fixedResidueIndices: matchedIndices.map((idx) => idx + 1),
-                nativeMotifCoords: nativeCoords,
-              };
-            }
-          } else if (effectiveContig && res.features?.is_protein && res.features?.ref_motif_token_type) {
-            const isProt = res.features.is_protein as Float32Array;
-            const motifType = res.features.ref_motif_token_type as Float32Array;
-            const matchedIndices: number[] = [];
-            let protIdx = 0;
-            for (let t = 0; t < isProt.length; t++) {
-              if (isProt[t] !== 1) continue;
-              if (motifType[t * 3 + 1] === 1) {
-                matchedIndices.push(protIdx);
-              }
-              protIdx++;
-            }
-            const nativeCoords = extractNativeMotifCaCoordsFromContig(structureText, effectiveContig);
-            if (matchedIndices.length > 0) {
-              motifMeta = {
-                motifIndices: matchedIndices,
-                fixedResidueIndices: matchedIndices.map((idx) => idx + 1),
-                ...(nativeCoords.length === matchedIndices.length
-                  ? { nativeMotifCoords: nativeCoords }
-                  : {}),
-              };
-            }
-          }
-        }
+        // Motif metadata for downstream RMSD / MPNN auto-locking (supports both mmCIF and PDB inputs)
+        const motifMeta = computeRfd3MotifMeta({
+          mode,
+          caResidues: inputCaResidues,
+          resolvedLen,
+          effectiveContig,
+          motifAssignments: Array.isArray(res.motifAssignments) ? res.motifAssignments : undefined,
+          features: res.features,
+        });
 
         // Binder locked-chain & symmetry tied-position metadata for downstream inverse folding
         const uniqueChains = [...new Set(parsed.chainIds)];
@@ -822,6 +572,9 @@ createWorkerHarness({
     } finally {
       ctx.signal.removeEventListener('abort', onCtxAbort);
       if (activeAbort === abortCtrl) activeAbort = null;
+      if (!eng.resources?.closed) {
+        trimRfd3EngineSafely(eng);
+      }
     }
 
     const primary = items[0];
@@ -876,6 +629,7 @@ createWorkerHarness({
     abortRequested = true;
     activeAbort?.abort();
     activeAbort = null;
+    await drainGpuDeviceQueue(ownedDevice, 1500);
     disposeEngine();
   },
 });
