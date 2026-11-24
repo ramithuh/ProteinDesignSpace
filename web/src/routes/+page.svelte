@@ -3575,6 +3575,7 @@
         (isMultiDesignAll3d && multiDesignViewMode === 'grid'),
     ),
   );
+  let isSpinPausedForRun = $derived(isRunning && viewerSpin && !isCanonicalViewerLayout);
 
   let compareEmptyMessage = $derived.by((): string | undefined => {
     if (!isCompareMode || !comparisonState || comparisonState.models.length > 0) return undefined;
@@ -4622,12 +4623,14 @@
             </label>
             <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
             <label
-              class:disabled-opt={isCanonicalViewerLayout}
+              class:disabled-opt={isCanonicalViewerLayout || isSpinPausedForRun}
               title={isCanonicalViewerLayout
                 ? 'Spin is paused in Side-by-Side / Grid layout to preserve A (left) → B (right) orientation'
-                : 'Slowly rotate the 3D view (pauses while dragging)'}
+                : isSpinPausedForRun
+                  ? 'Spin is paused while WebGPU pipeline runs (resumes automatically when done; click to change preference)'
+                  : 'Slowly rotate the 3D view (pauses while dragging)'}
             >
-              <input type="checkbox" disabled={isCanonicalViewerLayout} bind:checked={viewerSpin} /> Spin
+              <input type="checkbox" disabled={isCanonicalViewerLayout} bind:checked={viewerSpin} /> Spin{#if isSpinPausedForRun} <span class="spin-paused-hint">(paused)</span>{/if}
             </label>
             <button
               type="button"
@@ -4709,12 +4712,14 @@
             <label><input type="checkbox" name="viewer-show-refold" bind:checked={showRefold} /> Refold (pLDDT)</label>
             <label><input type="checkbox" name="viewer-illustrative" bind:checked={illustrative} /> Illustrative</label>
             <label
-              class:disabled-opt={isCanonicalViewerLayout}
+              class:disabled-opt={isCanonicalViewerLayout || isSpinPausedForRun}
               title={isCanonicalViewerLayout
                 ? 'Spin is paused in Side-by-Side / Grid layout to preserve A (left) → B (right) orientation'
-                : 'Slowly rotate the 3D view (pauses while dragging)'}
+                : isSpinPausedForRun
+                  ? 'Spin is paused while WebGPU pipeline runs (resumes automatically when done; click to change preference)'
+                  : 'Slowly rotate the 3D view (pauses while dragging)'}
             >
-              <input type="checkbox" name="viewer-spin" disabled={isCanonicalViewerLayout} bind:checked={viewerSpin} /> Spin
+              <input type="checkbox" name="viewer-spin" disabled={isCanonicalViewerLayout} bind:checked={viewerSpin} /> Spin{#if isSpinPausedForRun} <span class="spin-paused-hint">(paused)</span>{/if}
             </label>
             {#if viewerStructureMeta?.trajectoryPdb}
               <label><input type="checkbox" name="viewer-show-trajectory" bind:checked={showTrajectory} /> Trajectory</label>
@@ -4817,7 +4822,8 @@
             showRefold={studioInputViewerActive || isMultiDesignAll3d ? false : showRefold}
             {showTrajectory}
             {illustrative}
-            spin={viewerSpin && !isRunning && !isCanonicalViewerLayout}
+            spin={viewerSpin}
+            pauseSpin={isRunning}
             canonicalCamera={isCanonicalViewerLayout}
             expanded={expandedPane === 'viewer' || studioOpen}
             defaultStyleMenuOpen={expandedPane === 'viewer' && !studioOpen}
@@ -6700,6 +6706,10 @@
   .viewer-bar label.disabled-opt {
     opacity: 0.7;
     cursor: default;
+  }
+  .spin-paused-hint {
+    font-size: 10.5px;
+    color: var(--text-dim);
   }
   .pick-target-tag {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
