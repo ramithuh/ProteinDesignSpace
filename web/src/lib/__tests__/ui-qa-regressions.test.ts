@@ -293,11 +293,23 @@ describe('M3 UI & QA regressions (Svelte 5 AST parse, pure validation, and sourc
     expect(resolveAutoModelLabelOnChange('localfold-af2', 'ESMFold2 300M #2', 'ef2-fast-600m')).toBe(
       'EF2 Fast 600M #2',
     );
+    expect(resolveAutoModelLabelOnChange('localfold-af2', 'AF2 Refolding', 'ef2-fast-600m')).toBe(
+      'EF2 Fast 600M',
+    );
+    expect(resolveAutoModelLabelOnChange('localfold-af2', 'AF2 Refolding (MPNN)', 'boltz2')).toBe(
+      'Boltz-2 (MPNN)',
+    );
+    expect(resolveAutoModelLabelOnChange('localfold-af2', 'Boltz-2 Co-fold', 'rosettafold3')).toBe(
+      'RoseTTAFold 3',
+    );
     expect(resolveAutoModelLabelOnChange('localfold-af2', 'Catalytic Pocket Refold', 'boltz2')).toBeNull();
 
     // ProteinMPNN variants
     expect(resolveAutoModelLabelOnChange('web-protein-mpnn', 'SolubleMPNN', 'ca')).toBe(
       'Cα-ProteinMPNN',
+    );
+    expect(resolveAutoModelLabelOnChange('web-protein-mpnn', 'SolubleMPNN Redesign', 'proteinmpnn')).toBe(
+      'ProteinMPNN',
     );
     expect(resolveAutoModelLabelOnChange('web-protein-mpnn', 'Cα-MPNN (Branch 1)', 'proteinmpnn')).toBe(
       'ProteinMPNN (Branch 1)',
@@ -307,6 +319,9 @@ describe('M3 UI & QA regressions (Svelte 5 AST parse, pure validation, and sourc
     // AntiFold / ESM-IF1 variants
     expect(resolveAutoModelLabelOnChange('antifold-esmif1', 'AntiFold / ESM-IF1', 'esmif1')).toBe(
       'ESM-IF1',
+    );
+    expect(resolveAutoModelLabelOnChange('antifold-esmif1', 'ESM-IF1 Inverse Folding', 'antifold')).toBe(
+      'AntiFold',
     );
     expect(resolveAutoModelLabelOnChange('antifold-esmif1', 'ESM-IF1', 'antifold')).toBe('AntiFold');
     expect(resolveAutoModelLabelOnChange('antifold-esmif1', 'CDR Loop Designer', 'esmif1')).toBeNull();

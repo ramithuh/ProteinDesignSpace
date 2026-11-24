@@ -8,6 +8,7 @@
   import type { ResidueHighlightLayer } from '$lib/engine/studio-types';
   import type { AtomGranularity, BfactorSemantics } from '$lib/engine/types';
   import { resolveUncertaintyColorArgFromValues } from './bfactor-domain';
+  import { pruneFalseNucleicMonomers } from './molstar-sanitize';
 
   interface Props {
     designedPdb: string | null;
@@ -1049,6 +1050,7 @@
           const model = await ctx.builders.structure.createModel(traj, { modelIndex: targetIdx });
           if (destroyed || mySeq !== loadSeq) return;
           pruneFalseCyclicPolymers(traj, model, text, StructConn);
+          pruneFalseNucleicMonomers(traj, model);
           if (useTraj) trajModelRef = model.ref;
           const struct = await ctx.builders.structure.createStructure(model, {
             name: 'model',
@@ -1121,6 +1123,7 @@
           const traj = await ctx.builders.structure.parseTrajectory(data, rFmt);
           const model = await ctx.builders.structure.createModel(traj, { modelIndex: 0 });
           pruneFalseCyclicPolymers(traj, model, rPdb, StructConn);
+          pruneFalseNucleicMonomers(traj, model);
           const struct = await ctx.builders.structure.createStructure(model, {
             name: 'model',
             params: {},
@@ -1351,6 +1354,7 @@
           const model = await ctx.builders.structure.createModel(traj, { modelIndex: 0 });
           if (destroyed || mySeq !== loadSeq) return;
           pruneFalseCyclicPolymers(traj, model, m.pdbText, StructConn);
+          pruneFalseNucleicMonomers(traj, model);
           const struct = await ctx.builders.structure.createStructure(model, {
             name: 'model',
             params: {},

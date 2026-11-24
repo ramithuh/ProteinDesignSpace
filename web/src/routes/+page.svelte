@@ -3800,30 +3800,31 @@
                   />
                 </label>
               {/if}
+              {@const hasRemoteStatus = Boolean(remoteChecking || remoteHealth?.ok || remoteHealth?.error)}
               <div class="pop-row">
-                <span
-                  class="pop-v"
-                  class:ok-t={remoteHealth?.ok}
-                  class:bad-t={remoteHealth?.ok === false}
-                  style="text-align: left; overflow: hidden; text-overflow: ellipsis;"
-                  title={remoteHealth?.error || remoteHealth?.gpu?.description || ''}
-                >
-                  {#if remoteChecking}
-                    Checking host GPU…
-                  {:else if remoteHealth?.ok}
-                    {formatHostGpuDetail(remoteHealth)}
-                    {(remoteHealth.queueDepth ?? 0) > 0 ? ` · q=${remoteHealth.queueDepth}` : ''}
-                  {:else if remoteHealth?.error}
-                    Offline: {remoteHealth.error}
-                  {:else if computeBackend.serverUrl.trim()}
-                    Ready — click Connect
-                  {:else}
-                    Enter URL &amp; token, then Connect
-                  {/if}
-                </span>
+                {#if hasRemoteStatus}
+                  <span
+                    class="pop-v"
+                    class:ok-t={remoteHealth?.ok}
+                    class:bad-t={remoteHealth?.ok === false}
+                    style="text-align: left; overflow: hidden; text-overflow: ellipsis;"
+                    title={remoteHealth?.error || remoteHealth?.gpu?.description || ''}
+                  >
+                    {#if remoteChecking}
+                      Checking host GPU…
+                    {:else if remoteHealth?.ok}
+                      {formatHostGpuDetail(remoteHealth)}
+                      {(remoteHealth.queueDepth ?? 0) > 0 ? ` · q=${remoteHealth.queueDepth}` : ''}
+                    {:else if remoteHealth?.error}
+                      Offline: {remoteHealth.error}
+                    {/if}
+                  </span>
+                {/if}
                 <button
                   type="button"
                   class="pop-action"
+                  class:is-primary={!remoteHealth?.ok}
+                  class:is-full={!hasRemoteStatus}
                   disabled={remoteChecking}
                   onclick={() => void probeRemoteBackend(computeBackend)}
                 >
@@ -5074,21 +5075,23 @@
     padding: 4px 0 10px;
     margin-bottom: 8px;
     border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
   .hdr-left {
     display: flex;
     align-items: center;
     gap: 10px;
-    flex-wrap: wrap;
+    flex: 1 1 0;
+    flex-wrap: nowrap;
     min-width: 0;
     max-width: 100%;
   }
   .hdr-right {
     display: flex;
     align-items: center;
-    gap: 7px;
-    flex-wrap: wrap;
+    gap: 6px;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
     max-width: 100%;
   }
   .brand-logo {
@@ -5161,8 +5164,9 @@
     border: 1px solid var(--border-strong);
     border-radius: 7px;
     overflow: hidden;
-    min-width: 0;
-    max-width: min(390px, 100%);
+    flex: 0 1 auto;
+    min-width: 120px;
+    max-width: min(360px, 100%);
     padding: 0;
     cursor: pointer;
     color: var(--text-body);
@@ -5289,7 +5293,12 @@
     opacity: 0.78;
     font-weight: 400;
   }
-  @media (max-width: 1120px) {
+  @media (max-width: 1380px) {
+    .hdr-compute-seg:not(.active) .hdr-compute-sub {
+      display: none;
+    }
+  }
+  @media (max-width: 1080px) {
     .hdr-compute-sub {
       display: none;
     }
@@ -5366,7 +5375,7 @@
     color: var(--text-primary);
     border-color: var(--accent);
   }
-  @media (max-width: 980px) {
+  @media (max-width: 1240px) {
     .hdr-gh-label {
       display: none;
     }
@@ -5374,6 +5383,28 @@
       padding: 0;
       width: 30px;
       justify-content: center;
+    }
+  }
+  @media (max-width: 1080px) {
+    .hdr-share-label {
+      display: none;
+    }
+    .hdr-share-btn {
+      padding: 0;
+      width: 30px;
+      justify-content: center;
+    }
+  }
+  @media (max-width: 860px) {
+    .app-header {
+      flex-wrap: wrap;
+    }
+    .hdr-left {
+      flex: 1 1 auto;
+      flex-wrap: wrap;
+    }
+    .hdr-right {
+      flex-wrap: wrap;
     }
   }
 
@@ -5662,6 +5693,21 @@
   .pop-action:hover:not(:disabled) {
     background: var(--bg-surface-hover);
     border-color: var(--accent);
+  }
+  .pop-action.is-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #ffffff;
+    font-weight: 600;
+  }
+  .pop-action.is-primary:hover:not(:disabled) {
+    filter: brightness(1.08);
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .pop-action.is-full {
+    width: 100%;
+    padding: 5px 10px;
   }
   .pop-action.danger:hover:not(:disabled),
   .pop-action.confirm-danger {

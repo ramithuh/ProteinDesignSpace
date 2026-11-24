@@ -770,8 +770,14 @@ export function computeUpstreamLockSummary(
 const LOCALFOLD_MODEL_ALIAS_RE =
   /^(?:localfold|esmfold\s*2(?:\s+(?:experimental\s+)?fast)?(?:\s+(?:300m|600m))?|ef2(?:\s+fast)?(?:\s+(?:300m|600m))?|(?:af2|alphafold\s*2)(?:\s*-?\s*multimer(?:\s+v3)?)?(?:\s*(?:·|-)?\s*(?:model\s*)?[1-5])?|af3|alphafold\s*3|rf3|rosettafold\s*3|boltz-?2|protenix(?:\s*-?v?2)?|openbind(?:\s*-?0)?|openfold\s*3|opendde|mol-?1|intellifold(?:\s*-?2)?)$/i;
 
+const LOCALFOLD_ROLE_SUFFIX_RE =
+  /\s+(?:re-?fold(?:ing)?|co-?fold(?:ing)?|fold(?:ing)?|predict(?:ion|or)?|oracle|verification|check)$/i;
+
 const MPNN_VARIANT_ALIAS_RE =
   /^(?:proteinmpnn|solublempnn|(?:c[αa]|ca)[\s-]*(?:protein)?mpnn)$/i;
+
+const MPNN_ROLE_SUFFIX_RE =
+  /\s+(?:re-?design(?:er)?|design(?:er)?|inverse\s+fold(?:ing)?|seq(?:uence)?(?:\s+design)?)$/i;
 
 const ANTIFOLD_VARIANT_LABELS: Record<string, string> = {
   antifold: 'AntiFold',
@@ -781,17 +787,26 @@ const ANTIFOLD_VARIANT_LABELS: Record<string, string> = {
 const ANTIFOLD_VARIANT_ALIAS_RE =
   /^(?:antifold(?:\s*\/\s*esm-?if1)?|esm-?if1|antifold\s*\(antibody\s+cdrs\)|esm-?if1\s*\(general\s+inverse\s+folding\))$/i;
 
+const ANTIFOLD_ROLE_SUFFIX_RE =
+  /\s+(?:re-?design(?:er)?|design(?:er)?|inverse\s+fold(?:ing)?|cdr\s+re-?design)$/i;
+
 function isKnownLocalFoldModelName(text: string): boolean {
   const norm = text.trim();
   if (!norm) return false;
-  const lower = norm.toLowerCase();
-  if (LOCALFOLD_MODEL_ALIAS_RE.test(norm)) return true;
-  return LOCALFOLD_MODEL_OPTIONS.some(
-    (m) =>
-      m.shortLabel.toLowerCase() === lower ||
-      m.label.toLowerCase() === lower ||
-      m.id.toLowerCase() === lower,
-  );
+  const check = (candidate: string): boolean => {
+    const lower = candidate.toLowerCase();
+    if (LOCALFOLD_MODEL_ALIAS_RE.test(candidate)) return true;
+    return LOCALFOLD_MODEL_OPTIONS.some(
+      (m) =>
+        m.shortLabel.toLowerCase() === lower ||
+        m.label.toLowerCase() === lower ||
+        m.id.toLowerCase() === lower,
+    );
+  };
+  if (check(norm)) return true;
+  const strippedRole = norm.replace(LOCALFOLD_ROLE_SUFFIX_RE, '').trim();
+  if (strippedRole && strippedRole !== norm && check(strippedRole)) return true;
+  return false;
 }
 
 function splitAutoLabelSuffix(raw: string): { base: string; parenContent: string | null; suffix: string } {
@@ -839,12 +854,18 @@ export function resolveAutoModelLabelOnChange(
     const nextMeta = MPNN_VARIANT_OPTIONS.find((v) => v.family === nextModelValue);
     if (!nextMeta) return null;
     const isKnownMpnn = (text: string): boolean => {
-      const lower = text.trim().toLowerCase();
-      if (!lower) return false;
-      if (MPNN_VARIANT_ALIAS_RE.test(text.trim())) return true;
-      return MPNN_VARIANT_OPTIONS.some(
-        (v) => v.shortLabel.toLowerCase() === lower || v.label.toLowerCase() === lower,
-      );
+      const check = (candidate: string): boolean => {
+        const lower = candidate.toLowerCase();
+        if (!lower) return false;
+        if (MPNN_VARIANT_ALIAS_RE.test(candidate)) return true;
+        return MPNN_VARIANT_OPTIONS.some(
+          (v) => v.shortLabel.toLowerCase() === lower || v.label.toLowerCase() === lower,
+        );
+      };
+      const norm = text.trim();
+      if (check(norm)) return true;
+      const stripped = norm.replace(MPNN_ROLE_SUFFIX_RE, '').trim();
+      return Boolean(stripped && stripped !== norm && check(stripped));
     };
     if (!raw || isKnownMpnn(raw)) return nextMeta.shortLabel;
     const { base, parenContent, suffix } = splitAutoLabelSuffix(raw);
@@ -858,7 +879,12 @@ export function resolveAutoModelLabelOnChange(
   if (adapterId === 'antifold-esmif1') {
     const nextShort = ANTIFOLD_VARIANT_LABELS[nextModelValue];
     if (!nextShort) return null;
-    const isKnownAntiFold = (text: string): boolean => ANTIFOLD_VARIANT_ALIAS_RE.test(text.trim());
+    const isKnownAntiFold = (text: string): boolean => {
+      const norm = text.trim();
+      if (ANTIFOLD_VARIANT_ALIAS_RE.test(norm)) return true;
+      const stripped = norm.replace(ANTIFOLD_ROLE_SUFFIX_RE, '').trim();
+      return Boolean(stripped && stripped !== norm && ANTIFOLD_VARIANT_ALIAS_RE.test(stripped));
+    };
     if (!raw || isKnownAntiFold(raw)) return nextShort;
     const { base, parenContent, suffix } = splitAutoLabelSuffix(raw);
     if (isKnownAntiFold(base)) {

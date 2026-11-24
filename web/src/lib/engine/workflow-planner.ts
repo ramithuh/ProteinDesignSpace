@@ -2179,7 +2179,8 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
       for (const gen of downstreamGens) {
         if (
           (gen.adapterId === 'protpardelle' || gen.adapterId === 'rfd4-proteina') &&
-          String(gen.params.taskMode ?? gen.params.mode ?? '').trim().toLowerCase() === 'partial'
+          String(gen.params.taskMode ?? gen.params.mode ?? '').trim().toLowerCase() === 'partial' &&
+          bm.category !== 'enzyme-ligand'
         ) {
           continue;
         }
