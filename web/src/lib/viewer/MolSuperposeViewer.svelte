@@ -9,6 +9,7 @@
   import type { AtomGranularity, BfactorSemantics } from '$lib/engine/types';
   import { resolveUncertaintyColorArgFromValues } from './bfactor-domain';
   import { pruneFalseNucleicMonomers } from './molstar-sanitize';
+  import { resolveViewerSpinState } from './viewer-spin';
 
   interface Props {
     designedPdb: string | null;
@@ -27,6 +28,8 @@
     spinSpeed?: number;
     /** Lock camera reset to canonical front view (+Z -> -Z, up +Y) and pause spin (side-by-side / grid layouts). */
     canonicalCamera?: boolean;
+    /** Temporarily pause spin animation (e.g. while a GPU pipeline run is active) without mutating `spin` or enabling SSAO occlusion. */
+    pauseSpin?: boolean;
     /** When true (full-view expanded mode), shows the floating Representation & View menu. */
     expanded?: boolean;
     /** Override whether the Representation menu opens automatically upon entering `expanded` mode (default: true on viewports >= 640px). */
@@ -73,6 +76,7 @@
     spin = true,
     spinSpeed = 0.02,
     canonicalCamera = false,
+    pauseSpin = false,
     expanded = false,
     defaultStyleMenuOpen = undefined,
     theme = 'dark',
@@ -557,9 +561,9 @@
           renderer: { backgroundColor: (theme === 'light' ? 0xf8fafc : 0x0d0e11) as unknown as never },
           cameraFog: { name: 'off', params: {} },
           cameraClipping: { far: false, radius: 0, minNear: 0.1 },
-          postprocessing: buildPostprocessingProps(illustrative, effectiveSpin),
+          postprocessing: buildPostprocessingProps(illustrative, spinState.disableOcclusion),
           trackball: {
-            animate: effectiveSpin
+            animate: spinState.effectiveSpin
               ? { name: 'spin', params: { speed: effectiveSpinSpeed, axis: [0, -1, 0] as unknown as never } }
               : { name: 'off', params: {} },
           },
@@ -1159,7 +1163,7 @@
           (sDesigned && (useTraj && tPdb ? tPdb : dPdb)) || (sRefold && rPdb && !useTraj),
         );
         const liveStructs = ctx.managers?.structure?.hierarchy?.current?.structures?.length ?? 0;
-        applyPostprocessing(illustrative, spin && hasAnyStructure);
+        applyPostprocessing(illustrative, spinState.disableOcclusion);
         if (savedCam && liveStructs > 0) {
           ctx.canvas3d?.camera?.setState(savedCam, 0);
         } else {
@@ -1214,11 +1218,11 @@
     }
   }
 
-  function buildPostprocessingProps(illustrativeOn: boolean, spinning: boolean) {
+  function buildPostprocessingProps(illustrativeOn: boolean, disableOcclusion: boolean) {
     return {
       bloom: { name: 'off' as const, params: {} },
       shadow: { name: 'off' as const, params: {} },
-      occlusion: spinning
+      occlusion: disableOcclusion
         ? { name: 'off' as const, params: {} }
         : {
             name: 'on' as const,
@@ -1260,27 +1264,40 @@
     };
   }
 
-  function applyPostprocessing(illustrativeOn: boolean, spinning: boolean) {
+  function applyPostprocessing(illustrativeOn: boolean, disableOcclusion: boolean) {
     if (!plugin?.canvas3d) return;
     plugin.canvas3d.setProps({
-      postprocessing: buildPostprocessingProps(illustrativeOn, spinning),
+      postprocessing: buildPostprocessingProps(illustrativeOn, disableOcclusion),
     });
   }
 
   let hasAnyStructure = $derived(
     Boolean((models && models.length > 0) || designedPdb || refoldPdb),
   );
-  let effectiveSpin = $derived(spin && hasAnyStructure && !canonicalCamera);
+  let spinState = $derived(
+    resolveViewerSpinState({
+      spin,
+      hasAnyStructure,
+      canonicalCamera,
+      pauseSpin,
+    }),
+  );
+  let effectiveSpin = $derived(spinState.effectiveSpin);
   let showSemanticBfactorLegend = $derived(
     hasAnyStructure &&
       isSemanticBfactor &&
       (colorScheme === 'auto' || colorScheme === 'uncertainty'),
   );
 
-  function applySpin(on: boolean, speed: number) {
+  function applySpin(
+    on: boolean,
+    speed: number,
+    illustrativeOn = illustrative,
+    disableOcclusion = on,
+  ) {
     if (!plugin?.canvas3d) return;
     plugin.canvas3d.setProps({
-      postprocessing: buildPostprocessingProps(illustrative, on),
+      postprocessing: buildPostprocessingProps(illustrativeOn, disableOcclusion),
       trackball: {
         animate: on
           ? { name: 'spin', params: { speed, axis: [0, -1, 0] as unknown as never } }
@@ -1402,7 +1419,7 @@
         if (destroyed || mySeq !== loadSeq) return;
         const liveStructs = ctx.managers?.structure?.hierarchy?.current?.structures?.length ?? 0;
         modelRefs = nextRefs;
-        applyPostprocessing(illustrative, spin && hasAnyStructure && !styleOpts.canonicalCamera);
+        applyPostprocessing(illustrative, spinState.disableOcclusion);
         if (savedCam && liveStructs > 0) {
           ctx.canvas3d?.camera?.setState(savedCam, 0);
         } else {
@@ -1802,15 +1819,10 @@
   });
 
   $effect(() => {
-    const on = illustrative;
-    const spinning = effectiveSpin;
-    if (plugin) applyPostprocessing(on, spinning);
-  });
-
-  $effect(() => {
-    const on = effectiveSpin;
+    const illus = illustrative;
+    const { effectiveSpin: on, disableOcclusion } = spinState;
     const speed = effectiveSpinSpeed;
-    if (plugin) applySpin(on, speed);
+    if (plugin) applySpin(on, speed, illus, disableOcclusion);
   });
 
   $effect(() => {
@@ -2008,9 +2020,11 @@
               </button>
             </div>
           </div>
-          {#if effectiveSpin}
+          {#if spinState.spinConfigured}
             <label class="sp-field">
-              <span>Spin speed ({effectiveSpinSpeed.toFixed(3)} rot/s)</span>
+              <span>
+                Spin speed ({effectiveSpinSpeed.toFixed(3)} rot/s){pauseSpin && !effectiveSpin ? ' · paused' : ''}
+              </span>
               <input
                 type="range"
                 min="0.005"
