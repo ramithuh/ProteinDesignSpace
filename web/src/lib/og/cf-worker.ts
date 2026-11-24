@@ -122,7 +122,9 @@ export default {
       (url.pathname === '/' || url.pathname === '/index.html') &&
       (url.searchParams.has('g') || url.searchParams.has('p'))
     ) {
-      const assetRes = await env.ASSETS.fetch(new Request(new URL('/index.html', url.origin), request));
+      // IMPORTANT: Fetch `/` (not `/index.html`) from Cloudflare Pages ASSETS —
+      // CF Pages ASSETS returns a 308 redirect from `/index.html` -> `/`!
+      const assetRes = await env.ASSETS.fetch(new Request(new URL('/', url.origin), request));
       const contentType = assetRes.headers.get('content-type') ?? '';
       if (!assetRes.ok || !contentType.includes('text/html')) {
         return assetRes;

@@ -123,8 +123,14 @@ describe('Social media OG preview cards & edge worker', () => {
       new Request(`https://denovo.run/?g=${USER_6FIZ_G}`),
       {
         ASSETS: {
-          fetch: async () =>
-            new Response(baseHtml, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }),
+          fetch: async (input) => {
+            const reqUrl = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+            // Simulate real Cloudflare Pages ASSETS redirecting /index.html -> /
+            if (reqUrl.pathname === '/index.html') {
+              return new Response(null, { status: 308, headers: { Location: '/' } });
+            }
+            return new Response(baseHtml, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+          },
         },
       },
     );
