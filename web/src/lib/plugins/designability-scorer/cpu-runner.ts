@@ -6,6 +6,7 @@
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import { applyTransformToPdb, computeGeometryStats, kabschAlign } from '$lib/protein-ops/kabsch';
 import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
+import { NUCLEIC_ACID_RESNAMES, tokenizeCifLine } from '$lib/protein-ops/hetatm-policy';
 import { resolveFoldConfidence } from '$lib/engine/bio-capabilities';
 import { canonicalJsonStringify, fnv1a } from '$lib/kernel/hash-utils';
 import type { UpstreamGraphQuery } from '$lib/kernel/plugin-types';
@@ -26,6 +27,291 @@ interface ScorerChainRange {
   chainId: string;
   start: number;
   length: number;
+}
+
+export interface NativeMotifAtomCoord {
+  resIdx: number;
+  atomName: string;
+  x: number;
+  y: number;
+  z: number;
+}
+
+type StructureWithMotifAtoms = StructureArtifact & {
+  nativeMotifAtomCoords?: NativeMotifAtomCoord[];
+};
+
+type DesignabilityRowWithMotifAtoms = DesignabilityRow & {
+  genMotifAtomRmsd?: number | null;
+  refoldMotifAtomRmsd?: number | null;
+};
+
+type DesignabilityMetricsWithMotifAtoms = DesignabilityMetrics & {
+  genMotifAtomRmsd?: number | null;
+  refoldMotifAtomRmsd?: number | null;
+};
+
+const SCORER_WATER_RESNAMES = new Set(['HOH', 'WAT', 'DOD', 'H2O', 'TIP', 'TIP3']);
+const SCORER_PEPTIDE_CAP_RESNAMES = new Set(['ACE', 'NME', 'NH2', 'FOR']);
+
+function scorerAltLocPriority(alt: string): number {
+  const ch = alt.trim();
+  if (ch === '' || ch === 'A' || ch === '1') return 0;
+  if (ch === 'B' || ch === '2') return 1;
+  return 2;
+}
+
+function isProteinHydrogen(elemRaw: string, atomNameRaw: string): boolean {
+  const elem = elemRaw.trim().toUpperCase();
+  if (elem && elem !== '.' && elem !== '?') {
+    return elem === 'H' || elem === 'D';
+  }
+  const atom = atomNameRaw.trim().toUpperCase();
+  return /^[0-9]*[HD]/.test(atom);
+}
+
+/**
+ * Parse all heavy atoms of protein residues from PDB or mmCIF text, indexed by 0-based protein
+ * residue index matching `parseStructureText` (`caCoords` ordering: only residues with observed
+ * `CA`, skipping waters, non-MSE HETATM ligands, nucleic acids, peptide caps, and hydrogens).
+ */
+export function extractProteinHeavyAtomsByResidueIndex(
+  structureText: string,
+): Array<Map<string, [number, number, number]>> {
+  if (!structureText || !structureText.trim()) return [];
+  interface ResEntry {
+    atoms: Map<string, [number, number, number]>;
+    atomAltPrio: Map<string, number>;
+  }
+  const residues: ResEntry[] = [];
+  const byKey = new Map<string, ResEntry>();
+
+  const addAtom = (
+    resKey: string,
+    atomNameRaw: string,
+    prio: number,
+    x: number,
+    y: number,
+    z: number,
+  ) => {
+    const atomName = atomNameRaw.trim().toUpperCase();
+    if (!atomName || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
+    let entry = byKey.get(resKey);
+    if (!entry) {
+      entry = { atoms: new Map(), atomAltPrio: new Map() };
+      byKey.set(resKey, entry);
+      residues.push(entry);
+    }
+    const prevPrio = entry.atomAltPrio.get(atomName);
+    if (prevPrio === undefined || prio < prevPrio) {
+      entry.atoms.set(atomName, [x, y, z]);
+      entry.atomAltPrio.set(atomName, prio);
+    }
+  };
+
+  const trimmed = structureText.trimStart();
+  const isMmcif = trimmed.startsWith('data_') || structureText.includes('_atom_site.');
+
+  if (isMmcif) {
+    const lines = structureText.split(/\r?\n/);
+    let inLoop = false;
+    let inAtomSite = false;
+    let cols: string[] = [];
+    let iGroup = -1;
+    let iModel = -1;
+    let iAlt = -1;
+    let iLabelAtom = -1;
+    let iAuthAtom = -1;
+    let iAuthAsym = -1;
+    let iLabelAsym = -1;
+    let iAuthSeq = -1;
+    let iLabelSeq = -1;
+    let iIns = -1;
+    let iLabelComp = -1;
+    let iAuthComp = -1;
+    let iElem = -1;
+    let iX = -1;
+    let iY = -1;
+    let iZ = -1;
+    let firstModel: string | null = null;
+    let pendingRow: string[] = [];
+
+    const cifVal = (row: string[], idx: number): string => {
+      if (idx < 0 || idx >= row.length) return '';
+      const v = row[idx];
+      return v === '.' || v === '?' ? '' : v;
+    };
+
+    const flushRow = (row: string[]) => {
+      const modelNum = cifVal(row, iModel);
+      if (modelNum) {
+        if (firstModel === null) firstModel = modelNum;
+        else if (modelNum !== firstModel) return;
+      }
+      const prio = scorerAltLocPriority(cifVal(row, iAlt));
+      if (prio > 1) return;
+      const group = (cifVal(row, iGroup) || 'ATOM').toUpperCase();
+      const comp = (cifVal(row, iLabelComp) || cifVal(row, iAuthComp) || 'UNK').toUpperCase();
+      if (
+        SCORER_PEPTIDE_CAP_RESNAMES.has(comp) ||
+        NUCLEIC_ACID_RESNAMES.has(comp) ||
+        SCORER_WATER_RESNAMES.has(comp)
+      ) {
+        return;
+      }
+      if (group === 'HETATM') {
+        if (comp !== 'MSE') return;
+      } else if (group !== 'ATOM') {
+        return;
+      }
+      const atomName = cifVal(row, iLabelAtom) || cifVal(row, iAuthAtom);
+      if (!atomName || isProteinHydrogen(cifVal(row, iElem), atomName)) return;
+      const chain = cifVal(row, iAuthAsym) || cifVal(row, iLabelAsym) || 'A';
+      const seqId = cifVal(row, iAuthSeq) || cifVal(row, iLabelSeq);
+      const ins = cifVal(row, iIns);
+      const x = parseFloat(iX >= 0 ? row[iX] : '');
+      const y = parseFloat(iY >= 0 ? row[iY] : '');
+      const z = parseFloat(iZ >= 0 ? row[iZ] : '');
+      addAtom(`${chain}:${seqId}:${ins}`, atomName, prio, x, y, z);
+    };
+
+    for (let li = 0; li < lines.length; li++) {
+      const tr = lines[li].trim();
+      if (!tr || tr.startsWith('#')) continue;
+      if (tr === 'loop_') {
+        if (inAtomSite) break;
+        inLoop = true;
+        inAtomSite = false;
+        cols = [];
+        pendingRow = [];
+        continue;
+      }
+      if (inLoop && tr.startsWith('_')) {
+        const colName = tr.split(/\s+/)[0];
+        if (colName.startsWith('_atom_site.')) {
+          inAtomSite = true;
+          cols.push(colName);
+          const idx = cols.length - 1;
+          if (colName === '_atom_site.group_PDB') iGroup = idx;
+          else if (colName === '_atom_site.pdbx_PDB_model_num') iModel = idx;
+          else if (colName === '_atom_site.label_alt_id') iAlt = idx;
+          else if (colName === '_atom_site.label_atom_id') iLabelAtom = idx;
+          else if (colName === '_atom_site.auth_atom_id') iAuthAtom = idx;
+          else if (colName === '_atom_site.auth_asym_id') iAuthAsym = idx;
+          else if (colName === '_atom_site.label_asym_id') iLabelAsym = idx;
+          else if (colName === '_atom_site.auth_seq_id') iAuthSeq = idx;
+          else if (colName === '_atom_site.label_seq_id') iLabelSeq = idx;
+          else if (colName === '_atom_site.pdbx_PDB_ins_code') iIns = idx;
+          else if (colName === '_atom_site.label_comp_id') iLabelComp = idx;
+          else if (colName === '_atom_site.auth_comp_id') iAuthComp = idx;
+          else if (colName === '_atom_site.type_symbol') iElem = idx;
+          else if (colName === '_atom_site.Cartn_x') iX = idx;
+          else if (colName === '_atom_site.Cartn_y') iY = idx;
+          else if (colName === '_atom_site.Cartn_z') iZ = idx;
+        } else {
+          inAtomSite = false;
+        }
+        continue;
+      }
+      if (inAtomSite) {
+        if (
+          tr.startsWith('_') ||
+          tr.startsWith('data_') ||
+          tr.startsWith('save_') ||
+          tr === 'stop_'
+        ) {
+          break;
+        }
+        inLoop = false;
+        const toks = tokenizeCifLine(tr);
+        if (toks.length === 0) continue;
+        if (pendingRow.length === 0 && toks.length >= cols.length) {
+          flushRow(toks);
+        } else {
+          pendingRow.push(...toks);
+          while (cols.length > 0 && pendingRow.length >= cols.length) {
+            flushRow(pendingRow.slice(0, cols.length));
+            pendingRow = pendingRow.slice(cols.length);
+          }
+        }
+      } else {
+        inLoop = false;
+      }
+    }
+  } else {
+    const lines = structureText.split(/\r?\n/);
+    let seenAtoms = false;
+    let seenModel = false;
+    for (const line of lines) {
+      if (line.startsWith('MODEL ')) {
+        if (seenModel) break;
+        seenModel = true;
+        continue;
+      }
+      if (line.startsWith('ENDMDL')) {
+        if (seenModel || seenAtoms) break;
+        continue;
+      }
+      if (line.length < 54) continue;
+      const isAtom = line.startsWith('ATOM  ');
+      const isHet = line.startsWith('HETATM');
+      if (!isAtom && !isHet) continue;
+      const comp = line.slice(17, 20).trim().toUpperCase();
+      if (
+        SCORER_PEPTIDE_CAP_RESNAMES.has(comp) ||
+        NUCLEIC_ACID_RESNAMES.has(comp) ||
+        SCORER_WATER_RESNAMES.has(comp)
+      ) {
+        continue;
+      }
+      if (isHet && comp !== 'MSE') continue;
+      seenAtoms = true;
+      const prio = scorerAltLocPriority(line[16] ?? ' ');
+      if (prio > 1) continue;
+      const atomName = line.slice(12, 16).trim();
+      const elem = line.length >= 78 ? line.slice(76, 78) : '';
+      if (!atomName || isProteinHydrogen(elem, atomName)) continue;
+      const chain = line[21]?.trim() || 'A';
+      const resNum = line.slice(22, 26).trim();
+      const ins = (line[26] ?? ' ').trim();
+      const x = parseFloat(line.slice(30, 38));
+      const y = parseFloat(line.slice(38, 46));
+      const z = parseFloat(line.slice(46, 54));
+      addAtom(`${chain}:${resNum}:${ins}`, atomName, prio, x, y, z);
+    }
+  }
+
+  return residues.filter((r) => r.atoms.has('CA')).map((r) => r.atoms);
+}
+
+function computeMotifHeavyAtomRmsd(
+  heavyAtomsByRes: readonly Map<string, [number, number, number]>[],
+  nativeAtoms: readonly NativeMotifAtomCoord[],
+): number | undefined {
+  if (heavyAtomsByRes.length === 0 || nativeAtoms.length < 3) return undefined;
+  const matchedMob: Array<[number, number, number]> = [];
+  const matchedNat: Array<[number, number, number]> = [];
+  for (const a of nativeAtoms) {
+    const resMap = heavyAtomsByRes[a.resIdx];
+    if (!resMap) continue;
+    const coord = resMap.get(a.atomName);
+    if (!coord) continue;
+    matchedMob.push(coord);
+    matchedNat.push([a.x, a.y, a.z]);
+  }
+  if (matchedMob.length < 3) return undefined;
+  const mobBuf = new Float32Array(matchedMob.length * 3);
+  const natBuf = new Float32Array(matchedNat.length * 3);
+  for (let i = 0; i < matchedMob.length; i++) {
+    mobBuf[i * 3 + 0] = matchedMob[i][0];
+    mobBuf[i * 3 + 1] = matchedMob[i][1];
+    mobBuf[i * 3 + 2] = matchedMob[i][2];
+    natBuf[i * 3 + 0] = matchedNat[i][0];
+    natBuf[i * 3 + 1] = matchedNat[i][1];
+    natBuf[i * 3 + 2] = matchedNat[i][2];
+  }
+  const res = kabschAlign(mobBuf, natBuf);
+  return Number.isFinite(res.rmsd) ? res.rmsd : undefined;
 }
 
 function resolveScorerChainRanges(
@@ -395,6 +681,41 @@ export async function runDesignabilityScorerCpu(
     );
     const designedStructureText =
       ref.cifText && (hasNonProtein || !ref.pdbText) ? ref.cifText : ref.pdbText;
+
+    const rawNativeAtoms = (ref as StructureWithMotifAtoms).nativeMotifAtomCoords;
+    const validNativeAtoms: NativeMotifAtomCoord[] = [];
+    if (Array.isArray(rawNativeAtoms) && rawNativeAtoms.length >= 3) {
+      for (const entry of rawNativeAtoms) {
+        const atomName = typeof entry?.atomName === 'string' ? entry.atomName.trim().toUpperCase() : '';
+        if (
+          entry &&
+          Number.isInteger(entry.resIdx) &&
+          entry.resIdx >= 0 &&
+          entry.resIdx < refLen &&
+          atomName.length > 0 &&
+          Number.isFinite(entry.x) &&
+          Number.isFinite(entry.y) &&
+          Number.isFinite(entry.z)
+        ) {
+          validNativeAtoms.push({
+            resIdx: entry.resIdx,
+            atomName,
+            x: entry.x,
+            y: entry.y,
+            z: entry.z,
+          });
+        }
+      }
+    }
+    let genMotifAtomRmsd: number | undefined;
+    if (validNativeAtoms.length >= 3) {
+      const refTextForAtoms = designedStructureText || ref.cifText || ref.pdbText || '';
+      if (refTextForAtoms) {
+        const designedHeavy = extractProteinHeavyAtomsByResidueIndex(refTextForAtoms);
+        genMotifAtomRmsd = computeMotifHeavyAtomRmsd(designedHeavy, validNativeAtoms);
+      }
+    }
+
     return {
       ref,
       refLen,
@@ -402,6 +723,8 @@ export async function runDesignabilityScorerCpu(
       motifPairs,
       nativeMotifCa,
       genMotifRmsd,
+      validNativeAtoms,
+      genMotifAtomRmsd,
       designedStructureText,
     };
   };
@@ -419,8 +742,17 @@ export async function runDesignabilityScorerCpu(
       rowReferenceMode: 'self-consistency' | 'external-reference' | 'lineage-mismatch';
       parsedMapping: ReturnType<typeof parseReferenceResidueMapping>;
     },
-  ): DesignabilityRow => {
-    const { ref, refLen, motifPairs, nativeMotifCa, genMotifRmsd, designedStructureText } = ctx;
+  ): DesignabilityRowWithMotifAtoms => {
+    const {
+      ref,
+      refLen,
+      motifPairs,
+      nativeMotifCa,
+      genMotifRmsd,
+      validNativeAtoms,
+      genMotifAtomRmsd,
+      designedStructureText,
+    } = ctx;
     const {
       rowLineage,
       rowSelfConsistencyValid,
@@ -592,6 +924,35 @@ export async function runDesignabilityScorerCpu(
           }
         }
       }
+    } else if (
+      isFullOneToOne &&
+      chainRanges.length === 1 &&
+      f.pae &&
+      f.pae.length > refLen * refLen
+    ) {
+      // Holo protein–ligand / protein–DNA interface PAE: average off-diagonal protein↔non-protein blocks
+      const paeDim = Math.round(Math.sqrt(f.pae.length));
+      if (paeDim > refLen && paeDim * paeDim === f.pae.length) {
+        let sum = 0;
+        let count = 0;
+        for (let i = 0; i < refLen; i++) {
+          for (let j = refLen; j < paeDim; j++) {
+            const v1 = f.pae[i * paeDim + j];
+            if (Number.isFinite(v1)) {
+              sum += v1;
+              count++;
+            }
+            const v2 = f.pae[j * paeDim + i];
+            if (Number.isFinite(v2)) {
+              sum += v2;
+              count++;
+            }
+          }
+        }
+        if (count > 0) {
+          ipae = sum / count;
+        }
+      }
     }
 
     const ipsaeChainRanges =
@@ -628,6 +989,16 @@ export async function runDesignabilityScorerCpu(
       const refoldAlign = kabschAlign(refoldMotifCa, nativeMotifCa);
       if (Number.isFinite(refoldAlign.rmsd)) {
         refoldMotifRmsd = refoldAlign.rmsd;
+      }
+    }
+
+    let refoldMotifAtomRmsd: number | undefined;
+    if (isFullOneToOne && validNativeAtoms.length >= 3) {
+      const foldStructureText =
+        f.pdbText || (f as FoldedCandidate & { cifText?: string }).cifText || '';
+      if (foldStructureText) {
+        const refoldHeavy = extractProteinHeavyAtomsByResidueIndex(foldStructureText);
+        refoldMotifAtomRmsd = computeMotifHeavyAtomRmsd(refoldHeavy, validNativeAtoms);
       }
     }
 
@@ -711,6 +1082,8 @@ export async function runDesignabilityScorerCpu(
       ...(targetAlignedBinderRmsd !== undefined ? { targetAlignedBinderRmsd } : {}),
       ...(genMotifRmsd !== undefined ? { genMotifRmsd } : {}),
       ...(refoldMotifRmsd !== undefined ? { refoldMotifRmsd } : {}),
+      ...(genMotifAtomRmsd !== undefined ? { genMotifAtomRmsd } : {}),
+      ...(refoldMotifAtomRmsd !== undefined ? { refoldMotifAtomRmsd } : {}),
       referenceMode: rowReferenceMode,
       referenceRelation: rowReferenceRelation,
       referenceLabel: rowReferenceLabel,
@@ -940,11 +1313,12 @@ export async function runDesignabilityScorerCpu(
         collectionId: structure.collection?.id ?? null,
       }),
     );
-    const metrics: DesignabilityMetrics = {
+    const bestRow = (rows[0] ?? null) as DesignabilityRowWithMotifAtoms | null;
+    const metrics: DesignabilityMetricsWithMotifAtoms = {
       kind: 'DesignabilityMetrics',
       id: `metrics-${structure.id}-${folds.id}-${threshHash}`,
       rows,
-      best: rows[0] ?? null,
+      best: bestRow,
       passRate: rows.length > 0 ? passed / rows.length : 0,
       referenceStructureId: structure.id,
       foldParentStructureId: folds.parentStructureId || 'multi-design',
@@ -960,6 +1334,12 @@ export async function runDesignabilityScorerCpu(
         evaluatedDesignIds.size > 0
           ? passingDesignIds.size / evaluatedDesignIds.size
           : null,
+      ...(bestRow?.genMotifAtomRmsd !== undefined
+        ? { genMotifAtomRmsd: bestRow.genMotifAtomRmsd }
+        : {}),
+      ...(bestRow?.refoldMotifAtomRmsd !== undefined
+        ? { refoldMotifAtomRmsd: bestRow.refoldMotifAtomRmsd }
+        : {}),
       ...(lineageWarning ? { lineageWarning } : {}),
       ...(appliedMappingSpec ? { referenceMapping: appliedMappingSpec } : {}),
       ...(folds.collectionKind ? { collectionKind: folds.collectionKind } : {}),
@@ -1154,11 +1534,12 @@ export async function runDesignabilityScorerCpu(
       mapping: appliedMappingSpec ?? null,
     }),
   );
-  const metrics: DesignabilityMetrics = {
+  const bestRow = (rows[0] ?? null) as DesignabilityRowWithMotifAtoms | null;
+  const metrics: DesignabilityMetricsWithMotifAtoms = {
     kind: 'DesignabilityMetrics',
     id: `metrics-${structure.id}-${folds.id}-${threshHash}`,
     rows,
-    best: rows[0] ?? null,
+    best: bestRow,
     passRate: rows.length > 0 ? passed / rows.length : 0,
     referenceStructureId: structure.id,
     foldParentStructureId: foldSetLineage || folds.parentStructureId || 'none',
@@ -1168,6 +1549,12 @@ export async function runDesignabilityScorerCpu(
     selfConsistencyValid: topSelfConsistencyValid,
     lineageStatus,
     lineageMismatch: anyLineageMismatch,
+    ...(bestRow?.genMotifAtomRmsd !== undefined
+      ? { genMotifAtomRmsd: bestRow.genMotifAtomRmsd }
+      : {}),
+    ...(bestRow?.refoldMotifAtomRmsd !== undefined
+      ? { refoldMotifAtomRmsd: bestRow.refoldMotifAtomRmsd }
+      : {}),
     ...(lineageWarning ? { lineageWarning } : {}),
     ...(appliedMappingSpec ? { referenceMapping: appliedMappingSpec } : {}),
     ...(folds.collectionKind ? { collectionKind: folds.collectionKind } : {}),

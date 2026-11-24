@@ -65,7 +65,7 @@ describe('Wave 2 — Multi-generator benchmark sync (WF-06)', () => {
     expect(String(rfd.params.contig)).not.toContain(',');
     expect(rfd.params.autoSeededBenchmarkId).toBe('rfd_1prw_efhand');
 
-    expect(g2.params.motifRange).toBe('A16-35');
+    expect(g2.params.motifRange).toBe('A16-35, A52-71');
     expect(g2.params.autoSeededBenchmarkId).toBe('rfd_1prw_efhand');
 
     // Switch benchmark to 5O45 binder: BoltzGen flips to binder + hotspots, motif-only models reset cleanly
@@ -134,7 +134,10 @@ describe('Wave 2 — CT-10 pre-run notices & schema guards', () => {
 
   it('validates Genie 2 motifRange syntax and missing template wire', () => {
     expect(
-      validateNodeParams({ id: 'g2', adapterId: 'genie2', params: { motifRange: 'A16-35, A52-71' } }).some((e) =>
+      validateNodeParams({ id: 'g2', adapterId: 'genie2', params: { motifRange: 'A16-35, A52-71' } }),
+    ).toHaveLength(0);
+    expect(
+      validateNodeParams({ id: 'g2', adapterId: 'genie2', params: { motifRange: 'A35-16' } }).some((e) =>
         /motifRange/i.test(e),
       ),
     ).toBe(true);

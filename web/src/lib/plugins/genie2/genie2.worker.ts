@@ -6,6 +6,7 @@
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
 import { requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
+import { buildGenie2OptionalMotifs } from '$lib/protein-ops/motif-placement';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import { createWorkerHarness, fnv1a, type WorkerRunContext } from '$lib/kernel';
 import type { StructureArtifact } from '$lib/engine/types';
@@ -145,114 +146,6 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
   }
 }
 
-interface BuiltGenie2Motif {
-  motifs: Array<{ start: number; sequence: string; coordinates: Float32Array; group: number }>;
-  motifIndices: number[];
-  fixedResidueIndices: number[];
-  nativeMotifCoords: number[][];
-}
-
-function buildOptionalMotifs(
-  template: StructureArtifact | undefined,
-  motifRange: string,
-  targetLength: number,
-): BuiltGenie2Motif | undefined {
-  const trimmed = motifRange.trim();
-  if (!trimmed) return undefined;
-  if (!template?.pdbText) {
-    throw new Error('Genie 2 motifRange requires a connected template structure.');
-  }
-  const parsed = parseStructureText(template.pdbText);
-  if (parsed.nResidues === 0) {
-    throw new Error('Genie 2 motif template contains no valid residues.');
-  }
-  // Parse simple "A10-25" or "10-25" range against the template residues
-  const match = trimmed.match(/^(?:([A-Za-z]):?)?(-?\d+)(?:-(-?\d+))?$/);
-  if (!match) {
-    throw new Error(`Invalid Genie 2 motifRange "${trimmed}" (expected e.g. A10-25 or 10-25).`);
-  }
-  const rawChainFilter = match[1];
-  const uniqueChains = [...new Set(parsed.chainIds)];
-  if (!rawChainFilter && uniqueChains.length > 1) {
-    throw new Error(
-      `Ambiguous Genie 2 motifRange "${trimmed}" on multi-chain template (chains ${uniqueChains.join(', ')}). Prefix with a chain ID such as "${uniqueChains[0]}${trimmed}".`,
-    );
-  }
-  let resolvedChainFilter: string | undefined;
-  if (rawChainFilter) {
-    if (uniqueChains.includes(rawChainFilter)) {
-      resolvedChainFilter = rawChainFilter;
-    } else {
-      const upper = rawChainFilter.toUpperCase();
-      const ciMatches = uniqueChains.filter((c) => c.toUpperCase() === upper);
-      resolvedChainFilter = ciMatches.length === 1 ? ciMatches[0] : rawChainFilter;
-    }
-  }
-  const startRes = Number(match[2]);
-  const endRes = match[3] ? Number(match[3]) : startRes;
-  const lo = Math.min(startRes, endRes);
-  const hi = Math.max(startRes, endRes);
-  const picked: number[] = [];
-  for (let i = 0; i < parsed.nResidues; i++) {
-    if (resolvedChainFilter && parsed.chainIds[i] !== resolvedChainFilter) continue;
-    const r = parsed.resNums[i];
-    if (r >= lo && r <= hi) picked.push(i);
-  }
-  if (picked.length < 3) {
-    throw new Error(
-      `Genie 2 motifRange "${trimmed}" matched only ${picked.length} residue(s) (minimum 3 required).`,
-    );
-  }
-  if (picked.length >= targetLength) {
-    throw new Error(
-      `Genie 2 motif length (${picked.length} aa) must be smaller than target length (${targetLength} aa).`,
-    );
-  }
-
-  let cx = 0;
-  let cy = 0;
-  let cz = 0;
-  const nativeMotifCoords: number[][] = [];
-  for (let k = 0; k < picked.length; k++) {
-    const idx = picked[k];
-    const x = parsed.caCoords[idx * 3];
-    const y = parsed.caCoords[idx * 3 + 1];
-    const z = parsed.caCoords[idx * 3 + 2];
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
-      throw new Error(`Genie 2 motif template has non-finite Cα coordinates at residue index ${idx}.`);
-    }
-    cx += x;
-    cy += y;
-    cz += z;
-    nativeMotifCoords.push([x, y, z]);
-  }
-  cx /= picked.length;
-  cy /= picked.length;
-  cz /= picked.length;
-
-  const coords = new Float32Array(picked.length * 3);
-  let seq = '';
-  const startOffset = Math.max(0, Math.floor((targetLength - picked.length) / 2));
-  const motifIndices: number[] = [];
-  const fixedResidueIndices: number[] = [];
-  for (let k = 0; k < picked.length; k++) {
-    const idx = picked[k];
-    coords[k * 3] = parsed.caCoords[idx * 3] - cx;
-    coords[k * 3 + 1] = parsed.caCoords[idx * 3 + 1] - cy;
-    coords[k * 3 + 2] = parsed.caCoords[idx * 3 + 2] - cz;
-    const rawAa = (parsed.sequence[idx] || 'A').toUpperCase();
-    seq += /^[ACDEFGHIKLMNPQRSTVWY]$/.test(rawAa) ? rawAa : 'A';
-    motifIndices.push(startOffset + k);
-    fixedResidueIndices.push(startOffset + k + 1);
-  }
-  return {
-    motifs: [{ start: startOffset, sequence: seq, coordinates: coords, group: 1 }],
-    motifIndices,
-    fixedResidueIndices,
-    nativeMotifCoords,
-  };
-}
-
 createWorkerHarness({
   async run(ctx) {
     abortRequested = false;
@@ -266,7 +159,7 @@ createWorkerHarness({
     const motifRange = String(p.motifRange ?? '').trim();
     const numDesigns = Math.max(1, Math.min(8, Math.round(Number(p.numDesigns ?? 1))));
 
-    const motifMeta = buildOptionalMotifs(template, motifRange, length);
+    const motifMeta = buildGenie2OptionalMotifs(template, motifRange, length);
     const motifs = motifMeta?.motifs;
 
     if (abortRequested || ctx.signal.aborted) {

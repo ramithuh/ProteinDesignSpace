@@ -416,9 +416,12 @@ createWorkerHarness({
       lockChain: p.lockChain,
       hotspots: p.hotspots,
       motifSpan: p.motifSpan,
+      motifAtoms: p.motifAtoms,
       unindexedMotif: p.unindexedMotif,
       hbondMode: p.hbondMode,
       hbondSelection: p.hbondSelection,
+      hbondDonorSelection: p.hbondDonorSelection,
+      hbondAcceptorSelection: p.hbondAcceptorSelection,
       cathCode: p.cathCode,
       customSpecYaml: p.customSpecYaml,
     };
@@ -426,9 +429,12 @@ createWorkerHarness({
     const inlineLock = String(rawParams.lockChain ?? '').trim();
     const inlineHotspots = String(rawParams.hotspots ?? '').trim();
     const inlineMotif = String(rawParams.motifSpan ?? '').trim();
+    const inlineMotifAtoms = String(rawParams.motifAtoms ?? '').trim();
     const inlineUnidx = Boolean(rawParams.unindexedMotif);
     const inlineHbondMode = String(rawParams.hbondMode ?? 'none');
     const inlineHbondSel = String(rawParams.hbondSelection ?? '').trim();
+    const inlineHbondDonorSel = String(rawParams.hbondDonorSelection ?? '').trim();
+    const inlineHbondAcceptorSel = String(rawParams.hbondAcceptorSelection ?? '').trim();
     const inlineCath = String(rawParams.cathCode ?? '').trim();
 
     // Fail fast BEFORE downloading 330–468 MB weights if a required template structure is missing
@@ -544,8 +550,8 @@ createWorkerHarness({
     } else {
       let inputCif: string | Uint8Array | undefined =
         mode === 'partial' || mode === 'inverse-folding'
-          ? (template?.cifText ?? template?.pdbText)
-          : (condArtifact?.inputCif ?? template?.cifText ?? template?.pdbText);
+          ? (template?.cifText || template?.pdbText)
+          : (condArtifact?.inputCif || template?.cifText || template?.pdbText);
       if (!inputCif && condArtifact?.cifUrl && !activePresetId) {
         inputCif = await fetchExampleCifBytes(ctx, condArtifact.cifUrl);
       }
@@ -608,7 +614,7 @@ createWorkerHarness({
             resolved.customSpecYaml,
             prepared
               ? { inputAtomArray: prepared.atomArray, seed: itemSeed }
-              : { inputCif: template?.cifText ?? template?.pdbText, seed: itemSeed },
+              : { inputCif: template?.cifText || template?.pdbText, seed: itemSeed },
           );
       } else {
         if (prepared && Object.keys(resolved.conditions).length > 0) {
@@ -834,9 +840,12 @@ createWorkerHarness({
           inlineLock,
           inlineHotspots,
           inlineMotif,
+          inlineMotifAtoms,
           inlineUnidx,
           inlineHbondMode,
           inlineHbondSel,
+          inlineHbondDonorSel,
+          inlineHbondAcceptorSel,
           inlineCath,
           customSpecYaml,
           partialFraction: mode === 'partial' ? partialFraction : null,
@@ -962,9 +971,12 @@ createWorkerHarness({
         inlineLock,
         inlineHotspots,
         inlineMotif,
+        inlineMotifAtoms,
         inlineUnidx,
         inlineHbondMode,
         inlineHbondSel,
+        inlineHbondDonorSel,
+        inlineHbondAcceptorSel,
         inlineCath,
         customSpecYaml,
         partialFraction: mode === 'partial' ? partialFraction : null,

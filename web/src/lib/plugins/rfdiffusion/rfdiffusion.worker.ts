@@ -12,6 +12,7 @@ import {
   type WorkerRunContext,
 } from '$lib/kernel';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
+import { resolveRfdiffusionMotifContig } from '$lib/protein-ops/motif-placement';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type { StructureArtifact, TrajectoryFramesArtifact } from '$lib/engine/types';
 
@@ -187,16 +188,7 @@ createWorkerHarness({
 
     let effectiveContig: string | undefined;
     if (taskMode === 'motif' && upstreamStruct) {
-      if (contig) {
-        effectiveContig = contig.replace(/,/g, '/');
-      } else {
-        const ch = upstreamStruct.chainIds?.[0] ?? 'A';
-        const firstRes = upstreamStruct.sourceResidues?.[0]?.resNum ?? 1;
-        const motifLen = Math.min(upstreamStruct.length, 20);
-        const endRes = firstRes + motifLen - 1;
-        const flank = Math.max(10, Math.floor((effectiveLength - motifLen) / 2));
-        effectiveContig = `${flank}-${flank}/${ch}${firstRes}-${endRes}/${flank}-${flank}`;
-      }
+      effectiveContig = resolveRfdiffusionMotifContig(upstreamStruct, contig, effectiveLength);
     }
 
     const activeEngine = await ensureEngine(ctx, precision);

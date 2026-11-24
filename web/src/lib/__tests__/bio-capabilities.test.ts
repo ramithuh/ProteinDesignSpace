@@ -76,7 +76,7 @@ describe('Two-Layer Biological Capability Schema & Multi-Chain I/O', () => {
     expect(issues.some((i) => i.code === 'mpnn-non-protein-stripped' && i.nodeId === 'mpnn')).toBe(true);
     const af2Issue = issues.find((i) => i.code === 'af2-non-protein-entity' && i.nodeId === 'fold');
     expect(af2Issue).toBeDefined();
-    expect(af2Issue!.fix?.paramsPatch).toEqual({ model: 'rosettafold3' });
+    expect(af2Issue!.fix?.paramsPatch).toEqual({ model: 'rosettafold3', ligandCcdCodes: 'SAM' });
     expect(af2Issue!.fix?.nodeLabel).toBe('RoseTTAFold 3');
   });
 

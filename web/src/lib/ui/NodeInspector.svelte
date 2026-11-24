@@ -34,6 +34,7 @@
     normalizeUniProtId,
   } from '$lib/protein-ops/alphafold-db';
   import { parseStructureText, type ParsedStructure } from '$lib/protein-ops/pdb';
+  import { isSilentProteinOnlyHetatm } from '$lib/protein-ops/hetatm-policy';
   import { resolveMotifSourceResidues, type SelectedMotifSourceResidue } from '$lib/engine/conditioning';
   import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
   import {
@@ -562,12 +563,16 @@
           'lockChain',
           'hotspots',
           'motifSpan',
+          'motifAtoms',
           'motifSelection',
           'motifRange',
           'unindexedMotif',
           'hbondMode',
           'hbondSelection',
+          'hbondDonorSelection',
+          'hbondAcceptorSelection',
           'cathCode',
+          'customSpecYaml',
           'presetId',
         ].includes(key)
       ) {
@@ -1081,8 +1086,13 @@
                   <option value={b.id}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
                 {/each}
               </optgroup>
-              <optgroup label="AME Enzymes, Ligands & DNA (RFD4 All-Atom)">
-                {#each BENCHMARK_TARGETS.filter((b) => b.category === 'enzyme-ligand') as b (b.id)}
+              <optgroup label="AME Enzymes (RFD4 All-Atom)">
+                {#each BENCHMARK_TARGETS.filter((b) => b.category === 'enzyme-ligand' && b.id.startsWith('ame_')) as b (b.id)}
+                  <option value={b.id}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
+                {/each}
+              </optgroup>
+              <optgroup label="Small-Molecule & DNA Binders (RFD4 All-Atom)">
+                {#each BENCHMARK_TARGETS.filter((b) => b.category === 'enzyme-ligand' && !b.id.startsWith('ame_')) as b (b.id)}
                   <option value={b.id}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
                 {/each}
               </optgroup>
@@ -1301,9 +1311,13 @@
         {@const droppedCropLigands = (() => {
           const trimCrop = cropVal.trim();
           if (!trimCrop) return [] as string[];
+          const benchId = String(node.params.benchmarkId ?? '').trim() || undefined;
+          const pdbId = normalizePdbId(String(node.params.pdbId ?? '')) || undefined;
+          const keepNonSilent = (ligs: readonly string[]) =>
+            ligs.filter((l) => !isSilentProteinOnlyHetatm(l, { pdbId, benchmarkId: benchId }));
           const liveOmitted = liveStructure?.diagnostics?.omittedLigands;
           if (Array.isArray(liveOmitted) && liveOmitted.length > 0) {
-            return liveOmitted;
+            return keepNonSilent(liveOmitted);
           }
           const rawTxt = String(node.params.pdbText ?? '').trim();
           if (!rawTxt) return [] as string[];
@@ -1313,7 +1327,7 @@
             const keptLigs = new Set(
               (liveStructure?.diagnostics?.ligandNames ?? []).map((l) => l.toUpperCase()),
             );
-            return fullLigs.filter((l) => !keptLigs.has(l.toUpperCase()));
+            return keepNonSilent(fullLigs.filter((l) => !keptLigs.has(l.toUpperCase())));
           } catch {
             return [] as string[];
           }
@@ -1529,6 +1543,16 @@
           />
           Unindexed motif (auto-place catalytic residues, e.g. AME enzymes)
         </label>
+        <label class="full">
+          Motif Atom Subset (optional · tip atoms or TIP / BKBN / ALL)
+          <input
+            type="text"
+            {disabled}
+            placeholder="e.g. A102:ND1,CG,CE1; A104:OE1,CD"
+            value={String(node.params.motifAtoms ?? '')}
+            oninput={(e) => setParam('motifAtoms', e.currentTarget.value)}
+          />
+        </label>
       {:else if rfdMode === 'binder'}
         <label>
           Target Chain
@@ -1645,6 +1669,16 @@
             onchange={(e) => setParam('unindexedMotif', e.currentTarget.checked)}
           />
           Unindexed motif (auto-place catalytic residues)
+        </label>
+        <label class="full">
+          Motif Atom Subset (optional · tip atoms or TIP / BKBN / ALL)
+          <input
+            type="text"
+            {disabled}
+            placeholder="e.g. A102:ND1,CG,CE1; A104:OE1,CD"
+            value={String(node.params.motifAtoms ?? '')}
+            oninput={(e) => setParam('motifAtoms', e.currentTarget.value)}
+          />
         </label>
         <div class="chip-field full">
           <label>
@@ -1838,6 +1872,26 @@
               />
             </label>
           {/if}
+          <label class="full">
+            H-Bond Donor Atoms (optional · <code>C_HB.DONOR</code>)
+            <input
+              type="text"
+              {disabled}
+              placeholder="A/SAM/*/[N,N6,O2',O3']"
+              value={String(node.params.hbondDonorSelection ?? '')}
+              oninput={(e) => setParam('hbondDonorSelection', e.currentTarget.value)}
+            />
+          </label>
+          <label class="full">
+            H-Bond Acceptor Atoms (optional · <code>C_HB.ACCEPTOR</code>)
+            <input
+              type="text"
+              {disabled}
+              placeholder="A/SAM/*/[O,OXT,O4',N1,N3,N7]"
+              value={String(node.params.hbondAcceptorSelection ?? '')}
+              oninput={(e) => setParam('hbondAcceptorSelection', e.currentTarget.value)}
+            />
+          </label>
           <label class="full">
             Custom constraint spec (YAML / JSON)
             <textarea

@@ -517,6 +517,167 @@ export function kabschAlignSubstructure(
         }
       }
 
+      // 1c. For larger multi-island unindexed motifs (m > 7, e.g. 2-island 40-aa 1PRW EF-hand),
+      // partition `shortCoords` and `validKnown` into contiguous motif islands and search over
+      // island-level bijections (K <= 6, K! <= 720) using Kabsch RMSD (preferring `validNative`
+      // when present, with sequence identity tie-breaking for symmetric motifs).
+      if (!orderedKnown && validKnown.length === m && m > 7) {
+        const sChainIds =
+          options?.shortChainIds && options.shortChainIds.length === m ? options.shortChainIds : null;
+        const lChainIds =
+          options?.longChainIds && options.longChainIds.length === n ? options.longChainIds : null;
+        const sSeq = options?.shortSeq?.trim().toUpperCase() ?? '';
+        const lSeq = options?.longSeq?.trim().toUpperCase() ?? '';
+        const hasSeq = sSeq.length === m && lSeq.length === n;
+
+        const shortIslands: MotifIsland[] = [];
+        let sStart = 0;
+        for (let i = 1; i < m; i++) {
+          const chainGap = sChainIds ? sChainIds[i] !== sChainIds[i - 1] : false;
+          const resGap =
+            shortResNums && shortResNums.length === m ? shortResNums[i] !== shortResNums[i - 1] + 1 : false;
+          const dx = shortCoords[i * 3] - shortCoords[(i - 1) * 3];
+          const dy = shortCoords[i * 3 + 1] - shortCoords[(i - 1) * 3 + 1];
+          const dz = shortCoords[i * 3 + 2] - shortCoords[(i - 1) * 3 + 2];
+          const distBreak = dx * dx + dy * dy + dz * dz > 6.5 * 6.5;
+          if (chainGap || resGap || distBreak) {
+            shortIslands.push({ start: sStart, len: i - sStart });
+            sStart = i;
+          }
+        }
+        shortIslands.push({ start: sStart, len: m - sStart });
+
+        const knownIslands: MotifIsland[] = [];
+        let kStart = 0;
+        for (let k = 1; k < m; k++) {
+          const idxGap = validKnown[k] !== validKnown[k - 1] + 1;
+          const chainGap = lChainIds ? lChainIds[validKnown[k]] !== lChainIds[validKnown[k - 1]] : false;
+          let distBreak = false;
+          if (validNativeAligned) {
+            const dx = validNative[k][0] - validNative[k - 1][0];
+            const dy = validNative[k][1] - validNative[k - 1][1];
+            const dz = validNative[k][2] - validNative[k - 1][2];
+            distBreak = dx * dx + dy * dy + dz * dz > 6.5 * 6.5;
+          } else {
+            const a = validKnown[k] * 3;
+            const b = validKnown[k - 1] * 3;
+            const dx = longCoords[a] - longCoords[b];
+            const dy = longCoords[a + 1] - longCoords[b + 1];
+            const dz = longCoords[a + 2] - longCoords[b + 2];
+            distBreak = dx * dx + dy * dy + dz * dz > 6.5 * 6.5;
+          }
+          if (idxGap || chainGap || distBreak) {
+            knownIslands.push({ start: kStart, len: k - kStart });
+            kStart = k;
+          }
+        }
+        knownIslands.push({ start: kStart, len: m - kStart });
+
+        const K = shortIslands.length;
+        if (K >= 2 && K <= 6) {
+          const targetRefCoords = new Float32Array(m * 3);
+          const candKnownBuf = new Array<number>(m);
+          let bestCandKnown: number[] | null = null;
+          let bestRmsd = Infinity;
+          let bestSeqMatches = -1;
+
+          const evaluateCandidateMapping = (kIdxForShort: readonly number[]) => {
+            let seqMatches = 0;
+            for (let i = 0; i < m; i++) {
+              const k = kIdxForShort[i];
+              const li = validKnown[k];
+              candKnownBuf[i] = li;
+              if (validNativeAligned) {
+                targetRefCoords[i * 3 + 0] = validNative[k][0];
+                targetRefCoords[i * 3 + 1] = validNative[k][1];
+                targetRefCoords[i * 3 + 2] = validNative[k][2];
+              } else {
+                targetRefCoords[i * 3 + 0] = longCoords[li * 3 + 0];
+                targetRefCoords[i * 3 + 1] = longCoords[li * 3 + 1];
+                targetRefCoords[i * 3 + 2] = longCoords[li * 3 + 2];
+              }
+              if (hasSeq && sSeq[i] !== 'X' && lSeq[li] !== 'X' && sSeq[i] === lSeq[li]) {
+                seqMatches++;
+              }
+            }
+            const rmsd = evalKabschRmsd(shortCoords, targetRefCoords, m);
+            if (!Number.isFinite(rmsd)) return;
+            const clearlyBetterGeom = rmsd < bestRmsd - 0.25;
+            const tiedGeomBetterSeq =
+              hasSeq && Math.abs(rmsd - bestRmsd) <= 0.25 && seqMatches > bestSeqMatches;
+            const exactBetterGeom =
+              (!hasSeq || seqMatches === bestSeqMatches) && rmsd < bestRmsd - 1e-6;
+            if (bestCandKnown === null || clearlyBetterGeom || tiedGeomBetterSeq || exactBetterGeom) {
+              bestRmsd = rmsd;
+              bestSeqMatches = seqMatches;
+              bestCandKnown = candKnownBuf.slice();
+            }
+          };
+
+          const kIdxMap = new Array<number>(m);
+          const perm = new Array<number>(K);
+          const used = new Uint8Array(K);
+          let testedExactIslands = false;
+
+          if (knownIslands.length === K) {
+            const dfsExact = (depth: number) => {
+              if (depth === K) {
+                testedExactIslands = true;
+                for (let si = 0; si < K; si++) {
+                  const sIsl = shortIslands[si];
+                  const kIsl = knownIslands[perm[si]];
+                  for (let j = 0; j < sIsl.len; j++) {
+                    kIdxMap[sIsl.start + j] = kIsl.start + j;
+                  }
+                }
+                evaluateCandidateMapping(kIdxMap);
+                return;
+              }
+              const needLen = shortIslands[depth].len;
+              for (let ki = 0; ki < K; ki++) {
+                if (used[ki] || knownIslands[ki].len !== needLen) continue;
+                used[ki] = 1;
+                perm[depth] = ki;
+                dfsExact(depth + 1);
+                used[ki] = 0;
+              }
+            };
+            dfsExact(0);
+          }
+
+          // Fallback when islands were placed adjacent (0 spacer) so knownIslands merged:
+          // partition validKnown sequentially by every permutation of shortIslands lengths.
+          if (!testedExactIslands) {
+            used.fill(0);
+            const dfsOrder = (depth: number) => {
+              if (depth === K) {
+                let cursor = 0;
+                for (let p = 0; p < K; p++) {
+                  const sIsl = shortIslands[perm[p]];
+                  for (let j = 0; j < sIsl.len; j++) {
+                    kIdxMap[sIsl.start + j] = cursor++;
+                  }
+                }
+                evaluateCandidateMapping(kIdxMap);
+                return;
+              }
+              for (let si = 0; si < K; si++) {
+                if (used[si]) continue;
+                used[si] = 1;
+                perm[depth] = si;
+                dfsOrder(depth + 1);
+                used[si] = 0;
+              }
+            };
+            dfsOrder(0);
+          }
+
+          if (bestCandKnown) {
+            orderedKnown = bestCandKnown;
+          }
+        }
+      }
+
       const finalKnown = orderedKnown ?? validKnown;
       const pairCount = Math.min(m, finalKnown.length);
       if (pairCount >= 3) {

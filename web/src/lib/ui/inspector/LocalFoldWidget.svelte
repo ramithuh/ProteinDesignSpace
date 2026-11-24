@@ -465,7 +465,11 @@
         onChange={(v) => onSetParam('maxTotalFolds', v)}
       />
       <span class="field-hint">
-        Campaign cap across multi-backbone batches (round-robin up to {Number(node.params.maxSequences ?? 2)}/backbone).
+        {#if lfCapMode === 'follow-upstream'}
+          Campaign cap across multi-backbone batches (Follow upstream (up to 8/backbone)).
+        {:else}
+          Campaign cap across multi-backbone batches (round-robin up to {Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}/backbone).
+        {/if}
       </span>
     </label>
     <label>

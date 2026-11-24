@@ -13,6 +13,10 @@ import {
   type WorkerRunContext,
 } from '$lib/kernel';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
+import {
+  planMultiIslandMotifPlacement,
+  type MotifResidueSpec,
+} from '$lib/protein-ops/motif-placement';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type {
   SequenceCandidate,
@@ -262,28 +266,42 @@ createWorkerHarness({
             `Motif selection "${motifSelection}" matched 0 residues in "${upstreamStruct.label}".`,
           );
         }
-        // Preserve same-chain author-numbering gaps between split motif islands (e.g. 1PRW A16-35 & A52-71)
-        const relOffsets: number[] = [];
-        let cursor = 0;
-        const tplRes = parsedTemplate.residues as Array<{ chain?: string; resid?: number }> | undefined;
-        for (let i = 0; i < sourceIndices.length; i++) {
-          if (i > 0) {
-            const prev = tplRes?.[sourceIndices[i - 1]];
-            const cur = tplRes?.[sourceIndices[i]];
-            if (prev && cur && prev.chain === cur.chain && typeof prev.resid === 'number' && typeof cur.resid === 'number') {
-              const delta = cur.resid - prev.resid;
-              const gap = delta > 1 && delta <= 65 ? delta - 1 : 0;
-              cursor += 1 + gap;
-            } else {
-              cursor += 1;
+        // Plan physically bounded multi-island motif positions using native spacing + 3D Cα bounds
+        const tplRes = parsedTemplate.residues as
+          | Array<{ chain?: string; resid?: number; icode?: string }>
+          | undefined;
+        const tplCoords = parsedTemplate.coords as Float32Array | undefined;
+        const tplAtomMask = parsedTemplate.atomMask as Float32Array | undefined;
+        const motifSpecs: MotifResidueSpec[] = sourceIndices.map((srcIdx) => {
+          const r = tplRes?.[srcIdx];
+          let caCoord: [number, number, number] | null = null;
+          if (
+            tplCoords &&
+            srcIdx * 111 + 5 < tplCoords.length &&
+            (!tplAtomMask || tplAtomMask[srcIdx * 37 + 1] > 0.5)
+          ) {
+            const x = tplCoords[srcIdx * 111 + 3];
+            const y = tplCoords[srcIdx * 111 + 4];
+            const z = tplCoords[srcIdx * 111 + 5];
+            if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+              caCoord = [x, y, z];
             }
           }
-          relOffsets.push(cursor);
-        }
-        const motifSpan = relOffsets.length > 0 ? relOffsets[relOffsets.length - 1] + 1 : sourceIndices.length;
-        sampleLen = Math.max(length, motifSpan + 10);
-        const padLeft = Math.floor((sampleLen - motifSpan) / 2);
-        targetIndices = relOffsets.map((off) => padLeft + off);
+          return {
+            chain: r?.chain ?? 'A',
+            resNum: typeof r?.resid === 'number' ? r.resid : srcIdx + 1,
+            insCode: r?.icode ?? '',
+            caCoord,
+          };
+        });
+        const placement = planMultiIslandMotifPlacement(motifSpecs, {
+          targetLength: length,
+          minNFlank: 4,
+          minCFlank: 4,
+          allowExpandLength: true,
+        });
+        sampleLen = placement.effectiveLength;
+        targetIndices = placement.targetIndices;
       }
     }
 

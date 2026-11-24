@@ -107,10 +107,14 @@ export function buildResetToBenchmarkParams(
     next.lockChain = '';
     next.hotspots = '';
     next.motifSpan = '';
+    next.motifAtoms = '';
     next.unindexedMotif = false;
     next.hbondMode = 'none';
     next.hbondSelection = '';
+    next.hbondDonorSelection = '';
+    next.hbondAcceptorSelection = '';
     next.cathCode = '';
+    next.customSpecYaml = '';
   } else if (adapterId === 'genie3') {
     next.taskMode = 'unconditional';
     next.length = defLen;
@@ -161,7 +165,7 @@ export function parseLengthFromContig(contig: string | undefined): number | null
     const afterBreak = raw.split('/0').slice(1).join(',');
     const tokens = afterBreak.split(/[,\s]+/).filter(Boolean);
     for (const tok of tokens) {
-      const m = tok.match(/^(\d+)(?:-(\d+))?$/);
+      const m = tok.match(/^(\d+)(?:-(\d+))?[PRDN]?$/i);
       if (m) {
         const lo = Number(m[1]);
         const hi = m[2] ? Number(m[2]) : lo;
@@ -169,7 +173,7 @@ export function parseLengthFromContig(contig: string | undefined): number | null
       }
     }
   }
-  const bare = raw.match(/^(\d+)(?:-(\d+))?$/);
+  const bare = raw.match(/^(\d+)(?:-(\d+))?[PRDN]?$/i);
   if (bare) {
     const lo = Number(bare[1]);
     const hi = bare[2] ? Number(bare[2]) : lo;
@@ -180,7 +184,7 @@ export function parseLengthFromContig(contig: string | undefined): number | null
     let total = 0;
     let matchedAny = false;
     for (const tok of tokens) {
-      const lenMatch = tok.match(/^(\d+)(?:-(\d+))?$/);
+      const lenMatch = tok.match(/^(\d+)(?:-(\d+))?[PRDN]?$/i);
       if (lenMatch) {
         const lo = Number(lenMatch[1]);
         const hi = lenMatch[2] ? Number(lenMatch[2]) : lo;
@@ -188,10 +192,10 @@ export function parseLengthFromContig(contig: string | undefined): number | null
         matchedAny = true;
         continue;
       }
-      const spanMatch = tok.match(/^[A-Za-z](\d+)-(\d+)$/);
+      const spanMatch = tok.match(/^[A-Za-z_]+(-?\d+)(?:-(-?\d+))?$/);
       if (spanMatch) {
         const lo = Number(spanMatch[1]);
-        const hi = Number(spanMatch[2]);
+        const hi = spanMatch[2] !== undefined ? Number(spanMatch[2]) : lo;
         if (hi >= lo) {
           total += hi - lo + 1;
           matchedAny = true;
@@ -416,9 +420,14 @@ export function computeBenchmarkAutoSeedPatches(
           lockChain: '',
           hotspots: '',
           motifSpan: '',
+          motifAtoms: '',
           unindexedMotif: false,
           hbondMode: 'none',
           hbondSelection: '',
+          hbondDonorSelection: '',
+          hbondAcceptorSelection: '',
+          cathCode: '',
+          customSpecYaml: '',
           ...(shouldResetLen ? { length: adapterDefaultLen } : {}),
         };
         delete nextPatch.autoSeededBenchmarkId;
@@ -544,7 +553,77 @@ export function computeBenchmarkAutoSeedPatches(
       continue;
     }
 
-    if (seededId === bench.id) continue;
+    if (seededId === bench.id) {
+      // When the user edits the `length` slider on an auto-seeded benchmark without manually editing
+      // `contig` (`!userEditedTask`), keep `contig` synchronized via `adaptBenchmarkContigForLength`.
+      if (Number.isFinite(curLen) && curLen > 0) {
+        const targetLen = Math.round(curLen);
+        const bp = bench.conditionParams;
+        const parsedBenchLen = parseLengthFromContig(bp.contig);
+        const rawCurContig = String(cp.contig ?? '').trim();
+        if (
+          node.adapterId === 'rfd4-proteina' &&
+          rawCurContig &&
+          bp.taskPreset === 'custom' &&
+          !['partial', 'inverse-folding', 'preset'].includes(String(cp.mode ?? 'unconditional'))
+        ) {
+          const expectedContig =
+            parsedBenchLen !== null && targetLen === parsedBenchLen
+              ? bp.contig
+              : adaptBenchmarkContigForLength(bp.contig, targetLen, bench.category);
+          if (expectedContig !== rawCurContig) {
+            const nextPatch: Record<string, unknown> = {
+              ...cp,
+              contig: expectedContig,
+            };
+            if (parsedBenchLen !== null && targetLen !== parsedBenchLen) {
+              delete nextPatch.autoSeededLength;
+            }
+            patches ??= {};
+            patches[node.id] = nextPatch;
+          }
+        } else if (node.adapterId === 'genie3' && rawCurContig && bench.supportsGenie3) {
+          const expectedContig =
+            parsedBenchLen !== null && targetLen === parsedBenchLen
+              ? bp.contig
+              : adaptBenchmarkContigForLength(bp.contig, targetLen, bench.category);
+          if (expectedContig !== rawCurContig) {
+            const nextPatch: Record<string, unknown> = {
+              ...cp,
+              contig: expectedContig,
+            };
+            if (parsedBenchLen !== null && targetLen !== parsedBenchLen) {
+              delete nextPatch.autoSeededLength;
+            }
+            patches ??= {};
+            patches[node.id] = nextPatch;
+          }
+        } else if (
+          node.adapterId === 'rfdiffusion' &&
+          rawCurContig &&
+          isBenchmarkSupportedForAdapter('rfdiffusion', bench) &&
+          String(cp.taskMode ?? 'unconditional') !== 'symmetry'
+        ) {
+          const adapted =
+            parsedBenchLen !== null && targetLen === parsedBenchLen
+              ? bp.contig
+              : adaptBenchmarkContigForLength(bp.contig, targetLen, bench.category);
+          const expectedContig = formatRfdiffusionContig(adapted);
+          if (expectedContig !== rawCurContig) {
+            const nextPatch: Record<string, unknown> = {
+              ...cp,
+              contig: expectedContig,
+            };
+            if (parsedBenchLen !== null && targetLen !== parsedBenchLen) {
+              delete nextPatch.autoSeededLength;
+            }
+            patches ??= {};
+            patches[node.id] = nextPatch;
+          }
+        }
+      }
+      continue;
+    }
 
     if (node.adapterId === 'rfd4-proteina') {
       const curMode = String(cp.mode ?? 'unconditional').trim() || 'unconditional';
@@ -556,7 +635,11 @@ export function computeBenchmarkAutoSeedPatches(
         !String(cp.contig ?? '').trim() &&
         !String(cp.hotspots ?? '').trim() &&
         !String(cp.motifSpan ?? '').trim() &&
+        !String(cp.motifAtoms ?? '').trim() &&
         !String(cp.lockChain ?? '').trim() &&
+        !String(cp.hbondDonorSelection ?? '').trim() &&
+        !String(cp.hbondAcceptorSelection ?? '').trim() &&
+        !String(cp.cathCode ?? '').trim() &&
         !String(cp.customSpecYaml ?? '').trim();
       if (!hasNoTaskParams && !seededId) continue;
 
@@ -582,9 +665,14 @@ export function computeBenchmarkAutoSeedPatches(
         lockChain: bp.lockChain ?? '',
         hotspots: bp.hotspots ?? '',
         motifSpan: bp.motifSpan ?? '',
+        motifAtoms: bp.motifAtoms ?? '',
         unindexedMotif: Boolean(bp.unindexedMotif),
         hbondMode: bp.hbondMode ?? 'none',
         hbondSelection: bp.hbondSelection ?? '',
+        hbondDonorSelection: bp.hbondDonorSelection ?? '',
+        hbondAcceptorSelection: bp.hbondAcceptorSelection ?? '',
+        cathCode: '',
+        customSpecYaml: '',
         autoSeededBenchmarkId: bench.id,
       };
       delete nextPatch.autoSeededFromBenchmark;
@@ -818,11 +906,11 @@ export function computeBenchmarkAutoSeedPatches(
         const bp = bench.conditionParams;
         const parsedLen = parseLengthFromContig(bp.contig);
         const nextLength = hasCustomLength ? Math.round(curLen) : parsedLen;
-        const firstRange = extractFirstContiguousMotifRange(bp.motifSpan);
+        const fullMotifRange = String(bp.motifSpan ?? '').trim();
         const nextPatch: Record<string, unknown> = {
           ...cp,
           ...(nextLength !== null ? { length: nextLength } : {}),
-          motifRange: firstRange,
+          motifRange: fullMotifRange,
           autoSeededBenchmarkId: bench.id,
         };
         delete nextPatch.autoSeededFromBenchmark;
@@ -977,6 +1065,9 @@ export function applyPlannerBenchmarkSeedingToNode(
     if (bp.lockChain && !String(params.lockChain ?? '').trim()) {
       params.lockChain = bp.lockChain;
     }
+    if (bp.motifAtoms && !String(params.motifAtoms ?? '').trim()) {
+      params.motifAtoms = bp.motifAtoms;
+    }
     if (bp.unindexedMotif && params.unindexedMotif !== true) {
       params.unindexedMotif = true;
     }
@@ -985,6 +1076,12 @@ export function applyPlannerBenchmarkSeedingToNode(
     }
     if (bp.hbondSelection && !String(params.hbondSelection ?? '').trim()) {
       params.hbondSelection = bp.hbondSelection;
+    }
+    if (bp.hbondDonorSelection && !String(params.hbondDonorSelection ?? '').trim()) {
+      params.hbondDonorSelection = bp.hbondDonorSelection;
+    }
+    if (bp.hbondAcceptorSelection && !String(params.hbondAcceptorSelection ?? '').trim()) {
+      params.hbondAcceptorSelection = bp.hbondAcceptorSelection;
     }
 
     const parsedBenchLen = parseLengthFromContig(bp.contig);
@@ -1178,13 +1275,13 @@ export function applyPlannerBenchmarkSeedingToNode(
     if (!isBenchmarkSupportedForAdapter('genie2', bench)) {
       return { repairedHallucination: false };
     }
-    const firstRange = extractFirstContiguousMotifRange(bp.motifSpan);
+    const fullMotifRange = String(bp.motifSpan ?? '').trim();
     const curRange = String(params.motifRange ?? '').trim();
-    if (firstRange) {
+    if (fullMotifRange) {
       const disjoint = curRange && isResidueSpecDisjointFromBenchmark(curRange, bench);
-      if (!curRange || disjoint || (opts?.overwriteUnpromptedResidues && curRange !== firstRange)) {
-        if (curRange && curRange !== firstRange) repairedHallucination = true;
-        params.motifRange = firstRange;
+      if (!curRange || disjoint || (opts?.overwriteUnpromptedResidues && curRange !== fullMotifRange)) {
+        if (curRange && curRange !== fullMotifRange) repairedHallucination = true;
+        params.motifRange = fullMotifRange;
       }
     }
     const parsedBenchLen = parseLengthFromContig(bp.contig);

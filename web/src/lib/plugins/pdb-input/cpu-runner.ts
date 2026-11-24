@@ -136,7 +136,12 @@ export async function materializePdbInputNode(
     sequence: parsed.sequence,
     caCoords: parsed.caCoords,
     backbone4Coords: parsed.backbone4Coords,
-    pdbText: parsed.nResidues > 0 ? parsed.pdbText : parsed.format === 'mmcif' ? '' : effectiveRawText,
+    pdbText:
+      parsed.pdbText.trim().length > 0
+        ? parsed.pdbText
+        : parsed.format === 'mmcif'
+          ? ''
+          : effectiveRawText,
     cifText: parsed.format === 'mmcif' ? effectiveRawText : undefined,
     chainIds: parsed.chainIds,
     chainLengths: parsed.diagnostics.chainLengths,

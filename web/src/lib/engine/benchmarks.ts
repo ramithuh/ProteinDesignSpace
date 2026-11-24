@@ -25,9 +25,14 @@ export interface BenchmarkTargetMeta {
     lockChain?: string;
     hotspots?: string;
     motifSpan?: string;
+    motifAtoms?: string;
     unindexedMotif?: boolean;
     hbondMode?: 'none' | 'ACCEPTOR' | 'DONOR' | 'BOTH';
     hbondSelection?: string;
+    hbondDonorSelection?: string;
+    hbondAcceptorSelection?: string;
+    rasaBuriedSelection?: string;
+    piStackSelection?: string;
   };
 }
 
@@ -39,7 +44,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     shortLabel: 'RSV-F Site V (5TPN)',
     category: 'motif',
     pdbId: '5TPN',
-    sourceFamily: 'RFdiffusion / MotifBench',
+    sourceFamily: 'RFdiffusion 25 / Genie 3 RSV-F',
     approxTokens: 75,
     tier: 'fast',
     supportsGenie3: true,
@@ -48,7 +53,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     cropSegments: 'A163-181',
     conditionParams: {
       taskPreset: 'custom',
-      contig: '25-25,A163-181,30-30',
+      contig: '25-25,A163-181,31-31',
       motifSpan: 'A163-181',
     },
   },
@@ -82,11 +87,11 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     tier: 'fast',
     supportsGenie3: true,
     entities: ['protein'],
-    biology: '3-island catalytic His₃ Zn²⁺ binding site',
+    biology: '3-island catalytic His₃ Zn²⁺ binding site with Thr199 gatekeeper',
     cropSegments: 'A93-97, A118-120, A198-200',
     conditionParams: {
       taskPreset: 'custom',
-      contig: '15-15,A93-97,20-20,A118-120,20-20,A198-200,10-10',
+      contig: '14-14,A93-97,20-20,A118-120,20-20,A198-200,10-10',
       motifSpan: 'A93-97, A118-120, A198-200',
     },
   },
@@ -124,7 +129,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     cropSegments: 'A18-25, A47-54, A92-99, A123-130',
     conditionParams: {
       taskPreset: 'custom',
-      contig: '15-15,A18-25,20-20,A47-54,20-20,A92-99,20-20,A123-130,18-18',
+      contig: '12-12,A92-99,24-24,A123-130,24-24,A47-54,23-23,A18-25,10-10',
       motifSpan: 'A18-25, A47-54, A92-99, A123-130',
     },
   },
@@ -143,7 +148,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     cropSegments: 'A55, A99, A190-192',
     conditionParams: {
       taskPreset: 'custom',
-      contig: '35-35,A55-55,35-35,A99-99,45-45,A190-192,30-30',
+      contig: '15-15,A55-55,45-45,A99-99,70-70,A190-192,15-15',
       motifSpan: 'A55, A99, A190-192',
     },
   },
@@ -282,12 +287,13 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     tier: 'fast',
     supportsGenie3: false,
     entities: ['protein', 'ligand'],
-    biology: 'Unindexed 4-residue catalytic Zn²⁺ + transition-state analog (DHZ)',
+    biology: 'Unindexed 4-residue catalytic Zn²⁺ + transition-state analog (DHZ) with AME tip-atom conditioning',
     cropSegments: 'A102, A104, A129, A132, A:ZN, A:DHZ',
     conditionParams: {
       taskPreset: 'custom',
       contig: '180-180',
       motifSpan: 'A102, A104, A129, A132',
+      motifAtoms: 'A102:ND1,CG,CE1; A104:OE1,CD; A129:SG,CB; A132:SG,CB,CA',
       unindexedMotif: true,
     },
   },
@@ -302,12 +308,13 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     tier: 'fast',
     supportsGenie3: false,
     entities: ['protein', 'ligand'],
-    biology: '2-His-1-carboxylate facial triad coordinating Fe²⁺ + α-ketoglutarate',
+    biology: '2-His-1-carboxylate facial triad + Arg270 coordinating Fe²⁺, α-ketoglutarate (AKG), and taurine (TAU) with AME tip-atom conditioning',
     cropSegments: 'A99, A101, A255, A270, A:FE2, A:AKG, A:TAU',
     conditionParams: {
       taskPreset: 'custom',
       contig: '180-180',
       motifSpan: 'A99, A101, A255, A270',
+      motifAtoms: 'A99:NE2,CD2,CE1; A101:OD1,CG,CB,OD2; A255:NE2,CD2,CE1,CG,ND1; A270:NH1,CZ',
       unindexedMotif: true,
     },
   },
@@ -322,13 +329,13 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     tier: 'fast',
     supportsGenie3: false,
     entities: ['protein', 'ligand'],
-    biology: 'De novo pocket around S-adenosylmethionine (SAM) with H-bonds',
+    biology: 'De novo pocket around S-adenosylmethionine (SAM) with polar donor/acceptor H-bonds',
     cropSegments: 'A:SAM',
     conditionParams: {
       taskPreset: 'custom',
       contig: '110-110',
-      hbondMode: 'ACCEPTOR',
-      hbondSelection: 'A/SAM/*/*',
+      hbondDonorSelection: "A/SAM/*/[N,N6,O2',O3']",
+      hbondAcceptorSelection: "A/SAM/*/[O,OXT,O4',N1,N3,N7]",
     },
   },
   {
@@ -342,7 +349,7 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     tier: 'fast',
     supportsGenie3: false,
     entities: ['protein', 'dna'],
-    biology: 'Sequence-specific dsDNA groove recognition (TGAATGAA)',
+    biology: 'Sequence-specific 18-bp dsDNA duplex (containing 8-bp TGAATGAA Capicua core) groove recognition',
     cropSegments: 'B, C',
     conditionParams: {
       taskPreset: 'custom',

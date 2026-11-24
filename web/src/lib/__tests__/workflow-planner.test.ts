@@ -1353,8 +1353,8 @@ describe('WorkflowPlan R1–R4 regressions & Q1–Q10 reconciliation', () => {
     }).graph;
     const rfdSam = samGraph.nodes.find((n) => n.id === 'rfd_sam')!;
     const rfdFree = samGraph.nodes.find((n) => n.id === 'rfd_free')!;
-    expect(rfdSam.params.hbondMode).toBe('ACCEPTOR');
-    expect(rfdSam.params.hbondSelection).toBe('A/SAM/*/*');
+    expect(rfdSam.params.hbondDonorSelection).toBe("A/SAM/*/[N,N6,O2',O3']");
+    expect(rfdSam.params.hbondAcceptorSelection).toBe("A/SAM/*/[O,OXT,O4',N1,N3,N7]");
     expect(rfdSam.params.autoSeededBenchmarkId).toBe('sm_7c7m_sam');
     expect(rfdSam.params.autoSeededLength).toBe(110);
     expect(rfdFree.params.mode).toBe('unconditional');

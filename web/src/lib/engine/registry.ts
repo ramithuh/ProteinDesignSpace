@@ -430,6 +430,16 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Auto-place catalytic/functional motif residues without fixed sequence positions.',
       },
       {
+        key: 'motifAtoms',
+        label: 'Motif Atom Subset (optional)',
+        kind: 'text',
+        tier: 'primary',
+        defaultValue: '',
+        placeholder: 'e.g. A102:ND1,CG,CE1; A104:OE1,CD (or TIP / BKBN / ALL)',
+        modes: ['motif', 'conditioned', 'partial', 'inverse-folding'],
+        description: 'Per-residue catalytic tip-atom subset for coordinate conditioning (C_CRDGRP) while keeping residue-level sequence & index constraints.',
+      },
+      {
         key: 'lockChain',
         label: 'Target Chain',
         kind: 'text',
@@ -561,6 +571,24 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         defaultValue: '',
         placeholder: 'B/SAM/*/*',
         description: 'Atom selection string for hydrogen-bond conditioning.',
+      },
+      {
+        key: 'hbondDonorSelection',
+        label: 'H-Bond Donor Atoms',
+        kind: 'text',
+        tier: 'advanced',
+        defaultValue: '',
+        placeholder: "A/SAM/*/[N,N6,O2',O3']",
+        description: 'Multi-role H-bond donor atom selection (C_HB.DONOR).',
+      },
+      {
+        key: 'hbondAcceptorSelection',
+        label: 'H-Bond Acceptor Atoms',
+        kind: 'text',
+        tier: 'advanced',
+        defaultValue: '',
+        placeholder: "A/SAM/*/[O,OXT,O4',N1,N3,N7]",
+        description: 'Multi-role H-bond acceptor atom selection (C_HB.ACCEPTOR).',
       },
       {
         key: 'customSpecYaml',
@@ -1778,8 +1806,8 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'text',
         tier: 'advanced',
         defaultValue: '',
-        placeholder: 'e.g. A10-25 (with template connected)',
-        description: 'Optional residue range from a connected template PDB to scaffold softly.',
+        placeholder: 'e.g. A16-35, A52-71 (with template connected)',
+        description: 'Optional single or comma-separated multi-island residue ranges from a connected template PDB to scaffold softly.',
       },
       {
         key: 'numDesigns',
@@ -1806,10 +1834,20 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     crossValidate: (p) => {
       const errs: string[] = [];
       const motifRange = String(p.motifRange ?? '').trim();
-      if (motifRange && !/^(?:([A-Za-z]):?)?(-?\d+)(?:-(-?\d+))?$/.test(motifRange)) {
-        errs.push(
-          `Invalid Genie 2 motifRange "${motifRange}" (expected a single contiguous range like A10-25 or 10-25).`,
-        );
+      if (motifRange) {
+        const tokens = motifRange.split(/[,;\s]+/).filter(Boolean);
+        const invalid = tokens.filter((tok) => {
+          const m = /^(?:([A-Za-z]):?)?(-?\d+)(?:-(-?\d+))?$/.exec(tok);
+          if (!m) return true;
+          const lo = Number(m[2]);
+          const hi = m[3] !== undefined ? Number(m[3]) : lo;
+          return !Number.isFinite(lo) || !Number.isFinite(hi) || hi < lo;
+        });
+        if (tokens.length === 0 || invalid.length > 0) {
+          errs.push(
+            `Invalid Genie 2 motifRange "${motifRange}" (expected residue spans like A10-25 or A16-35, A52-71).`,
+          );
+        }
       }
       return errs;
     },

@@ -320,13 +320,24 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
     const cttIntent = buildCanonicalConditionIntent(cttBench.conditionParams);
     const cttCompiled = compileConditionToRfd4(cttIntent, cttCtx);
 
-    // Remapped label_seq_ids (98, 100, 125, 128) + ligand chains B296, C295 injected into contig!
+    // Remapped label_seq_ids (98, 100, 125, 128) + ligand chains B296, C295 injected into contig,
+    // with exact published AME tip atoms in C_CRDGRP and 4 distinct unindexed C_IDX groups!
     expect(cttCompiled.contig).toBe('180-180,A98,A100,A125,A128,/0,B296,/0,C295');
     expect(cttCompiled.conditions.C_CRDGRP).toEqual({
-      1: [{ select: "sel('A/*/[98,100,125,128]/*') | sel('B/*/*/*') | sel('C/*/*/*')" }],
+      1: [
+        {
+          select:
+            "sel('A/*/98/[ND1,CG,CE1]') | sel('A/*/100/[OE1,CD]') | sel('A/*/125/[SG,CB]') | sel('A/*/128/[SG,CB,CA]') | sel('B/*/*/*') | sel('C/*/*/*')",
+        },
+      ],
     });
     expect(cttCompiled.conditions.C_IDX).toEqual({
-      false: [{ select: "sel('A/*/[98,100,125,128]/*')", group: 'motif' }],
+      false: [
+        { select: "sel('A/*/98/*')", group: 'motif_0' },
+        { select: "sel('A/*/100/*')", group: 'motif_1' },
+        { select: "sel('A/*/125/*')", group: 'motif_2' },
+        { select: "sel('A/*/128/*')", group: 'motif_3' },
+      ],
     });
 
     // 2. 7C7M (SAM) and 7M5W (B-DNA) benchmarks now use wired-template custom mode instead of remote preset
@@ -367,7 +378,10 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
     );
     expect(samCompiled.contig).toBe('110-110,/0,D301');
     expect(samCompiled.conditions.C_CRD).toEqual({ true: [{ select: "sel('D/*/*/*')" }] });
-    expect(samCompiled.conditions.C_HB).toEqual({ ACCEPTOR: [{ select: "sel('D/SAM/*/*')" }] });
+    expect(samCompiled.conditions.C_HB).toEqual({
+      DONOR: [{ select: 'sel("D/SAM/*/[N,N6,O2\',O3\']")' }],
+      ACCEPTOR: [{ select: 'sel("D/SAM/*/[O,OXT,O4\',N1,N3,N7]")' }],
+    });
 
     // 3. Binder contig synthesis for blank / bare-monomer contigs
     expect(isBareLengthContig('')).toBe(true);

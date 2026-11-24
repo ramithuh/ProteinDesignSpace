@@ -17,6 +17,7 @@ import { getBenchmarkById } from './benchmarks';
 import type {
   CanonicalConditionIntent,
   ConditionSpecArtifact,
+  MotifAtomTarget,
   MsaMode,
   StructureArtifact,
 } from './types';
@@ -839,12 +840,13 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
     };
 
     if (trimmed.includes('sel(')) {
-      return trimmed.replace(/sel\(\s*(['"])([^'"]+)\1\s*\)/g, (_m, q: string, inner: string) => {
+      return trimmed.replace(/sel\(\s*(?:"([^"]+)"|'([^']+)')\s*\)/g, (_m, dq: string | undefined, sq: string | undefined) => {
+        const inner = dq ?? sq ?? '';
         const remapped = inner
           .split(',')
           .map((p) => remapPath(p.trim()))
           .join(',');
-        return `sel(${q}${remapped}${q})`;
+        return wrapRfd4Sel(remapped);
       });
     }
     return remapPath(trimmed);
@@ -1047,6 +1049,97 @@ export function resolveMotifSourceResidues(
   return selected;
 }
 
+/**
+ * Wrap a path selection string in RFD4 `sel(...)`, automatically choosing double quotes when
+ * atom names contain single-quote primes (e.g. ribose `O2'`, `O3'`, `O4'`) so RFD4's query
+ * tokenizer never truncates at the prime character.
+ */
+function wrapRfd4Sel(selPath: string): string {
+  const trimmed = selPath.trim();
+  if (trimmed.includes('sel(')) return trimmed;
+  if (trimmed.includes("'")) {
+    return `sel("${trimmed.replace(/"/g, '\\"')}")`;
+  }
+  return `sel('${trimmed}')`;
+}
+
+const TIP_ATOMS_BY_RESNAME: Record<string, readonly string[]> = {
+  ALA: ['CB', 'CA'],
+  ARG: ['CZ', 'NH1', 'NH2'],
+  ASN: ['CG', 'OD1', 'ND2'],
+  ASP: ['CG', 'OD1', 'OD2'],
+  CYS: ['CB', 'SG'],
+  GLN: ['CD', 'OE1', 'NE2'],
+  GLU: ['CD', 'OE1', 'OE2'],
+  GLY: ['N', 'CA', 'C', 'O'],
+  HIS: ['CG', 'ND1', 'CE1', 'NE2', 'CD2'],
+  ILE: ['CB', 'CG1', 'CG2', 'CD1'],
+  LEU: ['CG', 'CD1', 'CD2'],
+  LYS: ['CE', 'NZ'],
+  MET: ['CG', 'SD', 'CE'],
+  PHE: ['CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ'],
+  PRO: ['CB', 'CG', 'CD'],
+  SER: ['CB', 'OG'],
+  THR: ['CB', 'OG1', 'CG2'],
+  TRP: ['CD2', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2', 'NE1'],
+  TYR: ['CZ', 'OH', 'CE1', 'CE2'],
+  VAL: ['CB', 'CG1', 'CG2'],
+};
+
+export interface ParsedMotifAtomEntry {
+  range: ResidueRangeToken;
+  /** Explicit uppercased atom names, or shorthand `'TIP' | 'BKBN' | 'ALL'`. */
+  atoms: string[] | 'TIP' | 'BKBN' | 'ALL';
+}
+
+/**
+ * Parse a `motifAtoms` specification into either a global shorthand (`'TIP' | 'BKBN' | 'ALL'`)
+ * or per-residue atom-subset entries (e.g. `A102:ND1,CG,CE1; A104:OE1,CD; A129:SG,CB; A132:SG,CB,CA`).
+ */
+export function parseMotifAtomsSpec(raw: string | undefined): {
+  shorthand?: 'TIP' | 'BKBN' | 'ALL';
+  entries: ParsedMotifAtomEntry[];
+} {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed) return { entries: [] };
+  const upper = trimmed.toUpperCase();
+  if (upper === 'ALL' || upper === '*') return { shorthand: 'ALL', entries: [] };
+  if (upper === 'BKBN' || upper === 'BACKBONE') return { shorthand: 'BKBN', entries: [] };
+  if (upper === 'TIP') return { shorthand: 'TIP', entries: [] };
+
+  const entries: ParsedMotifAtomEntry[] = [];
+  for (const part of trimmed.split(/[;\n]+/).map((s) => s.trim()).filter(Boolean)) {
+    const colonIdx = part.lastIndexOf(':');
+    if (colonIdx <= 0 || colonIdx >= part.length - 1) continue;
+    const lhs = part.slice(0, colonIdx).trim();
+    const rhs = part.slice(colonIdx + 1).trim();
+    if (!lhs || !rhs) continue;
+    const ranges = parseResidueRangeTokens(lhs);
+    if (ranges.length === 0) continue;
+    const rhsUpper = rhs.toUpperCase();
+    let atoms: string[] | 'TIP' | 'BKBN' | 'ALL';
+    if (rhsUpper === 'ALL' || rhsUpper === '*') {
+      atoms = 'ALL';
+    } else if (rhsUpper === 'BKBN' || rhsUpper === 'BACKBONE') {
+      atoms = 'BKBN';
+    } else if (rhsUpper === 'TIP') {
+      atoms = 'TIP';
+    } else {
+      const list = rhs
+        .replace(/^\[|\]$/g, '')
+        .split(/[,\s]+/)
+        .map((a) => a.trim().toUpperCase())
+        .filter(Boolean);
+      if (list.length === 0) continue;
+      atoms = list;
+    }
+    for (const range of ranges) {
+      entries.push({ range, atoms });
+    }
+  }
+  return { entries };
+}
+
 /** Extract a clean, model-agnostic CanonicalConditionIntent from node params. */
 export function buildCanonicalConditionIntent(
   params: Record<string, unknown>,
@@ -1061,9 +1154,14 @@ export function buildCanonicalConditionIntent(
     .split(/[,\s]+/)
     .map((s) => s.trim())
     .filter(Boolean);
+  const motifAtoms = String(params.motifAtoms ?? '').trim() || undefined;
   const unindexedMotif = Boolean(params.unindexedMotif);
   const hbondMode = (String(params.hbondMode ?? 'none') as CanonicalConditionIntent['hbondMode']) || 'none';
   const hbondSelection = String(params.hbondSelection ?? '').trim() || undefined;
+  const hbondDonorSelection = String(params.hbondDonorSelection ?? '').trim() || undefined;
+  const hbondAcceptorSelection = String(params.hbondAcceptorSelection ?? '').trim() || undefined;
+  const rasaBuriedSelection = String(params.rasaBuriedSelection ?? '').trim() || undefined;
+  const piStackSelection = String(params.piStackSelection ?? '').trim() || undefined;
   const cathCode = String(params.cathCode ?? '').trim() || undefined;
   const benchmarkId = String(params.benchmarkId ?? '').trim() || undefined;
   const pdbId = String(params.pdbId ?? '').trim().toUpperCase() || undefined;
@@ -1073,9 +1171,14 @@ export function buildCanonicalConditionIntent(
     ...(lockChain ? { lockChain } : {}),
     ...(hotspots.length > 0 ? { hotspots } : {}),
     ...(motifSpans.length > 0 ? { motifSpans } : {}),
+    ...(motifAtoms ? { motifAtoms } : {}),
     ...(unindexedMotif ? { unindexedMotif: true } : {}),
     ...(hbondMode && hbondMode !== 'none' ? { hbondMode } : {}),
     ...(hbondSelection ? { hbondSelection } : {}),
+    ...(hbondDonorSelection ? { hbondDonorSelection } : {}),
+    ...(hbondAcceptorSelection ? { hbondAcceptorSelection } : {}),
+    ...(rasaBuriedSelection ? { rasaBuriedSelection } : {}),
+    ...(piStackSelection ? { piStackSelection } : {}),
     ...(cathCode ? { cathCode } : {}),
     ...(benchmarkId ? { benchmarkId } : {}),
     ...(pdbId ? { pdbId } : {}),
@@ -1191,14 +1294,20 @@ export function compileConditionToRfd4(
   };
   collectExplicitLigandRefs(intent.contig);
   collectExplicitLigandRefs(opts?.cropSegments);
-  if (intent.hbondSelection) {
-    for (const seg of intent.hbondSelection.split(/[,|)\s'"]+/).filter(Boolean)) {
+  const collectLigandsFromPathSel = (rawSel: string | undefined) => {
+    if (!rawSel) return;
+    for (const seg of rawSel.split(/[,|)\s'"]+/).filter(Boolean)) {
       const parts = seg.split('/');
       if (parts.length >= 2 && parts[1] && parts[1] !== '*') {
         explicitlyNamedLigands.add(parts[1].trim().toUpperCase());
       }
     }
-  }
+  };
+  collectLigandsFromPathSel(intent.hbondSelection);
+  collectLigandsFromPathSel(intent.hbondDonorSelection);
+  collectLigandsFromPathSel(intent.hbondAcceptorSelection);
+  collectLigandsFromPathSel(intent.rasaBuriedSelection);
+  collectLigandsFromPathSel(intent.piStackSelection);
 
   const injectedLigands: Rfd4LigandEntry[] = [];
   const injectedNucleic: Rfd4PolymerChainInfo[] = [];
@@ -1264,26 +1373,113 @@ export function compileConditionToRfd4(
 
   let hasMotifCrdGrp = false;
   if (effectiveMotifSpans.length > 0) {
+    const parsedMotifSpans = parseResidueRangeTokens(effectiveMotifSpans.join(', '));
     const byChain = new Map<string, string[]>();
-    for (const r of parseResidueRangeTokens(effectiveMotifSpans.join(', '))) {
+    for (const r of parsedMotifSpans) {
       const list = byChain.get(r.chain) ?? [];
       list.push(formatResidueRangeNumSpec(r));
       byChain.set(r.chain, list);
     }
-    const exprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/[${nums.join(',')}]/*')`);
-    if (exprs.length > 0) {
-      const sel = exprs.join(' | ');
-      conditions.C_CRDGRP = { 1: [{ select: sel }] };
+    const resExprs = [...byChain.entries()].map(([ch, nums]) => `sel('${ch}/*/[${nums.join(',')}]/*')`);
+    if (resExprs.length > 0) {
+      const resSel = resExprs.join(' | ');
+      const parsedAtoms = parseMotifAtomsSpec(intent.motifAtoms);
+      const formatResSpec = (start: number, end: number, startIns?: string, endIns?: string): string => {
+        const sTok = `${start}${startIns ?? ''}`;
+        const eTok = `${end}${endIns ?? ''}`;
+        return sTok === eTok ? sTok : `[${sTok}-${eTok}]`;
+      };
+      const emitTipAtomSelectors = (chain: string, start: number, end: number): string[] => {
+        if (!templateContext) {
+          return [`sel('${chain}/*/${formatResSpec(start, end)}/*')`];
+        }
+        const out: string[] = [];
+        for (let resId = start; resId <= end; resId++) {
+          const entry = templateContext.byLabelRes.get(`${chain}:${resId}`);
+          const tipAtoms = entry ? TIP_ATOMS_BY_RESNAME[entry.compId.toUpperCase()] : undefined;
+          if (tipAtoms && tipAtoms.length > 0) {
+            out.push(`sel('${chain}/*/${resId}/[${tipAtoms.join(',')}]')`);
+          } else {
+            out.push(`sel('${chain}/*/${resId}/*')`);
+          }
+        }
+        return out;
+      };
+
+      let crdGrpSel = resSel;
+      if (parsedAtoms.shorthand === 'BKBN') {
+        crdGrpSel = [...byChain.entries()]
+          .map(([ch, nums]) => `sel('${ch}/*/[${nums.join(',')}]/[N,CA,C,O]')`)
+          .join(' | ');
+      } else if (parsedAtoms.shorthand === 'TIP') {
+        const tipExprs: string[] = [];
+        for (const r of parsedMotifSpans) {
+          tipExprs.push(...emitTipAtomSelectors(r.chain, r.start, r.end));
+        }
+        if (tipExprs.length > 0) crdGrpSel = tipExprs.join(' | ');
+      } else if (parsedAtoms.entries.length > 0) {
+        const atomExprs: string[] = [];
+        const coveredKeys = new Set<string>();
+        for (const entry of parsedAtoms.entries) {
+          const r = entry.range;
+          const mapped = templateContext
+            ? templateContext.remapPolymerRange(r.chain, r.start, r.end, r.startInsCode, r.endInsCode)
+            : { labelChain: r.chain, start: r.start, end: r.end };
+          for (let k = mapped.start; k <= mapped.end; k++) {
+            coveredKeys.add(`${mapped.labelChain}:${k}`);
+          }
+          if (entry.atoms === 'TIP') {
+            atomExprs.push(...emitTipAtomSelectors(mapped.labelChain, mapped.start, mapped.end));
+          } else {
+            const atomPart =
+              entry.atoms === 'ALL'
+                ? '*'
+                : entry.atoms === 'BKBN'
+                  ? '[N,CA,C,O]'
+                  : entry.atoms.length === 1 && entry.atoms[0] === '*'
+                    ? '*'
+                    : `[${entry.atoms.join(',')}]`;
+            const resPart = formatResSpec(mapped.start, mapped.end);
+            atomExprs.push(wrapRfd4Sel(`${mapped.labelChain}/*/${resPart}/${atomPart}`));
+          }
+        }
+        // Preserve full-residue coverage for any motifSpan residues not explicitly subsetted in motifAtoms
+        for (const r of parsedMotifSpans) {
+          const uncovered: number[] = [];
+          for (let k = r.start; k <= r.end; k++) {
+            if (!coveredKeys.has(`${r.chain}:${k}`)) uncovered.push(k);
+          }
+          if (uncovered.length > 0) {
+            const resPart = uncovered.length === 1 ? `${uncovered[0]}` : `[${uncovered.join(',')}]`;
+            atomExprs.push(`sel('${r.chain}/*/${resPart}/*')`);
+          }
+        }
+        if (atomExprs.length > 0) crdGrpSel = atomExprs.join(' | ');
+      }
+
+      conditions.C_CRDGRP = { 1: [{ select: crdGrpSel }] };
       hasMotifCrdGrp = true;
-      appendSelect('C_SEQ', sel);
+      // Keep C_SEQ and C_IDX at residue level (/*) so sequence identity & unindexed insertion apply to the whole residue
+      appendSelect('C_SEQ', resSel);
       if (intent.unindexedMotif) {
-        conditions.C_IDX = { false: [{ select: sel, group: 'motif' }] };
+        // P0-2: Emit distinct unindexed group (`motif_0`, `motif_1`, ...) per disjoint catalytic residue / island
+        conditions.C_IDX = {
+          false: parsedMotifSpans.map((r, idx) => ({
+            select: `sel('${r.chain}/*/${formatResSpec(r.start, r.end, r.startInsCode, r.endInsCode)}/*')`,
+            group: `motif_${idx}`,
+          })),
+        };
       }
       tags.push(
         intent.unindexedMotif
           ? `unidx-motif:${effectiveMotifSpans.join(', ')}`
           : `motif:${effectiveMotifSpans.join(', ')}`,
       );
+      if (parsedAtoms.shorthand && parsedAtoms.shorthand !== 'ALL') {
+        tags.push(`atoms:${parsedAtoms.shorthand}`);
+      } else if (parsedAtoms.entries.length > 0) {
+        tags.push('atoms:tip');
+      }
     }
   }
 
@@ -1312,13 +1508,40 @@ export function compileConditionToRfd4(
     tags.push(`dna:${naChains.join(',')}`);
   }
 
+  const hbondEntries: Record<string, Array<{ select: string }>> = {};
+  const appendHbondRole = (role: string, rawSel: string) => {
+    const remappedSel = templateContext ? templateContext.remapHbondSelection(rawSel) : rawSel;
+    const expr = wrapRfd4Sel(remappedSel);
+    hbondEntries[role] = [...(hbondEntries[role] ?? []), { select: expr }];
+    if (!tags.includes(`HB:${role}`)) tags.push(`HB:${role}`);
+  };
+  if (intent.hbondDonorSelection) {
+    appendHbondRole('DONOR', intent.hbondDonorSelection);
+  }
+  if (intent.hbondAcceptorSelection) {
+    appendHbondRole('ACCEPTOR', intent.hbondAcceptorSelection);
+  }
   if (intent.hbondMode && intent.hbondMode !== 'none' && intent.hbondSelection) {
+    appendHbondRole(intent.hbondMode, intent.hbondSelection);
+  }
+  if (Object.keys(hbondEntries).length > 0) {
+    conditions.C_HB = hbondEntries;
+  }
+
+  if (intent.rasaBuriedSelection) {
     const remappedSel = templateContext
-      ? templateContext.remapHbondSelection(intent.hbondSelection)
-      : intent.hbondSelection;
-    const expr = remappedSel.includes('sel(') ? remappedSel : `sel('${remappedSel}')`;
-    conditions.C_HB = { [intent.hbondMode]: [{ select: expr }] };
-    tags.push(`HB:${intent.hbondMode}`);
+      ? templateContext.remapHbondSelection(intent.rasaBuriedSelection)
+      : intent.rasaBuriedSelection;
+    conditions.C_RAS = { BURIED: [{ select: wrapRfd4Sel(remappedSel) }] };
+    tags.push('RASA:BURIED');
+  }
+
+  if (intent.piStackSelection) {
+    const remappedSel = templateContext
+      ? templateContext.remapHbondSelection(intent.piStackSelection)
+      : intent.piStackSelection;
+    conditions.C_PISTACK = { true: [{ select: wrapRfd4Sel(remappedSel) }] };
+    tags.push('PISTACK');
   }
 
   if (intent.cathCode) {
@@ -1555,11 +1778,12 @@ export interface ExtractedDesignMetadata {
   chainRoles?: Record<string, 'target' | 'binder' | 'scaffold'>;
   motifIndices?: number[];
   nativeMotifCoords?: number[][];
+  nativeMotifAtomCoords?: MotifAtomTarget[];
 }
 
 /**
  * Derive output `lockedChains`, 1-based `fixedResidueIndices`, `chainRoles`, 0-based `motifIndices`,
- * and `nativeMotifCoords` from an RFD4 generated structure + input batch.
+ * `nativeMotifCoords`, and atom-level `nativeMotifAtomCoords` from an RFD4 generated structure + input batch.
  */
 export function extractRfd4DesignMetadata(
   parsed: { nResidues: number; chainIds: string[]; resNums: number[] },
@@ -1571,14 +1795,63 @@ export function extractRfd4DesignMetadata(
   if (parsed.nResidues === 0) return {};
 
   const condSeqRaw = batch?.condition_sequence_1_residue?.data ?? batch?.condition_sequence_1_residue;
-  const caRecords: Array<Record<string, unknown>> = [];
+
+  // Group non-hetero protein atom records by residue (`chain:resId:insCode` or `tok:tokenId`),
+  // retaining only residue buckets with an observed CA atom so the list aligns 1:1 with `parsed.nResidues`
+  // even when nucleic acid chains are present.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const residueGroups: Array<Array<Record<string, any>>> = [];
   if (Array.isArray(structureAtoms)) {
+    const groupByKey = new Map<string, number>();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rawGroups: Array<Array<Record<string, any>>> = [];
     for (const rec of structureAtoms) {
-      if (!rec.isHetero && rec.atomName === 'CA') {
-        caRecords.push(rec);
+      if (rec?.isHetero) continue;
+      let key: string;
+      if (rec.chainId !== undefined && rec.resId !== undefined) {
+        key = `res:${rec.chainId}:${rec.resId}:${rec.insCode ?? ''}`;
+      } else if (typeof rec.tokenId === 'number') {
+        key = `tok:${rec.tokenId}`;
+      } else {
+        key = `seq:${rawGroups.length}`;
+      }
+      let idx = groupByKey.get(key);
+      if (idx === undefined) {
+        idx = rawGroups.length;
+        groupByKey.set(key, idx);
+        rawGroups.push([]);
+      }
+      rawGroups[idx].push(rec);
+    }
+    for (const grp of rawGroups) {
+      if (grp.some((r) => r.atomName === 'CA')) {
+        residueGroups.push(grp);
       }
     }
   }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const extractNativeCoord = (rec: Record<string, any> | undefined): [number, number, number] | null => {
+    if (!rec) return null;
+    const rawCoord =
+      (Array.isArray(rec.inCoord) && rec.inCoord.length === 3 ? rec.inCoord : null) ??
+      (Array.isArray(rec.intCrd) && rec.intCrd.length === 3 ? rec.intCrd : null) ??
+      (Array.isArray(rec.crd) && rec.crd.length === 3 ? rec.crd : null);
+    if (rawCoord && rawCoord.every((v: unknown) => typeof v === 'number' && Number.isFinite(v))) {
+      return [Number(rawCoord[0]), Number(rawCoord[1]), Number(rawCoord[2])];
+    }
+    return null;
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const isHeavyAtomRec = (rec: Record<string, any>): boolean => {
+    const el = String(rec.element ?? '').trim().toUpperCase();
+    if (el === 'H' || el === 'D') return false;
+    const nm = String(rec.atomName ?? '').trim().toUpperCase();
+    if (!nm) return false;
+    if (!el && /^\d*H/.test(nm)) return false;
+    return true;
+  };
 
   const uniqueChains: string[] = [];
   const chainStats = new Map<string, { total: number; seqFixed: number; coordFixed: number }>();
@@ -1586,8 +1859,11 @@ export function extractRfd4DesignMetadata(
     chain: string;
     isSeqFixed: boolean;
     isMotifCandidate: boolean;
-    nativeCoord: number[] | null;
+    nativeCaCoord: [number, number, number] | null;
+    atomTargets: MotifAtomTarget[];
   }> = [];
+
+  const alignedGroups = residueGroups.length === parsed.nResidues ? residueGroups : null;
 
   for (let i = 0; i < parsed.nResidues; i++) {
     const chain = parsed.chainIds[i] || 'A';
@@ -1598,30 +1874,59 @@ export function extractRfd4DesignMetadata(
     const stat = chainStats.get(chain)!;
     stat.total++;
 
-    const rec = caRecords.length === parsed.nResidues ? caRecords[i] : undefined;
-    const tid = typeof rec?.tokenId === 'number' ? rec.tokenId : -1;
-    const hasSeqCond = tid >= 0 && condSeqRaw && Number(condSeqRaw[tid]) > 0;
-    const coordGroup = typeof rec?.coordGroup === 'number' ? rec.coordGroup : -1;
-    const isUnidx = Boolean(rec?.isUnindexedInsertion);
-    const isSeqFixed = Boolean(hasSeqCond);
-    const isCoordFixed = coordGroup >= 0 || isUnidx;
+    const resAtoms = alignedGroups ? alignedGroups[i] : [];
+    const caRec = resAtoms.find((r) => r.atomName === 'CA');
+
+    let hasSeqCond = false;
+    let isUnidx = false;
+    let hasPosCoordGroup = false;
+    let hasZeroCoordGroup = false;
+    const atomTargets: MotifAtomTarget[] = [];
+
+    for (const rec of resAtoms) {
+      const tid = typeof rec.tokenId === 'number' ? rec.tokenId : -1;
+      if (tid >= 0 && condSeqRaw && Number(condSeqRaw[tid]) > 0) {
+        hasSeqCond = true;
+      }
+      if (rec.isUnindexedInsertion === true) {
+        isUnidx = true;
+      }
+      const cg = typeof rec.coordGroup === 'number' ? rec.coordGroup : -1;
+      if (cg > 0) {
+        hasPosCoordGroup = true;
+        if (isHeavyAtomRec(rec)) {
+          const c = extractNativeCoord(rec);
+          if (c) {
+            atomTargets.push({
+              resIdx: i,
+              atomName: String(rec.atomName).trim(),
+              x: c[0],
+              y: c[1],
+              z: c[2],
+            });
+          }
+        }
+      } else if (cg === 0) {
+        hasZeroCoordGroup = true;
+      }
+    }
+
+    // P0-1: Unindexed catalytic insertions always have fixed sequence identity for downstream MPNN
+    const isSeqFixed = hasSeqCond || isUnidx;
+    const isCoordFixed = hasPosCoordGroup || hasZeroCoordGroup || isUnidx;
     if (isSeqFixed) stat.seqFixed++;
     if (isCoordFixed) stat.coordFixed++;
 
-    const rawCoord =
-      (Array.isArray(rec?.inCoord) && rec.inCoord.length === 3 ? rec.inCoord : null) ??
-      (Array.isArray(rec?.crd) && rec.crd.length === 3 ? rec.crd : null) ??
-      (Array.isArray(rec?.intCrd) && rec.intCrd.length === 3 ? rec.intCrd : null);
-    const nativeCoord =
-      rawCoord && rawCoord.every((v: unknown) => typeof v === 'number' && Number.isFinite(v))
-        ? [Number(rawCoord[0]), Number(rawCoord[1]), Number(rawCoord[2])]
-        : null;
+    const nativeCaCoord = extractNativeCoord(caRec);
+    const isMotifCandidate =
+      hasPosCoordGroup || isUnidx || (hasZeroCoordGroup && nativeCaCoord !== null);
 
     perResFlags.push({
       chain,
       isSeqFixed,
-      isMotifCandidate: coordGroup > 0 || isUnidx || (coordGroup === 0 && nativeCoord !== null),
-      nativeCoord,
+      isMotifCandidate,
+      nativeCaCoord,
+      atomTargets,
     });
   }
 
@@ -1652,16 +1957,22 @@ export function extractRfd4DesignMetadata(
   const fixedResidueIndices: number[] = [];
   const motifIndices: number[] = [];
   const nativeMotifCoords: number[][] = [];
+  const nativeMotifAtomCoords: MotifAtomTarget[] = [];
 
   for (let i = 0; i < perResFlags.length; i++) {
     const f = perResFlags[i];
     if (lockedSet.has(f.chain)) continue;
     if (f.isSeqFixed) {
-      fixedResidueIndices.push(i + 1); // 1-based output index (sequence-fixed only!)
+      fixedResidueIndices.push(i + 1); // 1-based output index (sequence-fixed + unindexed catalytic insertions)
     }
-    if (f.isMotifCandidate && f.nativeCoord) {
+    if (f.isMotifCandidate) {
       motifIndices.push(i); // 0-based index into caCoords
-      nativeMotifCoords.push(f.nativeCoord);
+      if (f.nativeCaCoord) {
+        nativeMotifCoords.push(f.nativeCaCoord);
+      }
+      if (f.atomTargets.length > 0) {
+        nativeMotifAtomCoords.push(...f.atomTargets);
+      }
     }
   }
 
@@ -1669,7 +1980,11 @@ export function extractRfd4DesignMetadata(
     ...(lockedChains.length > 0 ? { lockedChains } : {}),
     ...(fixedResidueIndices.length > 0 ? { fixedResidueIndices } : {}),
     ...(Object.keys(chainRoles).length > 0 ? { chainRoles } : {}),
-    ...(motifIndices.length > 0 ? { motifIndices, nativeMotifCoords } : {}),
+    ...(motifIndices.length > 0 ? { motifIndices } : {}),
+    ...(nativeMotifCoords.length > 0 && nativeMotifCoords.length === motifIndices.length
+      ? { nativeMotifCoords }
+      : {}),
+    ...(nativeMotifAtomCoords.length > 0 ? { nativeMotifAtomCoords } : {}),
   };
 }
 
@@ -1819,10 +2134,16 @@ export function checkGenie3ConditionCompatibility(
       reason: 'Raw RFD4 JSON overrides cannot run on Genie 3 — use RFD4-Proteina or standard Conditioning fields.',
     };
   }
-  if (intent.hbondMode && intent.hbondMode !== 'none') {
+  if (
+    (intent.hbondMode && intent.hbondMode !== 'none') ||
+    intent.hbondDonorSelection ||
+    intent.hbondAcceptorSelection ||
+    intent.rasaBuriedSelection ||
+    intent.piStackSelection
+  ) {
     return {
       supported: false,
-      reason: 'Hydrogen-bond atom constraints require RFD4-Proteina (Genie 3 is Cα backbone diffusion).',
+      reason: 'Hydrogen-bond and all-atom biochemical constraints require RFD4-Proteina (Genie 3 is Cα backbone diffusion).',
     };
   }
   if (intent.cathCode) {
@@ -2403,9 +2724,14 @@ export function resolveRfd4CompiledInput(
   const inlineLock = String(params.lockChain ?? '').trim();
   const inlineHotspots = String(params.hotspots ?? '').trim();
   const inlineMotif = String(params.motifSpan ?? '').trim();
+  const inlineMotifAtoms = String(params.motifAtoms ?? '').trim();
   const inlineUnidx = Boolean(params.unindexedMotif);
   const inlineHbondMode = String(params.hbondMode ?? 'none');
   const inlineHbondSel = String(params.hbondSelection ?? '').trim();
+  const inlineHbondDonorSel = String(params.hbondDonorSelection ?? '').trim();
+  const inlineHbondAcceptorSel = String(params.hbondAcceptorSelection ?? '').trim();
+  const inlineRasaBuriedSel = String(params.rasaBuriedSelection ?? '').trim();
+  const inlinePiStackSel = String(params.piStackSelection ?? '').trim();
   const inlineCath = String(params.cathCode ?? '').trim();
 
   const hasTemplateStructure = Boolean(
@@ -2438,8 +2764,8 @@ export function resolveRfd4CompiledInput(
 
   const rawTemplateText =
     mode === 'partial' || mode === 'inverse-folding'
-      ? (template?.cifText ?? template?.pdbText)
-      : (condArtifact?.inputCif ?? template?.cifText ?? template?.pdbText);
+      ? (template?.cifText || template?.pdbText)
+      : (condArtifact?.inputCif || template?.cifText || template?.pdbText);
 
   const ensureTemplateContext = (): Rfd4TemplateContext | undefined => {
     if (templateContextOverride) return templateContextOverride;
@@ -2572,9 +2898,14 @@ export function resolveRfd4CompiledInput(
       lockChain: effectiveLock,
       hotspots: inlineHotspots,
       motifSpan: inlineMotif,
+      motifAtoms: inlineMotifAtoms,
       unindexedMotif: inlineUnidx,
       hbondMode: inlineHbondMode,
       hbondSelection: inlineHbondSel,
+      hbondDonorSelection: inlineHbondDonorSel,
+      hbondAcceptorSelection: inlineHbondAcceptorSel,
+      rasaBuriedSelection: inlineRasaBuriedSel,
+      piStackSelection: inlinePiStackSel,
       cathCode: inlineCath,
     });
     const compiled = compileConditionToRfd4(intent, templateContext, {
@@ -2609,7 +2940,12 @@ export function resolveRfd4CompiledInput(
       Boolean(inlineLock) ||
       Boolean(inlineHotspots) ||
       Boolean(inlineMotif) ||
+      Boolean(inlineMotifAtoms) ||
       (inlineHbondMode !== 'none' && Boolean(inlineHbondSel)) ||
+      Boolean(inlineHbondDonorSel) ||
+      Boolean(inlineHbondAcceptorSel) ||
+      Boolean(inlineRasaBuriedSel) ||
+      Boolean(inlinePiStackSel) ||
       Boolean(inlineCath);
 
     if (customSpecYaml) {
@@ -2633,9 +2969,14 @@ export function resolveRfd4CompiledInput(
           lockChain: inlineLock,
           hotspots: inlineHotspots,
           motifSpan: inlineMotif,
+          motifAtoms: inlineMotifAtoms,
           unindexedMotif: false,
           hbondMode: inlineHbondMode,
           hbondSelection: inlineHbondSel,
+          hbondDonorSelection: inlineHbondDonorSel,
+          hbondAcceptorSelection: inlineHbondAcceptorSel,
+          rasaBuriedSelection: inlineRasaBuriedSel,
+          piStackSelection: inlinePiStackSel,
           cathCode: inlineCath,
         });
       const compiled = compileConditionToRfd4(intent, templateContext, {

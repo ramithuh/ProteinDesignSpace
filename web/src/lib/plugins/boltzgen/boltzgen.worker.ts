@@ -16,6 +16,7 @@ import {
   type WorkerRunContext,
 } from '$lib/kernel';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
+import { buildBoltzGenMotifPlan, type BoltzGenMotifPlan } from '$lib/protein-ops/motif-placement';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type { StructureArtifact, TrajectoryFramesArtifact } from '$lib/engine/types';
 
@@ -298,33 +299,14 @@ createWorkerHarness({
 
     let effectiveLength = length;
     let motifIndices: number[] | undefined;
+    let boltzMotifPlan: BoltzGenMotifPlan | undefined;
     if (taskMode === 'motif' && upstreamStruct) {
-      const targetLen = upstreamStruct.length;
-      const srcRes =
-        upstreamStruct.sourceResidues && upstreamStruct.sourceResidues.length === targetLen
-          ? upstreamStruct.sourceResidues
-          : parseStructureText(upstreamStruct.pdbText).sourceResidues;
-      // Preserve same-chain author-numbering gaps between split motif islands (e.g. 1PRW A16-35 & A52-71)
-      const relOffsets: number[] = [];
-      let cursor = 0;
-      for (let i = 0; i < targetLen; i++) {
-        if (i > 0) {
-          const prev = srcRes[i - 1];
-          const cur = srcRes[i];
-          if (prev && cur && prev.authChainId === cur.authChainId) {
-            const delta = cur.resNum - prev.resNum;
-            const gap = delta > 1 && delta <= 65 ? delta - 1 : 0;
-            cursor += 1 + gap;
-          } else {
-            cursor += 1;
-          }
-        }
-        relOffsets.push(cursor);
-      }
-      const motifSpan = relOffsets.length > 0 ? relOffsets[relOffsets.length - 1] + 1 : targetLen;
-      effectiveLength = Math.max(length, motifSpan + motifOffset + 4);
-      const startIdx = Math.min(motifOffset, effectiveLength - motifSpan);
-      motifIndices = relOffsets.map((off) => startIdx + off);
+      boltzMotifPlan = buildBoltzGenMotifPlan(upstreamStruct, {
+        targetLength: length,
+        motifOffset,
+      });
+      effectiveLength = boltzMotifPlan.effectiveLength;
+      motifIndices = boltzMotifPlan.motifIndices;
     }
 
     const activeEngine = await ensureEngine(ctx, variant, precision);
@@ -416,21 +398,11 @@ createWorkerHarness({
         }
         if (locked.length > 0) lockedChains = locked;
         chainRoles = roles;
-      } else if (taskMode === 'motif' && motifIndices && upstreamStruct) {
+      } else if (taskMode === 'motif' && boltzMotifPlan) {
         chainRoles = { A: 'scaffold' };
-        fixedResidueIndices = motifIndices.map((idx) => idx + 1);
-        outMotifIndices = [...motifIndices];
-        nativeMotifCoords = motifIndices.map((_, k) => {
-          const base = k * 3;
-          if (base + 2 < upstreamStruct.caCoords.length) {
-            return [
-              upstreamStruct.caCoords[base],
-              upstreamStruct.caCoords[base + 1],
-              upstreamStruct.caCoords[base + 2],
-            ];
-          }
-          return [0, 0, 0];
-        });
+        fixedResidueIndices = [...boltzMotifPlan.fixedResidueIndices];
+        outMotifIndices = [...boltzMotifPlan.motifIndices];
+        nativeMotifCoords = boltzMotifPlan.nativeMotifCoords.map((c) => [...c]);
       } else {
         const roles: Record<string, 'target' | 'binder' | 'scaffold'> = {};
         for (const ch of [...new Set(parsed.chainIds)]) roles[ch] = 'scaffold';

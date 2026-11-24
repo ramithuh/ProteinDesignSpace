@@ -141,6 +141,7 @@ createWorkerHarness({
 
     // Fail fast BEFORE downloading 45 MB weights if required template structure is missing or non-protein
     if (
+      taskMode !== 'unconditional' &&
       (taskMode === 'motif' || taskMode === 'binder' || Boolean(inlineLock) || Boolean(inlineMotif)) &&
       !template?.cifText &&
       !template?.pdbText &&
@@ -150,7 +151,7 @@ createWorkerHarness({
         `Genie 3 "${taskMode}" mode requires a wired structure input (e.g. from PDB Input).`,
       );
     }
-    if (template && (taskMode !== 'unconditional' || !condArtifact)) {
+    if (template && taskMode !== 'unconditional') {
       const bench = template.benchmarkId ? getBenchmarkById(template.benchmarkId) : undefined;
       const inferredPdbId =
         bench?.pdbId ??

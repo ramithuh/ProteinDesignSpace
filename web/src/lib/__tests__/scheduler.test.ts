@@ -837,7 +837,8 @@ describe('engine/scheduler (CPU nodes & memoization)', () => {
     );
     const dnaStruct = dnaRes.outputsByNode.p.structure as StructureArtifact;
     expect(dnaStruct.length).toBe(0);
-    expect(dnaStruct.pdbText).toBe('');
+    expect(dnaStruct.pdbText).toContain('ATOM');
+    expect(dnaStruct.pdbText).not.toContain('data_pure_dna');
     expect(dnaStruct.cifText).toBe(pureDnaCif);
     expect(dnaStruct.diagnostics?.hasNucleicAcids).toBe(true);
 

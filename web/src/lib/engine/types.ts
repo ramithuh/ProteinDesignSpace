@@ -290,6 +290,14 @@ export interface DockingScoreSummary {
   rows: GninaPoseScoreRow[];
 }
 
+export interface MotifAtomTarget {
+  resIdx: number;
+  atomName: string;
+  x: number;
+  y: number;
+  z: number;
+}
+
 export interface StructureArtifact {
   kind: 'StructureArtifact';
   id: string;
@@ -333,6 +341,8 @@ export interface StructureArtifact {
   motifIndices?: number[];
   /** Native template Cα [x, y, z] coordinates (Å) for each residue in `motifIndices`. */
   nativeMotifCoords?: number[][];
+  /** Native template heavy-atom / tip-atom coordinates (Å) for atom-level catalytic motif RMSD. */
+  nativeMotifAtomCoords?: MotifAtomTarget[];
   /** Optional parent structure ID when this structure was derived from an upstream structure/collection. */
   parentStructureId?: string;
   /** Deterministic immutable design key when produced as part of a multi-design collection. */
@@ -535,6 +545,10 @@ export interface DesignabilityRow {
   genMotifRmsd?: number;
   /** Refolded motif Cα RMSD (Å) against native template motif coordinates. */
   refoldMotifRmsd?: number;
+  /** Generated motif all-atom / tip-atom RMSD (Å) against native template motif atom coordinates. */
+  genMotifAtomRmsd?: number | null;
+  /** Refolded motif all-atom / tip-atom RMSD (Å) against native template motif atom coordinates. */
+  refoldMotifAtomRmsd?: number | null;
   /** Reference comparison classification for this row. */
   referenceMode?: 'self-consistency' | 'external-reference' | 'lineage-mismatch';
   /** Exact semantic relationship between the fold's lineage and the wired reference structure. */
@@ -598,9 +612,15 @@ export interface CanonicalConditionIntent {
   lockChain?: string;
   hotspots?: string[];
   motifSpans?: string[];
+  /** Per-residue atom subset syntax (e.g. `A102:ND1,CG,CE1; A104:OE1,CD`) or shorthand `TIP` / `BKBN` / `ALL`. */
+  motifAtoms?: string;
   unindexedMotif?: boolean;
   hbondMode?: 'none' | 'ACCEPTOR' | 'DONOR' | 'BOTH';
   hbondSelection?: string;
+  hbondDonorSelection?: string;
+  hbondAcceptorSelection?: string;
+  rasaBuriedSelection?: string;
+  piStackSelection?: string;
   cathCode?: string;
   benchmarkId?: string;
   pdbId?: string;
