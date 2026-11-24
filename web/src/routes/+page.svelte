@@ -238,7 +238,12 @@
       }
       const nextHealth = await checkRemoteServerHealth(activeCfg.serverUrl, activeCfg.apiToken);
       if (seq !== remoteProbeSeq) return;
-      remoteHealth = nextHealth;
+      // On static hosted origins (e.g. denovo.run), same-origin /api/health returns 404 — show a neutral prompt instead of red Offline.
+      if (!activeCfg.serverUrl.trim() && !nextHealth.ok && /HTTP 404\b/i.test(nextHealth.error ?? '')) {
+        remoteHealth = null;
+      } else {
+        remoteHealth = nextHealth;
+      }
       syncSchedulerRemoteExecutor(computeBackend);
     } finally {
       if (seq === remoteProbeSeq) {
@@ -256,6 +261,15 @@
     syncSchedulerRemoteExecutor(computeBackend);
   }
 
+  function shouldAutoProbeRemote(cfg: ComputeBackendConfig): boolean {
+    if (cfg.mode === 'local') return false;
+    // Same-origin (blank URL): auto-probe so cookie-authenticated / SSH-tunnel servers connect seamlessly
+    if (!cfg.serverUrl.trim()) return true;
+    // Cross-origin custom URL: only auto-probe when a token is already present (e.g. same-tab refresh)
+    // so pasting a URL never triggers a premature browser Local Network Access prompt before token entry.
+    return Boolean(cfg.apiToken.trim());
+  }
+
   function handleHeaderComputeClick(target: 'local' | 'remote') {
     moreMenuOpen = false;
     shareMenuOpen = false;
@@ -271,12 +285,15 @@
       sysPopAlignLeft = rect.right < 320;
     }
     sysMenuOpen = nextOpen;
-    if (!switching && nextOpen && computeBackend.mode !== 'local') {
+    if (!switching && nextOpen && shouldAutoProbeRemote(computeBackend)) {
       void probeRemoteBackend(computeBackend);
     }
   }
 
-  function updateComputeBackend(patch: Partial<ComputeBackendConfig>) {
+  function updateComputeBackend(
+    patch: Partial<ComputeBackendConfig>,
+    opts: { autoProbe?: boolean } = {},
+  ) {
     const prevOrigin = resolveRemoteBackendOrigin(computeBackend.serverUrl);
     const nextRaw: ComputeBackendConfig = { ...computeBackend, ...patch };
     const nextOrigin = resolveRemoteBackendOrigin(nextRaw.serverUrl);
@@ -291,7 +308,8 @@
     }
     saveComputeBackendConfig(computeBackend);
     syncSchedulerRemoteExecutor(computeBackend);
-    if (computeBackend.mode !== 'local' && !originChanged) {
+    const allowProbe = opts.autoProbe !== false;
+    if (allowProbe && !originChanged && shouldAutoProbeRemote(computeBackend)) {
       void probeRemoteBackend(computeBackend);
     }
   }
@@ -1121,9 +1139,13 @@
     const loadedBackend = loadComputeBackendConfig();
     computeBackend = loadedBackend;
     syncSchedulerRemoteExecutor(loadedBackend);
-    if (loadedBackend.mode !== 'local') {
+    if (shouldAutoProbeRemote(loadedBackend)) {
       void probeRemoteBackend(loadedBackend);
-    } else if (typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
+    } else if (
+      loadedBackend.mode === 'local' &&
+      typeof window !== 'undefined' &&
+      window.location.protocol.startsWith('http')
+    ) {
       void checkRemoteServerHealth('', '', fetch, 1500).then((health) => {
         if (!health.ok) return;
         sameOriginHostDetected = health;
@@ -3671,7 +3693,22 @@
                   value={computeBackend.serverUrl}
                   placeholder="http://localhost:8787"
                   disabled={isRunning}
-                  onchange={(e) => updateComputeBackend({ serverUrl: (e.currentTarget as HTMLInputElement).value })}
+                  oninput={(e) =>
+                    updateComputeBackend(
+                      { serverUrl: (e.currentTarget as HTMLInputElement).value },
+                      { autoProbe: false },
+                    )}
+                  onchange={(e) =>
+                    updateComputeBackend(
+                      { serverUrl: (e.currentTarget as HTMLInputElement).value },
+                      { autoProbe: false },
+                    )}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      void probeRemoteBackend(computeBackend);
+                    }
+                  }}
                 />
               </label>
               {#if !computeBackend.serverUrl.trim() && remoteHealth?.ok && remoteHealth.authenticatedBy === 'cookie'}
@@ -3695,13 +3732,16 @@
                     value={computeBackend.apiToken}
                     placeholder="Bearer token if set"
                     disabled={isRunning}
-                    oninput={(e) => {
-                      computeBackend = {
-                        ...computeBackend,
-                        apiToken: (e.currentTarget as HTMLInputElement).value,
-                      };
-                    }}
-                    onchange={(e) => updateComputeBackend({ apiToken: (e.currentTarget as HTMLInputElement).value })}
+                    oninput={(e) =>
+                      updateComputeBackend(
+                        { apiToken: (e.currentTarget as HTMLInputElement).value },
+                        { autoProbe: false },
+                      )}
+                    onchange={(e) =>
+                      updateComputeBackend(
+                        { apiToken: (e.currentTarget as HTMLInputElement).value },
+                        { autoProbe: false },
+                      )}
                     onkeydown={(e) => {
                       if (e.key === 'Enter') {
                         e.preventDefault();
@@ -3737,8 +3777,10 @@
                     {(remoteHealth.queueDepth ?? 0) > 0 ? ` · q=${remoteHealth.queueDepth}` : ''}
                   {:else if remoteHealth?.error}
                     Offline: {remoteHealth.error}
+                  {:else if computeBackend.serverUrl.trim()}
+                    Ready — click Connect
                   {:else}
-                    Not tested yet
+                    Enter URL &amp; token, then Connect
                   {/if}
                 </span>
                 <button
@@ -3747,7 +3789,11 @@
                   disabled={remoteChecking}
                   onclick={() => void probeRemoteBackend(computeBackend)}
                 >
-                  {!computeBackend.serverUrl.trim() && computeBackend.apiToken.trim() ? 'Sign in' : 'Test'}
+                  {!computeBackend.serverUrl.trim() && computeBackend.apiToken.trim()
+                    ? 'Sign in'
+                    : remoteHealth?.ok
+                      ? 'Test'
+                      : 'Connect'}
                 </button>
               </div>
               {#if remoteHealth?.ok && remoteHealth.activeAdapter}
