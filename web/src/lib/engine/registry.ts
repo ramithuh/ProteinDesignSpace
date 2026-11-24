@@ -1430,7 +1430,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
   },
   'la-proteina': {
     id: 'la-proteina',
-    displayName: 'La-Proteina (LD1 + AE1)',
+    displayName: 'La-Proteina (LD1–LD7 + AE1/AE3)',
     shortName: 'La-Proteina',
     stage: 'generate',
     runtime: 'wgsl-custom',
@@ -1439,13 +1439,41 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     precisionWeightsMB: { int8: 277, fp16: 548 },
     licenseNote: 'Apache-2.0 (code) · NVIDIA Open Model License (weights · ramithuh/la-proteina-webgpu)',
     description:
-      'All-atom latent protein diffusion combining the 14-block LD1 latent velocity network with the 12-block AE1 decoder to co-design full atom37 structures and amino acid sequences.',
-    inputs: {},
+      'All-atom latent protein diffusion supporting unconditional co-design (LD1 + AE1) and conditional indexed/unindexed all-atom or tip-atom motif scaffolding (LD4–LD7 + AE3).',
+    inputs: {
+      structure: { type: 'StructureArtifact', required: false },
+    },
     outputs: {
       structure: { type: 'StructureArtifact' },
       sequences: { type: 'SequenceSet' },
     },
     paramSchema: [
+      {
+        key: 'variant',
+        label: 'Checkpoint / Task',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'ld1',
+        options: [
+          { value: 'ld1', label: 'Unconditional (LD1 + AE1 · ~277 MB)' },
+          { value: 'ld4', label: 'Motif · Indexed All-Atom (LD4 + AE3 · ~402 MB)' },
+          { value: 'ld5', label: 'Motif · Indexed Tip-Atom (LD5 + AE3 · ~402 MB)' },
+          { value: 'ld6', label: 'Motif · Unindexed All-Atom (LD6 + AE3 · ~402 MB)' },
+          { value: 'ld7', label: 'Motif · Unindexed Tip-Atom (LD7 + AE3 · ~402 MB)' },
+        ],
+        description:
+          'LD1 + AE1 generates unconditional all-atom proteins; LD4–LD7 + AE3 perform conditional all-atom or tip-atom motif scaffolding from a connected input structure.',
+      },
+      {
+        key: 'contig',
+        label: 'Motif Contig (LD4–LD7)',
+        kind: 'text',
+        tier: 'primary',
+        defaultValue: '',
+        placeholder: 'e.g. 20/A16-35/20 (blank = auto flank)',
+        description:
+          'Slash-separated motif contig for LD4–LD7 (scaffold lengths and PDB spans like 20/A16-35/20 or 15-30/P254-277/15-30). Ignored for LD1; leave blank to auto-flank the connected structure.',
+      },
       {
         key: 'precision',
         label: 'Weight Precision',
@@ -1453,8 +1481,8 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         tier: 'primary',
         defaultValue: 'int8',
         options: [
-          { value: 'int8', label: 'Compact (~277 MB)' },
-          { value: 'fp16', label: 'High precision (~548 MB)' },
+          { value: 'int8', label: 'Compact (INT8 · ~277–402 MB)' },
+          { value: 'fp16', label: 'High precision (FP16 · ~548–794 MB)' },
         ],
         description: 'Packed GPU weight precision streamed from Hugging Face.',
       },
@@ -1468,7 +1496,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         max: 300,
         step: 1,
         unit: 'aa',
-        description: 'Number of residues in the co-designed all-atom protein.',
+        description: 'Target residue count (used for LD1 or auto-flank length when Motif Contig is blank).',
       },
       {
         key: 'steps',
@@ -1487,7 +1515,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
             'La-Proteina SDE mode requires ~350–400 steps for Euler-Maruyama stability; fewer steps fracture Cα bonds (use ODE or SiD-Protein for fast runs).',
           fixValue: 400,
         },
-        description: 'Number of LD1 reverse-sampling steps before AE1 all-atom decoding.',
+        description: 'Number of reverse-sampling steps before AE1/AE3 all-atom decoding.',
       },
       {
         key: 'mode',

@@ -53,7 +53,7 @@ const EXPECTED_HOSTED_REVISIONS: Record<(typeof HOSTED_PORT_CARD_IDS)[number], {
   },
   'la-proteina-webgpu': {
     repo: 'https://huggingface.co/ramithuh/la-proteina-webgpu',
-    rev: 'ab1fcedcd05b',
+    rev: '62b86a5f4531',
   },
   'proteina-webgpu': {
     repo: 'https://huggingface.co/ramithuh/proteina-webgpu',

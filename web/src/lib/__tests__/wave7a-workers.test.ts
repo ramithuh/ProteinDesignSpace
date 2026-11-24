@@ -186,12 +186,12 @@ const WAVE7A_SPECS = [
     expectedParamKeys: ['fixedSequence', 'length', 'maskPositions', 'numSequences', 'precision', 'seed', 'taskMode'],
   },
   {
-    name: 'La-Proteina (LD1 + AE1)',
+    name: 'La-Proteina (LD1–LD7 + AE1/AE3)',
     vendorDir: 'static/vendor/la-proteina',
     workerFile: 'src/lib/plugins/la-proteina/laproteina.worker.ts',
     factoryExport: 'createLaProteinaEngine',
     hfBaseUrl: 'https://huggingface.co/ramithuh/la-proteina-webgpu/resolve/main',
-    expectedParamKeys: ['length', 'mode', 'numDesigns', 'precision', 'seed', 'steps'],
+    expectedParamKeys: ['contig', 'length', 'mode', 'numDesigns', 'precision', 'seed', 'steps', 'variant'],
   },
   {
     name: 'Proteina v1.2 (200M)',

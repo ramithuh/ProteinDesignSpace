@@ -87,7 +87,7 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   'pdb-input': 'Fetch by PDB ID or AlphaFold DB (UniProt), upload/paste PDB & mmCIF, or 3-helix demo',
   'sequence-input': 'Paste amino acid sequences (plain text or FASTA)',
   'rfd4-proteina': 'All-atom backbone and sequence co-design',
-  'la-proteina': 'All-atom latent diffusion (LD1 + AE1) co-designing structure and sequence',
+  'la-proteina': 'All-atom latent diffusion (LD1–LD7 + AE1/AE3) for de novo co-design & motif scaffolding',
   proteina: 'Scalable 200M transformer flow matching for de novo Cα backbones',
   'sid-protein': 'Distilled 16-step Proteina sampler for rapid Cα backbone generation',
   genie3: 'Fast de novo backbone diffusion (23.3M parameters)',
@@ -802,7 +802,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         subtitle: CONCISE_BLOCK_ROLES['la-proteina'],
         meta: `~${lap.approxWeightsMB} MB · Apache-2.0 / NVIDIA`,
         insert: { adapterId: 'la-proteina', label: 'La-Proteina' },
-        searchBlob: `${lap.id} ${lap.shortName} ${lap.displayName} ${CONCISE_BLOCK_ROLES['la-proteina']} laproteina ld1 ae1 latent all-atom co-design diffusion nvidia`.toLowerCase(),
+        searchBlob: `${lap.id} ${lap.shortName} ${lap.displayName} ${CONCISE_BLOCK_ROLES['la-proteina']} laproteina ld1 ld4 ld5 ld6 ld7 ae1 ae3 motif scaffolding tip-atom unindexed latent all-atom co-design diffusion nvidia`.toLowerCase(),
       },
       {
         key: 'proteina',

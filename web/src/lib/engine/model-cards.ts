@@ -1091,7 +1091,7 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
   'la-proteina-webgpu': {
     id: 'la-proteina-webgpu',
     adapterId: 'la-proteina',
-    displayName: 'La-Proteina (LD1 + AE1)',
+    displayName: 'La-Proteina (LD1–LD7 + AE1/AE3)',
     status: 'live',
     activePrecisionId: 'int8',
     precisions: [
@@ -1099,26 +1099,26 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
         id: 'int8',
         label: 'INT8',
         quantizationDetail:
-          'Packed 4×I8 LD1 (153 MB) + AE1 decoder (124 MB) matrices with colocated F32 per-row scales (total ~277 MB; ≤25 MB shards)',
+          'Packed 4×I8 LD1+AE1 (~277 MB unconditional) or LD4–LD7+AE3 (~402 MB conditional motif scaffolding) with colocated F32 per-row scales (≤25 MB shards)',
         approxSizeMB: 277,
         parityVsPytorchFp32: {
           metric: 'WebGPU atom37 & sequence logit relRMS vs matching-precision PyTorch',
-          value: '2.18e-5 (max across 34 GPU tests incl. 400-step sampling)',
-          scope: 'LD1 velocity network + AE1 all-atom decoder on hardware WebGPU (462/462 Naga shaders)',
-          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+          value: '≤ 2.2e-5 (LD1+AE1 & LD4–LD7+AE3; 0.156–0.214 Å motif RMSD, 100% motif seq rec)',
+          scope: 'LD1+AE1 unconditional + LD4–LD7+AE3 indexed/unindexed all-atom & tip-atom motif scaffolding (~17.6 ms/step on GB10)',
+          hardware: 'NVIDIA GB10 (ARM64), Chrome (Dawn Vulkan)',
         },
       },
       {
         id: 'fp16',
         label: 'FP16',
         quantizationDetail:
-          'Packed 2×F16 LD1 (303 MB) + AE1 decoder (245 MB) matrices unpacked in WGSL with F32 accumulation (~548 MB)',
+          'Packed 2×F16 LD1+AE1 (~548 MB) or LD4–LD7+AE3 (~794 MB) matrices unpacked in WGSL with F32 accumulation',
         approxSizeMB: 548,
         parityVsPytorchFp32: {
           metric: 'WebGPU atom37 & sequence logit relRMS vs matching-precision PyTorch',
-          value: '1.80e-5 (LD1 + AE1 end-to-end sampling)',
-          scope: 'LD1 + AE1 dynamic lengths and multi-step SDE/ODE trajectories',
-          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+          value: '≤ 1.8e-5 (LD1+AE1 & LD4–LD7+AE3 end-to-end sampling)',
+          scope: 'Unconditional and conditional atomistic motif scaffolding across dynamic lengths',
+          hardware: 'NVIDIA GB10 (ARM64), Chrome (Dawn Vulkan)',
         },
       },
       {
@@ -1129,21 +1129,21 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
         approxSizeMB: 1095,
         parityVsPytorchFp32: {
           metric: 'WebGPU atom37 & sequence logit relRMS vs PyTorch FP32',
-          value: '2.18e-5 (max across 34 GPU tests incl. 400-step sampling)',
-          scope: 'LD1 velocity network + AE1 all-atom decoder on hardware WebGPU',
-          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+          value: '2.18e-5 (max across LD1/AE1 & LD4–LD7/AE3 GPU parity suites)',
+          scope: 'Full velocity network + autoencoder parity on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chrome (Dawn Vulkan)',
         },
       },
     ],
     upstreamRepo: 'https://github.com/NVIDIA-BioNeMo/la-proteina',
     upstreamCommit: 'cde5de3ead6e4d76f367da6dc5174be9913ef6ca',
     weightsRepo: 'https://huggingface.co/ramithuh/la-proteina-webgpu',
-    weightsRevision: 'ab1fcedcd05b',
+    weightsRevision: '62b86a5f4531',
     license: 'Apache-2.0 (code) · NVIDIA Open Model License (weights)',
     citation: 'Geffner et al. (2025) La-Proteina: Atomistic Protein Generation via Partially Latent Flow Matching (NVIDIA BioNeMo).',
     limitations: [
-      'Unconditional single-chain all-atom co-design (LD1 + AE1 decoder); motif and triangular checkpoints are outside this package.',
-      'Default browser schedule uses 400 steps matching the upstream LD1 flow-matching schedule; lower step counts trade quality for speed.',
+      'Single-chain all-atom co-design (LD1 + AE1) and indexed/unindexed all-atom & tip-atom motif scaffolding (LD4–LD7 + AE3); triangular-attention LD2/LD3 checkpoints are outside this package.',
+      'Default browser schedule uses 400 steps matching the upstream flow-matching schedule; lower step counts trade quality for speed.',
     ],
   },
 

@@ -181,10 +181,17 @@ export function formatNodeParamSummary(
       return `${cath ? `CATH ${cath} · ` : ''}${num(p.length, 70)} aa · ${steps} steps`;
     }
     case 'la-proteina': {
+      const variant = String(p.variant ?? 'ld1').trim().toLowerCase();
       const len = num(p.length, 80);
       const steps = num(p.steps, 400);
       const mode = String(p.mode ?? 'sde').toUpperCase();
       const n = num(p.numDesigns, 1);
+      if (variant !== 'ld1' && /^ld[4-7]$/.test(variant)) {
+        const contig = String(p.contig ?? '').trim();
+        const tag = variant.toUpperCase();
+        const span = contig ? `(${contig})` : `${len} aa`;
+        return `${tag} motif ${span} · ${steps} steps · ${mode}${n > 1 ? ` · ×${n}` : ''}`;
+      }
       return `${len} aa · ${steps} steps · ${mode}${n > 1 ? ` · ×${n}` : ''}`;
     }
     case 'proteina': {
