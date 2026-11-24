@@ -4,7 +4,7 @@
 // Self-contained and Node-importable: ZERO runtime imports from `static/vendor/localfold/`,
 // `node:*`, Svelte, DOM, or WebGPU globals.
 
-import { NUCLEIC_ACID_RESNAMES } from '$lib/protein-ops/hetatm-policy';
+import { NUCLEIC_ACID_RESNAMES } from '../protein-ops/hetatm-policy';
 import type { StructureArtifact } from './types';
 
 // ---------------------------------------------------------------------------

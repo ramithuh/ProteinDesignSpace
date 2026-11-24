@@ -286,7 +286,7 @@ describe('Cloudflare Worker stateless /api/link endpoint', () => {
       ['?flow=nonexistent-model', 'UNKNOWN_MODEL'],
       ['?flow=r3~s', 'MISSING_REQUIRED_INPUT'],
       ['?flow=a:r3~b:r3~a', 'CYCLE_DETECTED'],
-      ['?flow=rfdiffusion~af2', 'INCOMPATIBLE_PORTS'],
+      ['?flow=q:sequence=MKTAY~mpnn', 'INCOMPATIBLE_PORTS'],
       ['?flow=p:pdbId=BAD', 'INVALID_PARAM'],
       ['?recipe=not-a-valid-recipe', 'INVALID_RECIPE'],
       ['?g=invalid_compressed_dag_payload', 'INVALID_COMPRESSED_DAG'],

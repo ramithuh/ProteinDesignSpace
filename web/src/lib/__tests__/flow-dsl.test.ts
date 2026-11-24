@@ -261,10 +261,24 @@ describe('engine/flow-dsl', () => {
     expect(missingStruct.ok).toBe(false);
     expect(missingStruct.errors.some((e) => e.code === 'MISSING_REQUIRED_INPUT' && e.nodeId === 'scorer')).toBe(true);
 
-    const incompatible = parseFlowDsl('rfdiffusion~af2');
+    const incompatible = parseFlowDsl('q:sequence=MKTAY~mpnn');
     expect(incompatible.ok).toBe(false);
     expect(incompatible.errors[0].code).toBe('INCOMPATIBLE_PORTS');
-    expect(incompatible.errors[0].message).toMatch(/mpnn/i);
+
+    // LocalFold accepts optional template:StructureArtifact, so rfdiffusion~af2 wires template
+    // but still fails with MISSING_REQUIRED_INPUT for sequences; pairing with seq succeeds.
+    const templateOnly = parseFlowDsl('rfdiffusion~af2');
+    expect(templateOnly.ok).toBe(false);
+    expect(templateOnly.errors.some((e) => e.code === 'MISSING_REQUIRED_INPUT' && e.nodeId === 'af2')).toBe(true);
+
+    const templateFold = parseFlowDsl('seq:sequence=MKTAY~af2;pdb:pdbId=1UBQ~af2');
+    expect(templateFold.ok).toBe(true);
+    expect(templateFold.graph?.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ fromNode: 'seq', fromPort: 'sequences', toNode: 'af2', toPort: 'sequences' }),
+        expect.objectContaining({ fromNode: 'pdb', fromPort: 'structure', toNode: 'af2', toPort: 'template' }),
+      ]),
+    );
 
     const unknownPort = parseFlowDsl('r3.bogus~m');
     expect(unknownPort.ok).toBe(false);
