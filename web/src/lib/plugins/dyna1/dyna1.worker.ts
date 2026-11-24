@@ -209,27 +209,48 @@ createWorkerHarness({
 
     const seqSet = ctx.inputs?.sequences as SequenceSet | undefined;
     const struct = ctx.inputs?.structure as StructureArtifact | undefined;
-    const backbone3 = extractDyna1Backbone3Coords(struct);
+    const structItems: StructureArtifact[] =
+      struct?.collection?.items && struct.collection.items.length > 1
+        ? struct.collection.items
+        : struct
+          ? [struct]
+          : [];
+    const defaultBackbone3 = extractDyna1Backbone3Coords(struct);
 
     let sourceCandidates: SequenceCandidate[] = [];
     let excludedCandidates: ExcludedCandidateRecord[] = [];
+    let pairedStructures: Array<StructureArtifact | null> = [];
     const parentStructureId: string | undefined = struct?.id ?? seqSet?.parentStructureId;
 
-    if (requestedInputMode === 'struct-only' && struct) {
-      sourceCandidates = [
-        {
-          id: struct.id,
-          key: struct.designKey ?? struct.id,
-          sequence: struct.sequence || 'A'.repeat(struct.length),
-          chainLengths: struct.chainLengths,
-          score: null,
-          globalScore: null,
-          sourceModelId: struct.sourceModelId,
-          sourceStructureId: struct.id,
-        },
-      ];
+    if (requestedInputMode === 'struct-only' && structItems.length > 0) {
+      const selectedStructs = structItems.slice(0, maxSequences);
+      pairedStructures = selectedStructs;
+      sourceCandidates = selectedStructs.map((s, idx) => ({
+        id: s.id,
+        key: s.designKey ?? s.id,
+        ...(s.designKey ? { designKey: s.designKey } : {}),
+        designIndex: s.designIndex ?? idx,
+        sequence: s.sequence || 'A'.repeat(s.length),
+        chainLengths: s.chainLengths,
+        score: null,
+        globalScore: null,
+        sourceModelId: s.sourceModelId,
+        sourceStructureId: s.id,
+      }));
+      if (structItems.length > maxSequences) {
+        excludedCandidates = structItems.slice(maxSequences).map((s, offset) => {
+          const index = maxSequences + offset;
+          return {
+            key: s.designKey ?? s.id,
+            id: s.id,
+            index,
+            reason: `Excluded by maxSequences=${maxSequences} (structure #${index + 1} of ${structItems.length})`,
+          };
+        });
+      }
     } else if (seqSet && seqSet.candidates.length > 0) {
       sourceCandidates = seqSet.candidates.slice(0, maxSequences);
+      pairedStructures = sourceCandidates.map(() => struct ?? null);
       if (seqSet.candidates.length > maxSequences) {
         excludedCandidates = seqSet.candidates.slice(maxSequences).map((cand, offset) => {
           const index = maxSequences + offset;
@@ -241,42 +262,63 @@ createWorkerHarness({
           };
         });
       }
-    } else if (struct && struct.sequence) {
-      sourceCandidates = [
-        {
-          id: struct.id,
-          key: struct.designKey ?? struct.id,
-          sequence: struct.sequence,
-          chainLengths: struct.chainLengths,
-          score: null,
-          globalScore: null,
-          sourceModelId: struct.sourceModelId,
-          sourceStructureId: struct.id,
-        },
-      ];
+    } else if (structItems.length > 0 && structItems.some((s) => Boolean(s.sequence))) {
+      const validStructs = structItems.filter((s) => Boolean(s.sequence));
+      const selectedStructs = validStructs.slice(0, maxSequences);
+      pairedStructures = selectedStructs;
+      sourceCandidates = selectedStructs.map((s, idx) => ({
+        id: s.id,
+        key: s.designKey ?? s.id,
+        ...(s.designKey ? { designKey: s.designKey } : {}),
+        designIndex: s.designIndex ?? idx,
+        sequence: s.sequence,
+        chainLengths: s.chainLengths,
+        score: null,
+        globalScore: null,
+        sourceModelId: s.sourceModelId,
+        sourceStructureId: s.id,
+      }));
+      if (validStructs.length > maxSequences) {
+        excludedCandidates = validStructs.slice(maxSequences).map((s, offset) => {
+          const index = maxSequences + offset;
+          return {
+            key: s.designKey ?? s.id,
+            id: s.id,
+            index,
+            reason: `Excluded by maxSequences=${maxSequences} (structure #${index + 1} of ${validStructs.length})`,
+          };
+        });
+      }
     } else {
       throw new Error(
         'Dyna-1 requires an upstream StructureArtifact or SequenceSet.',
       );
     }
 
-    if (requestedInputMode === 'struct-only' && backbone3 && (backbone3.length < 1 || backbone3.length > 1024)) {
-      throw new Error(
-        `Dyna-1 supports 1–1024 residues (structure "${struct?.label ?? 'input'}" has ${backbone3.length}).`,
-      );
+    const perItemBackbone3 = pairedStructures.map((s) =>
+      s === struct ? defaultBackbone3 : extractDyna1Backbone3Coords(s ?? undefined),
+    );
+    for (let idx = 0; idx < perItemBackbone3.length; idx++) {
+      const bb3 = perItemBackbone3[idx];
+      if (requestedInputMode === 'struct-only' && bb3 && (bb3.length < 1 || bb3.length > 1024)) {
+        throw new Error(
+          `Dyna-1 supports 1–1024 residues (structure "${pairedStructures[idx]?.label ?? struct?.label ?? 'input'}" has ${bb3.length}).`,
+        );
+      }
     }
-    const cleanedSeqs = sourceCandidates.map((c) =>
+    const cleanedSeqs = sourceCandidates.map((c, idx) =>
       requestedInputMode === 'struct-only'
-        ? c.sequence.replace(/[\s:/,-]+/g, '').toUpperCase() || 'X'.repeat(backbone3?.length ?? 0)
+        ? c.sequence.replace(/[\s:/,-]+/g, '').toUpperCase() || 'X'.repeat(perItemBackbone3[idx]?.length ?? 0)
         : cleanCanonicalSequence(c.sequence, c.id),
     );
-    const resolvedModes: Dyna1ResolvedMode[] = cleanedSeqs.map((seq) =>
-      resolveDyna1Mode(requestedInputMode, seq.length, backbone3),
+    const resolvedModes: Dyna1ResolvedMode[] = cleanedSeqs.map((seq, idx) =>
+      resolveDyna1Mode(requestedInputMode, seq.length, perItemBackbone3[idx]),
     );
 
     const activeEngine = await ensureEngine(ctx, precision);
 
     const scoredCandidates: SequenceCandidate[] = [];
+    const perItemProbs: Array<{ probs: Float32Array<ArrayBuffer>; mean: number }> = [];
     let primaryProbs = new Float32Array(0);
     let primarySeq = cleanedSeqs[0];
     let primaryMode: Dyna1ResolvedMode = resolvedModes[0];
@@ -285,14 +327,16 @@ createWorkerHarness({
     let primaryMax = 0;
     let primaryFlexFrac = 0;
 
-    const needsStructEncoding =
-      backbone3 !== null &&
-      resolvedModes.some((m) => m === 'seq+struct' || m === 'struct-only');
-    let cachedStructureTokens: Int32Array | null = null;
-
-    if (needsStructEncoding && backbone3 && typeof activeEngine.encodeStructure === 'function') {
-      const encRes = await activeEngine.encodeStructure(backbone3.coords, {
-        residueIndex: backbone3.residueIndex,
+    const encodedTokenCache = new Map<string, Int32Array | null>();
+    const encodeStructOnce = async (
+      itemStruct: StructureArtifact | null,
+      bb3: ReturnType<typeof extractDyna1Backbone3Coords>,
+    ): Promise<Int32Array | null> => {
+      if (!bb3 || typeof activeEngine.encodeStructure !== 'function') return null;
+      const cacheKey = itemStruct?.id ?? 'default';
+      if (encodedTokenCache.has(cacheKey)) return encodedTokenCache.get(cacheKey) ?? null;
+      const encRes = await activeEngine.encodeStructure(bb3.coords, {
+        residueIndex: bb3.residueIndex,
         signal: ctx.signal,
         onProgress: (prog: { phase?: string; loaded?: number; total?: number }) => {
           if (prog.phase !== 'structure-encoder') return;
@@ -308,24 +352,28 @@ createWorkerHarness({
           );
         },
       });
-      cachedStructureTokens =
+      const tokens =
         encRes?.structureTokens instanceof Int32Array
           ? encRes.structureTokens
           : encRes instanceof Int32Array
             ? encRes
             : null;
-    }
+      encodedTokenCache.set(cacheKey, tokens);
+      return tokens;
+    };
 
     for (let i = 0; i < sourceCandidates.length; i++) {
       const cand = sourceCandidates[i];
       const seq = cleanedSeqs[i];
       const mode = resolvedModes[i];
-      const useStruct = (mode === 'seq+struct' || mode === 'struct-only') && backbone3 !== null;
+      const bb3 = perItemBackbone3[i];
+      const useStruct = (mode === 'seq+struct' || mode === 'struct-only') && bb3 !== null;
+      const structureTokens = useStruct ? await encodeStructOnce(pairedStructures[i], bb3) : null;
 
       ctx.progress(
         'score',
         Math.min(0.95, 0.84 + (i / sourceCandidates.length) * 0.11),
-        `Dyna-1 (${mode}) on ${cand.id} (${useStruct ? backbone3!.length : seq.length} aa)...`,
+        `Dyna-1 (${mode}) on ${cand.id} (${useStruct ? bb3!.length : seq.length} aa)...`,
       );
 
       // In seq-only mode, preserve multi-chain boundaries by scoring each chain independently
@@ -377,9 +425,9 @@ createWorkerHarness({
           {
             mode,
             ...(useStruct
-              ? cachedStructureTokens
-                ? { structureTokens: cachedStructureTokens }
-                : { structureCoords: backbone3!.coords, residueIndex: backbone3!.residueIndex }
+              ? structureTokens
+                ? { structureTokens }
+                : { structureCoords: bb3!.coords, residueIndex: bb3!.residueIndex }
               : {}),
             signal: ctx.signal,
             onProgress: (prog: { phase?: string; loaded?: number; total?: number }) => {
@@ -425,6 +473,7 @@ createWorkerHarness({
         primaryMax = maxV;
         primaryFlexFrac = flexFrac;
       }
+      perItemProbs.push({ probs, mean });
 
       scoredCandidates.push({
         ...cand,
@@ -484,13 +533,29 @@ createWorkerHarness({
       },
     };
 
+    const distinctPairedStructs = pairedStructures.filter(
+      (s): s is StructureArtifact => s !== null,
+    );
+    const isMultiStructFanout =
+      distinctPairedStructs.length > 1 &&
+      distinctPairedStructs.length === perItemProbs.length &&
+      new Set(distinctPairedStructs.map((s) => s.id)).size > 1;
+    const emittedSourceStructureIds =
+      seqSet?.sourceStructureIds ??
+      (isMultiStructFanout ? distinctPairedStructs.map((s) => s.id) : undefined);
+    const emittedCollectionKind =
+      seqSet?.collectionKind ??
+      (isMultiStructFanout
+        ? (struct?.collection?.collectionKind ?? 'independent-candidates')
+        : undefined);
+
     const sequences: SequenceSet = {
       kind: 'SequenceSet',
       id: `dyna1-seqs-${precision}-${runHash}`,
       parentStructureId: parentStructureId ?? 'none',
       sourceStructureId: parentStructureId ?? 'none',
-      ...(seqSet?.sourceStructureIds ? { sourceStructureIds: seqSet.sourceStructureIds } : {}),
-      ...(seqSet?.collectionKind ? { collectionKind: seqSet.collectionKind } : {}),
+      ...(emittedSourceStructureIds ? { sourceStructureIds: emittedSourceStructureIds } : {}),
+      ...(emittedCollectionKind ? { collectionKind: emittedCollectionKind } : {}),
       ...(seqSet?.lockedChains?.length ? { lockedChains: seqSet.lockedChains } : {}),
       ...(seqSet?.chainRoles ? { chainRoles: seqSet.chainRoles } : {}),
       sourceModelId: 'dyna1',
@@ -501,37 +566,53 @@ createWorkerHarness({
     const outputs: Record<string, unknown> = { track, sequences };
     const transferableViews: Array<ArrayBufferView | undefined> = [track.values];
 
-    // When an upstream 3D structure is connected and length-matched, paint dynamics probabilities onto its B-factors
-    if (struct && (struct.pdbText || struct.cifText) && struct.length === L) {
-      const structText = struct.cifText || struct.pdbText;
+    const buildPaintedStruct = (
+      targetStruct: StructureArtifact,
+      probsArr: Float32Array,
+      meanVal: number,
+    ): StructureArtifact | null => {
+      if ((!targetStruct.pdbText && !targetStruct.cifText) || targetStruct.length !== probsArr.length) {
+        return null;
+      }
+      const structText = targetStruct.cifText || targetStruct.pdbText;
       const sourceResidues =
-        struct.sourceResidues && struct.sourceResidues.length > 0
-          ? struct.sourceResidues
+        targetStruct.sourceResidues && targetStruct.sourceResidues.length > 0
+          ? targetStruct.sourceResidues
           : structText
             ? parseStructureText(structText).sourceResidues
             : [];
-      const bfactors = new Float32Array(Math.max(sourceResidues.length, L)).fill(Number.NaN);
-      const nPaint = Math.min(bfactors.length, primaryProbs.length);
-      for (let i = 0; i < nPaint; i++) {
-        bfactors[i] = primaryProbs[i];
+      const bfactors = new Float32Array(Math.max(sourceResidues.length, probsArr.length)).fill(
+        Number.NaN,
+      );
+      const nPaint = Math.min(bfactors.length, probsArr.length);
+      for (let r = 0; r < nPaint; r++) {
+        bfactors[r] = probsArr[r];
       }
-      const paintedPdb = struct.pdbText
-        ? paintStructureBfactors(struct.pdbText, bfactors.subarray(0, sourceResidues.length || L))
-        : struct.pdbText;
-      const paintedCif = struct.cifText
-        ? paintStructureBfactors(struct.cifText, bfactors.subarray(0, sourceResidues.length || L))
+      const paintedPdb = targetStruct.pdbText
+        ? paintStructureBfactors(
+            targetStruct.pdbText,
+            bfactors.subarray(0, sourceResidues.length || probsArr.length),
+          )
+        : targetStruct.pdbText;
+      const paintedCif = targetStruct.cifText
+        ? paintStructureBfactors(
+            targetStruct.cifText,
+            bfactors.subarray(0, sourceResidues.length || probsArr.length),
+          )
         : undefined;
-      const caCopy = new Float32Array(struct.caCoords);
-      const bbCopy = new Float32Array(struct.backbone4Coords);
-      const obsCopy = struct.observedBackboneMask
-        ? new Uint8Array(struct.observedBackboneMask)
+      const caCopy = new Float32Array(targetStruct.caCoords);
+      const bbCopy = new Float32Array(targetStruct.backbone4Coords);
+      const obsCopy = targetStruct.observedBackboneMask
+        ? new Uint8Array(targetStruct.observedBackboneMask)
         : undefined;
-
-      const paintedStructure: StructureArtifact = {
-        ...struct,
-        id: `dyna1-struct-${struct.id}-${precision}-${runHash}`,
-        label: `${struct.label} (Dyna-1 · mean ${primaryMean.toFixed(2)})`,
-        parentStructureId: struct.id,
+      transferableViews.push(caCopy, bbCopy, obsCopy);
+      const baseCopy = { ...targetStruct };
+      delete baseCopy.collection;
+      return {
+        ...baseCopy,
+        id: `dyna1-struct-${targetStruct.id}-${precision}-${runHash}`,
+        label: `${targetStruct.label} (Dyna-1 · mean ${meanVal.toFixed(2)})`,
+        parentStructureId: targetStruct.id,
         caCoords: caCopy,
         backbone4Coords: bbCopy,
         ...(obsCopy ? { observedBackboneMask: obsCopy } : {}),
@@ -539,12 +620,47 @@ createWorkerHarness({
         ...(paintedCif !== undefined ? { cifText: paintedCif } : {}),
         bfactorSemantics: 'dynamics-prob',
         provenance: {
-          ...struct.provenance,
+          ...targetStruct.provenance,
           quantization: precision,
         },
       };
-      outputs.structure = paintedStructure;
-      transferableViews.push(caCopy, bbCopy, obsCopy);
+    };
+
+    // When an upstream 3D structure (or structure collection) is connected and length-matched,
+    // paint dynamics probabilities onto every member's B-factors.
+    if (isMultiStructFanout) {
+      const paintedItems: StructureArtifact[] = [];
+      for (let idx = 0; idx < distinctPairedStructs.length; idx++) {
+        const painted = buildPaintedStruct(
+          distinctPairedStructs[idx],
+          perItemProbs[idx].probs,
+          perItemProbs[idx].mean,
+        );
+        if (painted) paintedItems.push(painted);
+      }
+      if (paintedItems.length === 1) {
+        outputs.structure = paintedItems[0];
+      } else if (paintedItems.length > 1) {
+        const primaryPainted = paintedItems[0];
+        outputs.structure = {
+          ...primaryPainted,
+          id: `dyna1-batch-${paintedItems.length}-${precision}-${runHash}`,
+          collection: {
+            kind: 'Collection',
+            schema: 'denovo.collection/v1',
+            id: `dyna1-col-${precision}-${runHash}`,
+            familyKey: `dyna1-${precision}-${runHash}`,
+            collectionKind: emittedCollectionKind ?? 'independent-candidates',
+            requestedCount: paintedItems.length + excludedCandidates.length,
+            complete: excludedCandidates.length === 0,
+            items: paintedItems,
+            keys: paintedItems.map((it, idx) => it.designKey ?? it.id ?? `item-${idx}`),
+          },
+        };
+      }
+    } else if (struct && (struct.pdbText || struct.cifText) && struct.length === L) {
+      const painted = buildPaintedStruct(struct, primaryProbs, primaryMean);
+      if (painted) outputs.structure = painted;
     }
 
     return {

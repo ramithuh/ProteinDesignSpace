@@ -100,7 +100,7 @@ export const esmcPlugin: ModelPlugin = {
         mutations: 1,
         track: 1,
         sequences: items,
-        ...(ctx.connectedInputs.has('structure') ? { structure: 1 } : {}),
+        ...(ctx.connectedInputs.has('structure') ? { structure: items } : {}),
       },
       stageBreakdown: { score: items },
     };

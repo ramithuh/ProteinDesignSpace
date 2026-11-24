@@ -11,6 +11,17 @@ import {
   normalizeLocalFoldChainScores,
   resolveLocalFoldEffectiveConfig,
 } from '$lib/engine/conditioning';
+import {
+  alignQueryToTemplate,
+  buildAf2TemplatePayload,
+  buildAf3TemplateSlots,
+  getLocalFoldTemplateDialectPolicy,
+  LocalFoldTemplateError,
+  parseTemplateStructure,
+  type ParsedTemplateStructure,
+  type ResolvedLocalFoldTemplateSource,
+  type TemplateAlignmentResult,
+} from '$lib/engine/localfold-template';
 import { esmfold2Chains, esmfold2ParamIssue } from '$lib/engine/localfold-esmfold2';
 import { computeCandidateIpsae, loadEsmfold2 } from './localfold-esmfold2';
 import { LOCALFOLD_MODEL_OPTIONS } from '$lib/engine/registry';
@@ -31,6 +42,7 @@ import { sha256Hex, type CollectionMember } from '$lib/engine/collections';
 import { planLocalFoldFanout } from '$lib/engine/work-plan';
 import { createWorkerHarness, fnv1a, type WorkerRunContext } from '$lib/kernel';
 import type {
+  ArtifactProvenance,
   CollectionItemOutcome,
   ExcludedCandidateRecord,
   FoldedCandidate,
@@ -140,6 +152,7 @@ async function ensureCoreModules(ctx: WorkerRunContext) {
     unifiedMod,
     chainsMod,
     a3mMod,
+    a3mFeaturesMod,
     mmseqsMod,
     fixtureMod,
     storeMod,
@@ -152,6 +165,7 @@ async function ensureCoreModules(ctx: WorkerRunContext) {
     importVendor('webgpu/af2/multimer/model.js'),
     importVendor('shared/input/chains.js'),
     importVendor('shared/input/a3m.js'),
+    importVendor('webgpu/input/a3m-features.js'),
     importVendor('shared/input/mmseqs2-api.js'),
     importVendor('shared/bundles/alphafold-fixture.js'),
     importVendor('shared/bundles/http-tensor-store.js'),
@@ -166,6 +180,7 @@ async function ensureCoreModules(ctx: WorkerRunContext) {
     mergeChainA3ms: chainsMod.mergeChainA3ms,
     mergeUnpairedChainA3ms: chainsMod.mergeUnpairedChainA3ms,
     parseA3m: a3mMod.parseA3m,
+    makeA3mFeaturesFor: a3mFeaturesMod.makeA3mFeaturesFor,
     generateMmseqs2Msa: mmseqsMod.generateMmseqs2Msa,
     generateMmseqs2ComplexMsa: mmseqsMod.generateMmseqs2ComplexMsa,
     expandSearchedChains: mmseqsMod.expandSearchedChains,
@@ -430,6 +445,23 @@ function splitChainSequences(cleanSeq: string, chainLengths: number[]): string[]
   return parts;
 }
 
+function buildTemplateProvenance(
+  templateSource: ResolvedLocalFoldTemplateSource,
+  alignment: TemplateAlignmentResult,
+  templateSpanChains: boolean,
+): Partial<ArtifactProvenance> {
+  const warnings = [...templateSource.warnings, ...alignment.warnings];
+  return {
+    templateUsed: true,
+    templateFormat: templateSource.format,
+    templateDigest: templateSource.digest,
+    templateMatchedResidues: alignment.matchedQueryResidues,
+    templateTotalResidues: alignment.totalQueryResidues,
+    templateSpanChains,
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
+}
+
 createWorkerHarness({
   async run(ctx) {
     const seqSet = ctx.inputs?.sequences as SequenceSet | undefined;
@@ -437,10 +469,12 @@ createWorkerHarness({
       throw new Error('LocalFold requires an upstream SequenceSet with at least one sequence');
     }
 
+    const templateInput = ctx.inputs?.template as StructureArtifact | undefined;
     const p = ctx.params ?? {};
     const modelKey = String(p.model ?? 'monomer');
     const baseConfig = resolveLocalFoldEffectiveConfig({
       modelKey,
+      templateInput,
       params: {
         model: p.model,
         recycles: p.recycles,
@@ -452,6 +486,9 @@ createWorkerHarness({
         dnaSequences: p.dnaSequences,
         rnaSequences: p.rnaSequences,
         esmfold2Steps: p.esmfold2Steps,
+        templatePdbText: p.templatePdbText,
+        templateFilename: p.templateFilename,
+        templateSpanChains: p.templateSpanChains,
       },
     });
     const {
@@ -465,12 +502,35 @@ createWorkerHarness({
       ligandCcdCodes,
       dnaSeqs,
       rnaSeqs,
+      templateSpanChains,
+      templateSource,
+      templateSourceError,
     } = baseConfig;
     const recycles = clampLocalFoldRecycles(modelKey, baseConfig.recycles, 1);
     const tolerance = resolveAf2Tolerance(modelKey, baseConfig.tolerance);
     if (!isAf2Mono && !isAf2Multi && !isAf3 && !isEsmfold2) {
       throw new Error(`Unsupported LocalFold model "${modelKey}"`);
     }
+    const hasRawTemplate =
+      (templateInput !== undefined && templateInput !== null) ||
+      (typeof p.templatePdbText === 'string' && p.templatePdbText.trim().length > 0);
+    if (hasRawTemplate && !baseConfig.isTemplateCapable) {
+      const modelShort =
+        LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelKey)?.shortLabel ?? modelKey;
+      throw new LocalFoldTemplateError(
+        'TEMPLATE_FREE_MODEL',
+        `Structural templates are not supported by "${modelKey}" (${modelShort} is template-free). Switch to AF2 Model 1–2, AF2-Multimer, or an AF3-family model, or remove the template.`,
+      );
+    }
+    if (templateSourceError) {
+      throw new Error(templateSourceError);
+    }
+    const parsedTemplate: ParsedTemplateStructure | null = templateSource
+      ? parseTemplateStructure(templateSource.text, {
+          altlocFirst: getLocalFoldTemplateDialectPolicy(modelKey).altlocFirst,
+          arginines: baseConfig.templateFamily === 'af3',
+        })
+      : null;
     // Reject non-canonical DNA/RNA letters explicitly instead of silently stripping them (e.g. ACNGT -> ACGT)
     if (isAf3 || isEsmfold2) {
       const rawDnaTokens = Array.isArray(p.dnaSequences)
@@ -674,6 +734,39 @@ createWorkerHarness({
       }
       if (totalTokens > maxTargetTokens) maxTargetTokens = totalTokens;
     }
+    const parsedCandsByTarget: Array<ReturnType<typeof parseCandidateProteinChains>> = [];
+    const alignmentsByTarget: Array<TemplateAlignmentResult | null> = [];
+    for (let i = 0; i < targets.length; i++) {
+      const { cand } = targets[i];
+      const parsedCand = parseCandidateProteinChains(cand.sequence, cand.chainLengths);
+      parsedCandsByTarget.push(parsedCand);
+      if (!isEsmfold2) {
+        const cleanSeq = parsedCand.cleanSeq;
+        if (cleanSeq.length === 0) {
+          throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
+        }
+        const validCount = (cleanSeq.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
+        if (validCount / cleanSeq.length < 0.5) {
+          throw new Error(
+            `Refusing to fold "${cand.id}": ${cleanSeq.length - validCount}/${cleanSeq.length} residues are unknown/non-canonical (>50% unknown). Check the upstream generator output.`,
+          );
+        }
+      }
+      if (parsedTemplate) {
+        const queryChains = parsedCand.chainSeqs
+          .map((seq, idx) => ({
+            chainId:
+              cand.chainIds?.[idx]?.trim() ||
+              (idx < 26 ? String.fromCharCode(65 + idx) : `C${idx + 1}`),
+            sequence: seq,
+          }))
+          .filter((c) => c.sequence.length > 0);
+        alignmentsByTarget.push(alignQueryToTemplate(queryChains, parsedTemplate));
+      } else {
+        alignmentsByTarget.push(null);
+      }
+    }
+
     const ef2Chains = isEsmfold2 ? targets.map(({ cand }) => esmfold2Chains(cand, maxFoldResidues)) : [];
     const maxEf2ResidueLength = isEsmfold2
       ? ef2Chains.reduce((mx, chs) => Math.max(mx, chs.join('').length), 0)
@@ -762,17 +855,9 @@ createWorkerHarness({
         const target = targets[i];
         const cand = target.cand;
         const itemSeed = target.seed;
-        const parsedCand = parseCandidateProteinChains(cand.sequence, cand.chainLengths);
+        const parsedCand = parsedCandsByTarget[i];
         const cleanSeq = parsedCand.cleanSeq;
-        if (cleanSeq.length === 0) {
-          throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
-        }
-        const validCount = (cleanSeq.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
-        if (validCount / cleanSeq.length < 0.5) {
-          throw new Error(
-            `Refusing to fold "${cand.id}": ${cleanSeq.length - validCount}/${cleanSeq.length} residues are unknown/non-canonical (>50% unknown). Check the upstream generator output.`,
-          );
-        }
+        const alignment = alignmentsByTarget[i];
         const { chainLengths, chainSeqs } = parsedCand;
         const chainIds = chainIdsFromLengths(chainLengths);
         const uniqueChains = [...new Set(chainIds)];
@@ -807,6 +892,15 @@ createWorkerHarness({
           `Folding ${cand.id} with ${isAf2Multi ? 'AF2-Multimer' : 'AF2'} ${modelKey} (${cleanSeq.length} aa${chainLengths.length > 1 ? `, ${chainLengths.length} chains` : ''}, ${recycles} rec${msa.msaDepth > 1 ? `, MSA ${msa.msaDepth}` : ''})...`,
         );
 
+        const af2Payload = alignment
+          ? buildAf2TemplatePayload(
+              chainSeqs,
+              alignment,
+              isAf2Multi ? 'af2-multimer' : 'af2-monomer',
+              { spanChains: templateSpanChains },
+            )
+          : null;
+
         const predictOpts = isAf2Multi
           ? {
               recycles,
@@ -820,6 +914,7 @@ createWorkerHarness({
               outerProductMeanFirst: true,
               positionScale: 20,
               tolerance,
+              ...(af2Payload ? { template: af2Payload.template } : {}),
             }
           : {
               recycles,
@@ -829,24 +924,55 @@ createWorkerHarness({
               maskFraction: msaBudgets.maskFraction,
               chainLengths,
               tolerance,
+              ...(af2Payload ? { template: af2Payload.template } : {}),
             };
 
-        const prediction = await runner.predictA3m(
-          a3m,
-          loadedAf2.weights,
-          loadedAf2.featureTables,
-          predictOpts,
-          loadedAf2.paeBreaks,
-          undefined,
-          (prog: { completed: number; total: number }) => {
-            const sub = prog.total > 0 ? Math.min(1, Math.max(0, prog.completed / prog.total)) : 0;
-            ctx.progress(
-              'fold',
-              (i + sub) / targets.length,
-              `Folding ${cand.id} (${i + 1}/${targets.length}): ${(sub * 100).toFixed(0)}%`,
-            );
-          },
-        );
+        const onFoldProgress = (prog: { completed: number; total: number }) => {
+          const sub = prog.total > 0 ? Math.min(1, Math.max(0, prog.completed / prog.total)) : 0;
+          ctx.progress(
+            'fold',
+            (i + sub) / targets.length,
+            `Folding ${cand.id} (${i + 1}/${targets.length}): ${(sub * 100).toFixed(0)}%`,
+          );
+        };
+
+        let prediction;
+        if (isAf2Multi && af2Payload) {
+          const featuresByRecycle = await lfCore.makeA3mFeaturesFor(
+            gpuDevice,
+            a3m,
+            loadedAf2.featureTables,
+            {
+              ...predictOpts,
+              multimerClustering:
+                'outerProductMeanFirst' in predictOpts &&
+                predictOpts.outerProductMeanFirst === true,
+            },
+          );
+          for (const feat of featuresByRecycle) {
+            if (feat && feat.asymId === undefined) {
+              feat.asymId = af2Payload.asymId;
+            }
+          }
+          prediction = await runner.predict(
+            featuresByRecycle,
+            loadedAf2.weights,
+            loadedAf2.paeBreaks,
+            undefined,
+            onFoldProgress,
+            predictOpts,
+          );
+        } else {
+          prediction = await runner.predictA3m(
+            a3m,
+            loadedAf2.weights,
+            loadedAf2.featureTables,
+            predictOpts,
+            loadedAf2.paeBreaks,
+            undefined,
+            onFoldProgress,
+          );
+        }
 
         const fin = prediction.final;
         const passesRun =
@@ -929,6 +1055,9 @@ createWorkerHarness({
             ...(earlyStopped ? { earlyStopped: true } : {}),
             msaMode,
             msaDepth: msa.msaDepth,
+            ...(templateSource && alignment
+              ? buildTemplateProvenance(templateSource, alignment, templateSpanChains)
+              : {}),
           },
           elapsedMs: performance.now() - foldStart,
         });
@@ -964,17 +1093,9 @@ createWorkerHarness({
         const target = targets[i];
         const cand = target.cand;
         const itemSeed = target.seed;
-        const parsedCand = parseCandidateProteinChains(cand.sequence, cand.chainLengths);
+        const parsedCand = parsedCandsByTarget[i];
         const cleanSeq = parsedCand.cleanSeq;
-        if (cleanSeq.length === 0) {
-          throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
-        }
-        const validCount = (cleanSeq.match(/[ACDEFGHIKLMNPQRSTVWY]/g) ?? []).length;
-        if (validCount / cleanSeq.length < 0.5) {
-          throw new Error(
-            `Refusing to fold "${cand.id}": ${cleanSeq.length - validCount}/${cleanSeq.length} residues are unknown/non-canonical (>50% unknown). Check the upstream generator output.`,
-          );
-        }
+        const alignment = alignmentsByTarget[i];
         const { chainLengths, chainSeqs: proteinChainSeqs } = parsedCand;
         const msaChainInfo = resolveMsaChainIdsSafely({
           chainCount: proteinChainSeqs.length,
@@ -1028,11 +1149,20 @@ createWorkerHarness({
               }
             : {}),
         });
+        const templateSlots = alignment
+          ? buildAf3TemplateSlots(
+              { tokens: batch.tokens, residueOfToken: batch.residueOfToken },
+              alignment,
+              modelKey,
+              { spanChains: templateSpanChains },
+            )
+          : undefined;
         const result = await lfAf3.foldBatch(gpuDevice, batch, loadedAf3.weights, {
           mode: 'diffusion',
           steps: diffusionSteps,
           recycles,
           seed: itemSeed,
+          ...(templateSlots ? { templateSlots } : {}),
           onStage: (name: string, detail: Record<string, unknown> = {}) => {
             let sub = 0.1;
             let label = name;
@@ -1197,6 +1327,9 @@ createWorkerHarness({
             ...(earlyStopped ? { earlyStopped: true } : {}),
             msaMode,
             msaDepth: msa.msaDepth,
+            ...(templateSource && alignment
+              ? buildTemplateProvenance(templateSource, alignment, templateSpanChains)
+              : {}),
           },
           elapsedMs: performance.now() - foldStart,
         });
@@ -1219,6 +1352,13 @@ createWorkerHarness({
         ligandCcdCodes: isAf3 || isEsmfold2 ? ligandCcdCodes : [],
         dnaSeqs: isAf3 || isEsmfold2 ? dnaSeqs : [],
         rnaSeqs: isAf3 || isEsmfold2 ? rnaSeqs : [],
+        ...(templateSource
+          ? {
+              templateDigest: templateSource.digest,
+              templateFormat: templateSource.format,
+              templateSpanChains,
+            }
+          : {}),
       }),
     );
 
@@ -1248,60 +1388,104 @@ createWorkerHarness({
       folds,
     };
 
-    // Also export the selected representative fold as a StructureArtifact so downstream
-    // ProteinMPNN / RFD4 template / Scorer blocks can chain directly out of LocalFold,
-    // carrying explicit `representativeSelection` provenance.
-    let bestStructure: StructureArtifact | undefined;
-    if (rep) {
-      const bestFold = rep.fold;
-      const bestParsed = parsePdbBackbone(bestFold.pdbText);
-      const bestChainIds =
-        bestFold.chainIds && bestFold.chainIds.length === bestParsed.nResidues
-          ? bestFold.chainIds
-          : bestParsed.chainIds;
+    // Also export every folded candidate as a StructureArtifact (with the selected
+    // representative at the top level and all N folds in `collection.items` when N > 1)
+    // so downstream GNINA / ProteinMPNN / LigandMPNN / Dyna-1 / ESM-C / Compare blocks
+    // can operate across all folds rather than collapsing to #1.
+    const buildFoldStructure = (
+      fold: FoldedCandidate,
+      idx: number,
+      selection?: NonNullable<typeof rep>['selection'],
+    ): StructureArtifact => {
+      const parsedFold = parsePdbBackbone(fold.pdbText);
+      const foldChainIds =
+        fold.chainIds && fold.chainIds.length === parsedFold.nResidues
+          ? fold.chainIds
+          : parsedFold.chainIds;
+      const scoreVal =
+        selection?.scoreValue !== undefined
+          ? selection.scoreValue
+          : Number.isFinite(fold.meanPlddt)
+            ? fold.meanPlddt
+            : null;
       const confTag =
-        rep.selection.scoreValue !== null && rep.selection.scoreValue !== undefined
-          ? rep.selection.criterion === 'highest-multimer-score'
-            ? `score ${rep.selection.scoreValue.toFixed(2)}`
-            : `pLDDT ${rep.selection.scoreValue.toFixed(1)}`
+        scoreVal !== null
+          ? selection?.criterion === 'highest-multimer-score'
+            ? `score ${scoreVal.toFixed(2)}`
+            : `pLDDT ${scoreVal.toFixed(1)}`
           : 'no confidence';
-      bestStructure = {
+      return {
         kind: 'StructureArtifact',
-        id: `foldstruct-${modelKey}-${bestFold.sequenceId}-${runHash}`,
-        label: `${bestFold.sequenceId} (${modelKey}, ${confTag})`,
+        id: `foldstruct-${modelKey}-${fold.sequenceId}-${runHash}`,
+        label: `${fold.sequenceId} (${modelKey}, ${confTag})`,
         sourceModelId: 'localfold-af2',
-        parentStructureId: bestFold.sourceStructureId ?? sourceStructureId,
-        ...(bestFold.designKey ? { designKey: bestFold.designKey } : {}),
-        ...(bestFold.designIndex !== undefined ? { designIndex: bestFold.designIndex } : {}),
-        representativeSelection: rep.selection,
+        parentStructureId: fold.sourceStructureId ?? sourceStructureId,
+        designKey: fold.foldKey ?? fold.designKey ?? fold.key ?? fold.sequenceId,
+        designIndex: fold.designIndex ?? idx,
+        ...(selection ? { representativeSelection: selection } : {}),
         bfactorSemantics: 'plddt-0-100',
         atomGranularity: 'all-atom',
-        ...(bestFold.provenance ? { provenance: bestFold.provenance } : {}),
-        length: bestParsed.nResidues,
-        sequence: bestFold.sequence,
-        caCoords: bestParsed.caCoords,
-        backbone4Coords: bestParsed.backbone4Coords,
-        pdbText: bestFold.pdbText,
-        chainIds: bestChainIds,
-        chainLengths: bestFold.chainLengths ?? bestParsed.diagnostics.chainLengths,
-        insCodes: bestParsed.insCodes,
-        sourceResidues: bestParsed.sourceResidues,
-        chainIdMap: bestParsed.chainIdMap,
-        atomPresence: bestParsed.atomPresence,
-        observedBackboneMask: bestParsed.observedBackboneMask,
-        diagnostics: bestParsed.diagnostics,
+        ...(fold.provenance ? { provenance: fold.provenance } : {}),
+        length: parsedFold.nResidues,
+        sequence: fold.sequence,
+        caCoords: parsedFold.caCoords,
+        backbone4Coords: parsedFold.backbone4Coords,
+        pdbText: fold.pdbText,
+        chainIds: foldChainIds,
+        chainLengths: fold.chainLengths ?? parsedFold.diagnostics.chainLengths,
+        insCodes: parsedFold.insCodes,
+        sourceResidues: parsedFold.sourceResidues,
+        chainIdMap: parsedFold.chainIdMap,
+        atomPresence: parsedFold.atomPresence,
+        observedBackboneMask: parsedFold.observedBackboneMask,
+        diagnostics: parsedFold.diagnostics,
         geometry: computeGeometryStats(
-          bestParsed.caCoords,
-          bestChainIds,
-          bestParsed.resNums,
-          bestParsed.insCodes,
+          parsedFold.caCoords,
+          foldChainIds,
+          parsedFold.resNums,
+          parsedFold.insCodes,
         ),
       };
+    };
+
+    let bestStructure: StructureArtifact | undefined;
+    const foldStructures: StructureArtifact[] = [];
+    if (rep) {
+      const bestIdx = Math.max(0, folds.indexOf(rep.fold));
+      for (let i = 0; i < folds.length; i++) {
+        foldStructures.push(
+          buildFoldStructure(folds[i], i, i === bestIdx ? rep.selection : undefined),
+        );
+      }
+      const primaryStruct = foldStructures[bestIdx] ?? buildFoldStructure(rep.fold, 0, rep.selection);
+      if (foldStructures.length > 1) {
+        bestStructure = {
+          ...primaryStruct,
+          representativeSelection: rep.selection,
+          collection: {
+            kind: 'Collection',
+            schema: 'denovo.collection/v1',
+            id: `foldstruct-col-${modelKey}-${runHash}`,
+            familyKey: `localfold-${modelKey}-${runHash}`,
+            collectionKind,
+            requestedCount: foldStructures.length + excludedCandidates.length,
+            complete: excludedCandidates.length === 0,
+            items: foldStructures,
+            keys: foldStructures.map((s) => s.designKey ?? s.id),
+            representativeSelection: rep.selection,
+          },
+        };
+      } else {
+        bestStructure = primaryStruct;
+      }
     }
 
     const transferViews: Array<ArrayBufferView | undefined> = [];
     for (const f of folds) {
       transferViews.push(f.caCoords, f.plddt, f.pae);
+    }
+    for (const s of foldStructures) {
+      transferViews.push(s.caCoords, s.backbone4Coords, s.observedBackboneMask);
     }
     if (bestStructure) {
       transferViews.push(

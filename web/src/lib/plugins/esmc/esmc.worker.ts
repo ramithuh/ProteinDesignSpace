@@ -218,8 +218,14 @@ createWorkerHarness({
     const seqSet = ctx.inputs?.sequences as SequenceSet | undefined;
     const struct = ctx.inputs?.structure as StructureArtifact | undefined;
 
+    const structItems: StructureArtifact[] =
+      struct?.collection?.items && struct.collection.items.length > 1
+        ? struct.collection.items
+        : struct
+          ? [struct]
+          : [];
     const firstSeqLen =
-      seqSet?.candidates?.[0]?.sequence?.length ?? struct?.sequence?.length ?? null;
+      seqSet?.candidates?.[0]?.sequence?.length ?? structItems[0]?.sequence?.length ?? null;
     const capInfo = resolveEffectiveMaxSequences(
       'esmc',
       { ...p, capMode: p.capMode, maxSequences: p.maxSequences },
@@ -229,6 +235,7 @@ createWorkerHarness({
 
     let sourceCandidates: SequenceCandidate[] = [];
     let excludedCandidates: ExcludedCandidateRecord[] = [];
+    let pairedStructures: StructureArtifact[] = [];
     const parentStructureId: string | undefined = struct?.id ?? seqSet?.parentStructureId;
 
     if (seqSet && seqSet.candidates.length > 0) {
@@ -247,19 +254,35 @@ createWorkerHarness({
           };
         });
       }
-    } else if (struct && struct.sequence) {
-      sourceCandidates = [
-        {
-          id: struct.id,
-          key: struct.designKey ?? struct.id,
-          sequence: struct.sequence,
-          chainLengths: struct.chainLengths,
-          score: null,
-          globalScore: null,
-          sourceModelId: struct.sourceModelId,
-          sourceStructureId: struct.id,
-        },
-      ];
+    } else if (structItems.length > 0 && structItems.some((s) => Boolean(s.sequence))) {
+      const validStructs = structItems.filter((s) => Boolean(s.sequence));
+      pairedStructures = validStructs.slice(0, maxSequences);
+      sourceCandidates = pairedStructures.map((s, idx) => ({
+        id: s.id,
+        key: s.designKey ?? s.id,
+        ...(s.designKey ? { designKey: s.designKey } : {}),
+        designIndex: s.designIndex ?? idx,
+        sequence: s.sequence,
+        chainLengths: s.chainLengths,
+        score: null,
+        globalScore: null,
+        sourceModelId: s.sourceModelId,
+        sourceStructureId: s.id,
+      }));
+      if (validStructs.length > maxSequences) {
+        const reasonPrefix = capInfo.isPassBudgetCapped
+          ? `Excluded by masked LLR pass budget (${maxSequences} of ${validStructs.length})`
+          : `Excluded by maxSequences=${maxSequences}`;
+        excludedCandidates = validStructs.slice(maxSequences).map((s, offset) => {
+          const index = maxSequences + offset;
+          return {
+            key: s.designKey ?? s.id,
+            id: s.id,
+            index,
+            reason: `${reasonPrefix} (structure #${index + 1} of ${validStructs.length})`,
+          };
+        });
+      }
     } else {
       throw new Error(
         'ESM-C 300M requires an upstream SequenceSet (or StructureArtifact to extract its sequence).',
@@ -278,6 +301,11 @@ createWorkerHarness({
     const activeEngine = await ensureEngine(ctx, precision);
 
     const scoredCandidates: SequenceCandidate[] = [];
+    const perCandidateRes: Array<{
+      seq: string;
+      llr: Float32Array<ArrayBuffer>;
+      wtLogProbs: Float32Array<ArrayBuffer>;
+    }> = [];
     let primaryLlr = new Float32Array(0);
     let primaryWtLogProbs = new Float32Array(0);
     let primarySeq = cleanedSeqs[0];
@@ -421,6 +449,7 @@ createWorkerHarness({
         primaryNaturalness = initialRes.naturalness;
         primaryPpl = initialRes.pseudoPerplexity;
       }
+      perCandidateRes.push({ seq, llr: initialRes.llr, wtLogProbs: initialRes.wtLogProbs });
 
       const derivedSeqKey = seqChanged
         ? `${cand.sequenceKey ?? cand.key ?? cand.id}:esmc-fill:${fnv1a(outSeq)}`
@@ -551,13 +580,22 @@ createWorkerHarness({
       },
     };
 
+    const emittedSourceStructureIds =
+      seqSet?.sourceStructureIds ??
+      (pairedStructures.length > 1 ? pairedStructures.map((s) => s.id) : undefined);
+    const emittedCollectionKind =
+      seqSet?.collectionKind ??
+      (pairedStructures.length > 1
+        ? (struct?.collection?.collectionKind ?? 'independent-candidates')
+        : undefined);
+
     const sequences: SequenceSet = {
       kind: 'SequenceSet',
       id: `esmc-seqs-${mode}-${runHash}`,
       parentStructureId: parentStructureId ?? 'none',
       sourceStructureId: parentStructureId ?? 'none',
-      ...(seqSet?.sourceStructureIds ? { sourceStructureIds: seqSet.sourceStructureIds } : {}),
-      ...(seqSet?.collectionKind ? { collectionKind: seqSet.collectionKind } : {}),
+      ...(emittedSourceStructureIds ? { sourceStructureIds: emittedSourceStructureIds } : {}),
+      ...(emittedCollectionKind ? { collectionKind: emittedCollectionKind } : {}),
       ...(seqSet?.lockedChains?.length ? { lockedChains: seqSet.lockedChains } : {}),
       ...(seqSet?.chainRoles ? { chainRoles: seqSet.chainRoles } : {}),
       sourceModelId: 'esmc',
@@ -572,30 +610,56 @@ createWorkerHarness({
       track.values,
     ];
 
-    if (struct && (struct.pdbText || struct.cifText) && sourceResidues.length === L) {
-      const paintValues = new Float32Array(L);
-      for (let i = 0; i < L; i++) {
-        paintValues[i] = Number.isFinite(meanPerPosition[i])
-          ? meanPerPosition[i]
-          : primaryWtLogProbs[i];
+    const buildPaintedStruct = (
+      targetStruct: StructureArtifact,
+      targetSeq: string,
+      targetLlr: Float32Array,
+      targetWt: Float32Array,
+    ): StructureArtifact | null => {
+      if (!targetStruct.pdbText && !targetStruct.cifText) return null;
+      const tText = targetStruct.cifText || targetStruct.pdbText;
+      const tRes =
+        targetStruct.sourceResidues && targetStruct.sourceResidues.length > 0
+          ? targetStruct.sourceResidues
+          : tText
+            ? parseStructureText(tText).sourceResidues
+            : [];
+      const tL = targetSeq.length;
+      if (tRes.length !== tL) return null;
+      const paintValues = new Float32Array(tL);
+      for (let r = 0; r < tL; r++) {
+        let s = 0;
+        let cnt = 0;
+        const wt = targetSeq[r];
+        for (let a = 0; a < K; a++) {
+          if (CANONICAL_ALPHABET[a] === wt) continue;
+          const v = targetLlr[r * K + a];
+          if (Number.isFinite(v)) {
+            s += v;
+            cnt++;
+          }
+        }
+        paintValues[r] = cnt > 0 ? s / cnt : targetWt[r];
       }
-      const paintedPdb = struct.pdbText
-        ? paintStructureBfactors(struct.pdbText, paintValues)
-        : struct.pdbText;
-      const paintedCif = struct.cifText
-        ? paintStructureBfactors(struct.cifText, paintValues)
+      const paintedPdb = targetStruct.pdbText
+        ? paintStructureBfactors(targetStruct.pdbText, paintValues)
+        : targetStruct.pdbText;
+      const paintedCif = targetStruct.cifText
+        ? paintStructureBfactors(targetStruct.cifText, paintValues)
         : undefined;
-      const caCopy = new Float32Array(struct.caCoords);
-      const bbCopy = new Float32Array(struct.backbone4Coords);
-      const obsCopy = struct.observedBackboneMask
-        ? new Uint8Array(struct.observedBackboneMask)
+      const caCopy = new Float32Array(targetStruct.caCoords);
+      const bbCopy = new Float32Array(targetStruct.backbone4Coords);
+      const obsCopy = targetStruct.observedBackboneMask
+        ? new Uint8Array(targetStruct.observedBackboneMask)
         : undefined;
-
-      const paintedStructure: StructureArtifact = {
-        ...struct,
-        id: `esmc-struct-${struct.id}-${mode}-${precision}-${runHash}`,
-        label: `${struct.label} (ESM-C ${mode === 'masked' ? 'Masked' : mode === 'fill' ? 'Fill' : 'WT'} LLR)`,
-        parentStructureId: struct.id,
+      transferableViews.push(caCopy, bbCopy, obsCopy);
+      const baseCopy = { ...targetStruct };
+      delete baseCopy.collection;
+      return {
+        ...baseCopy,
+        id: `esmc-struct-${targetStruct.id}-${mode}-${precision}-${runHash}`,
+        label: `${targetStruct.label} (ESM-C ${mode === 'masked' ? 'Masked' : mode === 'fill' ? 'Fill' : 'WT'} LLR)`,
+        parentStructureId: targetStruct.id,
         caCoords: caCopy,
         backbone4Coords: bbCopy,
         ...(obsCopy ? { observedBackboneMask: obsCopy } : {}),
@@ -603,12 +667,48 @@ createWorkerHarness({
         ...(paintedCif !== undefined ? { cifText: paintedCif } : {}),
         bfactorSemantics: 'llr-fitness',
         provenance: {
-          ...struct.provenance,
+          ...targetStruct.provenance,
           quantization: precision,
         },
       };
-      outputs.structure = paintedStructure;
-      transferableViews.push(caCopy, bbCopy, obsCopy);
+    };
+
+    if (pairedStructures.length > 1) {
+      const paintedItems: StructureArtifact[] = [];
+      for (let idx = 0; idx < pairedStructures.length; idx++) {
+        const resItem = perCandidateRes[idx];
+        if (!resItem) continue;
+        const painted = buildPaintedStruct(
+          pairedStructures[idx],
+          resItem.seq,
+          resItem.llr,
+          resItem.wtLogProbs,
+        );
+        if (painted) paintedItems.push(painted);
+      }
+      if (paintedItems.length === 1) {
+        outputs.structure = paintedItems[0];
+      } else if (paintedItems.length > 1) {
+        const primaryPainted = paintedItems[0];
+        outputs.structure = {
+          ...primaryPainted,
+          id: `esmc-batch-${paintedItems.length}-${mode}-${precision}-${runHash}`,
+          collection: {
+            kind: 'Collection',
+            schema: 'denovo.collection/v1',
+            id: `esmc-col-${mode}-${runHash}`,
+            familyKey: `esmc-${mode}-${runHash}`,
+            collectionKind: emittedCollectionKind ?? 'independent-candidates',
+            requestedCount: paintedItems.length + excludedCandidates.length,
+            complete: excludedCandidates.length === 0,
+            items: paintedItems,
+            keys: paintedItems.map((it, idx) => it.designKey ?? it.id ?? `item-${idx}`),
+          },
+        };
+      }
+    } else if (struct && (struct.pdbText || struct.cifText) && sourceResidues.length === L) {
+      const painted = buildPaintedStruct(struct, primarySeq, primaryLlr, primaryWtLogProbs);
+      if (painted) outputs.structure = painted;
     }
 
     const transferables = collectOwnedTransferables(transferableViews);

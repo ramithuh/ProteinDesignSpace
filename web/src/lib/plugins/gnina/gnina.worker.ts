@@ -28,6 +28,10 @@ import {
   dockPoseWithWorkerFallback,
   resolveGninaDockWorkers,
 } from './dock-workers';
+import {
+  extractStructureCollectionItems,
+  wrapGninaCollection,
+} from './collection';
 import type {
   DockingScoreSummary,
   GninaPoseScoreRow,
@@ -259,24 +263,20 @@ createWorkerHarness({
     const minimizeIterations = Math.max(1, Math.min(12, Math.round(Number(p.minimizeIterations ?? 4))));
     const cnnWeight = Math.max(0, Math.min(5, Number(p.cnnWeight ?? 1.0)));
 
-    const struct = ctx.inputs?.structure as StructureArtifact | undefined;
-    if (!struct || (!struct.pdbText && !struct.cifText)) {
+    const rootStruct = ctx.inputs?.structure as StructureArtifact | undefined;
+    if (!rootStruct || (!rootStruct.pdbText && !rootStruct.cifText)) {
       throw new Error('GNINA 1.3 requires an upstream all-atom StructureArtifact (holo protein–ligand complex or receptor + ligand SDF).');
     }
-    if (struct.atomGranularity === 'ca-only' || struct.atomGranularity === 'backbone4') {
-      throw new Error(
-        `GNINA 1.3 requires all-atom receptor coordinates (including side chains), but "${struct.label}" is ${struct.atomGranularity}.`,
-      );
-    }
-
-    const rawStructText = struct.pdbText?.trim() ? struct.pdbText : struct.cifText ?? '';
-    const prep = extractHoloReceptorAndLigands(rawStructText, {
-      ligandCode: ligandCode || undefined,
-      includeMetals,
-    });
-
-    if (!prep.receptorPdb.trim()) {
-      throw new Error(`GNINA 1.3 found no protein receptor atoms in "${struct.label}".`);
+    const structItems = extractStructureCollectionItems(rootStruct);
+    for (const item of structItems) {
+      if (!item.pdbText && !item.cifText) {
+        throw new Error(`GNINA 1.3 requires PDB or mmCIF coordinates on "${item.label}".`);
+      }
+      if (item.atomGranularity === 'ca-only' || item.atomGranularity === 'backbone4') {
+        throw new Error(
+          `GNINA 1.3 requires all-atom receptor coordinates (including side chains), but "${item.label}" is ${item.atomGranularity}.`,
+        );
+      }
     }
 
     const useExternal = ligandSdf.length > 0;
@@ -287,20 +287,56 @@ createWorkerHarness({
       rcsbCcdSdf = await fetchRcsbCcdIdealSdf(dockLigandCcd, ctx.signal);
     }
 
-    if (!useExternal && !useRcsbCcd && !prep.selectedLigandSdf) {
-      if (ligandCode && prep.detectedLigandCodes.length > 0) {
+    const preparedItems = structItems.map((item) => {
+      const rawStructText = item.pdbText?.trim() ? item.pdbText : item.cifText ?? '';
+      const prep = extractHoloReceptorAndLigands(rawStructText, {
+        ligandCode: ligandCode || undefined,
+        includeMetals,
+      });
+      if (!prep.receptorPdb.trim()) {
+        throw new Error(`GNINA 1.3 found no protein receptor atoms in "${item.label}".`);
+      }
+      if (!useExternal && !useRcsbCcd && !prep.selectedLigandSdf) {
+        if (ligandCode && prep.detectedLigandCodes.length > 0) {
+          throw new Error(
+            `Ligand "${ligandCode}" not found in "${item.label}". Detected organic ligands: ${prep.detectedLigandCodes.join(', ')}.`,
+          );
+        }
         throw new Error(
-          `Ligand "${ligandCode}" not found in "${struct.label}". Detected organic ligands: ${prep.detectedLigandCodes.join(', ')}.`,
+          taskMode === 'dock'
+            ? `No ligand specified for docking into "${item.label}". Provide a CCD code (e.g. BTN, ATP, I4B), paste a ligand SDF/MOL2, or connect a holo complex.`
+            : `No organic small-molecule ligand found in "${item.label}". Wire a holo protein–ligand structure (e.g. 1STP, 1CTT, 184L) or paste a ligand SDF/MOL2 in Advanced parameters.`,
         );
       }
-      throw new Error(
-        taskMode === 'dock'
-          ? `No ligand specified for docking into "${struct.label}". Provide a CCD code (e.g. BTN, ATP, I4B), paste a ligand SDF/MOL2, or connect a holo complex.`
-          : `No organic small-molecule ligand found in "${struct.label}". Wire a holo protein–ligand structure (e.g. 1STP, 1CTT, 184L) or paste a ligand SDF/MOL2 in Advanced parameters.`,
-      );
-    }
+      return { item, prep };
+    });
 
     const activeEngine = await ensureEngine(ctx, precision);
+    const totalItems = preparedItems.length;
+    const scoredItems: StructureArtifact[] = [];
+    const perItemTracks: Array<ResidueTrackArtifact | undefined> = [];
+    const transferViews: Array<ArrayBufferView | undefined> = [];
+    const rootCtx = ctx;
+
+    for (let itemIdx = 0; itemIdx < totalItems; itemIdx++) {
+      if (rootCtx.signal.aborted) {
+        throw new Error('Run aborted');
+      }
+      const { item: struct, prep } = preparedItems[itemIdx];
+      const itemBase = 0.45 + (itemIdx / totalItems) * 0.52;
+      const itemSpan = 0.52 / totalItems;
+      const itemPrefix = totalItems > 1 ? `[${itemIdx + 1}/${totalItems}] ` : '';
+      const ctx: WorkerRunContext = {
+        ...rootCtx,
+        progress: (phase: string, rawFrac: number, detail: string) => {
+          const localFrac = Math.max(0, Math.min(1, (rawFrac - 0.45) / 0.55));
+          rootCtx.progress(
+            phase,
+            itemBase + localFrac * itemSpan,
+            detail ? `${itemPrefix}${detail}` : detail,
+          );
+        },
+      };
 
     const typedReceptor = gninaMod.parseReceptor(prep.receptorPdb, 'pdb');
     const externalFmt = useExternal ? detectExternalLigandFormat(ligandSdf) : 'sdf';
@@ -775,12 +811,17 @@ createWorkerHarness({
         ? parseStructureText(outputPdbText).diagnostics
         : struct.diagnostics;
 
-    const outStructure: StructureArtifact = {
-      ...struct,
+    const memberBase = { ...struct };
+    delete memberBase.collection;
+
+    const memberStructure: StructureArtifact = {
+      ...memberBase,
       id: `gnina-${modeTag}-${struct.id}-${precision}-${runHash}`,
       label: `${struct.label} · GNINA ${selectedLigandName} (CNN ${primaryRow.cnnScore.toFixed(2)} · pK ${primaryRow.cnnAffinity.toFixed(2)})`,
       sourceModelId: 'gnina',
       parentStructureId: struct.id,
+      designKey: struct.designKey ?? struct.id,
+      designIndex: struct.designIndex ?? itemIdx,
       caCoords: caCopy,
       backbone4Coords: bbCopy,
       ...(obsCopy ? { observedBackboneMask: obsCopy } : {}),
@@ -797,11 +838,22 @@ createWorkerHarness({
       },
     };
 
+    scoredItems.push(memberStructure);
+    perItemTracks.push(trackArtifact);
+    transferViews.push(caCopy, bbCopy, obsCopy);
+    }
+
+    const { structure: outStructure, representativeIndex } = wrapGninaCollection(scoredItems, {
+      taskMode,
+      sortBy,
+      collectionKind: rootStruct.collection?.collectionKind,
+    });
+
     const outputs: Record<string, unknown> = { structure: outStructure };
-    const transferViews: Array<ArrayBufferView | undefined> = [caCopy, bbCopy, obsCopy];
-    if (trackArtifact) {
-      outputs.track = trackArtifact;
-      transferViews.push(trackArtifact.values);
+    const repTrack = perItemTracks[representativeIndex] ?? perItemTracks.find(Boolean);
+    if (repTrack) {
+      outputs.track = repTrack;
+      transferViews.push(repTrack.values);
     }
 
     return {

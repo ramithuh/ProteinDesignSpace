@@ -34,13 +34,29 @@ export async function runStructureCompareCpu(
   });
   const seenIds = new Set<string>();
   const combinedItems: StructureArtifact[] = [];
-  const addItem = (item: StructureArtifact | undefined) => {
+  const addSingleItem = (item: StructureArtifact | undefined) => {
     if (!item || seenIds.has(item.id)) return;
     seenIds.add(item.id);
-    combinedItems.push(item);
+    if (item.collection) {
+      const flat = { ...item };
+      delete flat.collection;
+      combinedItems.push(flat);
+    } else {
+      combinedItems.push(item);
+    }
   };
-  addItem(ref);
-  for (const s of structList) addItem(s);
+  const addItemOrCollection = (item: StructureArtifact | undefined) => {
+    if (!item) return;
+    if (item.collection?.items && item.collection.items.length > 1) {
+      for (const member of item.collection.items) {
+        addSingleItem(member);
+      }
+      return;
+    }
+    addSingleItem(item);
+  };
+  addSingleItem(ref);
+  for (const s of structList) addItemOrCollection(s);
 
   if (combinedItems.length <= 1 && !ref) {
     return { structure: primary };

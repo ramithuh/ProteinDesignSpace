@@ -314,11 +314,22 @@ export function computePlannedFlowMap(
       const mode = String(node.params?.mode ?? 'demo-bundle');
       res = { count: 1, length: mode === 'demo-bundle' ? 53 : null, isEstimate: true };
     } else if (node.adapterId === 'localfold-af2') {
-      // LocalFold `structure` port collapses to a single representative fold
+      // LocalFold `structure` port emits a StructureArtifact.collection containing all folded candidates
       const upSeqEdge = findEdge(node.id, 'sequences');
       const upSeqNode = upSeqEdge ? nodeById.get(upSeqEdge.fromNode) : null;
-      const upInfo = upSeqNode ? sequencesOut(upSeqNode, visiting) : null;
-      res = { count: 1, length: upInfo?.length ?? null, isEstimate: true };
+      if (upSeqNode) {
+        const upInfo = sequencesOut(upSeqNode, visiting);
+        const cap = resolveEffectiveMaxSequences('localfold-af2', node.params);
+        const maxTotalFolds = readClampedInt(node.params?.maxTotalFolds, 16, 1, 64);
+        const perBbAllowed = Math.min(upInfo.sequences, upInfo.backbones * cap.limit);
+        const foldedCount =
+          upInfo.backbones > 1
+            ? Math.max(1, Math.min(perBbAllowed, maxTotalFolds))
+            : Math.max(1, Math.min(upInfo.sequences, cap.limit));
+        res = { count: foldedCount, length: upInfo.length, isEstimate: upInfo.isEstimate };
+      } else {
+        res = { count: 1, length: null, isEstimate: true };
+      }
     } else {
       const upEdge = findEdge(node.id, 'structure') ?? findEdge(node.id, 'template');
       const upNode = upEdge ? nodeById.get(upEdge.fromNode) : null;
@@ -684,25 +695,55 @@ export function computePlannedFlowMap(
         const upNode = nodeById.get(upStructEdge.fromNode);
         if (upNode) {
           const bb = backbonesOut(upNode);
-          if (bb.count > 1) {
-            const info: NodeFlowInfo = {
-              nodeId: node.id,
-              adapterId: node.adapterId,
-              incomingCount: bb.count,
-              incomingBackbones: bb.count,
-              processedCount: 1,
-              droppedCount: bb.count - 1,
-              dropKind: 'collection-collapse',
-              isEstimate: bb.isEstimate,
-              effectiveCap: 1,
-              severity: 'info',
-              badgeText: `ℹ Rep structure #1 of ${bb.count}`,
-              detailText: `Operates on the representative structure (#1 of ${bb.count} backbones).`,
-            };
-            nodes.set(node.id, info);
-            recordEdge(upStructEdge, bb.count, 1, bb.count - 1, 'collection-collapse', bb.isEstimate, 'struct');
-            pushDownstreamImpact(upStructEdge.fromNode, node, info);
+          const cap = resolveEffectiveMaxSequences(node.adapterId, node.params, {
+            sequenceLength: bb.length,
+          });
+          const incomingCount = bb.count;
+          const processedCount = Math.max(1, Math.min(cap.limit, incomingCount));
+          const droppedCount = Math.max(0, incomingCount - processedCount);
+          const dropKind: FlowDropKind =
+            droppedCount > 0
+              ? cap.isPassBudgetCapped
+                ? 'latency-budget'
+                : 'cap-per-backbone'
+              : 'none';
+          const tilde = bb.isEstimate ? '~' : '';
+          let badgeText: string | null = null;
+          let detailText: string | null = null;
+          let severity: 'warning' | 'info' | null = null;
+          if (droppedCount > 0) {
+            severity = 'warning';
+            if (dropKind === 'latency-budget') {
+              badgeText = `⚠ ${tilde}${processedCount} of ${incomingCount} structs (masked budget)`;
+              detailText = cap.unknownLengthFallback
+                ? `Masked LLR requires L forward passes per structure; auto-capped at 1 pre-run until length is known.`
+                : `Masked LLR pass budget (${ESMC_MASKED_PASS_BUDGET} passes) caps ${incomingCount} structures at ${processedCount} (L=${bb.length}).`;
+            } else if (cap.capMode === 'fixed') {
+              badgeText = `⚠ ${tilde}${processedCount} of ${incomingCount} structs (cap ${cap.limit})`;
+              detailText = `Fixed cap (maxSequences=${cap.limit}) scores ${processedCount} of ${incomingCount} upstream structures (${droppedCount} skipped).`;
+            } else {
+              badgeText = `⚠ ${tilde}${processedCount} of ${incomingCount} structs (max ${cap.limit})`;
+              detailText = `Batch limit (${cap.limit}) caps ${incomingCount} incoming structures to ${processedCount}.`;
+            }
           }
+          const info: NodeFlowInfo = {
+            nodeId: node.id,
+            adapterId: node.adapterId,
+            incomingCount,
+            incomingBackbones: bb.count,
+            processedCount,
+            droppedCount,
+            dropKind,
+            isEstimate: bb.isEstimate,
+            effectiveCap: cap.limit,
+            capMode: cap.capMode,
+            severity,
+            badgeText,
+            detailText,
+          };
+          nodes.set(node.id, info);
+          recordEdge(upStructEdge, incomingCount, processedCount, droppedCount, dropKind, bb.isEstimate, 'struct');
+          pushDownstreamImpact(upStructEdge.fromNode, node, info);
         }
       }
       continue;
@@ -783,8 +824,8 @@ export function computePlannedFlowMap(
       continue;
     }
 
-    // Representative-structure-only consumers (`thermompnn`, `gnina`)
-    if (node.adapterId === 'thermompnn' || node.adapterId === 'gnina') {
+    // Representative-structure-only consumers (`thermompnn`)
+    if (node.adapterId === 'thermompnn') {
       const upEdge = findEdge(node.id, 'structure');
       if (!upEdge) continue;
       const upNode = nodeById.get(upEdge.fromNode);
@@ -832,10 +873,14 @@ export function computePlannedFlowMap(
         if (upInfo.sequences > 1) {
           recordEdge(edge, upInfo.sequences, upInfo.sequences, 0, 'none', upInfo.isEstimate, 'seq');
         }
-      } else if (edge.toPort === 'structure' || edge.toPort === 'template') {
+      } else if (edge.toPort === 'structure' || edge.toPort === 'template' || edge.toPort === 'structures') {
         const bb = backbonesOut(upNode);
         if (bb.count > 1) {
-          const isFanoutConsumer = INVERSE_FOLD_PRODUCERS.has(node.adapterId) || node.adapterId === 'designability-scorer';
+          const isFanoutConsumer =
+            INVERSE_FOLD_PRODUCERS.has(node.adapterId) ||
+            node.adapterId === 'designability-scorer' ||
+            node.adapterId === 'gnina' ||
+            node.adapterId === 'structure-compare';
           if (isFanoutConsumer) {
             recordEdge(edge, bb.count, bb.count, 0, 'none', bb.isEstimate, 'struct');
           }

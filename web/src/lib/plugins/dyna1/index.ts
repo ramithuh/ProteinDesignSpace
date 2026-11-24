@@ -101,7 +101,7 @@ export const dyna1Plugin: ModelPlugin = {
       outputCardinality: {
         track: 1,
         sequences: items,
-        ...(ctx.connectedInputs.has('structure') ? { structure: 1 } : {}),
+        ...(ctx.connectedInputs.has('structure') ? { structure: items } : {}),
       },
       stageBreakdown: { score: items },
     };
