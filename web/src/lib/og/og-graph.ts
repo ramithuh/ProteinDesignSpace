@@ -363,9 +363,9 @@ function buildTitleAndDesc(
 ): { title: string; description: string } {
   if (nodes.length === 0) {
     return {
-      title: 'denovo.run — Browser-Native WebGPU Protein Design',
+      title: 'denovo.run — Interactive WebGPU Molecular Design Workspace',
       description:
-        'Compose RFD4-Proteina, Genie 3, ProteinMPNN, and LocalFold workflows locally in your browser via WebGPU.',
+        'Have a molecular design idea you want to quickly prototype in your browser? Interactive browser-native WebGPU workspace for structure, design, folding & docking.',
     };
   }
   if (nodes.length === 1) {
@@ -377,7 +377,7 @@ function buildTitleAndDesc(
     const chip = cleanChip && cleanChip !== n.label ? ` (${cleanChip})` : '';
     return {
       title: `${n.label}${chip} — denovo.run`,
-      description: `Interactive browser-native WebGPU protein structure & design workspace · ${n.label}${chip}.`,
+      description: `Interactive browser-native WebGPU molecular design workspace · ${n.label}${chip}.`,
     };
   }
   const chainNames = nodes
@@ -391,7 +391,7 @@ function buildTitleAndDesc(
     .map((n) => (n.paramChip ? `${n.label} (${n.paramChip})` : n.label));
   return {
     title: `${baseTitle} — denovo.run`,
-    description: `${nodes.length}-block WebGPU protein design workflow: ${summaryParts.join(' → ')}. Run locally in your browser.`,
+    description: `${nodes.length}-block WebGPU molecular design workflow: ${summaryParts.join(' → ')}. Prototype locally in your browser.`,
   };
 }
 

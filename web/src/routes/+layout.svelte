@@ -20,7 +20,7 @@
 </script>
 
 <svelte:head>
-  <title>denovo.run — Browser-Native WebGPU Protein Design</title>
+  <title>denovo.run — Interactive WebGPU Molecular Design Workspace</title>
 </svelte:head>
 
 <main>
