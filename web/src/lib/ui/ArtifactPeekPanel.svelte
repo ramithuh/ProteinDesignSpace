@@ -1018,20 +1018,12 @@
     </div>
   {/if}
 
-  {#if activeSlot?.direction === 'in' && outSlots.length > 0 && outSlots.every((s) => s.artifact === null) && node && onRunUpToNode}
+  {#if activeSlot?.direction === 'in' && outSlots.length > 0 && outSlots.every((s) => s.artifact === null) && node}
     {@const nodeTitle = node.label || ADAPTER_REGISTRY[node.adapterId]?.shortName || node.adapterId}
     <div class="input-preview-banner" role="status">
       <span>
         Showing upstream input (<b>{activeSlot.portName}</b>) — <b>{nodeTitle}</b> has not run yet.
       </span>
-      <button
-        type="button"
-        class="run-to-btn compact"
-        disabled={isRunning}
-        onclick={() => onRunUpToNode(node.id)}
-      >
-        ▶ Run up to {nodeTitle}
-      </button>
     </div>
   {/if}
 
@@ -2097,7 +2089,7 @@
         <p class="placeholder-msg">
           No data on <b>{activeSlot.direction === 'in' ? 'IN' : 'OUT'} · {activeSlot.portName}</b> yet.
         </p>
-        {#if node && onRunUpToNode}
+        {#if !embedded && node && onRunUpToNode}
           <button
             class="run-to-btn"
             disabled={isRunning}
@@ -2669,12 +2661,6 @@
   .run-to-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-  }
-  .run-to-btn.compact {
-    padding: 4px 10px;
-    font-size: 11px;
-    white-space: nowrap;
-    flex-shrink: 0;
   }
   .input-preview-banner {
     display: flex;

@@ -3068,6 +3068,16 @@
   let selectedNode = $derived(
     selectedNodeId ? (graph.nodes.find((n) => n.id === selectedNodeId) ?? null) : null,
   );
+  let selectedNodeNeedsRun = $derived.by((): boolean => {
+    if (!selectedNode || isCompareMode) return false;
+    if (selectedNode.adapterId === 'pdb-input' || selectedNode.adapterId === 'sequence-input') {
+      return false;
+    }
+    const st = nodeStates[selectedNode.id]?.status;
+    const outs = outputsByNode[selectedNode.id];
+    const hasOutputs = Boolean(outs && Object.keys(outs).length > 0);
+    return !hasOutputs || st !== 'done';
+  });
   let selectedUpstreamBenchmarkId = $derived.by((): string | null => {
     if (!selectedNode) return null;
     const edge = graph.edges.find(
@@ -5108,10 +5118,23 @@
               >
                 Compare branches ({comparableBranchIds.length})
               </button>
-            {:else if selectedNode && (!isCompareMode || rightPanelTab === 'params')}
+            {:else if selectedNode && !selectedNodeNeedsRun && (!isCompareMode || rightPanelTab === 'params')}
               <span class="tab-node-ctx" title={selectedNode.label ?? selectedNode.adapterId}>
                 {isCompareMode ? 'Editing: ' : ''}{selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
               </span>
+            {/if}
+            {#if selectedNode && selectedNodeNeedsRun}
+              {@const runTargetTitle = selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
+              <button
+                type="button"
+                class="pane-expand-btn run-here-tab-btn"
+                disabled={isRunning || hasBioErrors || validationErrors.length > 0}
+                onclick={() => runWorkflow(false, selectedNode.id)}
+                title={`Run upstream blocks up to ${runTargetTitle} (results stay cached for full runs)`}
+                aria-label={`Run up to ${runTargetTitle}`}
+              >
+                ▶ Run to here
+              </button>
             {/if}
             {#if selectedNode && !isCompareMode}
               <ModelCardPopover adapterId={selectedNode.adapterId} params={selectedNode.params} compact />
@@ -6879,6 +6902,24 @@
     min-width: 0;
     max-width: 100%;
     padding-bottom: 4px;
+  }
+  .pane-expand-btn.run-here-tab-btn {
+    margin-left: 0;
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    font-weight: 600;
+    padding: 2px 9px;
+    flex-shrink: 0;
+  }
+  .pane-expand-btn.run-here-tab-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 88%, #000);
+    border-color: color-mix(in srgb, var(--accent) 88%, #000);
+    color: #fff;
+  }
+  .pane-expand-btn.run-here-tab-btn:disabled {
+    opacity: 0.48;
+    cursor: not-allowed;
   }
   .r-tab {
     position: relative;
