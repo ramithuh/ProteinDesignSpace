@@ -481,9 +481,9 @@ describe('Self-hosted WebGPU security hardening (Astra 6.2 audit gates)', () => 
   it('H7/M5: validates HTTPS outside loopback, rejects URL credentials, and never persists apiToken in localStorage', () => {
     expect(validateRemoteServerUrl('http://127.0.0.1:8790').ok).toBe(true);
     expect(validateRemoteServerUrl('http://localhost:8790').ok).toBe(true);
-    expect(validateRemoteServerUrl('https://flame.tailnet.ts.net:8790').ok).toBe(true);
-    expect(validateRemoteServerUrl('http://100.109.74.34:8790').ok).toBe(false);
-    expect(validateRemoteServerUrl('https://user:pass@flame.tailnet.ts.net:8790').ok).toBe(false);
+    expect(validateRemoteServerUrl('https://gpu-box.example.ts.net:8790').ok).toBe(true);
+    expect(validateRemoteServerUrl('http://100.64.0.10:8790').ok).toBe(false);
+    expect(validateRemoteServerUrl('https://user:pass@gpu-box.example.ts.net:8790').ok).toBe(false);
 
     // M5: localStorage never stores apiToken and purges legacy saved tokens on load
     const mem = new Map<string, string>();
@@ -500,7 +500,7 @@ describe('Self-hosted WebGPU security hardening (Astra 6.2 audit gates)', () => 
       saveComputeBackendConfig({
         ...defaultComputeBackendConfig(),
         mode: 'remote',
-        serverUrl: 'https://flame.tailnet.ts.net:8790',
+        serverUrl: 'https://gpu-box.example.ts.net:8790',
         apiToken: 'dnv_super_secret',
       });
       expect(mem.get(COMPUTE_BACKEND_STORAGE_KEY)).not.toContain('dnv_super_secret');

@@ -96,9 +96,42 @@ export async function handleOgImageRequest(
   });
 }
 
+/** Return true for automated vulnerability scanner probes that should receive 404 instead of SPA 200 HTML. */
+export function isScannerProbePath(pathname: string): boolean {
+  const p = pathname.toLowerCase();
+  if (
+    p.startsWith('/.env') ||
+    p.startsWith('/.git') ||
+    p.startsWith('/.aws') ||
+    p.startsWith('/.ssh') ||
+    p.startsWith('/.ds_store') ||
+    p.startsWith('/wp-') ||
+    p.startsWith('/sites/default/') ||
+    p === '/config.js' ||
+    p === '/config.json' ||
+    p === '/xmlrpc.php' ||
+    p === '/phpinfo.php'
+  ) {
+    return true;
+  }
+  return /\.(?:php|bak|old|save|swp|sql|ini|log)(?:\.|$)/.test(p);
+}
+
 export default {
   async fetch(request: Request, env: CfPagesEnv, ctx?: { waitUntil(p: Promise<unknown>): void }): Promise<Response> {
     const url = new URL(request.url);
+
+    // 0. Drop automated dotfile/CMS/PHP scanner probes with a real 404 (not SPA 200 index.html)
+    if (isScannerProbePath(url.pathname)) {
+      return new Response('Not found', {
+        status: 404,
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'public, max-age=3600',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    }
 
     // 1. Dynamic 1200x630 PNG OG preview endpoint
     if (url.pathname === '/api/og' || url.pathname === '/og.png') {

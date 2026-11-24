@@ -145,5 +145,13 @@ describe('Social media OG preview cards & edge worker', () => {
     expect(ogRes.status).toBe(200);
     expect(ogRes.headers.get('content-type')).toBe('image/png');
     assertValidOgPng(new Uint8Array(await ogRes.arrayBuffer()));
+
+    // Scanner probes return crisp 404 instead of SPA 200 index.html
+    for (const probe of ['/.env', '/.env.bak', '/.git/config', '/sites/default/settings.php.old', '/config.js']) {
+      const probeRes = await cfWorker.fetch(new Request(`https://denovo.run${probe}`), {
+        ASSETS: { fetch: async () => new Response('<html>SPA</html>', { status: 200 }) },
+      });
+      expect(probeRes.status, probe).toBe(404);
+    }
   });
 });
