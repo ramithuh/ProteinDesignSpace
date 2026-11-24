@@ -221,7 +221,7 @@ export function parseResidueIntervals(spec: string | undefined): ParsedResidueIn
   for (const tok of tokens) {
     if (tok === '0' || /^\d+(?:-\d+)?[PRDN]?$/i.test(tok)) continue;
     if (tok.includes(':')) continue;
-    const span = /^([A-Za-z_])(-?\d+)(?:-(-?\d+))?$/.exec(tok);
+    const span = /^([A-Za-z_]+)(-?\d+)[A-Za-z]?(?:-(-?\d+)[A-Za-z]?)?$/.exec(tok);
     if (span) {
       const chain = span[1].toUpperCase();
       const a = Number(span[2]);
@@ -231,16 +231,70 @@ export function parseResidueIntervals(spec: string | undefined): ParsedResidueIn
       }
       continue;
     }
-    if (/^[A-Za-z_]$/.test(tok)) {
+    if (/^[A-Za-z_]+$/.test(tok)) {
       out.push({ chain: tok.toUpperCase(), start: -Infinity, end: Infinity });
     }
   }
   return out;
 }
 
+function mergeResidueIntervalsByChain(
+  intervals: readonly ParsedResidueInterval[],
+): Map<string, Array<{ start: number; end: number }>> {
+  const byChain = new Map<string, Array<{ start: number; end: number }>>();
+  for (const r of intervals) {
+    const ch = r.chain.toUpperCase();
+    let list = byChain.get(ch);
+    if (!list) {
+      list = [];
+      byChain.set(ch, list);
+    }
+    list.push({ start: Math.min(r.start, r.end), end: Math.max(r.start, r.end) });
+  }
+  for (const [ch, list] of byChain.entries()) {
+    list.sort((a, b) => a.start - b.start || a.end - b.end);
+    const merged: Array<{ start: number; end: number }> = [];
+    for (const seg of list) {
+      const prev = merged[merged.length - 1];
+      if (!prev) {
+        merged.push({ ...seg });
+      } else if (!Number.isFinite(prev.end) || seg.start <= prev.end + 1) {
+        prev.end = Math.max(prev.end, seg.end);
+      } else {
+        merged.push({ ...seg });
+      }
+    }
+    byChain.set(ch, merged);
+  }
+  return byChain;
+}
+
 /**
- * Return `true` when `spec` specifies at least one residue interval and NONE of its
- * residue intervals overlap any interval in `refIntervals`.
+ * Parse residue intervals from `motifAtoms` entries (`A102:ND1,CG; A128:SG,CB` -> `[A102, A128]`),
+ * ignoring global shorthands (`TIP`, `BKBN`, `ALL`).
+ */
+export function parseMotifAtomsResidueIntervals(motifAtoms: string | undefined): ParsedResidueInterval[] {
+  const raw = String(motifAtoms ?? '').trim();
+  if (!raw) return [];
+  const upper = raw.toUpperCase();
+  if (upper === 'ALL' || upper === '*' || upper === 'BKBN' || upper === 'BACKBONE' || upper === 'TIP') {
+    return [];
+  }
+  const out: ParsedResidueInterval[] = [];
+  for (const part of raw.split(/[;\n]+/).map((s) => s.trim()).filter(Boolean)) {
+    const colonIdx = part.lastIndexOf(':');
+    if (colonIdx <= 0 || colonIdx >= part.length - 1) continue;
+    const lhs = part.slice(0, colonIdx).trim();
+    out.push(...parseResidueIntervals(lhs));
+  }
+  return out;
+}
+
+/**
+ * Return `true` when `spec` specifies at least one residue interval and EITHER:
+ * - NONE of its intervals overlap any interval in `refIntervals` (100% disjoint across chains/spans), OR
+ * - ANY residue/range token on a polymer chain covered by `refIntervals` falls outside `refIntervals`
+ *   (e.g. `A102, A104, A128, A132` against `A102, A104, A129, A132` where `A128` is missing!).
  */
 export function isResidueSpecDisjointFromIntervals(
   spec: string | undefined,
@@ -248,14 +302,20 @@ export function isResidueSpecDisjointFromIntervals(
 ): boolean {
   const specIntervals = parseResidueIntervals(spec);
   if (specIntervals.length === 0 || refIntervals.length === 0) return false;
+  const mergedRefByChain = mergeResidueIntervalsByChain(refIntervals);
+  let overlappedAny = false;
   for (const s of specIntervals) {
-    for (const r of refIntervals) {
-      if (s.chain === r.chain && s.start <= r.end && r.start <= s.end) {
-        return false;
-      }
+    const refOnChain = mergedRefByChain.get(s.chain);
+    if (!refOnChain) {
+      continue;
     }
+    const covered = refOnChain.some((r) => r.start <= s.start && s.end <= r.end);
+    if (!covered) {
+      return true;
+    }
+    overlappedAny = true;
   }
-  return true;
+  return !overlappedAny;
 }
 
 /**
@@ -1065,7 +1125,16 @@ export function applyPlannerBenchmarkSeedingToNode(
     if (bp.lockChain && !String(params.lockChain ?? '').trim()) {
       params.lockChain = bp.lockChain;
     }
-    if (bp.motifAtoms && !String(params.motifAtoms ?? '').trim()) {
+    const curMotifAtoms = String(params.motifAtoms ?? '').trim();
+    const motifAtomsIntervals = parseMotifAtomsResidueIntervals(curMotifAtoms);
+    const motifAtomsDisjoint =
+      motifAtomsIntervals.length > 0 &&
+      isResidueSpecDisjointFromBenchmark(
+        motifAtomsIntervals.map((r) => `${r.chain}${r.start}-${r.end}`).join(', '),
+        bench,
+      );
+    if (bp.motifAtoms && (!curMotifAtoms || motifAtomsDisjoint || (opts?.overwriteUnpromptedResidues && curMotifAtoms !== bp.motifAtoms))) {
+      if (curMotifAtoms && curMotifAtoms !== bp.motifAtoms) repairedHallucination = true;
       params.motifAtoms = bp.motifAtoms;
     }
     if (bp.unindexedMotif && params.unindexedMotif !== true) {

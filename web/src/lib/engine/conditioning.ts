@@ -754,6 +754,14 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
           out.push(`${ligHit.labelChain}${ligHit.resId}`);
           continue;
         }
+        const bareTokenLigs = ligands.filter((l) => l.compId === tok.toUpperCase());
+        if (bareTokenLigs.length > 0) {
+          for (let i = 0; i < bareTokenLigs.length; i++) {
+            if (i > 0) out.push('/0');
+            out.push(`${bareTokenLigs[i].labelChain}${bareTokenLigs[i].resId}`);
+          }
+          continue;
+        }
         out.push(tok);
         continue;
       }
@@ -778,6 +786,25 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
       out.push(tok);
     }
     return out.join(',');
+  };
+
+  const splitBracketSafeCommas = (raw: string): string[] => {
+    const items: string[] = [];
+    let cur = '';
+    let depth = 0;
+    for (let i = 0; i < raw.length; i++) {
+      const ch = raw[i];
+      if (ch === '[') depth++;
+      else if (ch === ']') depth = Math.max(0, depth - 1);
+      else if (ch === ',' && depth === 0) {
+        items.push(cur);
+        cur = '';
+        continue;
+      }
+      cur += ch;
+    }
+    items.push(cur);
+    return items;
   };
 
   const remapHbondSelection = (selStr: string): string => {
@@ -813,28 +840,70 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
         }
       }
 
-      if (chainPart && chainPart !== '*' && /^[A-Za-z]+$/.test(chainPart)) {
+      if (chainPart && chainPart !== '*' && /^[A-Za-z][A-Za-z0-9_]*$/.test(chainPart)) {
         const origChain = chainPart;
         parts[0] = remapPolymerChain(origChain);
         if (resPart && resPart !== '*') {
           const inner = resPart.startsWith('[') && resPart.endsWith(']') ? resPart.slice(1, -1) : resPart;
-          const remappedNums: string[] = [];
-          for (const item of inner.split(',').map((s) => s.trim()).filter(Boolean)) {
+          const rawItems = inner.split(',').map((s) => s.trim()).filter(Boolean);
+          const parsedBounds = rawItems.map((item) => {
             const m = /^(-?\d+)([A-Za-z])?(?:-(-?\d+)([A-Za-z])?)?$/.exec(item);
-            if (!m) {
-              remappedNums.push(item);
-              continue;
-            }
+            if (!m) return null;
             const lo = parseInt(m[1], 10);
             const loIns = m[2] || undefined;
             const hasHi = m[3] !== undefined;
             const hi = hasHi ? parseInt(m[3], 10) : lo;
             const hiIns = hasHi ? m[4] || undefined : loIns;
-            if ((loIns || hiIns) && !hasExactAuthResidueMatch(origChain, lo, hi, loIns, hiIns)) {
+            return { item, lo, hi, loIns, hiIns };
+          });
+          // Support ligand selection by author chain + residue ID when compPart is '*' (e.g. sel('A/*/296/*'))
+          if (
+            compPart === '*' &&
+            parsedBounds.length > 0 &&
+            parsedBounds.every(
+              (b) =>
+                b !== null &&
+                !b.loIns &&
+                !b.hiIns &&
+                !hasExactAuthResidueMatch(origChain, b.lo, b.hi),
+            )
+          ) {
+            const origUpper = origChain.toUpperCase();
+            const ligChains = new Set<string>();
+            const allMatchedLigands = parsedBounds.every((b) => {
+              const hit = ligands.find(
+                (l) =>
+                  (l.authChain === origChain ||
+                    l.labelChain === origChain ||
+                    l.authChain.toUpperCase() === origUpper ||
+                    l.labelChain.toUpperCase() === origUpper) &&
+                  l.resId >= b!.lo &&
+                  l.resId <= b!.hi,
+              );
+              if (hit) ligChains.add(hit.labelChain);
+              return Boolean(hit);
+            });
+            if (allMatchedLigands && ligChains.size > 0) {
+              const uniqueLigChains = [...ligChains];
+              parts[0] =
+                uniqueLigChains.length === 1 ? uniqueLigChains[0] : `[${uniqueLigChains.join(',')}]`;
+              return parts.join('/');
+            }
+          }
+
+          const remappedNums: string[] = [];
+          for (let idx = 0; idx < rawItems.length; idx++) {
+            const item = rawItems[idx];
+            const b = parsedBounds[idx];
+            if (!b) {
               remappedNums.push(item);
               continue;
             }
-            const mapped = remapPolymerRange(origChain, lo, hi, loIns, hiIns);
+            if ((b.loIns || b.hiIns) && !hasExactAuthResidueMatch(origChain, b.lo, b.hi, b.loIns, b.hiIns)) {
+              remappedNums.push(item);
+              continue;
+            }
+            const mapped = remapPolymerRange(origChain, b.lo, b.hi, b.loIns, b.hiIns);
             remappedNums.push(mapped.start === mapped.end ? `${mapped.start}` : `${mapped.start}-${mapped.end}`);
           }
           parts[2] =
@@ -849,8 +918,7 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
     if (trimmed.includes('sel(')) {
       return trimmed.replace(/sel\(\s*(?:"([^"]+)"|'([^']+)')\s*\)/g, (_m, dq: string | undefined, sq: string | undefined) => {
         const inner = dq ?? sq ?? '';
-        const remapped = inner
-          .split(',')
+        const remapped = splitBracketSafeCommas(inner)
           .map((p) => remapPath(p.trim()))
           .join(',');
         return wrapRfd4Sel(remapped);
@@ -1719,6 +1787,512 @@ export function assertRfd4ConditionSelectorsMatch(
   } finally {
     contigAtoms.res_id = savedResId;
   }
+}
+
+export interface Rfd4SelectorValidationOptions {
+  contig?: string | null;
+  motifSpan?: string | readonly string[] | null;
+  motifAtoms?: string | null;
+  hotspots?: string | readonly string[] | null;
+  templateLabel?: string | null;
+  /** Allow label_asym_id + label_seq_id fallback even when authChain exists (for raw label-space overrides). */
+  allowLabelSpaceFallback?: boolean;
+}
+
+function lookupTemplateAuthChain(
+  ctx: Rfd4TemplateContext,
+  chain: string,
+): Rfd4PolymerChainInfo | undefined {
+  const t = chain.trim();
+  return ctx.polymerByAuthChain.get(t) ?? ctx.polymerByAuthChain.get(t.toUpperCase());
+}
+
+function lookupTemplateLabelChain(
+  ctx: Rfd4TemplateContext,
+  chain: string,
+): Rfd4PolymerChainInfo | undefined {
+  const t = chain.trim();
+  return ctx.polymerByLabelChain.get(t) ?? ctx.polymerByLabelChain.get(t.toUpperCase());
+}
+
+function summarizePolymerChainResidues(
+  info: Rfd4PolymerChainInfo,
+  useLabelSpace = false,
+): string {
+  const cid = useLabelSpace ? info.labelChain : info.authChain;
+  const runs: string[] = [];
+  let runStart: number | null = null;
+  let runEnd: number | null = null;
+  const flushRun = () => {
+    if (runStart === null || runEnd === null) return;
+    runs.push(runStart === runEnd ? `${cid}${runStart}` : `${cid}${runStart}-${runEnd}`);
+    runStart = null;
+    runEnd = null;
+  };
+  for (const r of info.residues) {
+    const seq = useLabelSpace ? r.labelSeqId : r.authSeqId;
+    const ins = useLabelSpace ? '' : r.insCode;
+    if (ins) {
+      flushRun();
+      runs.push(`${cid}${seq}${ins}`);
+      continue;
+    }
+    if (runStart === null || runEnd === null) {
+      runStart = seq;
+      runEnd = seq;
+    } else if (seq === runEnd) {
+      continue;
+    } else if (seq === runEnd + 1) {
+      runEnd = seq;
+    } else {
+      flushRun();
+      runStart = seq;
+      runEnd = seq;
+    }
+  }
+  flushRun();
+  if (runs.length <= 12) {
+    return runs.join(', ');
+  }
+  const tail = runs[runs.length - 1];
+  return `${runs.slice(0, 10).join(', ')}, … (${info.residues.length} residues through ${tail})`;
+}
+
+function formatRangeTokenDisplay(r: ResidueRangeToken): string {
+  return `${r.chain}${formatResidueRangeNumSpec(r)}`;
+}
+
+/**
+ * Validate every preserved residue/range selector in `contig`, `motifSpan`, `motifAtoms`, and
+ * `hotspots` against `templateContext` BEFORE downloading 330-468 MB of RFD4 weights (#97).
+ * Throws an actionable error listing the unmatched selector(s) and available residues on that chain.
+ */
+export function validateRfd4TemplateSelectors(
+  templateContext: Rfd4TemplateContext,
+  opts: Rfd4SelectorValidationOptions = {},
+): void {
+  const unmatched: Array<{ display: string; chain: string; isRange: boolean }> = [];
+  const seenUnmatched = new Set<string>();
+  const recordUnmatched = (display: string, chain: string, isRange: boolean) => {
+    if (seenUnmatched.has(display)) return;
+    seenUnmatched.add(display);
+    unmatched.push({ display, chain, isRange });
+  };
+
+  const matchesRange = (r: ResidueRangeToken, allowLigand: boolean): boolean => {
+    const authPoly = lookupTemplateAuthChain(templateContext, r.chain);
+    const labelPoly = lookupTemplateLabelChain(templateContext, r.chain);
+    const hasExplicitIns = Boolean(r.startInsCode || r.endInsCode);
+    if (authPoly) {
+      const authHit = authPoly.residues.some((res) =>
+        matchesResNumInsBounds(
+          res.authSeqId,
+          res.insCode,
+          r.start,
+          r.end,
+          r.startInsCode,
+          r.endInsCode,
+        ),
+      );
+      if (authHit) return true;
+      if (
+        opts.allowLabelSpaceFallback &&
+        !hasExplicitIns &&
+        labelPoly?.residues.some((res) => res.labelSeqId >= r.start && res.labelSeqId <= r.end)
+      ) {
+        return true;
+      }
+    } else if (!hasExplicitIns && labelPoly) {
+      if (labelPoly.residues.some((res) => res.labelSeqId >= r.start && res.labelSeqId <= r.end)) {
+        return true;
+      }
+    }
+    if (allowLigand && !hasExplicitIns) {
+      const chUpper = r.chain.toUpperCase();
+      const ligHit = templateContext.ligands.some(
+        (l) =>
+          (l.labelChain === r.chain ||
+            l.authChain === r.chain ||
+            l.labelChain.toUpperCase() === chUpper ||
+            l.authChain.toUpperCase() === chUpper) &&
+          l.resId >= r.start &&
+          l.resId <= r.end,
+      );
+      if (ligHit) return true;
+    }
+    return false;
+  };
+
+  const rawContig = typeof opts.contig === 'string' ? opts.contig.trim() : '';
+  if (rawContig) {
+    const parts = rawContig
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const tok of parts) {
+      if (tok === '/0') continue;
+      if (/^\d+(?:-\d+)?[PRDN]?$/i.test(tok)) continue;
+      if (/^[A-Za-z0-9_]+:\d+(?:-\d+)?[PRDN]?$/i.test(tok)) {
+        const prefix = tok.slice(0, tok.indexOf(':'));
+        if (
+          !lookupTemplateAuthChain(templateContext, prefix) &&
+          !lookupTemplateLabelChain(templateContext, prefix)
+        ) {
+          continue;
+        }
+      }
+      const chainLig = /^([A-Za-z0-9_]+):([A-Za-z0-9]{1,5})$/.exec(tok);
+      if (chainLig && !/^-?\d+[A-Za-z]?$/.test(chainLig[2])) {
+        const comp = chainLig[2].toUpperCase();
+        if (templateContext.ligands.some((l) => l.compId === comp)) continue;
+        recordUnmatched(tok, chainLig[1], false);
+        continue;
+      }
+      if (/^[A-Za-z][A-Za-z0-9]*$/.test(tok) && !/\d/.test(tok)) {
+        if (
+          lookupTemplateAuthChain(templateContext, tok) ||
+          lookupTemplateLabelChain(templateContext, tok) ||
+          templateContext.ligands.some((l) => l.compId === tok.toUpperCase())
+        ) {
+          continue;
+        }
+        recordUnmatched(tok, tok, false);
+        continue;
+      }
+      if (templateContext.ligands.some((l) => l.compId === tok.toUpperCase())) {
+        continue;
+      }
+      const parsed =
+        /^[A-Za-z]/.test(tok) || tok.includes(':') ? parseResidueRangeTokens(tok) : [];
+      if (parsed.length === 1) {
+        const pt = parsed[0];
+        if (!matchesRange(pt, true)) {
+          const isRange = pt.start !== pt.end || pt.startInsCode !== pt.endInsCode;
+          recordUnmatched(formatRangeTokenDisplay(pt), pt.chain, isRange);
+        }
+        continue;
+      }
+      recordUnmatched(tok, tok.replace(/[^A-Za-z0-9_].*$/, '') || 'A', false);
+    }
+  }
+
+  const checkPolymerTokenList = (raw: string | readonly string[] | null | undefined) => {
+    if (!raw) return;
+    const joined = Array.isArray(raw) ? raw.join(', ') : String(raw);
+    if (!joined.trim()) return;
+    for (const r of parseResidueRangeTokens(joined)) {
+      if (!matchesRange(r, false)) {
+        const isRange = r.start !== r.end || r.startInsCode !== r.endInsCode;
+        recordUnmatched(formatRangeTokenDisplay(r), r.chain, isRange);
+      }
+    }
+  };
+
+  checkPolymerTokenList(opts.motifSpan);
+  const parsedMotifAtoms = parseMotifAtomsSpec(opts.motifAtoms ?? undefined);
+  for (const entry of parsedMotifAtoms.entries) {
+    const r = entry.range;
+    if (!matchesRange(r, false)) {
+      const isRange = r.start !== r.end || r.startInsCode !== r.endInsCode;
+      recordUnmatched(formatRangeTokenDisplay(r), r.chain, isRange);
+    }
+  }
+  checkPolymerTokenList(opts.hotspots);
+
+  if (unmatched.length === 0) return;
+
+  const tplName = String(opts.templateLabel ?? '').trim();
+  const tplPart = tplName ? ` in template "${tplName}"` : ' in wired template';
+  const headPart =
+    unmatched.length === 1
+      ? unmatched[0].isRange
+        ? `Residue range ${unmatched[0].display} not found${tplPart}`
+        : `Residue ${unmatched[0].display} not found${tplPart}`
+      : `Residues ${unmatched.map((u) => u.display).join(', ')} not found${tplPart}`;
+
+  const requestedChains = [...new Set(unmatched.map((u) => u.chain.trim()).filter(Boolean))];
+  const resolvedChains: Array<{ chainLabel: string; summary: string }> = [];
+  let missingChain = false;
+  for (const ch of requestedChains) {
+    const authInfo = lookupTemplateAuthChain(templateContext, ch);
+    const labelInfo = !authInfo ? lookupTemplateLabelChain(templateContext, ch) : undefined;
+    const info = authInfo ?? labelInfo;
+    if (info) {
+      const useLabel = !authInfo && Boolean(labelInfo);
+      const chainLabel = useLabel ? info.labelChain : info.authChain;
+      if (!resolvedChains.some((c) => c.chainLabel === chainLabel)) {
+        resolvedChains.push({
+          chainLabel,
+          summary: summarizePolymerChainResidues(info, useLabel),
+        });
+      }
+    } else {
+      missingChain = true;
+    }
+  }
+
+  let availPart: string;
+  if (!missingChain && resolvedChains.length === 1) {
+    availPart = `available Chain ${resolvedChains[0].chainLabel} residues: ${resolvedChains[0].summary}`;
+  } else if (!missingChain && resolvedChains.length > 1) {
+    availPart = `available residues — ${resolvedChains
+      .map((c) => `Chain ${c.chainLabel}: ${c.summary}`)
+      .join('; ')}`;
+  } else {
+    const allPoly = [...templateContext.polymerByAuthChain.values()];
+    const chainSummaries = allPoly.map(
+      (c) => `Chain ${c.authChain} (${summarizePolymerChainResidues(c)})`,
+    );
+    const ligCodes = [...new Set(templateContext.ligands.map((l) => l.compId))];
+    const parts = [
+      ...(chainSummaries.length > 0 ? [`chains: ${chainSummaries.join('; ')}`] : []),
+      ...(ligCodes.length > 0 ? [`ligands: ${ligCodes.join(', ')}`] : []),
+    ];
+    availPart =
+      parts.length > 0 ? `available ${parts.join(' · ')}` : 'template contains 0 polymer residues';
+  }
+
+  throw new Error(`${headPart} — ${availPart}`);
+}
+
+function isContigPureLabelSpace(
+  templateContext: Rfd4TemplateContext,
+  contig: string,
+): boolean {
+  const parts = contig
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  let sawPreservedPolymer = false;
+  for (const tok of parts) {
+    if (tok === '/0' || /^\d+(?:-\d+)?[PRDN]?$/i.test(tok)) continue;
+    if (/^[A-Za-z0-9_]+:\d+(?:-\d+)?[PRDN]?$/i.test(tok)) {
+      const prefix = tok.slice(0, tok.indexOf(':'));
+      if (
+        !lookupTemplateAuthChain(templateContext, prefix) &&
+        !lookupTemplateLabelChain(templateContext, prefix)
+      ) {
+        continue;
+      }
+    }
+    const chainLig = /^([A-Za-z0-9_]+):([A-Za-z0-9]{1,5})$/.exec(tok);
+    if (chainLig && !/^-?\d+[A-Za-z]?$/.test(chainLig[2])) {
+      // `A:SAM` is author/comp shorthand, not raw RFD4 label-space syntax
+      return false;
+    }
+    const parsed = /^[A-Za-z]/.test(tok) || tok.includes(':') ? parseResidueRangeTokens(tok) : [];
+    if (parsed.length !== 1) return false;
+    const pt = parsed[0];
+    if (pt.startInsCode || pt.endInsCode) return false;
+    const labelPoly = lookupTemplateLabelChain(templateContext, pt.chain);
+    if (
+      labelPoly &&
+      labelPoly.residues.some((r) => r.labelSeqId >= pt.start && r.labelSeqId <= pt.end)
+    ) {
+      sawPreservedPolymer = true;
+      continue;
+    }
+    const ligHit = templateContext.ligands.some(
+      (l) => l.labelChain === pt.chain && l.resId >= pt.start && l.resId <= pt.end,
+    );
+    if (ligHit) continue;
+    return false;
+  }
+  return sawPreservedPolymer;
+}
+
+function extractTopLevelContigFromCustomSpec(rawSpecText: string): string | null {
+  const trimmed = rawSpecText.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('{')) {
+    try {
+      const obj = JSON.parse(trimmed) as Record<string, unknown>;
+      if (typeof obj?.contig === 'string') return obj.contig.trim();
+      if (obj && typeof obj === 'object' && !('input' in obj) && !('contig' in obj)) {
+        const firstKey = Object.keys(obj).find((k) => k !== 'global_args');
+        const sub = firstKey ? (obj[firstKey] as Record<string, unknown> | undefined) : undefined;
+        if (typeof sub?.contig === 'string') return sub.contig.trim();
+      }
+    } catch {
+      /* fall through to line scan */
+    }
+  }
+  for (const rawLine of trimmed.split(/\r?\n/)) {
+    const noComment = rawLine.replace(/(?:^|\s)#.*$/, '').trim();
+    const m = /^contig\s*:\s*(.+)$/.exec(noComment);
+    if (!m) continue;
+    let val = m[1].trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1).trim();
+    }
+    return val || null;
+  }
+  return null;
+}
+
+function remapRfd4ConditionsDict(
+  conditions: Record<string, unknown>,
+  templateContext: Rfd4TemplateContext,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [condName, valueMap] of Object.entries(conditions)) {
+    if (!valueMap || typeof valueMap !== 'object' || Array.isArray(valueMap)) {
+      out[condName] = valueMap;
+      continue;
+    }
+    const remappedValueMap: Record<string, unknown> = {};
+    for (const [valKey, entries] of Object.entries(valueMap as Record<string, unknown>)) {
+      if (!Array.isArray(entries)) {
+        remappedValueMap[valKey] = entries;
+        continue;
+      }
+      remappedValueMap[valKey] = entries.map((entry) => {
+        if (entry && typeof entry === 'object' && typeof (entry as { select?: unknown }).select === 'string') {
+          const prevSel = (entry as { select: string }).select;
+          return {
+            ...(entry as Record<string, unknown>),
+            select: templateContext.remapHbondSelection(prevSel),
+          };
+        }
+        return entry;
+      });
+    }
+    out[condName] = remappedValueMap;
+  }
+  return out;
+}
+
+/**
+ * Validate and remap a parsed RFD4 `customSpecYaml` object against `templateContext` (#97).
+ * Handles PDB -> split-CIF `1..N` renumbering and author-numbered mmCIF templates while
+ * preserving specs already authored in native mmCIF `label_asym_id` / `label_seq_id` space.
+ */
+export function remapAndValidateRfd4CustomSpec(
+  parsedSpec: Record<string, unknown>,
+  templateContext: Rfd4TemplateContext,
+  opts?: { isFromPdb?: boolean; templateLabel?: string | null; exampleId?: string },
+): Record<string, unknown> {
+  if (!parsedSpec || typeof parsedSpec !== 'object') return parsedSpec;
+
+  let specObj: Record<string, unknown> = { ...parsedSpec };
+  if (!('input' in specObj) && !('contig' in specObj) && !('conditions' in specObj)) {
+    const globalArgs =
+      specObj.global_args && typeof specObj.global_args === 'object'
+        ? (specObj.global_args as Record<string, unknown>)
+        : {};
+    const exampleKeys = Object.keys(specObj).filter((k) => k !== 'global_args');
+    if (exampleKeys.length > 0) {
+      const chosenKey =
+        opts?.exampleId && specObj[opts.exampleId] ? opts.exampleId : exampleKeys[0];
+      const chosen = specObj[chosenKey];
+      if (chosen && typeof chosen === 'object') {
+        specObj = { ...globalArgs, ...(chosen as Record<string, unknown>) };
+      }
+    }
+  }
+
+  const rawContig = typeof specObj.contig === 'string' ? specObj.contig.trim() : '';
+  const alreadyLabelSpace =
+    !opts?.isFromPdb && Boolean(rawContig) && isContigPureLabelSpace(templateContext, rawContig);
+
+  if (rawContig) {
+    validateRfd4TemplateSelectors(templateContext, {
+      contig: rawContig,
+      templateLabel: opts?.templateLabel,
+      allowLabelSpaceFallback: alreadyLabelSpace,
+    });
+    if (!alreadyLabelSpace) {
+      specObj.contig = templateContext.remapContig(rawContig);
+    }
+  }
+
+  if (
+    !alreadyLabelSpace &&
+    specObj.conditions &&
+    typeof specObj.conditions === 'object' &&
+    !Array.isArray(specObj.conditions)
+  ) {
+    specObj.conditions = remapRfd4ConditionsDict(
+      specObj.conditions as Record<string, unknown>,
+      templateContext,
+    );
+  }
+
+  return specObj;
+}
+
+/**
+ * Single-source-of-truth fail-fast template selector validator shared by `rfd4.worker.ts`
+ * (pre-weight-download) and `validateRuntimeNodeInputs` in `bio-capabilities.ts` (Layer 2 preflight).
+ */
+export function validateRfd4InputsAgainstTemplate(
+  params: Record<string, unknown>,
+  template?: StructureArtifact,
+  condArtifact?: ConditionSpecArtifact,
+  fallbackLabel?: string | null,
+): void {
+  const mode = String(params.mode ?? 'unconditional');
+  if (mode === 'preset') return;
+  if (mode === 'conditioned' && condArtifact?.cifUrl?.startsWith('preset:')) return;
+
+  const customSpecYaml = String(params.customSpecYaml ?? '').trim();
+  if (mode === 'unconditional' && !customSpecYaml) return;
+
+  const rawStructureText =
+    mode === 'partial' || mode === 'inverse-folding'
+      ? (template?.cifText || template?.pdbText)
+      : (condArtifact?.inputCif || template?.cifText || template?.pdbText);
+  if (!rawStructureText) return;
+
+  const isCif = /^\s*(data_|loop_|_atom_site\.)/m.test(rawStructureText);
+  const templateContext = extractRfd4TemplateContext(rawStructureText);
+  const templateLabel = template?.label || condArtifact?.label || fallbackLabel || null;
+  const omitContig = mode === 'partial' || mode === 'inverse-folding';
+
+  if (customSpecYaml) {
+    const yamlContig = omitContig ? null : extractTopLevelContigFromCustomSpec(customSpecYaml);
+    if (yamlContig) {
+      const alreadyLabelSpace = !isCif ? false : isContigPureLabelSpace(templateContext, yamlContig);
+      validateRfd4TemplateSelectors(templateContext, {
+        contig: yamlContig,
+        templateLabel,
+        allowLabelSpaceFallback: alreadyLabelSpace,
+      });
+    }
+    return;
+  }
+
+  if (condArtifact) {
+    if (condArtifact.intent) {
+      validateRfd4TemplateSelectors(templateContext, {
+        contig: omitContig ? null : condArtifact.intent.contig,
+        motifSpan: condArtifact.intent.motifSpans,
+        motifAtoms: condArtifact.intent.motifAtoms,
+        hotspots: condArtifact.intent.hotspots,
+        templateLabel,
+      });
+    } else if (!omitContig && condArtifact.contig) {
+      validateRfd4TemplateSelectors(templateContext, {
+        contig: condArtifact.contig,
+        templateLabel,
+        allowLabelSpaceFallback: isCif,
+      });
+    }
+    return;
+  }
+
+  const inlineContig = String(params.contig ?? '').trim();
+  const inlineMotif = String(params.motifSpan ?? '').trim();
+  const inlineMotifAtoms = String(params.motifAtoms ?? '').trim();
+  const inlineHotspots = String(params.hotspots ?? '').trim();
+
+  validateRfd4TemplateSelectors(templateContext, {
+    contig: omitContig || isBareLengthContig(inlineContig) ? null : inlineContig,
+    motifSpan: inlineMotif || null,
+    motifAtoms: inlineMotifAtoms || null,
+    hotspots: inlineHotspots || null,
+    templateLabel,
+  });
 }
 
 export interface MotifLineage {
