@@ -2,12 +2,16 @@
 export {
   estimateSafeBrowserMemoryBudgetBytes,
   extractAdapterInfo,
+  extractAdapterLimits,
   formatWebGpuAdapterSummary,
   isSoftwareWebGpuAdapter,
   isWebGpuDeviceLostError,
+  probeBrowserHardwareCapabilities,
   requestResilientWebGpuAdapter,
   requestResilientWebGpuDevice,
   type ResilientAdapterResult,
   type ResilientDeviceResult,
   type WebGpuAdapterInfoSnapshot,
+  type WebGpuAdapterLimitsSnapshot,
+  type WebGpuHardwareCapabilities,
 } from '$lib/kernel/webgpu-device';

@@ -95,29 +95,33 @@ export interface LocalFoldModelMeta {
   approxMB: number;
   license: string;
   nonCommercial?: boolean;
+  /** Pair-track channel width (`c_z`) governing storage-buffer binding ceiling. */
+  pairChannels?: number;
+  /** Diffusion/structural token multiplier relative to residue count (e.g. `2` for OpenDDE). */
+  tokenExpansionFactor?: number;
 }
 
 export const LOCALFOLD_MODEL_OPTIONS: LocalFoldModelMeta[] = [
-  { id: 'monomer', label: 'AlphaFold2 · Model 1 (pTM)', shortLabel: 'AF2 Model 1', family: 'af2', approxMB: 97, license: 'CC-BY-4.0' },
-  { id: 'monomer-2', label: 'AlphaFold2 · Model 2 (pTM)', shortLabel: 'AF2 Model 2', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
-  { id: 'monomer-3', label: 'AlphaFold2 · Model 3 (pTM, template-free)', shortLabel: 'AF2 Model 3', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
-  { id: 'monomer-4', label: 'AlphaFold2 · Model 4 (pTM, template-free)', shortLabel: 'AF2 Model 4', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
-  { id: 'monomer-5', label: 'AlphaFold2 · Model 5 (pTM, template-free)', shortLabel: 'AF2 Model 5', family: 'af2', approxMB: 140, license: 'CC-BY-4.0' },
-  { id: 'multimer', label: 'AlphaFold2-Multimer v3 · Model 1', shortLabel: 'AF2-Multimer 1', family: 'af2-multimer', approxMB: 74, license: 'CC-BY-4.0' },
-  { id: 'multimer-2', label: 'AlphaFold2-Multimer v3 · Model 2', shortLabel: 'AF2-Multimer 2', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0' },
-  { id: 'multimer-3', label: 'AlphaFold2-Multimer v3 · Model 3', shortLabel: 'AF2-Multimer 3', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0' },
-  { id: 'multimer-4', label: 'AlphaFold2-Multimer v3 · Model 4', shortLabel: 'AF2-Multimer 4', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0' },
-  { id: 'multimer-5', label: 'AlphaFold2-Multimer v3 · Model 5', shortLabel: 'AF2-Multimer 5', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0' },
-  { id: 'rosettafold3', label: 'RoseTTAFold3 (RF3)', shortLabel: 'RoseTTAFold 3', family: 'af3', approxMB: 266, license: 'BSD-3-Clause' },
-  { id: 'boltz2', label: 'Boltz-2', shortLabel: 'Boltz-2', family: 'af3', approxMB: 364, license: 'MIT' },
-  { id: 'openbind0', label: 'OpenBind-0 (OpenFold3 v0.5.0)', shortLabel: 'OpenBind-0', family: 'af3', approxMB: 265, license: 'Apache-2.0' },
-  { id: 'protenix2', label: 'Protenix-v2', shortLabel: 'Protenix-v2', family: 'af3', approxMB: 334, license: 'Apache-2.0' },
-  { id: 'opendde', label: 'OpenDDE', shortLabel: 'OpenDDE', family: 'af3', approxMB: 473, license: 'Apache-2.0' },
-  { id: 'mol1', label: 'Mol-1', shortLabel: 'Mol-1', family: 'af3', approxMB: 510, license: 'Apache-2.0' },
-  { id: 'intellifold2', label: 'IntelliFold-2', shortLabel: 'IntelliFold-2', family: 'af3', approxMB: 612, license: 'Apache-2.0' },
-  { id: 'af3', label: 'AlphaFold 3 (Non-Commercial)', shortLabel: 'AlphaFold 3', family: 'af3', approxMB: 265, license: 'AF3 Non-Commercial', nonCommercial: true },
-  { id: 'ef2-fast-300m', label: 'ESMFold2 Experimental Fast · ESM-C 300M', shortLabel: 'EF2 Fast 300M', family: 'esmfold2', approxMB: 270, license: 'Biohub / Synthyra model terms' },
-  { id: 'ef2-fast-600m', label: 'ESMFold2 Experimental Fast · ESM-C 600M', shortLabel: 'EF2 Fast 600M', family: 'esmfold2', approxMB: 368, license: 'Biohub / Synthyra model terms' },
+  { id: 'monomer', label: 'AlphaFold2 · Model 1 (pTM)', shortLabel: 'AF2 Model 1', family: 'af2', approxMB: 97, license: 'CC-BY-4.0', pairChannels: 128 },
+  { id: 'monomer-2', label: 'AlphaFold2 · Model 2 (pTM)', shortLabel: 'AF2 Model 2', family: 'af2', approxMB: 140, license: 'CC-BY-4.0', pairChannels: 128 },
+  { id: 'monomer-3', label: 'AlphaFold2 · Model 3 (pTM, template-free)', shortLabel: 'AF2 Model 3', family: 'af2', approxMB: 140, license: 'CC-BY-4.0', pairChannels: 128 },
+  { id: 'monomer-4', label: 'AlphaFold2 · Model 4 (pTM, template-free)', shortLabel: 'AF2 Model 4', family: 'af2', approxMB: 140, license: 'CC-BY-4.0', pairChannels: 128 },
+  { id: 'monomer-5', label: 'AlphaFold2 · Model 5 (pTM, template-free)', shortLabel: 'AF2 Model 5', family: 'af2', approxMB: 140, license: 'CC-BY-4.0', pairChannels: 128 },
+  { id: 'multimer', label: 'AlphaFold2-Multimer v3 · Model 1', shortLabel: 'AF2-Multimer 1', family: 'af2-multimer', approxMB: 74, license: 'CC-BY-4.0', pairChannels: 128 },
+  { id: 'multimer-2', label: 'AlphaFold2-Multimer v3 · Model 2', shortLabel: 'AF2-Multimer 2', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0', pairChannels: 128 },
+  { id: 'multimer-3', label: 'AlphaFold2-Multimer v3 · Model 3', shortLabel: 'AF2-Multimer 3', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0', pairChannels: 128 },
+  { id: 'multimer-4', label: 'AlphaFold2-Multimer v3 · Model 4', shortLabel: 'AF2-Multimer 4', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0', pairChannels: 128 },
+  { id: 'multimer-5', label: 'AlphaFold2-Multimer v3 · Model 5', shortLabel: 'AF2-Multimer 5', family: 'af2-multimer', approxMB: 118, license: 'CC-BY-4.0', pairChannels: 128 },
+  { id: 'rosettafold3', label: 'RoseTTAFold3 (RF3)', shortLabel: 'RoseTTAFold 3', family: 'af3', approxMB: 266, license: 'BSD-3-Clause', pairChannels: 128 },
+  { id: 'boltz2', label: 'Boltz-2', shortLabel: 'Boltz-2', family: 'af3', approxMB: 364, license: 'MIT', pairChannels: 128 },
+  { id: 'openbind0', label: 'OpenBind-0 (OpenFold3 v0.5.0)', shortLabel: 'OpenBind-0', family: 'af3', approxMB: 265, license: 'Apache-2.0', pairChannels: 128 },
+  { id: 'protenix2', label: 'Protenix-v2', shortLabel: 'Protenix-v2', family: 'af3', approxMB: 334, license: 'Apache-2.0', pairChannels: 256 },
+  { id: 'opendde', label: 'OpenDDE', shortLabel: 'OpenDDE', family: 'af3', approxMB: 473, license: 'Apache-2.0', pairChannels: 384, tokenExpansionFactor: 2 },
+  { id: 'mol1', label: 'Mol-1', shortLabel: 'Mol-1', family: 'af3', approxMB: 510, license: 'Apache-2.0', pairChannels: 448 },
+  { id: 'intellifold2', label: 'IntelliFold-2', shortLabel: 'IntelliFold-2', family: 'af3', approxMB: 612, license: 'Apache-2.0', pairChannels: 512 },
+  { id: 'af3', label: 'AlphaFold 3 (Non-Commercial)', shortLabel: 'AlphaFold 3', family: 'af3', approxMB: 265, license: 'AF3 Non-Commercial', nonCommercial: true, pairChannels: 128 },
+  { id: 'ef2-fast-300m', label: 'ESMFold2 Experimental Fast · ESM-C 300M', shortLabel: 'EF2 Fast 300M', family: 'esmfold2', approxMB: 270, license: 'Biohub / Synthyra model terms', pairChannels: 256 },
+  { id: 'ef2-fast-600m', label: 'ESMFold2 Experimental Fast · ESM-C 600M', shortLabel: 'EF2 Fast 600M', family: 'esmfold2', approxMB: 368, license: 'Biohub / Synthyra model terms', pairChannels: 256 },
 ];
 
 export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {

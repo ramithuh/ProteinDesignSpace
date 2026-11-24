@@ -9,6 +9,7 @@
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS, RFD4_BENCHMARK_OPTIONS } from './registry';
 import { decodeWireValue, encodeWireValue } from './remote-codec';
 import type { CanonicalArtifact, NodeProgressEvent, WorkflowNode } from './types';
+import type { WebGpuHardwareCapabilities } from './webgpu-device';
 
 export type ComputeRoutingMode = 'local' | 'remote' | 'hybrid';
 
@@ -274,6 +275,60 @@ export function formatHostGpuDetail(health: RemoteServerHealth | null): string {
   return g.description || g.vendor || 'Host GPU ready';
 }
 
+const MIB = 1024 * 1024;
+const GIB = 1024 * 1024 * 1024;
+
+/**
+ * Compute a safe Browser `Auto` residue ceiling for a LocalFold model from probed
+ * WebGPU adapter limits and system memory capabilities.
+ */
+export function computeSafeBrowserFoldCeiling(
+  modelId: string,
+  hardwareCaps?: WebGpuHardwareCapabilities | null,
+): number {
+  const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
+  const familyBaseline = meta.family === 'af2' || meta.family === 'af2-multimer' ? 768 : 512;
+  const maxStorageBindingBytes = hardwareCaps?.limits?.maxStorageBufferBindingSize;
+  if (!hardwareCaps || typeof maxStorageBindingBytes !== 'number' || !Number.isFinite(maxStorageBindingBytes) || maxStorageBindingBytes <= 0) {
+    return familyBaseline;
+  }
+
+  const pairChannels = meta.pairChannels ?? 128;
+  const tokenExpansionFactor = meta.tokenExpansionFactor ?? 1;
+  const rawBindingTokens = Math.floor(Math.sqrt(maxStorageBindingBytes / (pairChannels * 4)));
+  const bindingCeiling = Math.floor(rawBindingTokens / tokenExpansionFactor);
+
+  if (meta.family === 'esmfold2') {
+    return 512;
+  }
+
+  const hasCapableRam =
+    (hardwareCaps.deviceMemoryGiB !== null && hardwareCaps.deviceMemoryGiB >= 8) ||
+    (hardwareCaps.estimatedMemoryBudgetBytes !== null && hardwareCaps.estimatedMemoryBudgetBytes >= 2 * GIB);
+  const isCapableDesktop =
+    !hardwareCaps.isSoftwareFallback &&
+    maxStorageBindingBytes >= 256 * MIB &&
+    hasCapableRam;
+
+  if (isCapableDesktop) {
+    if (meta.family === 'af2' || meta.family === 'af2-multimer') {
+      return Math.max(64, Math.min(768, bindingCeiling));
+    }
+    if (pairChannels <= 128 && tokenExpansionFactor === 1) {
+      return Math.max(64, Math.min(768, bindingCeiling));
+    }
+    return Math.max(64, Math.min(512, bindingCeiling));
+  }
+
+  if (meta.family === 'af2' || meta.family === 'af2-multimer') {
+    const isLowRam = hardwareCaps.deviceMemoryGiB !== null && hardwareCaps.deviceMemoryGiB <= 4;
+    const cap = hardwareCaps.isSoftwareFallback || isLowRam ? 512 : 768;
+    return Math.max(64, Math.min(cap, bindingCeiling));
+  }
+
+  return Math.max(64, Math.min(512, bindingCeiling));
+}
+
 /**
  * Resolve the effective folding residue ceiling for a node given Settings + Host GPU routing.
  * H4: On Host GPU, never exceed the operator's advertised `remoteHealth.maxFoldResidues`.
@@ -282,7 +337,11 @@ export function resolveNodeFoldLimitOptions(
   node: WorkflowNode,
   config: ComputeBackendConfig,
   remoteHealth?: RemoteServerHealth | null,
-  opts?: { localWebGpuAvailable?: boolean; localWebGpuFallback?: boolean },
+  opts?: {
+    localWebGpuAvailable?: boolean;
+    localWebGpuFallback?: boolean;
+    localHardwareCaps?: WebGpuHardwareCapabilities | null;
+  },
 ): { maxFoldResidues?: number; isHostGpu: boolean } {
   const isHostGpu = shouldRouteNodeToRemote(node, config, opts);
   const userOverride = sanitizeMaxFoldResidues(config.maxFoldResidues);
@@ -294,10 +353,17 @@ export function resolveNodeFoldLimitOptions(
       isHostGpu: true,
     };
   }
-  return {
-    ...(userOverride !== null ? { maxFoldResidues: userOverride } : {}),
-    isHostGpu: false,
-  };
+  if (userOverride !== null) {
+    return { maxFoldResidues: userOverride, isHostGpu: false };
+  }
+  if (opts?.localHardwareCaps && node.adapterId === 'localfold-af2') {
+    const modelId = String(node.params?.model ?? 'monomer');
+    return {
+      maxFoldResidues: computeSafeBrowserFoldCeiling(modelId, opts.localHardwareCaps),
+      isHostGpu: false,
+    };
+  }
+  return { isHostGpu: false };
 }
 
 /** Estimate active weight size (MB) for routing decisions in hybrid mode. */

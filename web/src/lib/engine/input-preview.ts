@@ -2598,10 +2598,19 @@ export function compileNodeInputPreview(
       dnaSeqs,
       rnaSeqs,
     } = baseCfg;
+    const nodeFoldLimit = foldLimitOpts?.resolveNodeFoldLimits?.(node) ?? foldLimitOpts;
+    const defaultFoldLimit = meta.family === 'af3' || meta.family === 'esmfold2' ? 512 : 768;
+    const resolvedFoldLimit =
+      typeof nodeFoldLimit?.maxFoldResidues === 'number' &&
+      Number.isFinite(nodeFoldLimit.maxFoldResidues) &&
+      nodeFoldLimit.maxFoldResidues >= 64
+        ? Math.round(nodeFoldLimit.maxFoldResidues)
+        : defaultFoldLimit;
     const foldSettings: CompiledModelPayloadView['compiledSummary'] = {
       model: modelKey,
       family: meta.family,
       msaMode,
+      maxFoldResidues: resolvedFoldLimit,
     };
     if (isEsmFold) {
       foldSettings.esmfold2Steps = baseCfg.effectiveEsmfold2Steps;
@@ -2692,12 +2701,8 @@ export function compileNodeInputPreview(
           .toUpperCase()
           .replace(/[\s/:,]+/g, '')
           .replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, 'X');
-        const resolvedEf2Limit =
-          foldLimitOpts?.resolveNodeFoldLimits?.(node)?.maxFoldResidues ??
-          foldLimitOpts?.maxFoldResidues ??
-          undefined;
         chainLengths = isEsmFold
-          ? esmfold2Chains(rep, resolvedEf2Limit ?? 512).map((chain) => chain.length)
+          ? esmfold2Chains(rep, resolvedFoldLimit).map((chain) => chain.length)
           : Array.isArray(rep.chainLengths) &&
           rep.chainLengths.length > 0 &&
           rep.chainLengths.every((n) => Number.isInteger(n) && n > 0) &&

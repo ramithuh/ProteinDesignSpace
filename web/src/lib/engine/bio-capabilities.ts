@@ -3396,9 +3396,19 @@ export function validateBioCapabilities(
         customMax !== null
           ? isHostGpu
             ? customMax
-            : Math.max(defaultTokenLimit, Math.round(customMax * 0.85))
+            : customMax < defaultTokenLimit
+              ? customMax
+              : Math.max(defaultTokenLimit, Math.round(customMax * 0.85))
           : defaultTokenLimit;
       if (up.estimatedTokens > tokenLimit) {
+        const foldCeilingTiers = [768, 1024, 1536, 2048, 3072, 4096] as const;
+        const suggestedTier =
+          !isHostGpu && up.estimatedTokens <= 4096
+            ? (foldCeilingTiers.find(
+                (t) => t > (customMax ?? 0) && Math.round(t * 0.85) >= up.estimatedTokens,
+              ) ??
+              foldCeilingTiers.find((t) => t > (customMax ?? 0) && t >= up.estimatedTokens))
+            : undefined;
         issues.push({
           severity: 'warning',
           code: 'webgpu-token-ceiling',
@@ -3406,6 +3416,16 @@ export function validateBioCapabilities(
           message: isHostGpu
             ? `Estimated length (~${up.estimatedTokens} tokens) exceeds the configured Host GPU ceiling (${tokenLimit}) for ${meta.shortLabel}. Raise "Max fold len" in the GPU menu if your host VRAM permits.`
             : `Estimated length (~${up.estimatedTokens} tokens) exceeds the recommended browser WebGPU ceiling (${tokenLimit}) for ${meta.shortLabel} and may hit GPU memory limits.`,
+          ...(suggestedTier !== undefined
+            ? {
+                fix: {
+                  label: `Raise Max fold len to ${suggestedTier} aa`,
+                  nodeId: node.id,
+                  paramsPatch: {},
+                  computeBackendPatch: { maxFoldResidues: suggestedTier },
+                },
+              }
+            : {}),
         });
       }
     }

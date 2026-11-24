@@ -13,6 +13,7 @@ import {
 } from '$lib/engine/conditioning';
 import { esmfold2Chains, esmfold2ParamIssue } from '$lib/engine/localfold-esmfold2';
 import { computeCandidateIpsae, loadEsmfold2 } from './localfold-esmfold2';
+import { LOCALFOLD_MODEL_OPTIONS } from '$lib/engine/registry';
 import { selectFoldWorkItems } from '$lib/engine/bio-capabilities';
 import {
   clampLocalFoldRecycles,
@@ -262,7 +263,7 @@ async function ensureDevice() {
   });
 }
 
-async function ensureModelLoaded(ctx: WorkerRunContext, modelKey: string) {
+async function ensureModelLoaded(ctx: WorkerRunContext, modelKey: string, maxTargetTokens = 0) {
   await ensureCoreModules(ctx);
 
   if (loadedModelKey && loadedModelKey !== modelKey) {
@@ -276,6 +277,27 @@ async function ensureModelLoaded(ctx: WorkerRunContext, modelKey: string) {
   }
 
   await ensureDevice();
+
+  if (!ESMFOLD2_MODELS.has(modelKey) && maxTargetTokens > 0 && gpuDevice) {
+    const maxBindingBytes = Number(gpuDevice.limits?.maxStorageBufferBindingSize ?? 0);
+    if (Number.isFinite(maxBindingBytes) && maxBindingBytes > 0) {
+      const modelMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelKey);
+      const pairChannels = modelMeta?.pairChannels ?? 128;
+      const tokenExpansionFactor = modelMeta?.tokenExpansionFactor ?? 1;
+      const effectiveTokens = maxTargetTokens * tokenExpansionFactor;
+      const requiredPairBytes = effectiveTokens * effectiveTokens * pairChannels * 4;
+      if (requiredPairBytes > maxBindingBytes) {
+        const bindingCeiling = Math.floor(
+          Math.floor(Math.sqrt(maxBindingBytes / (pairChannels * 4))) / tokenExpansionFactor,
+        );
+        const reqMiB = (requiredPairBytes / (1024 * 1024)).toFixed(0);
+        const limitMiB = (maxBindingBytes / (1024 * 1024)).toFixed(0);
+        throw new Error(
+          `Refusing to download ${modelMeta?.shortLabel ?? modelKey} weights: ${maxTargetTokens} tokens requires ~${reqMiB} MiB pair storage buffer (${pairChannels}-ch${tokenExpansionFactor > 1 ? `, ${tokenExpansionFactor}x structural tokens` : ''}), exceeding this WebGPU device's maxStorageBufferBindingSize (${limitMiB} MiB; hardware ceiling ~${bindingCeiling} residues).`,
+        );
+      }
+    }
+  }
 
   if (loadedModelKey === modelKey && (loadedAf2 || loadedAf3 || predictEsmfold2)) {
     return;
@@ -621,11 +643,37 @@ createWorkerHarness({
       });
     }
 
+    const modelMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelKey);
+    const defaultMaxFoldResidues = isAf2Mono || isAf2Multi ? 768 : 512;
     const rawMaxFoldResidues = Number(ctx.maxFoldResidues);
     const maxFoldResidues =
-      Number.isFinite(rawMaxFoldResidues) && rawMaxFoldResidues >= 512
+      Number.isFinite(rawMaxFoldResidues) && rawMaxFoldResidues >= 64
         ? Math.round(rawMaxFoldResidues)
-        : 512;
+        : defaultMaxFoldResidues;
+    const extraPolymerTokens =
+      isAf3 || isEsmfold2
+        ? dnaSeqs.reduce((sum, s) => sum + s.length, 0) +
+          rnaSeqs.reduce((sum, s) => sum + s.length, 0) +
+          ligandCcdCodes.length
+        : 0;
+    let maxTargetTokens = 0;
+    for (const { cand } of targets) {
+      const proteinLen = cand.sequence.replace(/[\s/:,]+/g, '').length;
+      if (proteinLen === 0) {
+        throw new Error(`Refusing to fold "${cand.id}": sequence is empty`);
+      }
+      const totalTokens = proteinLen + extraPolymerTokens;
+      if (totalTokens > maxFoldResidues) {
+        const sizeDesc =
+          extraPolymerTokens > 0
+            ? `${proteinLen} aa + ${extraPolymerTokens} nucleic/ligand = ${totalTokens} tokens`
+            : `${proteinLen} aa`;
+        throw new Error(
+          `Refusing to fold "${cand.id}" (${sizeDesc}) with ${modelMeta?.shortLabel ?? modelKey}: exceeds WebGPU memory ceiling (${maxFoldResidues} residues). Raise "Max fold len" in the GPU / Compute menu or crop the target domain before running.`,
+        );
+      }
+      if (totalTokens > maxTargetTokens) maxTargetTokens = totalTokens;
+    }
     const ef2Chains = isEsmfold2 ? targets.map(({ cand }) => esmfold2Chains(cand, maxFoldResidues)) : [];
     const maxEf2ResidueLength = isEsmfold2
       ? ef2Chains.reduce((mx, chs) => Math.max(mx, chs.join('').length), 0)
@@ -638,7 +686,7 @@ createWorkerHarness({
         })
       : baseConfig;
     const effectiveEsmfold2Steps = effectiveConfig.effectiveEsmfold2Steps;
-    await ensureModelLoaded(ctx, modelKey);
+    await ensureModelLoaded(ctx, modelKey, maxTargetTokens);
     const folds: FoldedCandidate[] = [];
     const sourceStructureId = seqSet.sourceStructureId ?? seqSet.parentStructureId;
     const msaCache = createMsaSearchCache();

@@ -1465,7 +1465,10 @@ export class ExecutionScheduler {
         }
       }
     }
-    for (const issue of validateBioCapabilities(graph, resumeOutputs)) {
+    const bioFoldLimitOpts = this.foldLimitResolver
+      ? { resolveNodeFoldLimits: (n: WorkflowNode) => this.foldLimitResolver?.(n) }
+      : undefined;
+    for (const issue of validateBioCapabilities(graph, resumeOutputs, bioFoldLimitOpts)) {
       if (issue.severity === 'error' && !errors.includes(issue.message)) {
         errors.push(issue.message);
       }
