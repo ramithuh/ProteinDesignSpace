@@ -1,5 +1,41 @@
 // Lightweight, zero-Svelte workflow decoder & metadata extractor for Cloudflare Pages Edge OG previews.
 
+import {
+  MAX_HASH_CHARS,
+  MAX_IMPORT_EDGES,
+  MAX_IMPORT_NODES,
+  SHORT_TO_ADAPTER,
+  decodeWorkflowQuery,
+  extractWorkflowSearchOrHash,
+} from '../engine/flow-dsl';
+import { ADAPTER_REGISTRY } from '../engine/registry';
+
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function safeStr(v: unknown): string {
+  return typeof v === 'string'
+    ? v
+    : typeof v === 'number' || typeof v === 'boolean'
+      ? String(v)
+      : '';
+}
+
+function sanitizeOgValue(val: unknown, depth = 0): unknown {
+  if (val === null || typeof val !== 'object') return val;
+  if (depth > 32) return undefined;
+  if (Array.isArray(val)) return val.map((item) => sanitizeOgValue(item, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+    if (FORBIDDEN_KEYS.has(k)) continue;
+    out[k] = sanitizeOgValue(v, depth + 1);
+  }
+  return out;
+}
+
+function sanitizeOgParams(obj: Record<string, unknown>): Record<string, unknown> {
+  return sanitizeOgValue(obj, 0) as Record<string, unknown>;
+}
+
 export type OgNodeCategory = 'input' | 'generation' | 'sequence' | 'prediction' | 'evaluation';
 
 export interface OgNode {
@@ -35,36 +71,6 @@ interface AdapterMeta {
   shortName: string;
   category: OgNodeCategory;
 }
-
-const SHORT_TO_ADAPTER: Record<string, string> = {
-  p: 'pdb-input',
-  q: 'sequence-input',
-  r: 'rfd4-proteina',
-  g: 'genie3',
-  pp: 'protpardelle',
-  d: 'rfdiffusion',
-  r3: 'rfd3',
-  b: 'boltzgen',
-  e: 'evodiff',
-  lp: 'la-proteina',
-  pr: 'proteina',
-  sp: 'sid-protein',
-  g2: 'genie2',
-  ff: 'frameflow',
-  f2: 'foldflow2',
-  m: 'web-protein-mpnn',
-  lm: 'ligandmpnn',
-  la: 'lasermpnn',
-  af: 'antifold-esmif1',
-  f: 'localfold-af2',
-  tm: 'thermompnn',
-  ec: 'esmc',
-  dy: 'dyna1',
-  gn: 'gnina',
-  tk: 'top-k-filter',
-  s: 'designability-scorer',
-  c: 'structure-compare',
-};
 
 const ADAPTER_META: Record<string, AdapterMeta> = {
   'pdb-input': { shortName: 'Structure Input', category: 'input' },
@@ -107,132 +113,24 @@ export const CATEGORY_COLORS: Record<
   evaluation: { accent: '#d97706', badgeBg: '#fef3c7', badgeText: '#b45309', label: 'EVALUATION' },
 };
 
-interface PresetDef {
-  name: string;
-  nodes: Array<{ id: string; adapterId: string; label: string; params: Record<string, unknown> }>;
-  edges: OgEdge[];
-}
-
-const PRESET_SNAPSHOTS: Record<string, PresetDef> = {
-  'genie3-mpnn-af2': {
-    name: 'Genie 3 → Cα-ProteinMPNN → LocalFold',
-    nodes: [
-      { id: 'gen', adapterId: 'genie3', label: 'Genie 3', params: { length: 80, nSampleStep: 100 } },
-      { id: 'mpnn', adapterId: 'web-protein-mpnn', label: 'Cα-ProteinMPNN', params: { family: 'ca', numSequences: 2 } },
-      { id: 'fold', adapterId: 'localfold-af2', label: 'AF2 Model 1', params: { capMode: 'follow-upstream', recycles: 1 } },
-      { id: 'score', adapterId: 'designability-scorer', label: 'scRMSD / scTM', params: {} },
-    ],
-    edges: [
-      { fromNode: 'gen', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
-      { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
-      { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
-      { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
-    ],
-  },
-  'rfd4-refold-native': {
-    name: 'RFD4-Proteina → LocalFold → scRMSD',
-    nodes: [
-      { id: 'gen', adapterId: 'rfd4-proteina', label: 'RFD4-Proteina', params: { length: 80, numSteps: 50 } },
-      { id: 'fold', adapterId: 'localfold-af2', label: 'AF2 Model 1', params: { capMode: 'follow-upstream', recycles: 1 } },
-      { id: 'score', adapterId: 'designability-scorer', label: 'scRMSD / scTM', params: {} },
-    ],
-    edges: [
-      { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
-      { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
-      { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
-    ],
-  },
-  'pdb-refold-qc': {
-    name: 'Backbone Input → SolubleMPNN → LocalFold',
-    nodes: [
-      { id: 'src', adapterId: 'pdb-input', label: 'Backbone Input', params: { mode: 'demo-bundle' } },
-      { id: 'mpnn', adapterId: 'web-protein-mpnn', label: 'SolubleMPNN', params: { family: 'soluble', numSequences: 2 } },
-      { id: 'fold', adapterId: 'localfold-af2', label: 'AF2 Model 1', params: { capMode: 'follow-upstream', recycles: 1 } },
-      { id: 'score', adapterId: 'designability-scorer', label: 'scRMSD / scTM', params: {} },
-    ],
-    edges: [
-      { fromNode: 'src', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
-      { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
-      { fromNode: 'src', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
-      { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
-    ],
-  },
-  'rfd4-mpnn-refold': {
-    name: 'RFD4-Proteina → SolubleMPNN → LocalFold',
-    nodes: [
-      { id: 'gen', adapterId: 'rfd4-proteina', label: 'RFD4-Proteina', params: { length: 80, numSteps: 50 } },
-      { id: 'mpnn', adapterId: 'web-protein-mpnn', label: 'SolubleMPNN', params: { family: 'soluble', numSequences: 2 } },
-      { id: 'fold', adapterId: 'localfold-af2', label: 'AF2 Model 1', params: { capMode: 'follow-upstream', recycles: 1 } },
-      { id: 'score', adapterId: 'designability-scorer', label: 'scRMSD / scTM', params: {} },
-    ],
-    edges: [
-      { fromNode: 'gen', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
-      { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
-      { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
-      { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
-    ],
-  },
-  'rfd4-branch-compare': {
-    name: 'RFD4-Proteina: SolubleMPNN vs Native',
-    nodes: [
-      { id: 'gen', adapterId: 'rfd4-proteina', label: 'RFD4-Proteina', params: { length: 80 } },
-      { id: 'mpnn', adapterId: 'web-protein-mpnn', label: 'SolubleMPNN', params: { numSequences: 2 } },
-      { id: 'fold_mpnn', adapterId: 'localfold-af2', label: 'AF2 (MPNN)', params: { capMode: 'follow-upstream' } },
-      { id: 'score_mpnn', adapterId: 'designability-scorer', label: 'Score (MPNN)', params: {} },
-      { id: 'fold_native', adapterId: 'localfold-af2', label: 'AF2 (Native)', params: { capMode: 'follow-upstream' } },
-      { id: 'score_native', adapterId: 'designability-scorer', label: 'Score (Native)', params: {} },
-    ],
-    edges: [
-      { fromNode: 'gen', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
-      { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold_mpnn', toPort: 'sequences' },
-      { fromNode: 'fold_mpnn', fromPort: 'folds', toNode: 'score_mpnn', toPort: 'folds' },
-      { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold_native', toPort: 'sequences' },
-      { fromNode: 'fold_native', fromPort: 'folds', toNode: 'score_native', toPort: 'folds' },
-    ],
-  },
-  'rfd4-conditioned-cath': {
-    name: 'CATH-Conditioned RFD4-Proteina → LocalFold',
-    nodes: [
-      { id: 'gen', adapterId: 'rfd4-proteina', label: 'RFD4-Proteina', params: { length: 80, cathCode: '1.10.287' } },
-      { id: 'fold', adapterId: 'localfold-af2', label: 'AF2 Model 1', params: { capMode: 'follow-upstream' } },
-      { id: 'score', adapterId: 'designability-scorer', label: 'scRMSD / scTM', params: {} },
-    ],
-    edges: [
-      { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
-      { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
-      { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
-    ],
-  },
-  'rfd4-af2-vs-rf3': {
-    name: 'RFD4-Proteina: AF2 vs RoseTTAFold 3',
-    nodes: [
-      { id: 'gen', adapterId: 'rfd4-proteina', label: 'RFD4-Proteina', params: { length: 80 } },
-      { id: 'fold_af2', adapterId: 'localfold-af2', label: 'AF2 Model 1', params: { capMode: 'follow-upstream' } },
-      { id: 'score_af2', adapterId: 'designability-scorer', label: 'Score (AF2)', params: {} },
-      { id: 'fold_rf3', adapterId: 'localfold-af2', label: 'RoseTTAFold 3', params: { model: 'rf3', capMode: 'follow-upstream' } },
-      { id: 'score_rf3', adapterId: 'designability-scorer', label: 'Score (RF3)', params: {} },
-    ],
-    edges: [
-      { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold_af2', toPort: 'sequences' },
-      { fromNode: 'fold_af2', fromPort: 'folds', toNode: 'score_af2', toPort: 'folds' },
-      { fromNode: 'gen', fromPort: 'sequences', toNode: 'fold_rf3', toPort: 'sequences' },
-      { fromNode: 'fold_rf3', fromPort: 'folds', toNode: 'score_rf3', toPort: 'folds' },
-    ],
-  },
-  'pdb-thermompnn': {
-    name: 'Backbone Input → ThermoMPNN ΔΔG',
-    nodes: [
-      { id: 'src', adapterId: 'pdb-input', label: 'Backbone Input', params: { mode: 'demo-bundle' } },
-      { id: 'thermo', adapterId: 'thermompnn', label: 'ThermoMPNN', params: {} },
-    ],
-    edges: [{ fromNode: 'src', fromPort: 'structure', toNode: 'thermo', toPort: 'structure' }],
-  },
-};
-
 function formatCompactParamChip(adapterId: string, params: Record<string, unknown>): string {
-  const str = (k: string, fb = '') => (params[k] !== undefined && params[k] !== null ? String(params[k]).trim() : fb);
+  const str = (k: string, fb = '') => {
+    if (!Object.hasOwn(params, k)) return fb;
+    const v = params[k];
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      return String(v).trim();
+    }
+    return fb;
+  };
   const num = (k: string, fb: number) => {
-    const n = Number(params[k]);
+    if (!Object.hasOwn(params, k)) return fb;
+    const raw = params[k];
+    const n =
+      typeof raw === 'number'
+        ? raw
+        : typeof raw === 'string' && raw.trim() !== ''
+          ? Number(raw)
+          : NaN;
     return Number.isFinite(n) ? n : fb;
   };
   switch (adapterId) {
@@ -292,7 +190,7 @@ function formatCompactParamChip(adapterId: string, params: Record<string, unknow
     case 'top-k-filter':
       return `Top-${num('topK', 2)} filter`;
     default:
-      return ADAPTER_META[adapterId]?.shortName ?? adapterId;
+      return resolveOgAdapterMeta(adapterId).shortName;
   }
 }
 
@@ -323,7 +221,10 @@ async function inflateRawEdge(bytes: Uint8Array): Promise<string> {
       if (done) break;
       if (value) {
         total += value.byteLength;
-        if (total > 256 * 1024) throw new Error('Decompressed payload too large');
+        if (total > 256 * 1024) {
+          await reader.cancel('Decompressed payload too large').catch(() => {});
+          throw new Error('Decompressed payload too large');
+        }
         chunks.push(value);
       }
     }
@@ -343,15 +244,15 @@ async function inflateRawEdge(bytes: Uint8Array): Promise<string> {
 function extractStructureTarget(nodes: OgNode[]): OgStructureTarget | null {
   for (const n of nodes) {
     if (n.adapterId !== 'pdb-input') continue;
-    const mode = String(n.params.mode ?? 'demo-bundle');
-    const cropSegments = String(n.params.cropSegments ?? '').trim();
+    const mode = safeStr(n.params.mode ?? 'demo-bundle') || 'demo-bundle';
+    const cropSegments = safeStr(n.params.cropSegments).trim();
     if (mode === 'pdb-id') {
-      const pdbId = String(n.params.pdbId ?? '').trim().toUpperCase();
+      const pdbId = safeStr(n.params.pdbId).trim().toUpperCase();
       if (/^[0-9A-Z]{4}$/.test(pdbId)) {
         return { kind: 'rcsb', pdbId, cropSegments };
       }
     } else if (mode === 'alphafold-db') {
-      const uniprotId = String(n.params.uniprotId ?? '').trim().toUpperCase();
+      const uniprotId = safeStr(n.params.uniprotId).trim().toUpperCase();
       if (/^[A-Z0-9]{6,10}$/.test(uniprotId)) {
         return { kind: 'afdb', uniprotId, cropSegments };
       }
@@ -398,167 +299,222 @@ function buildTitleAndDesc(
   };
 }
 
+function stageToCategory(stage: string): OgNodeCategory {
+  switch (stage) {
+    case 'source':
+      return 'input';
+    case 'generate':
+      return 'generation';
+    case 'inverse-fold':
+      return 'sequence';
+    case 'fold':
+      return 'prediction';
+    case 'condition':
+    case 'score':
+    default:
+      return 'evaluation';
+  }
+}
+
+function resolveOgAdapterMeta(
+  adapterId: string,
+  fallbackLabel?: string,
+  fallbackStage?: string,
+): AdapterMeta {
+  if (Object.hasOwn(ADAPTER_META, adapterId)) {
+    return ADAPTER_META[adapterId];
+  }
+  const manifest = Object.hasOwn(ADAPTER_REGISTRY, adapterId)
+    ? ADAPTER_REGISTRY[adapterId]
+    : undefined;
+  return {
+    shortName: fallbackLabel ?? manifest?.displayName ?? adapterId,
+    category: stageToCategory(fallbackStage ?? manifest?.stage ?? 'score'),
+  };
+}
+
 /**
- * Decode a `?g=...` / `?p=...` (or `#g=...` / `#p=...`) share query string into
- * lightweight edge OG metadata and graph structure.
+ * Decode a `?flow=...`, `?recipe=...`, `?g=...`, or `?p=...` (or `#...` / full URL / hybrid `?utm_...#flow=`)
+ * share query string into lightweight edge OG metadata and graph structure.
  */
 export async function decodeOgWorkflowFromQuery(
   rawQueryOrHash: string,
 ): Promise<DecodedOgWorkflow | null> {
-  const clean = rawQueryOrHash.replace(/^[#?]/, '').trim();
-  if (!clean || clean.length > 32_768) return null;
+  try {
+    const { clean, invalidUrl } = extractWorkflowSearchOrHash(rawQueryOrHash);
+    if (invalidUrl || !clean || clean.length > MAX_HASH_CHARS) return null;
 
-  const qs = new URLSearchParams(clean);
-  const pVal = qs.get('p');
-  const gVal = qs.get('g');
+    const qs = new URLSearchParams(clean);
 
-  if (pVal) {
-    const preset = PRESET_SNAPSHOTS[pVal];
-    if (!preset) return null;
-    const nodeMap = new Map<string, OgNode>();
-    const nodes: OgNode[] = preset.nodes.map((pn) => {
-      const meta = ADAPTER_META[pn.adapterId] ?? { shortName: pn.adapterId, category: 'evaluation' as const };
-      const params = { ...pn.params };
-      const node: OgNode = {
-        id: pn.id,
-        adapterId: pn.adapterId,
-        label: pn.label || meta.shortName,
-        category: meta.category,
-        paramChip: '',
-        params,
-      };
-      nodeMap.set(pn.id, node);
-      return node;
-    });
-    for (const [k, v] of qs.entries()) {
-      if (k === 'p' || k === 'v') continue;
-      const dot = k.lastIndexOf('.');
-      if (dot <= 0) continue;
-      const node = nodeMap.get(k.slice(0, dot));
-      const paramKey = k.slice(dot + 1);
-      if (!node || !paramKey || paramKey === '__proto__' || paramKey === 'constructor') continue;
-      if (paramKey === '_label' && v.trim()) {
-        node.label = v.trim();
-      } else if (paramKey === '_pos') {
-        const [xs, ys] = v.split(',');
-        const x = Number(xs);
-        const y = Number(ys);
-        if (Number.isFinite(x) && Number.isFinite(y)) node.position = { x, y };
-      } else {
-        node.params[paramKey] = v;
-      }
-    }
-    for (const n of nodes) {
-      n.paramChip = formatCompactParamChip(n.adapterId, n.params);
-    }
-    const { title, description } = buildTitleAndDesc(nodes, preset.name);
-    return {
-      title,
-      description,
-      nodes,
-      edges: preset.edges.map((e) => ({ ...e })),
-      structureTarget: extractStructureTarget(nodes),
-    };
-  }
+    if (qs.has('flow') || qs.has('recipe') || qs.has('p')) {
+      const res = await decodeWorkflowQuery(clean);
+      if (!res.ok || !res.graph || res.graph.nodes.length === 0) return null;
 
-  if (gVal) {
-    const normalized = gVal
-      .replace(/%5[fF]/g, '_')
-      .replace(/%2[dD]/g, '-')
-      .replace(/\\_/g, '_')
-      .replace(/[.,;:!?)\]}>'"]+$/, '');
-
-    let parsed: { v?: number; n: unknown[]; e: unknown[]; p?: unknown } | null = null;
-    for (const candidate of [normalized, normalized + '_', normalized + '-']) {
-      try {
-        const rawBytes = fromBase64Url(candidate);
-        let text: string;
-        try {
-          text = await inflateRawEdge(rawBytes);
-        } catch {
-          text = new TextDecoder().decode(rawBytes);
-        }
-        const obj = JSON.parse(text);
-        if (obj && typeof obj === 'object' && Array.isArray(obj.n) && Array.isArray(obj.e)) {
-          parsed = obj;
-          break;
-        }
-      } catch {
-        /* try next */
-      }
-    }
-    if (!parsed || parsed.n.length === 0 || parsed.n.length > 64) return null;
-
-    const isLegacyV1 = !parsed.v || parsed.v < 2;
-    const rawPos = Array.isArray(parsed.p) ? parsed.p : null;
-    const nodes: OgNode[] = [];
-    for (let i = 0; i < parsed.n.length; i++) {
-      const tuple = parsed.n[i];
-      if (!Array.isArray(tuple) || tuple.length < 2) return null;
-      const id = String(tuple[0]);
-      const shortA = String(tuple[1]);
-      const adapterId = SHORT_TO_ADAPTER[shortA] ?? shortA;
-      const meta = ADAPTER_META[adapterId] ?? { shortName: adapterId, category: 'evaluation' as const };
-      const params: Record<string, unknown> =
-        tuple[2] && typeof tuple[2] === 'object' && !Array.isArray(tuple[2])
-          ? { ...(tuple[2] as Record<string, unknown>) }
-          : {};
-      if (
-        isLegacyV1 &&
-        (adapterId === 'localfold-af2' || adapterId === 'esmc' || adapterId === 'dyna1') &&
-        !('capMode' in params)
-      ) {
-        params.capMode = 'fixed';
-      }
-      const label =
-        typeof tuple[3] === 'string' && tuple[3].trim() ? tuple[3].trim() : meta.shortName;
-      const posTuple = rawPos?.[i];
-      const position =
-        Array.isArray(posTuple) &&
-        posTuple.length === 2 &&
-        Number.isFinite(Number(posTuple[0])) &&
-        Number.isFinite(Number(posTuple[1]))
-          ? { x: Number(posTuple[0]), y: Number(posTuple[1]) }
-          : undefined;
-
-      nodes.push({
-        id,
-        adapterId,
-        label,
-        category: meta.category,
-        paramChip: formatCompactParamChip(adapterId, params),
-        params,
-        ...(position ? { position } : {}),
+      const summaryById = new Map(res.nodes.map((s) => [s.id, s]));
+      const nodes: OgNode[] = res.graph.nodes.map((n) => {
+        const summary = summaryById.get(n.id);
+        const meta = resolveOgAdapterMeta(n.adapterId, summary?.label, summary?.stage);
+        const label = typeof n.label === 'string' && n.label.trim() ? n.label.trim() : meta.shortName;
+        const params = { ...n.params };
+        return {
+          id: n.id,
+          adapterId: n.adapterId,
+          label,
+          category: meta.category,
+          paramChip: formatCompactParamChip(n.adapterId, params),
+          params,
+          ...(n.position ? { position: n.position } : {}),
+        };
       });
+
+      const edges: OgEdge[] = res.graph.edges.map((e) => ({
+        fromNode: e.fromNode,
+        fromPort: e.fromPort,
+        toNode: e.toNode,
+        toPort: e.toPort,
+      }));
+
+      const customTitle =
+        res.graph.name && res.graph.name !== 'Shared Workflow' && res.graph.name !== 'Custom Recipe'
+          ? res.graph.name
+          : undefined;
+      const { title, description } = buildTitleAndDesc(nodes, customTitle);
+      return {
+        title,
+        description,
+        nodes,
+        edges,
+        structureTarget: extractStructureTarget(nodes),
+      };
     }
 
-    const edges: OgEdge[] = [];
-    for (const rawE of parsed.e) {
-      if (!Array.isArray(rawE)) continue;
-      if (rawE.length >= 4) {
-        const fromNode = String(rawE[0] ?? '').trim();
-        const fromPort = String(rawE[1] ?? 'out').trim();
-        const toNode = String(rawE[2] ?? '').trim();
-        const toPort = String(rawE[3] ?? 'in').trim();
-        if (fromNode && toNode) edges.push({ fromNode, fromPort, toNode, toPort });
-      } else if (rawE.length >= 2) {
-        const [src, dst] = rawE;
-        if (typeof src !== 'string' || typeof dst !== 'string') continue;
-        const [fromNode, fromPort = 'out'] = src.split('.');
-        const [toNode, toPort = 'in'] = dst.split('.');
-        if (fromNode && toNode) edges.push({ fromNode, fromPort, toNode, toPort });
+    const gVal = qs.get('g');
+
+    if (gVal) {
+      const normalized = gVal
+        .replace(/%5[fF]/g, '_')
+        .replace(/%2[dD]/g, '-')
+        .replace(/\\_/g, '_')
+        .replace(/[.,;:!?)\]}>'"]+$/, '');
+
+      let parsed: { v?: number; n: unknown[]; e: unknown[]; p?: unknown } | null = null;
+      for (const candidate of [normalized, normalized + '_', normalized + '-', normalized + '__']) {
+        try {
+          const rawBytes = fromBase64Url(candidate);
+          let text: string;
+          try {
+            text = await inflateRawEdge(rawBytes);
+          } catch {
+            text = new TextDecoder().decode(rawBytes);
+          }
+          const obj = JSON.parse(text);
+          if (obj && typeof obj === 'object' && Array.isArray(obj.n) && Array.isArray(obj.e)) {
+            parsed = obj;
+            break;
+          }
+        } catch {
+          /* try next */
+        }
       }
+      if (
+        !parsed ||
+        parsed.n.length === 0 ||
+        parsed.n.length > MAX_IMPORT_NODES ||
+        parsed.e.length > MAX_IMPORT_EDGES
+      ) {
+        return null;
+      }
+
+      const isLegacyV1 = !parsed.v || parsed.v < 2;
+      const rawPos = Array.isArray(parsed.p) ? parsed.p : null;
+      const nodes: OgNode[] = [];
+      for (let i = 0; i < parsed.n.length; i++) {
+        const tuple = parsed.n[i];
+        if (!Array.isArray(tuple) || tuple.length < 2) return null;
+        if (typeof tuple[0] !== 'string' || typeof tuple[1] !== 'string') return null;
+        const id = tuple[0];
+        const shortA = tuple[1];
+        if (!id || FORBIDDEN_KEYS.has(id) || !shortA || FORBIDDEN_KEYS.has(shortA)) {
+          return null;
+        }
+        const adapterId = Object.hasOwn(SHORT_TO_ADAPTER, shortA)
+          ? SHORT_TO_ADAPTER[shortA]
+          : shortA;
+        if (FORBIDDEN_KEYS.has(adapterId)) return null;
+        const meta = resolveOgAdapterMeta(adapterId);
+        const params: Record<string, unknown> =
+          tuple[2] && typeof tuple[2] === 'object' && !Array.isArray(tuple[2])
+            ? sanitizeOgParams(tuple[2] as Record<string, unknown>)
+            : {};
+        if (
+          isLegacyV1 &&
+          (adapterId === 'localfold-af2' || adapterId === 'esmc' || adapterId === 'dyna1') &&
+          !('capMode' in params)
+        ) {
+          params.capMode = 'fixed';
+        }
+        const label =
+          typeof tuple[3] === 'string' && tuple[3].trim() ? tuple[3].trim() : meta.shortName;
+        const posTuple = rawPos?.[i];
+        const position =
+          Array.isArray(posTuple) &&
+          posTuple.length === 2 &&
+          typeof posTuple[0] === 'number' &&
+          Number.isFinite(posTuple[0]) &&
+          typeof posTuple[1] === 'number' &&
+          Number.isFinite(posTuple[1])
+            ? { x: posTuple[0], y: posTuple[1] }
+            : undefined;
+
+        nodes.push({
+          id,
+          adapterId,
+          label,
+          category: meta.category,
+          paramChip: formatCompactParamChip(adapterId, params),
+          params,
+          ...(position ? { position } : {}),
+        });
+      }
+
+      const edges: OgEdge[] = [];
+      for (const rawE of parsed.e) {
+        if (!Array.isArray(rawE)) continue;
+        if (rawE.length >= 4) {
+          if (
+            typeof rawE[0] !== 'string' ||
+            typeof rawE[2] !== 'string' ||
+            (rawE[1] !== undefined && rawE[1] !== null && typeof rawE[1] !== 'string') ||
+            (rawE[3] !== undefined && rawE[3] !== null && typeof rawE[3] !== 'string')
+          ) {
+            return null;
+          }
+          const fromNode = rawE[0].trim();
+          const fromPort = (typeof rawE[1] === 'string' ? rawE[1] : 'out').trim();
+          const toNode = rawE[2].trim();
+          const toPort = (typeof rawE[3] === 'string' ? rawE[3] : 'in').trim();
+          if (fromNode && toNode) edges.push({ fromNode, fromPort, toNode, toPort });
+        } else if (rawE.length >= 2) {
+          const [src, dst] = rawE;
+          if (typeof src !== 'string' || typeof dst !== 'string') continue;
+          const [fromNode, fromPort = 'out'] = src.split('.');
+          const [toNode, toPort = 'in'] = dst.split('.');
+          if (fromNode && toNode) edges.push({ fromNode, fromPort, toNode, toPort });
+        }
+      }
+
+      const { title, description } = buildTitleAndDesc(nodes);
+      return {
+        title,
+        description,
+        nodes,
+        edges,
+        structureTarget: extractStructureTarget(nodes),
+      };
     }
 
-    const { title, description } = buildTitleAndDesc(nodes);
-    return {
-      title,
-      description,
-      nodes,
-      edges,
-      structureTarget: extractStructureTarget(nodes),
-    };
+    return null;
+  } catch {
+    return null;
   }
-
-  return null;
 }

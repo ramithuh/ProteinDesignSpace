@@ -112,7 +112,9 @@ export function validateResidueMappingSyntax(raw: unknown): string | null {
   if (raw === undefined || raw === null || raw === '') return null;
   const checkInt = (v: unknown, role: string): string | null => {
     if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
-      return `Invalid residueMapping: ${role} must be a strict finite integer (>= 0; got ${String(v)}).`;
+      const shown =
+        typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' ? String(v) : typeof v;
+      return `Invalid residueMapping: ${role} must be a strict finite integer (>= 0; got ${shown}).`;
     }
     return null;
   };
@@ -184,6 +186,14 @@ function resolveDefaultModeId(manifest: AdapterManifest): string | null {
   return manifest.modes[0].id;
 }
 
+function isPrimitiveParam(v: unknown): v is string | number | boolean {
+  return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+}
+
+function safeParamStr(v: unknown): string {
+  return isPrimitiveParam(v) ? String(v) : '';
+}
+
 /**
  * Resolve the active `AdapterModeSpec` for a manifest given current node `params`.
  * - Returns `null` if the adapter declares no `modes`.
@@ -197,10 +207,8 @@ export function getActiveModeSpec(
   if (!manifest?.modes || manifest.modes.length === 0) return null;
   const key = manifest.modeParamKey;
   const raw = key ? params?.[key] : undefined;
-  const modeId =
-    raw !== undefined && raw !== null && String(raw).trim() !== ''
-      ? String(raw).trim()
-      : resolveDefaultModeId(manifest);
+  const rawStr = safeParamStr(raw).trim();
+  const modeId = rawStr !== '' ? rawStr : resolveDefaultModeId(manifest);
   if (!modeId) return null;
   return manifest.modes.find((m) => m.id === modeId) ?? null;
 }
@@ -223,8 +231,9 @@ export function getVisibleParamFields(
       activeModeId = activeSpec.id;
     } else if (manifest.modeParamKey) {
       const raw = params?.[manifest.modeParamKey];
-      if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
-        activeModeId = String(raw).trim();
+      const rawStr = safeParamStr(raw).trim();
+      if (rawStr !== '') {
+        activeModeId = rawStr;
       }
     }
   }
@@ -318,18 +327,24 @@ export function validateParamsWithSchema(
   if (manifest.modes && manifest.modes.length > 0 && manifest.modeParamKey) {
     const modeKey = manifest.modeParamKey;
     const rawMode = p[modeKey];
-    const activeMode = getActiveModeSpec(manifest, p);
-    if (rawMode !== undefined && rawMode !== null && String(rawMode).trim() !== '' && !activeMode) {
+    if (rawMode !== undefined && rawMode !== null && !isPrimitiveParam(rawMode)) {
       const allowed = manifest.modes.map((m) => m.id).join(', ');
-      errs.push(`"${label}": Unknown ${modeKey} "${String(rawMode)}" (expected ${allowed}).`);
+      errs.push(`"${label}": ${modeKey} must be a string (expected ${allowed}).`);
       modeInvalid = true;
-    } else if (activeMode && opts.connectedInputs !== undefined) {
-      const connected = new Set(opts.connectedInputs);
-      for (const reqPort of activeMode.requiredInputs ?? []) {
-        if (!connected.has(reqPort)) {
-          errs.push(
-            `"${label}" (${activeMode.label}) requires a connected "${reqPort}" input.`,
-          );
+    } else {
+      const activeMode = getActiveModeSpec(manifest, p);
+      if (rawMode !== undefined && rawMode !== null && safeParamStr(rawMode).trim() !== '' && !activeMode) {
+        const allowed = manifest.modes.map((m) => m.id).join(', ');
+        errs.push(`"${label}": Unknown ${modeKey} "${safeParamStr(rawMode)}" (expected ${allowed}).`);
+        modeInvalid = true;
+      } else if (activeMode && opts.connectedInputs !== undefined) {
+        const connected = new Set(opts.connectedInputs);
+        for (const reqPort of activeMode.requiredInputs ?? []) {
+          if (!connected.has(reqPort)) {
+            errs.push(
+              `"${label}" (${activeMode.label}) requires a connected "${reqPort}" input.`,
+            );
+          }
         }
       }
     }
@@ -344,7 +359,7 @@ export function validateParamsWithSchema(
     if (modeInvalid && field.key === manifest.modeParamKey) continue;
 
     if (field.kind === 'number' || field.kind === 'integer') {
-      const val = Number(raw);
+      const val = isPrimitiveParam(raw) ? Number(raw) : NaN;
       const unit = field.unit ? ` ${field.unit}` : '';
       const hasMin = typeof field.min === 'number';
       const hasMax = typeof field.max === 'number';
@@ -365,8 +380,10 @@ export function validateParamsWithSchema(
     }
 
     if (field.kind === 'select') {
-      if (field.options && field.options.length > 0) {
-        const str = String(raw);
+      if (raw !== null && !isPrimitiveParam(raw)) {
+        errs.push(`"${label}": ${field.key} must be a string.`);
+      } else if (field.options && field.options.length > 0) {
+        const str = safeParamStr(raw);
         if (!field.options.some((opt) => opt.value === str)) {
           const allowed = field.options.map((opt) => opt.value).join(', ');
           errs.push(`"${label}": Invalid ${field.key} "${str}" (expected ${allowed}).`);
@@ -383,7 +400,11 @@ export function validateParamsWithSchema(
     }
 
     if (field.kind === 'aa-set') {
-      const str = String(raw ?? '').trim();
+      if (raw !== null && !isPrimitiveParam(raw)) {
+        errs.push(`"${label}": ${field.key} must be a string.`);
+        continue;
+      }
+      const str = safeParamStr(raw).trim();
       if (str) {
         const badChars = new Set<string>();
         const canonicalSeen = new Set<string>();
@@ -405,7 +426,11 @@ export function validateParamsWithSchema(
     }
 
     if (field.kind === 'residue-list') {
-      const str = String(raw ?? '').trim();
+      if (raw !== null && !isPrimitiveParam(raw)) {
+        errs.push(`"${label}": ${field.key} must be a string.`);
+        continue;
+      }
+      const str = safeParamStr(raw).trim();
       if (str) {
         const allowBareChain = Boolean(field.allowBareChain);
         const allowLigandRef = field.studioRole === 'crop';

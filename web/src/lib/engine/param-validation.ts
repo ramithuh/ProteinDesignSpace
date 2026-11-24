@@ -14,6 +14,14 @@ import {
 
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
 
+function safeStr(v: unknown): string {
+  return typeof v === 'string'
+    ? v
+    : typeof v === 'number' || typeof v === 'boolean'
+      ? String(v)
+      : '';
+}
+
 const SHA256_K = new Uint32Array([
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -603,8 +611,11 @@ export function validateNodeParams(
   opts?: { connectedInputs?: Iterable<string> },
 ): string[] {
   const errs: string[] = [];
-  const label = node.label || node.adapterId;
-  const p = node.params ?? {};
+  const label = safeStr(node.label) || safeStr(node.adapterId);
+  const p =
+    node.params && typeof node.params === 'object' && !Array.isArray(node.params)
+      ? node.params
+      : {};
   const manifest = Object.hasOwn(ADAPTER_REGISTRY, node.adapterId)
     ? ADAPTER_REGISTRY[node.adapterId]
     : undefined;
@@ -623,22 +634,46 @@ export function validateNodeParams(
 
   // 2. Manifest-declared cross-field & cross-input validation
   if (manifest?.crossValidate) {
-    const crossErrs = manifest.crossValidate(
-      p,
-      connectedSet ? { connectedInputs: connectedSet } : undefined,
-    );
-    for (const msg of crossErrs) {
+    const safeParams: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(p)) {
+      if (
+        v === null ||
+        typeof v !== 'object' ||
+        k === 'unresolvedImportIssues' ||
+        k === 'residueMapping'
+      ) {
+        safeParams[k] = v;
+      }
+    }
+    try {
+      const crossErrs = manifest.crossValidate(
+        safeParams,
+        connectedSet ? { connectedInputs: connectedSet } : undefined,
+      );
+      for (const msg of crossErrs) {
+        errs.push(msg.startsWith(`"${label}":`) ? msg : `"${label}": ${msg}`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Cross-validation failed.';
       errs.push(msg.startsWith(`"${label}":`) ? msg : `"${label}": ${msg}`);
     }
   }
 
   // 3. Domain-specific syntax, structure, sequence, and upload-integrity checks
   if (node.adapterId === 'rfd4-proteina') {
-    const customYaml = String(p.customSpecYaml ?? '').trim();
-    if (customYaml) {
-      const yamlCheck = validateCustomSpecYaml(customYaml);
-      if (yamlCheck.status === 'error') {
-        errs.push(`"${label}": ${yamlCheck.message}`);
+    if (
+      p.customSpecYaml !== undefined &&
+      p.customSpecYaml !== null &&
+      typeof p.customSpecYaml !== 'string'
+    ) {
+      errs.push(`"${label}": customSpecYaml must be a string.`);
+    } else {
+      const customYaml = safeStr(p.customSpecYaml).trim();
+      if (customYaml) {
+        const yamlCheck = validateCustomSpecYaml(customYaml);
+        if (yamlCheck.status === 'error') {
+          errs.push(`"${label}": ${yamlCheck.message}`);
+        }
       }
     }
   }
@@ -660,10 +695,10 @@ export function validateNodeParams(
         try {
           return JSON.stringify(raw);
         } catch {
-          return String(raw).trim();
+          return '';
         }
       }
-      return String(raw).trim();
+      return safeStr(raw).trim();
     };
     if (Array.isArray(p.unresolvedImportIssues)) {
       for (const rawIssue of p.unresolvedImportIssues) {
@@ -681,13 +716,36 @@ export function validateNodeParams(
   }
 
   if (node.adapterId === 'pdb-input') {
-    const mode = p.mode !== undefined ? String(p.mode) : 'demo-bundle';
+    if (p.mode !== undefined && p.mode !== null && typeof p.mode !== 'string') {
+      errs.push(`"${label}": mode must be a string.`);
+    }
+    const mode = typeof p.mode === 'string' ? p.mode : 'demo-bundle';
     if (mode === 'custom') {
-      const rawPdb = String(p.pdbText ?? '');
+      if (p.pdbText !== undefined && p.pdbText !== null && typeof p.pdbText !== 'string') {
+        errs.push(`"${label}": pdbText must be a string.`);
+      }
+      if (
+        p.expectedPdbSha256 !== undefined &&
+        p.expectedPdbSha256 !== null &&
+        typeof p.expectedPdbSha256 !== 'string'
+      ) {
+        errs.push(`"${label}": expectedPdbSha256 must be a string.`);
+      }
+      if (
+        p.expectedFilename !== undefined &&
+        p.expectedFilename !== null &&
+        typeof p.expectedFilename !== 'string'
+      ) {
+        errs.push(`"${label}": expectedFilename must be a string.`);
+      }
+      if (p.filename !== undefined && p.filename !== null && typeof p.filename !== 'string') {
+        errs.push(`"${label}": filename must be a string.`);
+      }
+      const rawPdb = safeStr(p.pdbText);
       const missingUpload = Boolean(p.missingUpload);
-      const expectedShaRaw = String(p.expectedPdbSha256 ?? '').trim();
+      const expectedShaRaw = safeStr(p.expectedPdbSha256).trim();
       const expectedSha = expectedShaRaw.toLowerCase();
-      const expectedFilename = String(p.expectedFilename ?? p.filename ?? '').trim();
+      const expectedFilename = safeStr(p.expectedFilename ?? p.filename).trim();
 
       if (expectedSha && !isValidSha256Hex(expectedSha)) {
         errs.push(
@@ -721,22 +779,34 @@ export function validateNodeParams(
         }
       }
     } else if (mode === 'pdb-id') {
-      const check = validatePdbId(String(p.pdbId ?? ''));
-      if (check.status === 'error') {
-        errs.push(`"${label}": ${check.message}`);
+      if (p.pdbId !== undefined && p.pdbId !== null && typeof p.pdbId !== 'string') {
+        errs.push(`"${label}": pdbId must be a string.`);
+      } else {
+        const check = validatePdbId(safeStr(p.pdbId));
+        if (check.status === 'error') {
+          errs.push(`"${label}": ${check.message}`);
+        }
       }
     } else if (mode === 'alphafold-db') {
-      const check = validateUniProtId(String(p.uniprotId ?? ''));
-      if (check.status === 'error') {
-        errs.push(`"${label}": ${check.message}`);
+      if (p.uniprotId !== undefined && p.uniprotId !== null && typeof p.uniprotId !== 'string') {
+        errs.push(`"${label}": uniprotId must be a string.`);
+      } else {
+        const check = validateUniProtId(safeStr(p.uniprotId));
+        if (check.status === 'error') {
+          errs.push(`"${label}": ${check.message}`);
+        }
       }
     }
   }
 
   if (node.adapterId === 'sequence-input') {
-    const check = validateSequenceText(String(p.sequence ?? ''));
-    if (check.status === 'error') {
-      errs.push(`"${label}": ${check.message}`);
+    if (p.sequence !== undefined && p.sequence !== null && typeof p.sequence !== 'string') {
+      errs.push(`"${label}": sequence must be a string.`);
+    } else {
+      const check = validateSequenceText(safeStr(p.sequence));
+      if (check.status === 'error') {
+        errs.push(`"${label}": ${check.message}`);
+      }
     }
   }
 

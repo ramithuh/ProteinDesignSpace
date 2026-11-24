@@ -42,7 +42,7 @@ await esbuild.build({
 const routesConfig = {
   version: 1,
   include: ['/*'],
-  exclude: ['/_app/*', '/vendor/*', '/favicon.svg', '/og-default.png', '/demo-welcome*'],
+  exclude: ['/_app/*', '/vendor/*', '/favicon.svg', '/og-default.png', '/demo-welcome*', '/llms.txt'],
 };
 writeFileSync(outRoutesPath, JSON.stringify(routesConfig, null, 2) + '\n', 'utf8');
 

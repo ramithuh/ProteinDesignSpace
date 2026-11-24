@@ -3,6 +3,7 @@ import { decodeOgWorkflowFromQuery } from '$lib/og/og-graph';
 import { parseCifForOgPreview, parsePdbForOgPreview } from '$lib/og/edge-structure';
 import { OG_HEIGHT, OG_WIDTH, renderDefaultOgPng, renderWorkflowOgPng } from '$lib/og/render-og-card';
 import cfWorker, { injectOgMetaIntoHtml } from '$lib/og/cf-worker';
+import { WORKFLOW_PRESETS } from '$lib/engine/registry';
 import { buildShareableWorkflowUrl, decodeHashToGraph } from '$lib/engine/share';
 import { isSharedWorkflowHash } from '$lib/ui/page-state-helpers';
 
@@ -153,5 +154,218 @@ describe('Social media OG preview cards & edge worker', () => {
       });
       expect(probeRes.status, probe).toBe(404);
     }
+  });
+
+  it('decodes ?flow= and ?recipe= (including hybrid URLs, RFD3 vs RFD4, fan-out/fan-in, AFDB, and $-labels) and renders 1200x630 OG PNGs', async () => {
+    // 1. Linear ?flow=
+    const linear = await decodeOgWorkflowFromQuery('?flow=r3:length=80~m~f');
+    expect(linear).not.toBeNull();
+    expect(linear!.nodes).toHaveLength(3);
+    expect(linear!.edges).toHaveLength(2);
+    expect(linear!.structureTarget).toBeNull();
+    assertValidOgPng(await renderWorkflowOgPng(linear!));
+
+    // 2. Multi-branch RFD3 vs RFD4 with 1UBQ structure target
+    const branchQuery = '?flow=src:p:pdbId=1UBQ~r3:length=80~cmp;src~r:length=80~cmp';
+    const branch = await decodeOgWorkflowFromQuery(branchQuery);
+    expect(branch).not.toBeNull();
+    expect(branch!.nodes).toHaveLength(4);
+    expect(branch!.edges).toHaveLength(4);
+    expect(branch!.structureTarget).toEqual({
+      kind: 'rcsb',
+      pdbId: '1UBQ',
+      cropSegments: '',
+    });
+    assertValidOgPng(await renderWorkflowOgPng(branch!));
+
+    // 3. Fan-out/fan-in + custom _label with $ special replacement chars
+    const fanQuery = '?flow=' + encodeURIComponent('r3:length=70,_label="Backbone $100 $& Gen"~m:numSequences=4~f~s');
+    const fan = await decodeOgWorkflowFromQuery(fanQuery);
+    expect(fan).not.toBeNull();
+    expect(fan!.nodes).toHaveLength(4);
+    expect(fan!.nodes[0].label).toBe('Backbone $100 $& Gen');
+    // designability-scorer receives both folds and structure (fan-out/fan-in)
+    expect(fan!.edges.some((e) => e.toNode === 's' && e.toPort === 'structure')).toBe(true);
+    expect(fan!.edges.some((e) => e.toNode === 's' && e.toPort === 'folds')).toBe(true);
+    assertValidOgPng(await renderWorkflowOgPng(fan!));
+
+    // 4. AFDB target with cropSegments
+    const afdb = await decodeOgWorkflowFromQuery('?flow=src:p:uniprotId=P69905,cropSegments=A10-50~m');
+    expect(afdb).not.toBeNull();
+    expect(afdb!.structureTarget).toEqual({
+      kind: 'afdb',
+      uniprotId: 'P69905',
+      cropSegments: 'A10-50',
+    });
+    assertValidOgPng(await renderWorkflowOgPng(afdb!));
+
+    // 5. ?recipe= YAML & JSON
+    const yamlRecipe = [
+      'denovo: v1',
+      'name: "Custom YAML Pipeline"',
+      'nodes:',
+      '  gen: {"model":"rfd3","length":90}',
+      '  mpnn: {"model":"web-protein-mpnn","numSequences":3}',
+      'wires:',
+      '  - gen.structure -> mpnn.structure',
+    ].join('\n');
+    const decodedYaml = await decodeOgWorkflowFromQuery(`?recipe=${encodeURIComponent(yamlRecipe)}`);
+    expect(decodedYaml).not.toBeNull();
+    expect(decodedYaml!.title).toContain('Custom YAML Pipeline');
+    expect(decodedYaml!.nodes).toHaveLength(2);
+    expect(decodedYaml!.edges).toHaveLength(1);
+    assertValidOgPng(await renderWorkflowOgPng(decodedYaml!));
+
+    const jsonRecipe = JSON.stringify({
+      id: 'j1',
+      name: 'JSON Recipe',
+      nodes: [
+        { id: 'gen', adapterId: 'rfd4-proteina', label: 'RFD4', params: { length: 85 } },
+        { id: 'fold', adapterId: 'localfold-af2', label: 'AF2', params: {} },
+      ],
+      edges: [{ fromNode: 'gen', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' }],
+    });
+    const decodedJson = await decodeOgWorkflowFromQuery(`?recipe=${encodeURIComponent(jsonRecipe)}`);
+    expect(decodedJson).not.toBeNull();
+    expect(decodedJson!.title).toContain('JSON Recipe');
+    expect(decodedJson!.nodes).toHaveLength(2);
+    assertValidOgPng(await renderWorkflowOgPng(decodedJson!));
+
+    // 6. Hybrid ?utm_...#flow= and full URLs
+    const hybridFlow = await decodeOgWorkflowFromQuery('?utm_source=chatgpt.com#flow=r3:length=80~m~f');
+    expect(hybridFlow).not.toBeNull();
+    expect(hybridFlow!.nodes).toHaveLength(3);
+
+    const fullHybridUrl = await decodeOgWorkflowFromQuery(
+      `https://denovo.run/?utm_source=chatgpt.com#recipe=${encodeURIComponent(yamlRecipe)}`,
+    );
+    expect(fullHybridUrl).not.toBeNull();
+    expect(fullHybridUrl!.title).toContain('Custom YAML Pipeline');
+
+    // 7. Invalid ?flow= and ?recipe= return null (so /api/og falls back cleanly)
+    expect(await decodeOgWorkflowFromQuery('?flow=')).toBeNull();
+    expect(await decodeOgWorkflowFromQuery('?flow=unknown-model-xyz')).toBeNull();
+    expect(await decodeOgWorkflowFromQuery('?recipe=invalid-yaml')).toBeNull();
+    expect(await decodeOgWorkflowFromQuery('?recipe=' + encodeURIComponent('{"nodes":[],"edges":[]}'))).toBeNull();
+  });
+
+  it('serves /api/og PNG and injects OG meta tags on GET / and /index.html for ?flow= and ?recipe= (including $ labels)', async () => {
+    const baseHtml =
+      '<!doctype html><html><head><title>denovo.run</title><meta property="og:title" content="Default" /><meta name="twitter:card" content="summary" /></head><body>ok</body></html>';
+    const assetsEnv = {
+      ASSETS: {
+        fetch: async (input: RequestInfo | URL) => {
+          const reqUrl = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+          if (reqUrl.pathname === '/index.html') {
+            return new Response(null, { status: 308, headers: { Location: '/' } });
+          }
+          return new Response(baseHtml, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+        },
+      },
+    };
+
+    // /api/og?flow=...
+    const ogFlowRes = await cfWorker.fetch(
+      new Request('https://denovo.run/api/og?flow=r3:length=80~m~f'),
+      assetsEnv,
+    );
+    expect(ogFlowRes.status).toBe(200);
+    expect(ogFlowRes.headers.get('content-type')).toBe('image/png');
+    assertValidOgPng(new Uint8Array(await ogFlowRes.arrayBuffer()));
+
+    // /api/og?recipe=...
+    const yamlRecipe = 'denovo: v1\nnodes:\n  g: {"model":"rfd3","length":75}\n';
+    const ogRecipeRes = await cfWorker.fetch(
+      new Request(`https://denovo.run/api/og?recipe=${encodeURIComponent(yamlRecipe)}`),
+      assetsEnv,
+    );
+    expect(ogRecipeRes.status).toBe(200);
+    expect(ogRecipeRes.headers.get('content-type')).toBe('image/png');
+    assertValidOgPng(new Uint8Array(await ogRecipeRes.arrayBuffer()));
+
+    // /api/og with invalid ?flow= falls open to default 1200x630 PNG
+    const ogBadFlowRes = await cfWorker.fetch(
+      new Request('https://denovo.run/api/og?flow=not-a-real-model'),
+      assetsEnv,
+    );
+    expect(ogBadFlowRes.status).toBe(200);
+    expect(ogBadFlowRes.headers.get('content-type')).toBe('image/png');
+    assertValidOgPng(new Uint8Array(await ogBadFlowRes.arrayBuffer()));
+
+    // GET /?utm_source=chatgpt.com&flow=... with $ and ' in _label
+    const trickyFlow = encodeURIComponent("r3:length=80,_label=\"A's $100 $& Test\"~m~f");
+    const trickyReqUrl = new URL(`https://denovo.run/?utm_source=chatgpt.com&flow=${trickyFlow}`);
+    const pageRes = await cfWorker.fetch(new Request(trickyReqUrl.toString()), assetsEnv);
+    expect(pageRes.status).toBe(200);
+    const html = await pageRes.text();
+    expect(html).toContain('A&#39;s $100 $&amp; Test');
+    expect(html).toContain(
+      `<meta property="og:image" content="https://denovo.run/api/og${trickyReqUrl.search.replace(/&/g, '&amp;')}" />`,
+    );
+    expect(html).toContain('<meta name="twitter:card" content="summary_large_image" />');
+    expect(html).not.toContain('content="Default"');
+    // Ensure </head> was not duplicated or corrupted by $&
+    expect(html.match(/<\/head>/g)).toHaveLength(1);
+
+    // GET /index.html?recipe=...
+    const indexRecipeRes = await cfWorker.fetch(
+      new Request(`https://denovo.run/index.html?recipe=${encodeURIComponent(yamlRecipe)}`),
+      assetsEnv,
+    );
+    expect(indexRecipeRes.status).toBe(200);
+    const recipeHtml = await indexRecipeRes.text();
+    expect(recipeHtml).toContain(`/api/og?recipe=${encodeURIComponent(yamlRecipe)}`);
+    expect(recipeHtml).toContain('RFdiffusion3');
+  });
+
+  it('decodes all 8 WORKFLOW_PRESETS in parity with share.ts, infers capMode=fixed on maxSequences override, and blocks prototype keys', async () => {
+    expect(WORKFLOW_PRESETS).toHaveLength(8);
+
+    for (const preset of WORKFLOW_PRESETS) {
+      const query = `?p=${preset.id}`;
+      const clientGraph = await decodeHashToGraph(query);
+      const ogWf = await decodeOgWorkflowFromQuery(query);
+      expect(clientGraph, preset.id).not.toBeNull();
+      expect(ogWf, preset.id).not.toBeNull();
+
+      expect(ogWf!.nodes.map((n) => ({ id: n.id, adapterId: n.adapterId, label: n.label }))).toEqual(
+        clientGraph!.nodes.map((n) => ({ id: n.id, adapterId: n.adapterId, label: n.label })),
+      );
+      expect(ogWf!.edges).toEqual(clientGraph!.edges);
+      for (let i = 0; i < clientGraph!.nodes.length; i++) {
+        expect(ogWf!.nodes[i].params, `${preset.id}.${clientGraph!.nodes[i].id}`).toEqual(
+          clientGraph!.nodes[i].params,
+        );
+      }
+
+      if (preset.id === 'rfd4-branch-compare') {
+        expect(ogWf!.edges).toHaveLength(7);
+      }
+      if (preset.id === 'rfd4-af2-vs-rf3') {
+        expect(ogWf!.edges).toHaveLength(6);
+      }
+    }
+
+    // maxSequences override without explicit capMode infers capMode='fixed' and renders 'Cap 4'
+    const capQuery = '?p=rfd4-mpnn-refold&fold.maxSequences=4';
+    const capClient = await decodeHashToGraph(capQuery);
+    const capOg = await decodeOgWorkflowFromQuery(capQuery);
+    expect(capOg).not.toBeNull();
+    const foldOg = capOg!.nodes.find((n) => n.id === 'fold');
+    const foldClient = capClient!.nodes.find((n) => n.id === 'fold');
+    expect(foldOg?.params.capMode).toBe('fixed');
+    expect(foldOg?.params.maxSequences).toBe(4);
+    expect(foldOg?.params).toEqual(foldClient?.params);
+    expect(foldOg?.paramChip).toContain('Cap 4');
+
+    // __proto__ / constructor / prototype overrides must be ignored without polluting Object.prototype
+    const protoQuery =
+      '?p=rfd4-mpnn-refold&gen.prototype=polluted&gen.__proto__=polluted&gen.constructor=polluted';
+    const protoOg = await decodeOgWorkflowFromQuery(protoQuery);
+    expect(protoOg).not.toBeNull();
+    const genParams = protoOg!.nodes.find((n) => n.id === 'gen')!.params;
+    expect(Object.hasOwn(genParams, 'prototype')).toBe(false);
+    expect(Object.hasOwn(genParams, 'constructor')).toBe(false);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });

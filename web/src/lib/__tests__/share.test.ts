@@ -5,8 +5,10 @@ import { computeUploadDigest } from '$lib/engine/param-validation';
 import { ExecutionScheduler } from '$lib/engine/scheduler';
 import {
   decodeHashToGraph,
+  encodeGraphToFlow,
   encodeGraphToHash,
   graphToYamlRecipe,
+  isMarkdownSafeFlowUrl,
   normalizeWorkflowGraph,
   parseRecipeToGraph,
   serializeWorkflowJson,
@@ -778,5 +780,95 @@ describe('engine/share', () => {
     expect(typeof gen.autoSeededBenchmarkId).toBe('string');
     expect(gen.autoSeededFromBenchmark).toBe('ame_1ctt_cda');
     expect(typeof gen.autoSeededFromBenchmark).toBe('string');
+  });
+
+  it('decodes ?flow=, #flow=, ?recipe=, #recipe=, and multi-param URLs while rejecting invalid flows', async () => {
+    const flowGraph = await decodeHashToGraph('?flow=src:p:pdbId=1ubq~r3:length=80~cmp;src~r:length=80~cmp');
+    expect(flowGraph).not.toBeNull();
+    expect(flowGraph!.nodes.map((n) => n.adapterId)).toEqual([
+      'pdb-input',
+      'rfd3',
+      'structure-compare',
+      'rfd4-proteina',
+    ]);
+    expect(flowGraph!.nodes[0].params.pdbId).toBe('1UBQ');
+    expect(flowGraph!.edges).toHaveLength(4);
+
+    // #flow= and extra tracking params like utm_source=chatgpt.com
+    const utmFlow = await decodeHashToGraph(
+      '?utm_source=chatgpt.com&flow=r3(length=75)->mpnn->af2->scorer.',
+    );
+    expect(utmFlow).not.toBeNull();
+    expect(utmFlow!.nodes.map((n) => n.adapterId)).toEqual([
+      'rfd3',
+      'web-protein-mpnn',
+      'localfold-af2',
+      'designability-scorer',
+    ]);
+    expect(utmFlow!.edges).toContainEqual({
+      fromNode: 'r3',
+      fromPort: 'structure',
+      toNode: 'scorer',
+      toPort: 'structure',
+    });
+
+    const hashFlow = await decodeHashToGraph('#flow=r3~m~f');
+    expect(hashFlow).not.toBeNull();
+    expect(hashFlow!.nodes).toHaveLength(3);
+
+    // encodeGraphToFlow -> decodeHashToGraph round-trip + Markdown safety
+    const encoded = encodeGraphToFlow(flowGraph!);
+    expect(isMarkdownSafeFlowUrl(`https://denovo.run/?${encoded.query}`)).toBe(true);
+    const roundTripped = await decodeHashToGraph(`?${encoded.query}`);
+    expect(roundTripped).not.toBeNull();
+    expect(roundTripped!.edges).toEqual(flowGraph!.edges);
+
+    // ?recipe= and #recipe= YAML/JSON fallback
+    const yaml = graphToYamlRecipe(flowGraph!);
+    const fromQueryRecipe = await decodeHashToGraph(`?recipe=${encodeURIComponent(yaml)}`);
+    expect(fromQueryRecipe).not.toBeNull();
+    expect(fromQueryRecipe!.edges).toEqual(flowGraph!.edges);
+
+    const fromHashRecipe = await decodeHashToGraph(
+      `#recipe=${encodeURIComponent(serializeWorkflowJson(flowGraph!))}`,
+    );
+    expect(fromHashRecipe).not.toBeNull();
+    expect(fromHashRecipe!.nodes).toHaveLength(4);
+
+    // Invalid ?flow= / ?recipe= return null cleanly
+    expect(await decodeHashToGraph('?flow=seq~af2~scorer')).toBeNull();
+    expect(await decodeHashToGraph('?flow=nonexistent-model')).toBeNull();
+    expect(await decodeHashToGraph('?recipe=not-a-valid-recipe')).toBeNull();
+
+    // Hybrid ?query#hash URLs (?utm_source=...#flow= / #g= / #p= / #recipe=)
+    const hybridFlow = await decodeHashToGraph(
+      'https://denovo.run/?utm_source=chatgpt.com#flow=r3:length=80~m~f',
+    );
+    expect(hybridFlow).not.toBeNull();
+    expect(hybridFlow!.nodes.map((n) => n.adapterId)).toEqual([
+      'rfd3',
+      'web-protein-mpnn',
+      'localfold-af2',
+    ]);
+
+    const encG = await encodeGraphToHash(flowGraph!);
+    expect(encG.mode).toBe('compressed-dag');
+    const hybridG = await decodeHashToGraph(
+      `https://denovo.run/?utm_source=chatgpt.com${encG.hash}`,
+    );
+    expect(hybridG).not.toBeNull();
+    expect(hybridG!.nodes).toHaveLength(4);
+
+    const hybridP = await decodeHashToGraph(
+      'https://denovo.run/?utm_source=chatgpt.com#p=rfd4-mpnn-refold',
+    );
+    expect(hybridP).not.toBeNull();
+    expect(hybridP!.nodes.length).toBeGreaterThan(0);
+
+    const hybridRecipe = await decodeHashToGraph(
+      `https://denovo.run/?utm_source=chatgpt.com#recipe=${encodeURIComponent(yaml)}`,
+    );
+    expect(hybridRecipe).not.toBeNull();
+    expect(hybridRecipe!.edges).toEqual(flowGraph!.edges);
   });
 });

@@ -91,12 +91,43 @@ export function computePreviewChecks(
 
 export function isSharedWorkflowHash(rawHash: string): boolean {
   const trimmed = rawHash.trim();
-  return (
+  if (!trimmed) return false;
+  if (
     trimmed.startsWith('#g=') ||
     trimmed.startsWith('#p=') ||
+    trimmed.startsWith('#flow=') ||
+    trimmed.startsWith('#recipe=') ||
     trimmed.startsWith('?g=') ||
-    trimmed.startsWith('?p=')
-  );
+    trimmed.startsWith('?p=') ||
+    trimmed.startsWith('?flow=') ||
+    trimmed.startsWith('?recipe=')
+  ) {
+    return true;
+  }
+  const hasKeyInPart = (rawPart: string): boolean => {
+    const body = rawPart.replace(/^[?#]/, '');
+    if (!body.includes('=')) return false;
+    const params = new URLSearchParams(body);
+    return params.has('flow') || params.has('recipe') || params.has('g') || params.has('p');
+  };
+  if (/^https?:\/\//i.test(trimmed) || (trimmed.startsWith('/') && !trimmed.startsWith('//'))) {
+    try {
+      const u = trimmed.startsWith('/')
+        ? new URL(trimmed, 'https://denovo.run')
+        : new URL(trimmed);
+      return hasKeyInPart(u.search) || hasKeyInPart(u.hash);
+    } catch {
+      return false;
+    }
+  }
+  if (trimmed.startsWith('?') && trimmed.includes('#')) {
+    const hashIdx = trimmed.indexOf('#');
+    return hasKeyInPart(trimmed.slice(1, hashIdx)) || hasKeyInPart(trimmed.slice(hashIdx + 1));
+  }
+  if (!trimmed.startsWith('?') && !trimmed.startsWith('#')) {
+    return false;
+  }
+  return hasKeyInPart(trimmed);
 }
 
 export function shouldSuppressOnboardingForHash(

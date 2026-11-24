@@ -759,6 +759,18 @@ describe('page-state-helpers (R5, R3 auto-seed, QA #1/#2, QA #5)', () => {
   it('QA #1 & #2: hash helpers detect shared links, return null on broken hashes, and suppress onboarding', async () => {
     expect(isSharedWorkflowHash('#g=broken123')).toBe(true);
     expect(isSharedWorkflowHash('#p=unknown')).toBe(true);
+    expect(isSharedWorkflowHash('?g=abc')).toBe(true);
+    expect(isSharedWorkflowHash('?p=rfd4-refold-native')).toBe(true);
+    expect(isSharedWorkflowHash('?flow=r3~m~f')).toBe(true);
+    expect(isSharedWorkflowHash('#flow=r3~m~f')).toBe(true);
+    expect(isSharedWorkflowHash('?recipe=denovo%3A%20v1')).toBe(true);
+    expect(isSharedWorkflowHash('#recipe=%7B%7D')).toBe(true);
+    expect(isSharedWorkflowHash('?utm_source=chatgpt.com&flow=r3~m~f')).toBe(true);
+    expect(isSharedWorkflowHash('?utm_source=chatgpt.com#flow=r3~m~f')).toBe(true);
+    expect(isSharedWorkflowHash('https://denovo.run/?utm_source=chatgpt.com#flow=r3~m~f')).toBe(true);
+    expect(isSharedWorkflowHash('https://denovo.run/?utm_source=chatgpt.com#g=abc')).toBe(true);
+    expect(isSharedWorkflowHash('https://denovo.run/?utm_source=chatgpt.com#section')).toBe(false);
+    expect(isSharedWorkflowHash('?foo=bar')).toBe(false);
     expect(isSharedWorkflowHash('')).toBe(false);
     expect(isSharedWorkflowHash('#section')).toBe(false);
 

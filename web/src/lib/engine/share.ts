@@ -6,7 +6,73 @@ import { autoLayoutGraph, defaultParamsForAdapter, validateGraph } from './graph
 import { computeUploadDigest, isValidSha256Hex } from './param-validation';
 import { UI_TRACKING_PARAM_HINTS } from './benchmark-sync';
 import { getActivePluginRegistry } from '$lib/kernel/active-registry';
+import {
+  ADAPTER_TO_SHORT,
+  SHORT_TO_ADAPTER,
+  decodeFlowQuery,
+  encodeGraphToFlow as encodeGraphToFlowCore,
+  extractWorkflowSearchOrHash,
+  isMarkdownSafeFlowUrl,
+  parseFlowDsl,
+  parseFlowToGraph,
+  parseRecipeSafe,
+  resolveFlowModelAlias,
+  type FlowCatalogHooks,
+  type FlowEncodeOptions,
+  type FlowEncodeResult,
+  type FlowParseOptions,
+  type FlowParseResult,
+  type FlowValidationError,
+  type LinkEdgeSummary,
+  type LinkNodeSummary,
+} from './flow-dsl';
 import type { AdapterManifest, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
+
+function buildActiveCatalogHooks(): FlowCatalogHooks {
+  return {
+    resolveManifest: resolveAdapterManifest,
+    resolveShortCode: resolveShortCodeForAdapter,
+    resolveFromShortCode: (shortCode) => {
+      const fromReg = getActivePluginRegistry()?.resolveShortCode(shortCode);
+      if (fromReg) return fromReg;
+      return Object.hasOwn(SHORT_TO_ADAPTER, shortCode) ? SHORT_TO_ADAPTER[shortCode] : undefined;
+    },
+    yamlKeyAliases: (adapterId) => getActivePluginRegistry()?.getPlugin(adapterId)?.share.yamlKeyAliases,
+    prepareForShare: (adapterId, params, opts) =>
+      getActivePluginRegistry()?.getPlugin(adapterId)?.share.prepareForShare?.(params, opts),
+    stripOnShareKeys: (adapterId) => getActivePluginRegistry()?.getPlugin(adapterId)?.share.stripOnShareKeys,
+    sanitizeOnImport: (adapterId, params) =>
+      getActivePluginRegistry()?.getPlugin(adapterId)?.share.sanitizeOnImport?.(params),
+  };
+}
+
+export {
+  ADAPTER_TO_SHORT,
+  SHORT_TO_ADAPTER,
+  UI_TRACKING_PARAM_HINTS,
+  decodeFlowQuery,
+  isMarkdownSafeFlowUrl,
+  parseFlowDsl,
+  parseFlowToGraph,
+  parseRecipeSafe,
+  resolveFlowModelAlias,
+  type FlowCatalogHooks,
+  type FlowEncodeOptions,
+  type FlowEncodeResult,
+  type FlowParseOptions,
+  type FlowParseResult,
+  type FlowValidationError,
+  type LinkEdgeSummary,
+  type LinkNodeSummary,
+};
+
+/** Encode a WorkflowGraph into a Markdown-safe `?flow=...` URL query representation. */
+export function encodeGraphToFlow(graph: WorkflowGraph, opts: FlowEncodeOptions = {}): FlowEncodeResult {
+  return encodeGraphToFlowCore(graph, {
+    ...opts,
+    catalog: opts.catalog ?? buildActiveCatalogHooks(),
+  });
+}
 
 function resolveAdapterManifest(adapterId: string): AdapterManifest | undefined {
   const plugin = getActivePluginRegistry()?.getPlugin(adapterId);
@@ -28,42 +94,6 @@ function resolveAdapterFromShortCode(shortCode: string): string {
   return Object.hasOwn(SHORT_TO_ADAPTER, shortCode) ? SHORT_TO_ADAPTER[shortCode] : shortCode;
 }
 
-export { UI_TRACKING_PARAM_HINTS };
-
-const ADAPTER_TO_SHORT: Record<string, string> = {
-  'pdb-input': 'p',
-  'sequence-input': 'q',
-  'rfd4-proteina': 'r',
-  genie3: 'g',
-  protpardelle: 'pp',
-  rfdiffusion: 'd',
-  rfd3: 'r3',
-  boltzgen: 'b',
-  evodiff: 'e',
-  'la-proteina': 'lp',
-  proteina: 'pr',
-  'sid-protein': 'sp',
-  genie2: 'g2',
-  frameflow: 'ff',
-  foldflow2: 'f2',
-  'web-protein-mpnn': 'm',
-  ligandmpnn: 'lm',
-  lasermpnn: 'la',
-  'antifold-esmif1': 'af',
-  'localfold-af2': 'f',
-  thermompnn: 'tm',
-  esmc: 'ec',
-  dyna1: 'dy',
-  gnina: 'gn',
-  'top-k-filter': 'tk',
-  'designability-scorer': 's',
-  'structure-compare': 'c',
-};
-
-const SHORT_TO_ADAPTER: Record<string, string> = Object.fromEntries(
-  Object.entries(ADAPTER_TO_SHORT).map(([k, v]) => [v, k]),
-);
-
 function toBase64Url(bytes: Uint8Array): string {
   let bin = '';
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
@@ -80,12 +110,21 @@ function fromBase64Url(str: string): Uint8Array {
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
+function safeStr(v: unknown): string {
+  return typeof v === 'string'
+    ? v
+    : typeof v === 'number' || typeof v === 'boolean'
+      ? String(v)
+      : '';
+}
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 }
 
 function sanitizeValue(val: unknown, depth = 0): unknown {
-  if (depth > 8 || val === null || typeof val !== 'object') return val;
+  if (val === null || typeof val !== 'object') return val;
+  if (depth > 32) return undefined;
   if (Array.isArray(val)) return val.map((item) => sanitizeValue(item, depth + 1));
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
@@ -180,10 +219,10 @@ function formatUnresolvedIssueEntry(raw: unknown): string {
     try {
       return JSON.stringify(raw);
     } catch {
-      return String(raw).trim();
+      return '';
     }
   }
-  return String(raw).trim();
+  return safeStr(raw).trim();
 }
 
 function normalizeUnresolvedIssues(raw: unknown): string[] {
@@ -226,7 +265,7 @@ function diffParams(
   let strippedPdb = pluginStripped;
   let strippedPdbText: string | null = null;
   const effectivePdbMode =
-    adapterId === 'pdb-input' ? String(effectiveParams.mode ?? defaults.mode ?? 'demo-bundle') : '';
+    adapterId === 'pdb-input' ? safeStr(effectiveParams.mode ?? defaults.mode ?? 'demo-bundle') || 'demo-bundle' : '';
 
   for (const [k, v] of Object.entries(effectiveParams)) {
     if (FORBIDDEN_KEYS.has(k)) continue;
@@ -263,9 +302,9 @@ function diffParams(
   }
 
   if (adapterId === 'pdb-input' && !plugin?.share.prepareForShare && effectivePdbMode === 'custom') {
-    const existingShaRaw = String(params.expectedPdbSha256 ?? '').trim().toLowerCase();
-    const existingExpName = String(params.expectedFilename ?? '').trim();
-    const curFilename = String(params.filename ?? '').trim();
+    const existingShaRaw = safeStr(params.expectedPdbSha256).trim().toLowerCase();
+    const existingExpName = safeStr(params.expectedFilename).trim();
+    const curFilename = safeStr(params.filename).trim();
 
     if (strippedPdb && stripLargePdb && strippedPdbText !== null) {
       // Preserve mode:'custom' and record a deterministic SHA-256 digest so recipients
@@ -380,7 +419,10 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
         }
       }
     }
-    const hash = `#${qs.toString()}`;
+    const query = qs.toString().replace(/[._,;\-:]$/, (ch) =>
+      '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'),
+    );
+    const hash = `#${query}`;
     const candidate: EncodedHashResult = {
       hash,
       length: hash.length,
@@ -391,7 +433,7 @@ export async function encodeGraphToHash(graph: WorkflowGraph): Promise<EncodedHa
       bestPresetMatch = candidate;
     }
   }
-  if (bestPresetMatch) return bestPresetMatch;
+  if (bestPresetMatch && bestPresetMatch.length <= MAX_HASH_CHARS) return bestPresetMatch;
 
   // 2. General DAG -> short-alias tuple representation -> deflate-raw -> base64url
   const compactNodes = graph.nodes.map((n) => {
@@ -495,12 +537,15 @@ export function normalizeWorkflowGraph(
     if (!isPlainObject(n)) {
       throw new Error(`Invalid node at index ${idx}`);
     }
-    const id = String(n.id ?? '').trim();
-    if (!id) throw new Error(`Node at index ${idx} is missing an id`);
+    if (typeof n.id !== 'string' || !n.id.trim()) throw new Error(`Node at index ${idx} is missing an id`);
+    const id = n.id.trim();
     if (seenIds.has(id)) throw new Error(`Duplicate node id "${id}"`);
     seenIds.add(id);
 
-    const adapterId = String(n.adapterId ?? '');
+    if (typeof n.adapterId !== 'string') {
+      throw new Error(`Node "${id}" has non-string adapterId`);
+    }
+    const adapterId = n.adapterId;
     const manifest = resolveAdapterManifest(adapterId);
     if (!manifest) {
       throw new Error(`Unknown model "${adapterId}" on node "${id}"`);
@@ -515,7 +560,7 @@ export function normalizeWorkflowGraph(
       // PDB inputs so an imported recipe cannot spoof an RCSB accession with arbitrary coordinates.
       delete mergedParams.fetchedPdbId;
       delete mergedParams.fetchedUniProtId;
-      const mode = String(mergedParams.mode ?? 'demo-bundle');
+      const mode = safeStr(mergedParams.mode ?? 'demo-bundle');
       if (mode === 'pdb-id' || mode === 'alphafold-db' || mode === 'demo-bundle') {
         if ('pdbText' in mergedParams) {
           mergedParams.pdbText = '';
@@ -545,10 +590,18 @@ export function normalizeWorkflowGraph(
     if (!isPlainObject(e)) {
       throw new Error(`Invalid wire at index ${idx}`);
     }
-    const fromNode = String(e.fromNode ?? '').trim();
-    const fromPort = String(e.fromPort ?? '').trim();
-    const toNode = String(e.toNode ?? '').trim();
-    const toPort = String(e.toPort ?? '').trim();
+    if (
+      typeof e.fromNode !== 'string' ||
+      typeof e.fromPort !== 'string' ||
+      typeof e.toNode !== 'string' ||
+      typeof e.toPort !== 'string'
+    ) {
+      throw new Error(`Wire at index ${idx} must have string node and port names`);
+    }
+    const fromNode = e.fromNode.trim();
+    const fromPort = e.fromPort.trim();
+    const toNode = e.toNode.trim();
+    const toPort = e.toPort.trim();
     if (!fromNode || !fromPort || !toNode || !toPort) {
       throw new Error(`Wire at index ${idx} is missing node or port name`);
     }
@@ -587,194 +640,242 @@ export function buildShareableWorkflowUrl(origin: string, pathname: string, hash
   return `${origin}${pathname}?${clean}`;
 }
 
-/** Decode `#p=...`, `?p=...`, `#g=...`, or `?g=...` back into a full WorkflowGraph (with auto-layout). */
+async function decodePresetParamsToGraph(qs: URLSearchParams): Promise<WorkflowGraph | null> {
+  const presetId = qs.get('p');
+  const preset = WORKFLOW_PRESETS.find((p) => p.id === presetId);
+  if (!preset) return null;
+  const g = structuredClone(preset.graph);
+  const byId = new Map(g.nodes.map((n) => [n.id, n]));
+  const nodesWithExplicitCapMode = new Set<string>();
+  const nodesWithExplicitMaxSeq = new Set<string>();
+  let hasCustomPositions = false;
+  for (const [k, v] of qs.entries()) {
+    if (k === 'p' || k === 'v') continue;
+    const dot = k.lastIndexOf('.');
+    if (dot <= 0) continue;
+    const nodeId = k.slice(0, dot);
+    const paramKey = k.slice(dot + 1);
+    if (FORBIDDEN_KEYS.has(paramKey)) continue;
+    const node = byId.get(nodeId);
+    if (!node) continue;
+    if (paramKey === 'capMode') nodesWithExplicitCapMode.add(nodeId);
+    if (paramKey === 'maxSequences') nodesWithExplicitMaxSeq.add(nodeId);
+    if (paramKey === '_label') {
+      if (v.trim()) node.label = v;
+      continue;
+    }
+    if (paramKey === '_pos') {
+      const parts = v.split(',');
+      if (parts.length === 2) {
+        const x = Number(parts[0]);
+        const y = Number(parts[1]);
+        if (Number.isFinite(x) && Number.isFinite(y)) {
+          node.position = { x, y };
+          hasCustomPositions = true;
+        }
+      }
+      continue;
+    }
+    const defaults = defaultParamsForAdapter(node.adapterId);
+    const schemaVal = getSchemaTypeTemplate(node.adapterId, paramKey);
+    const templateVal =
+      node.params[paramKey] !== undefined
+        ? node.params[paramKey]
+        : defaults[paramKey] !== undefined
+          ? defaults[paramKey]
+          : schemaVal !== undefined
+            ? schemaVal
+            : PARAM_TYPE_HINTS[paramKey];
+    node.params[paramKey] = parseParamValue(v, templateVal);
+  }
+  for (const nodeId of nodesWithExplicitMaxSeq) {
+    if (!nodesWithExplicitCapMode.has(nodeId)) {
+      const node = byId.get(nodeId);
+      if (node && (node.adapterId === 'localfold-af2' || node.adapterId === 'esmc' || node.adapterId === 'dyna1')) {
+        node.params.capMode = 'fixed';
+      }
+    }
+  }
+  if (hasCustomPositions) {
+    const laid = preset.graph.nodes.some((n) => !n.position)
+      ? autoLayoutGraph(structuredClone(preset.graph))
+      : preset.graph;
+    for (let i = 0; i < g.nodes.length; i++) {
+      if (!g.nodes[i].position && laid.nodes[i]?.position) {
+        g.nodes[i].position = { ...laid.nodes[i].position! };
+      }
+    }
+  }
+  return normalizeWorkflowGraph(g, preset.id, preset.name, false);
+}
+
+async function decodeCompressedDagParam(rawG: string): Promise<WorkflowGraph | null> {
+  const normalizedEncoded = rawG
+    .replace(/%5[fF]/g, '_')
+    .replace(/%2[dD]/g, '-')
+    .replace(/\\_/g, '_')
+    .replace(/[.,;:!?)\]}>'"]+$/, '');
+
+  const tryDecodeCompressedObj = async (
+    candidate: string,
+  ): Promise<{ v?: number; n: unknown[]; e: unknown[]; p?: unknown } | null> => {
+    let rawBytes: Uint8Array;
+    try {
+      rawBytes = fromBase64Url(candidate);
+    } catch {
+      return null;
+    }
+    let jsonText: string;
+    try {
+      jsonText = await inflateRaw(rawBytes);
+    } catch (inflateErr) {
+      if (inflateErr instanceof Error && /maximum (decompressed|allowed) size/i.test(inflateErr.message)) {
+        throw inflateErr;
+      }
+      if (rawBytes.byteLength > MAX_INFLATED_BYTES) {
+        throw new Error('Shared workflow payload exceeds maximum allowed size.');
+      }
+      jsonText = new TextDecoder().decode(rawBytes);
+    }
+    let parsedObj: unknown;
+    try {
+      parsedObj = JSON.parse(jsonText);
+    } catch {
+      return null;
+    }
+    if (!isPlainObject(parsedObj) || !Array.isArray(parsedObj.n) || !Array.isArray(parsedObj.e)) {
+      return null;
+    }
+    const v = typeof parsedObj.v === 'number' ? parsedObj.v : undefined;
+    return { v, n: parsedObj.n, e: parsedObj.e, p: parsedObj.p };
+  };
+
+  let obj = await tryDecodeCompressedObj(normalizedEncoded);
+  if (!obj) {
+    // Recover links whose trailing `_` or `-` was stripped by Markdown/chat/social autolinkers.
+    for (const suffix of ['_', '-', '__']) {
+      obj = await tryDecodeCompressedObj(normalizedEncoded + suffix);
+      if (obj) break;
+    }
+  }
+  if (!obj) return null;
+  if (obj.n.length > MAX_IMPORT_NODES || obj.e.length > MAX_IMPORT_EDGES) {
+    throw new Error(
+      `Shared workflow exceeds size limits (max ${MAX_IMPORT_NODES} blocks, ${MAX_IMPORT_EDGES} wires).`,
+    );
+  }
+
+  const rawPositions = Array.isArray(obj.p) ? obj.p : null;
+  const nodes: WorkflowNode[] = [];
+  for (let i = 0; i < obj.n.length; i++) {
+    const tuple = obj.n[i];
+    if (!Array.isArray(tuple) || tuple.length < 2) return null;
+    if (typeof tuple[0] !== 'string' || typeof tuple[1] !== 'string') return null;
+    const id = tuple[0];
+    const shortA = tuple[1];
+    if (!id || FORBIDDEN_KEYS.has(id) || !shortA || FORBIDDEN_KEYS.has(shortA)) return null;
+    const adapterId = resolveAdapterFromShortCode(shortA);
+    const rawOverrides = isPlainObject(tuple[2]) ? tuple[2] : {};
+    const overrides = sanitizeParams(rawOverrides);
+    const label = typeof tuple[3] === 'string' ? tuple[3] : resolveAdapterManifest(adapterId)?.shortName ?? adapterId;
+    const posTuple = rawPositions?.[i];
+    const position =
+      Array.isArray(posTuple) &&
+      posTuple.length === 2 &&
+      typeof posTuple[0] === 'number' &&
+      Number.isFinite(posTuple[0]) &&
+      typeof posTuple[1] === 'number' &&
+      Number.isFinite(posTuple[1])
+        ? { x: posTuple[0], y: posTuple[1] }
+        : undefined;
+    const isLegacyV1 = !obj.v || obj.v < 2;
+    const isSeqCapped =
+      adapterId === 'localfold-af2' || adapterId === 'esmc' || adapterId === 'dyna1';
+    const legacyCapPatch =
+      isLegacyV1 && isSeqCapped && !('capMode' in overrides) ? { capMode: 'fixed' } : {};
+    nodes.push({
+      id,
+      adapterId,
+      label,
+      params: { ...defaultParamsForAdapter(adapterId), ...legacyCapPatch, ...overrides },
+      ...(position ? { position } : {}),
+    });
+  }
+  const edges: WorkflowEdge[] = [];
+  for (const e of obj.e) {
+    if (
+      !Array.isArray(e) ||
+      e.length < 4 ||
+      typeof e[0] !== 'string' ||
+      typeof e[1] !== 'string' ||
+      typeof e[2] !== 'string' ||
+      typeof e[3] !== 'string'
+    ) {
+      return null;
+    }
+    edges.push({
+      fromNode: e[0],
+      fromPort: e[1],
+      toNode: e[2],
+      toPort: e[3],
+    });
+  }
+  try {
+    return normalizeWorkflowGraph(
+      { id: 'shared-workflow', name: 'Shared Workflow', nodes, edges },
+      'shared-workflow',
+      'Shared Workflow',
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Decode `#p=`, `?p=`, `#g=`, `?g=`, `#flow=`, `?flow=`, `#recipe=`, or `?recipe=` (including extra params) into a WorkflowGraph. */
 export async function decodeHashToGraph(hash: string): Promise<WorkflowGraph | null> {
-  const clean = hash.replace(/^[#?]/, '').trim();
-  if (!clean) return null;
+  const { clean, invalidUrl } = extractWorkflowSearchOrHash(hash);
+  if (invalidUrl || !clean) return null;
   if (clean.length > MAX_HASH_CHARS) {
     throw new Error(`Shared workflow link is too large (max ${MAX_HASH_CHARS} chars).`);
   }
 
   if (clean.startsWith('p=')) {
-    const qs = new URLSearchParams(clean);
-    const presetId = qs.get('p');
-    const preset = WORKFLOW_PRESETS.find((p) => p.id === presetId);
-    if (!preset) return null;
-    const g = structuredClone(preset.graph);
-    const byId = new Map(g.nodes.map((n) => [n.id, n]));
-    const nodesWithExplicitCapMode = new Set<string>();
-    const nodesWithExplicitMaxSeq = new Set<string>();
-    let hasCustomPositions = false;
-    for (const [k, v] of qs.entries()) {
-      if (k === 'p' || k === 'v') continue;
-      const dot = k.lastIndexOf('.');
-      if (dot <= 0) continue;
-      const nodeId = k.slice(0, dot);
-      const paramKey = k.slice(dot + 1);
-      if (FORBIDDEN_KEYS.has(paramKey)) continue;
-      const node = byId.get(nodeId);
-      if (!node) continue;
-      if (paramKey === 'capMode') nodesWithExplicitCapMode.add(nodeId);
-      if (paramKey === 'maxSequences') nodesWithExplicitMaxSeq.add(nodeId);
-      if (paramKey === '_label') {
-        if (v.trim()) node.label = v;
-        continue;
-      }
-      if (paramKey === '_pos') {
-        const parts = v.split(',');
-        if (parts.length === 2) {
-          const x = Number(parts[0]);
-          const y = Number(parts[1]);
-          if (Number.isFinite(x) && Number.isFinite(y)) {
-            node.position = { x, y };
-            hasCustomPositions = true;
-          }
-        }
-        continue;
-      }
-      const defaults = defaultParamsForAdapter(node.adapterId);
-      const schemaVal = getSchemaTypeTemplate(node.adapterId, paramKey);
-      const templateVal =
-        node.params[paramKey] !== undefined
-          ? node.params[paramKey]
-          : defaults[paramKey] !== undefined
-            ? defaults[paramKey]
-            : schemaVal !== undefined
-              ? schemaVal
-              : PARAM_TYPE_HINTS[paramKey];
-      node.params[paramKey] = parseParamValue(v, templateVal);
-    }
-    for (const nodeId of nodesWithExplicitMaxSeq) {
-      if (!nodesWithExplicitCapMode.has(nodeId)) {
-        const node = byId.get(nodeId);
-        if (node && (node.adapterId === 'localfold-af2' || node.adapterId === 'esmc' || node.adapterId === 'dyna1')) {
-          node.params.capMode = 'fixed';
-        }
-      }
-    }
-    if (hasCustomPositions) {
-      const laid = preset.graph.nodes.some((n) => !n.position)
-        ? autoLayoutGraph(structuredClone(preset.graph))
-        : preset.graph;
-      for (let i = 0; i < g.nodes.length; i++) {
-        if (!g.nodes[i].position && laid.nodes[i]?.position) {
-          g.nodes[i].position = { ...laid.nodes[i].position! };
-        }
-      }
-    }
-    return normalizeWorkflowGraph(g, preset.id, preset.name, false);
+    return decodePresetParamsToGraph(new URLSearchParams(clean));
   }
 
   if (clean.startsWith('g=')) {
-    const normalizedEncoded = clean
-      .slice(2)
-      .replace(/%5[fF]/g, '_')
-      .replace(/%2[dD]/g, '-')
-      .replace(/\\_/g, '_')
-      .replace(/[.,;:!?)\]}>'"]+$/, '');
+    return decodeCompressedDagParam(clean.slice(2));
+  }
 
-    const tryDecodeCompressedObj = async (
-      candidate: string,
-    ): Promise<{ v?: number; n: unknown[]; e: unknown[]; p?: unknown } | null> => {
-      let rawBytes: Uint8Array;
-      try {
-        rawBytes = fromBase64Url(candidate);
-      } catch {
-        return null;
-      }
-      let jsonText: string;
-      try {
-        jsonText = await inflateRaw(rawBytes);
-      } catch (inflateErr) {
-        if (inflateErr instanceof Error && /maximum (decompressed|allowed) size/i.test(inflateErr.message)) {
-          throw inflateErr;
-        }
-        if (rawBytes.byteLength > MAX_INFLATED_BYTES) {
-          throw new Error('Shared workflow payload exceeds maximum allowed size.');
-        }
-        jsonText = new TextDecoder().decode(rawBytes);
-      }
-      let parsedObj: unknown;
-      try {
-        parsedObj = JSON.parse(jsonText);
-      } catch {
-        return null;
-      }
-      if (!isPlainObject(parsedObj) || !Array.isArray(parsedObj.n) || !Array.isArray(parsedObj.e)) {
-        return null;
-      }
-      const v = typeof parsedObj.v === 'number' ? parsedObj.v : undefined;
-      return { v, n: parsedObj.n, e: parsedObj.e, p: parsedObj.p };
-    };
-
-    let obj = await tryDecodeCompressedObj(normalizedEncoded);
-    if (!obj) {
-      // Recover links whose trailing `_` or `-` was stripped by Markdown/chat/social autolinkers.
-      for (const suffix of ['_', '-', '__']) {
-        obj = await tryDecodeCompressedObj(normalizedEncoded + suffix);
-        if (obj) break;
-      }
-    }
-    if (!obj) return null;
-    if (obj.n.length > MAX_IMPORT_NODES || obj.e.length > MAX_IMPORT_EDGES) {
-      throw new Error(
-        `Shared workflow exceeds size limits (max ${MAX_IMPORT_NODES} blocks, ${MAX_IMPORT_EDGES} wires).`,
-      );
-    }
-
-    const rawPositions = Array.isArray(obj.p) ? obj.p : null;
-    const nodes: WorkflowNode[] = [];
-    for (let i = 0; i < obj.n.length; i++) {
-      const tuple = obj.n[i];
-      if (!Array.isArray(tuple) || tuple.length < 2) return null;
-      const id = String(tuple[0]);
-      const shortA = String(tuple[1]);
-      const adapterId = resolveAdapterFromShortCode(shortA);
-      const rawOverrides = isPlainObject(tuple[2]) ? tuple[2] : {};
-      const overrides = sanitizeParams(rawOverrides);
-      const label = typeof tuple[3] === 'string' ? tuple[3] : resolveAdapterManifest(adapterId)?.shortName ?? adapterId;
-      const posTuple = rawPositions?.[i];
-      const position =
-        Array.isArray(posTuple) &&
-        posTuple.length === 2 &&
-        typeof posTuple[0] === 'number' &&
-        Number.isFinite(posTuple[0]) &&
-        typeof posTuple[1] === 'number' &&
-        Number.isFinite(posTuple[1])
-          ? { x: posTuple[0], y: posTuple[1] }
-          : undefined;
-      const isLegacyV1 = !obj.v || obj.v < 2;
-      const isSeqCapped =
-        adapterId === 'localfold-af2' || adapterId === 'esmc' || adapterId === 'dyna1';
-      const legacyCapPatch =
-        isLegacyV1 && isSeqCapped && !('capMode' in overrides) ? { capMode: 'fixed' } : {};
-      nodes.push({
-        id,
-        adapterId,
-        label,
-        params: { ...defaultParamsForAdapter(adapterId), ...legacyCapPatch, ...overrides },
-        ...(position ? { position } : {}),
-      });
-    }
-    const edges: WorkflowEdge[] = [];
-    for (const e of obj.e) {
-      if (!Array.isArray(e) || e.length < 4) return null;
-      edges.push({
-        fromNode: String(e[0]),
-        fromPort: String(e[1]),
-        toNode: String(e[2]),
-        toPort: String(e[3]),
-      });
-    }
+  const qs = new URLSearchParams(clean);
+  if (qs.has('flow')) {
+    const res = decodeFlowQuery(clean, { catalog: buildActiveCatalogHooks() });
+    if (!res.ok || !res.graph) return null;
     try {
-      return normalizeWorkflowGraph(
-        { id: 'shared-workflow', name: 'Shared Workflow', nodes, edges },
-        'shared-workflow',
-        'Shared Workflow',
-      );
+      return normalizeWorkflowGraph(res.graph, res.graph.id, res.graph.name, false);
     } catch {
       return null;
     }
+  }
+
+  if (qs.has('recipe')) {
+    const rawRecipe = qs.get('recipe') ?? '';
+    if (new TextEncoder().encode(rawRecipe).byteLength > MAX_INFLATED_BYTES) {
+      throw new Error('Shared workflow recipe exceeds maximum allowed size.');
+    }
+    try {
+      return parseRecipeToGraph(rawRecipe);
+    } catch {
+      return null;
+    }
+  }
+
+  if (qs.has('p')) {
+    return decodePresetParamsToGraph(qs);
+  }
+
+  if (qs.has('g')) {
+    return decodeCompressedDagParam(qs.get('g') ?? '');
   }
 
   return null;
@@ -869,7 +970,8 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
       if (line.startsWith('name:')) {
         const val = line.slice(5).trim();
         try {
-          name = String(JSON.parse(val));
+          const parsedName = JSON.parse(val);
+          name = typeof parsedName === 'string' ? parsedName : safeStr(parsedName) || val.replace(/^['"]|['"]$/g, '');
         } catch {
           name = val.replace(/^['"]|['"]$/g, '');
         }
@@ -888,7 +990,11 @@ export function parseRecipeToGraph(text: string): WorkflowGraph {
         throw new Error(`Invalid node body on "${id}": expected a JSON object`);
       }
       const obj = parsedBody;
-      const adapterId = String(obj.adapterId ?? obj.model ?? '');
+      const rawAdapter = obj.adapterId ?? obj.model ?? '';
+      if (typeof rawAdapter !== 'string') {
+        throw new Error(`Invalid model on node "${id}": expected a string`);
+      }
+      const adapterId = rawAdapter;
       const manifest = resolveAdapterManifest(adapterId);
       if (!manifest) {
         throw new Error(`Unknown model "${adapterId}" on node "${id}"`);

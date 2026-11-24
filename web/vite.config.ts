@@ -2,6 +2,7 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import { createMemoryFeedbackKv, handleFeedbackRequest } from './src/lib/og/feedback-api';
+import { generateLlmsTxt } from './src/lib/engine/llms-txt';
 
 /**
  * Local `vite dev` middleware for `/api/feedback` backed by an in-memory KV store
@@ -74,8 +75,58 @@ function stripUnusedOrtWasm(): Plugin {
   };
 }
 
+/**
+ * Serve `/llms.txt` dynamically in `vite dev` and emit `web/build/llms.txt`
+ * during the client pass of `vite build` (copied into `web/build/` by adapter-static).
+ */
+function llmsTxtPlugin(): Plugin {
+  let isBuild = false;
+  let isSsrBuild = false;
+  return {
+    name: 'denovo-llms-txt',
+    configResolved(config) {
+      isBuild = config.command === 'build';
+      isSsrBuild = Boolean(config.build?.ssr);
+    },
+    configureServer(server) {
+      server.middlewares.use('/llms.txt', (req, res, next) => {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          next();
+          return;
+        }
+        const reqPath = (req.url || '/').split('?')[0];
+        if (reqPath !== '/' && reqPath !== '') {
+          next();
+          return;
+        }
+        try {
+          const text = generateLlmsTxt();
+          const buf = Buffer.from(text, 'utf8');
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+          res.setHeader('Cache-Control', 'no-cache');
+          res.setHeader('Content-Length', String(buf.byteLength));
+          res.end(req.method === 'HEAD' ? undefined : buf);
+        } catch (err) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+          res.end(`Failed to generate /llms.txt: ${String(err)}`);
+        }
+      });
+    },
+    generateBundle() {
+      if (!isBuild || isSsrBuild) return;
+      this.emitFile({
+        type: 'asset',
+        fileName: 'llms.txt',
+        source: generateLlmsTxt(),
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [devFeedbackApiPlugin(), sveltekit(), stripUnusedOrtWasm()],
+  plugins: [devFeedbackApiPlugin(), llmsTxtPlugin(), sveltekit(), stripUnusedOrtWasm()],
   resolve: {
     alias: [
       // proteinmpnn-web ships TS source in GitHub installs (prepack only runs on publish).

@@ -23,6 +23,7 @@ for (const req of [
   '_worker.js',
   '_routes.json',
   'og-default.png',
+  'llms.txt',
   'vendor/ort/ort-wasm-simd-threaded.jspi.mjs',
   'vendor/ort/ort-wasm-simd-threaded.jspi.wasm',
   'vendor/ort/ort-wasm-simd-threaded.mjs',
@@ -42,6 +43,12 @@ for (const req of [
     console.error(`[check:deploy] FAIL: required build asset missing: ${req}`);
     process.exit(1);
   }
+}
+
+const llmsTxtSize = statSync(resolve(buildDir, 'llms.txt')).size;
+if (llmsTxtSize <= 500) {
+  console.error(`[check:deploy] FAIL: web/build/llms.txt is too small (${llmsTxtSize} bytes <= 500).`);
+  process.exit(1);
 }
 
 // Dynamically forbid any bundled model weights directory anywhere under web/build/vendor/*/weights
