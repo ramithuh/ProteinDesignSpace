@@ -33,28 +33,6 @@ When I first started this, I kind of gave up since models at the time weren't gr
 
 ---
 
-## Quick Start
-
-```bash
-cd web
-npm install
-npm run dev
-```
-
-Open `http://localhost:5173` in a WebGPU-capable browser (Chrome, Edge, Arc, or Firefox 145+ on macOS).
-
-```bash
-cd web
-npm test              # Vitest unit & upstream integration suite (offline)
-npm run check         # svelte-check TypeScript + Svelte diagnostics
-npm run build         # Syncs pinned upstreams & builds static SPA -> web/build/
-npm run check:deploy  # Verifies required vendor engines & Cloudflare 25 MiB limit
-```
-
-Model weights are **never** bundled in `web/build/` — sharded safetensors stream on demand from Hugging Face and cache locally in browser OPFS / CacheStorage. To add a new block to the workbench, see [ADDING_A_METHOD.md](ADDING_A_METHOD.md).
-
----
-
 ## Self-Host on Your Own GPU (Zero Python)
 
 Want to offload heavy GPU models and large folds (>512 aa) to a **remote workstation or cluster GPU** (RTX 5090, DGX Spark, HPC node) while keeping the UI, CPU blocks, and 3D Mol\* viewer fast in your laptop browser? Clone and run the zero-Python WebGPU host server on the GPU machine:
@@ -79,9 +57,20 @@ Then connect from your laptop via **SSH port forwarding** (or **Tailscale Serve*
 ssh -L 8790:127.0.0.1:8790 user@gpu-node
 ```
 
-Open **`http://127.0.0.1:8790`**, switch the top-right toggle to **Self-Hosted (remote machine)**, leave URL blank, paste your token once, and click **Sign in** (saved via an `HttpOnly; SameSite=Strict` session cookie).
+Open **`http://127.0.0.1:8790`**, switch the top-right toggle to **Self-Hosted (remote machine)**, leave URL blank, paste your token once, and click **Sign in**.
 
 See [**server/README.md**](server/README.md) for Tailscale HTTPS setup, weight cache directory (`DENOVO_DATA_DIR`), Ubuntu 24.04 AppArmor troubleshooting, and all server environment variables.
+
+---
+
+## Development
+
+```bash
+cd web && npm install && npm run dev   # dev server at http://localhost:5173
+cd web && npm test && npm run check    # offline Vitest suite & svelte-check
+```
+
+Model weights are never bundled in `web/build/` — sharded safetensors stream on demand from Hugging Face and cache locally. To add a new block, see [**ADDING_A_METHOD.md**](ADDING_A_METHOD.md).
 
 ---
 

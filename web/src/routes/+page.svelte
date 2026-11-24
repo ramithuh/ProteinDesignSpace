@@ -3677,7 +3677,7 @@
               {#if !computeBackend.serverUrl.trim() && remoteHealth?.ok && remoteHealth.authenticatedBy === 'cookie'}
                 <div class="pop-row">
                   <span class="pop-k">Session</span>
-                  <span class="pop-v ok-t">Signed in (cookie)</span>
+                  <span class="pop-v ok-t">Signed in</span>
                   <button
                     type="button"
                     class="pop-action"
@@ -3689,7 +3689,7 @@
                 </div>
               {:else}
                 <label class="pop-field">
-                  <span>API Token {!computeBackend.serverUrl.trim() ? '(saved via HttpOnly cookie)' : '(session only)'}</span>
+                  <span>API Token{computeBackend.serverUrl.trim() ? ' (session only)' : ''}</span>
                   <input
                     type="password"
                     value={computeBackend.apiToken}
