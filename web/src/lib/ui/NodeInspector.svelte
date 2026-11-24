@@ -3,7 +3,6 @@
   import {
     ADAPTER_REGISTRY,
     LOCALFOLD_MODEL_OPTIONS,
-    ESMFOLD2_STEPS,
     MPNN_CHECKPOINTS_BY_FAMILY,
     MPNN_VARIANT_OPTIONS,
     RFD4_BENCHMARK_OPTIONS,
@@ -39,6 +38,8 @@
     isBenchmarkSupportedForAdapter,
   } from '$lib/engine/benchmark-sync';
   import { MAX_DESIGNS } from '$lib/engine/work-plan';
+  import InspectorHeader from './InspectorHeader.svelte';
+  import LocalFoldWidget from './inspector/LocalFoldWidget.svelte';
   import NumericInput from './NumericInput.svelte';
   import SchemaParamFields from './SchemaParamFields.svelte';
   import SequenceEditor from './SequenceEditor.svelte';
@@ -455,59 +456,12 @@
     flushPendingTextCommit();
   });
 
-  function localFoldMaxRecycles(modelId: string, family: string): number {
-    return modelId === 'mol1' || family === 'af2-multimer' ? 20 : 10;
-  }
-
-  function localFoldDefaultRecyclesHint(modelId: string, family: string): string {
-    if (family === 'af2-multimer') return 'Upstream default: 20 (max 20)';
-    if (modelId === 'mol1') return 'Upstream default: 10 (max 20)';
-    if (family === 'af3') return 'Upstream default: 10 (max 10)';
-    return 'Upstream default: 3 (max 10)';
-  }
-
   function formatLocalFoldMsaBadge(modeRaw: unknown): string {
     const mode = String(modeRaw ?? 'single') as MsaMode;
     if (mode === 'mmseqs2') return 'MMseqs2 MSA';
     if (mode === 'target-only') return 'Target-only MSA';
     if (mode === 'a3m') return 'Custom .a3m MSA';
     return 'Single-sequence (no MSA)';
-  }
-
-  function parseA3mSequenceSummary(raw: string): { seqCount: number; queryLength: number } {
-    const trimmed = raw.trim();
-    if (!trimmed) return { seqCount: 0, queryLength: 0 };
-    const lines = trimmed.split(/\r?\n/);
-    let seqCount = 0;
-    let firstSeq = '';
-    let curSeq = '';
-    let seenHeader = false;
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith('#')) continue;
-      if (line.startsWith('>')) {
-        if (seenHeader && curSeq.length > 0) {
-          seqCount++;
-          if (!firstSeq) firstSeq = curSeq;
-        }
-        seenHeader = true;
-        curSeq = '';
-      } else {
-        const clean = line.replace(/\s+/g, '');
-        if (seenHeader) {
-          curSeq += clean;
-        } else {
-          seqCount++;
-          if (!firstSeq) firstSeq = clean;
-        }
-      }
-    }
-    if (seenHeader && curSeq.length > 0) {
-      seqCount++;
-      if (!firstSeq) firstSeq = curSeq;
-    }
-    const queryLength = firstSeq.replace(/[a-z.-]/g, '').length;
-    return { seqCount, queryLength };
   }
 
   async function handleA3mFileUpload(ev: Event) {
@@ -524,22 +478,6 @@
     } finally {
       input.value = '';
     }
-  }
-
-  function isAutoLocalFoldLabel(label: string | undefined): { auto: boolean; suffix: string } {
-    const raw = (label ?? '').trim();
-    if (!raw || raw === 'LocalFold') return { auto: true, suffix: '' };
-    const parenMatch = raw.match(/^(.*?)\s*(\((?:MPNN|Native|AF2|RF3)\))$/);
-    const base = parenMatch ? parenMatch[1].trim() : raw;
-    const suffix = parenMatch ? ` ${parenMatch[2]}` : '';
-    if (
-      base === 'LocalFold' ||
-      /^LocalFold\s*\([^)]+\)$/i.test(raw) ||
-      LOCALFOLD_MODEL_OPTIONS.some((m) => m.shortLabel === base || m.label === base)
-    ) {
-      return { auto: true, suffix: /^LocalFold\s*\(/i.test(raw) && !parenMatch ? '' : suffix };
-    }
-    return { auto: false, suffix: '' };
   }
 
   function isAutoMpnnLabel(label: string | undefined): boolean {
@@ -830,77 +768,21 @@
 </script>
 
 <div class="inspector" class:embedded>
-  <div class="head">
-    <div class="title-wrap">
-      <span class="stage-dot" style="background: {stageColor}"></span>
-      {#if onUpdateLabel}
-        <input
-          type="text"
-          class="title-input"
-          aria-label="Block title"
-          title="Click to rename this block"
-          {disabled}
-          placeholder={manifest?.shortName || node.adapterId}
-          value={titleDraft}
-          oninput={(e) => {
-            titleDraft = e.currentTarget.value;
-            onUpdateLabel(node.id, titleDraft);
-          }}
-          onblur={() => {
-            const trimmed = titleDraft.trim();
-            if (trimmed !== titleDraft) {
-              titleDraft = trimmed;
-              onUpdateLabel(node.id, trimmed);
-            }
-          }}
-          onkeydown={(e) => {
-            if (e.key === 'Enter') {
-              e.currentTarget.blur();
-            }
-          }}
-        />
-      {:else}
-        <h3>{node.label || manifest?.displayName || node.adapterId}</h3>
-      {/if}
-      <span class="sub-kind" title="Underlying model / engine">{activeModelBadge}</span>
-    </div>
-    {#if (!embedded && onOpenStudio) || onRunUpTo}
-      <div class="head-actions">
-        {#if !embedded && onOpenStudio}
-          <button
-            type="button"
-            class="studio-open-btn"
-            onclick={() => {
-              flushPendingTextCommit();
-              onOpenStudio();
-            }}
-            title="Inspect what the model sees & paint residue constraints in Studio (Space)"
-          >
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <rect x="1.8" y="2.4" width="12.4" height="11.2" rx="2" stroke="currentColor" stroke-width="1.4" />
-              <path d="M6.2 2.6V13.4" stroke="currentColor" stroke-width="1.3" />
-              <path d="M8.6 6H11.8M8.6 8.5H11.8M8.6 11H10.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
-            </svg>
-            Inspect Studio
-          </button>
-        {/if}
-        {#if onRunUpTo}
-          <button
-            type="button"
-            class="run-here-btn"
-            {disabled}
-            onclick={() => {
-              flushPendingTextCommit();
-              onRunUpTo(node.id);
-            }}
-            title="Execute only upstream blocks up to this block (memoized for full runs)"
-          >
-            ▶ Run to here
-          </button>
-        {/if}
-      </div>
-    {/if}
-  </div>
+  <InspectorHeader
+    nodeId={node.id}
+    {stageColor}
+    {titleDraft}
+    placeholder={manifest?.shortName || node.adapterId}
+    displayTitle={node.label || manifest?.displayName || node.adapterId}
+    {activeModelBadge}
+    {disabled}
+    host={embedded ? 'studio' : 'sidebar'}
+    onTitleDraftChange={(next) => (titleDraft = next)}
+    {onUpdateLabel}
+    onFlushTextCommit={flushPendingTextCommit}
+    {onOpenStudio}
+    {onRunUpTo}
+  />
 
   <!-- Primary Scientific Parameters -->
   <div class="fields">
@@ -2173,311 +2055,21 @@
       </details>
 
     {:else if node.adapterId === 'localfold-af2'}
-      {@const lfModelId = String(node.params.model ?? 'monomer')}
-      {@const lfMeta = selectedLocalFoldMeta ?? LOCALFOLD_MODEL_OPTIONS[0]}
-      {@const lfMsaMode = String(node.params.msaMode ?? 'single') as MsaMode}
-      {@const lfMaxRecycles = localFoldMaxRecycles(lfModelId, lfMeta.family)}
-      {@const lfRecyclesSpec = {
-        ...NUMERIC_SPECS['localfold-af2'].recycles,
-        max: lfMaxRecycles,
-      }}
-      {@const lfDefaultTol = lfMeta.family === 'af2-multimer' ? 0.5 : 0}
-      {@const lfTolSpec = {
-        min: 0,
-        max: 5,
-        step: 0.1,
-        integer: false,
-        defaultValue: lfDefaultTol,
-        unit: 'Å',
-      }}
-      {@const lfA3mSummary = lfMsaMode === 'a3m' ? parseA3mSequenceSummary(msaA3mDraft) : null}
-      {@const lfHasHoloContext =
-        Boolean(String(node.params.ligandCcdCodes ?? '').trim()) ||
-        Boolean(String(node.params.dnaSequences ?? '').trim()) ||
-        Boolean(String(node.params.rnaSequences ?? '').trim())}
-      <label class="wide">
-        Model
-        <select
-          {disabled}
-          value={lfModelId}
-          onchange={(e) => {
-            const nextModel = e.currentTarget.value;
-            const nextMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === nextModel);
-            const autoInfo = isAutoLocalFoldLabel(node.label);
-            if (autoInfo.auto && nextMeta) {
-              onUpdateLabel?.(node.id, `${nextMeta.shortLabel}${autoInfo.suffix}`);
-            }
-            const sanitized = sanitizeParamsOnModeSwitch('localfold-af2', node.params, nextModel);
-            onUpdate(node.id, sanitized);
-          }}
-        >
-          <optgroup label="AlphaFold2-Class (Monomer)">
-            {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af2') as opt (opt.id)}
-              <option value={opt.id}>{opt.label}</option>
-            {/each}
-          </optgroup>
-          <optgroup label="AlphaFold2-Multimer v3 (Complexes)">
-            {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af2-multimer') as opt (opt.id)}
-              <option value={opt.id}>{opt.label}</option>
-            {/each}
-          </optgroup>
-          <optgroup label="AF3-Class (All-Atom)">
-            {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'af3') as opt (opt.id)}
-              <option value={opt.id}>{opt.label}</option>
-            {/each}
-          </optgroup>
-          <optgroup label="ESMFold2 Experimental Fast">
-            {#each LOCALFOLD_MODEL_OPTIONS.filter((m) => m.family === 'esmfold2') as opt (opt.id)}
-              <option value={opt.id}>{opt.label}</option>
-            {/each}
-          </optgroup>
-        </select>
-        <span class="field-hint">{formatLocalFoldMsaBadge(lfMeta.family === 'esmfold2' ? 'single' : lfMsaMode)} · Weights: ~{lfMeta.approxMB} MB · License: {lfMeta.license}</span>
-      </label>
-
-      {#if lfMeta.family === 'esmfold2'}
-        <label>
-          Diffusion schedule
-          <select {disabled} value={Number(node.params.esmfold2Steps ?? ESMFOLD2_STEPS[0])}
-            onchange={(e) => setParam('esmfold2Steps', Number(e.currentTarget.value))}>
-            {#each ESMFOLD2_STEPS as steps}
-              <option value={steps}>{steps} scheduled steps</option>
-            {/each}
-          </select>
-          <span class="field-hint">Single-sequence ESM-C + all-atom diffusion. The default 15-step schedule executes 11 diffusion updates.</span>
-        </label>
-        {#if lfMsaMode !== 'single'}
-          <div class="full">
-            <span class="field-hint warn">This checkpoint runs in single-sequence mode without an external MSA.</span>
-            <button type="button" {disabled} onclick={() => onUpdate(node.id, {
-              ...node.params, msaMode: 'single',
-            })}>Switch to single-sequence</button>
-          </div>
-        {/if}
-      {:else}
-        <label class="full">
-          MSA Mode
-          <select
-            {disabled}
-            value={lfMsaMode}
-            onchange={(e) => {
-              flushPendingTextCommit();
-              setParam('msaMode', e.currentTarget.value);
-            }}
-          >
-            <option value="single">Single-sequence (100% local)</option>
-            <option value="mmseqs2">MMseqs2 MSA (ColabFold API)</option>
-            <option value="target-only">Target-only MSA (binders — skips de novo chain)</option>
-            <option value="a3m">Custom .a3m alignment (local)</option>
-          </select>
-          {#if lfMsaMode === 'mmseqs2' || lfMsaMode === 'target-only'}
-            <span class="field-hint">
-              Queries api.colabfold.com for evolutionary alignments; cached across candidates
-            </span>
-          {/if}
-        </label>
-
-        {#if lfMsaMode === 'a3m'}
-          <div class="a3m-box full">
-            <div class="a3m-head">
-              <label class="mu-upload-btn a3m-upload-btn" class:is-disabled={disabled}>
-                <span>↑ Upload .a3m file</span>
-                <input
-                  type="file"
-                  accept=".a3m,.fas,.fasta,.txt"
-                  hidden
-                  {disabled}
-                  onchange={handleA3mFileUpload}
-                />
-              </label>
-              {#if lfA3mSummary && lfA3mSummary.seqCount > 0}
-                <span class="field-hint ok">
-                  ✓ {lfA3mSummary.seqCount} sequence{lfA3mSummary.seqCount === 1 ? '' : 's'} parsed{lfA3mSummary.queryLength > 0 ? ` · ${lfA3mSummary.queryLength} aa query` : ''}
-                </span>
-              {:else}
-                <span class="field-hint warn">Paste or upload a .a3m alignment</span>
-              {/if}
-            </div>
-            <textarea
-              rows="4"
-              spellcheck="false"
-              class:input-error={!lfA3mSummary || lfA3mSummary.seqCount === 0}
-              {disabled}
-              placeholder=">query&#10;MKTAYIAKQRQISFVK...&#10;>hit1&#10;MKTAYIAKQRQISFVK..."
-              value={msaA3mDraft}
-              oninput={(e) => scheduleTextParam('msaA3mText', e.currentTarget.value)}
-              onblur={flushPendingTextCommit}
-            ></textarea>
-          </div>
-        {/if}
-
-        <label>
-          Recycles
-          <NumericInput
-            {disabled}
-            ariaLabel="Recycles"
-            spec={lfRecyclesSpec}
-            value={Number(node.params.recycles ?? 1)}
-            onChange={(v) => setParam('recycles', v)}
-          />
-          <span class="field-hint">{localFoldDefaultRecyclesHint(lfModelId, lfMeta.family)}</span>
-        </label>
-      {/if}
-      {#if lfMeta.family === 'af3'}
-        <label>
-          Diffusion steps
-          <NumericInput
-            {disabled}
-            ariaLabel="Diffusion steps"
-            spec={NUMERIC_SPECS['localfold-af2'].diffusionSteps}
-            value={Number(node.params.diffusionSteps ?? 25)}
-            onChange={(v) => setParam('diffusionSteps', v)}
-          />
-        </label>
-      {/if}
-      <label>
-        Max seqs to fold
-        <NumericInput
-          {disabled}
-          ariaLabel="Max sequences to fold"
-          spec={NUMERIC_SPECS['localfold-af2'].maxSequences}
-          value={Number(node.params.maxSequences ?? 2)}
-          onChange={(v) => setParam('maxSequences', v)}
-        />
-      </label>
-      {#if lfMultiDesignInfo}
-        {@const lfPerBackboneCap = Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}
-        {@const lfCampaignCap = Math.max(1, Math.min(64, Math.round(Number(node.params.maxTotalFolds ?? 16)) || 16))}
-        {@const lfPlanned = Math.min(
-          lfCampaignCap,
-          lfMultiDesignInfo.backboneCount * lfPerBackboneCap,
-          lfMultiDesignInfo.sequenceCount ?? lfCampaignCap,
-        )}
-        <div class="fanout-chip full" role="status">
-          <span class="fanout-dot" aria-hidden="true"></span>
-          <span>
-            <b>{lfMultiDesignInfo.backboneCount} backbones</b>
-            {#if lfMultiDesignInfo.sequenceCount !== null}
-              → {lfMultiDesignInfo.sequenceCount} sequences
-            {/if}
-            → up to <b>{lfPlanned} refold{lfPlanned === 1 ? '' : 's'}</b>
-            (≤{lfPerBackboneCap}/backbone, cap {lfCampaignCap})
-          </span>
-        </div>
-      {:else if upstreamSequences && upstreamSequences.candidates.length > Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}
-        {@const lfCapNow = Math.max(1, Math.min(8, Math.round(Number(node.params.maxSequences ?? 2)) || 2))}
-        {@const lfUpCount = upstreamSequences.candidates.length}
-        {@const lfTargetBump = Math.min(8, lfUpCount)}
-        <div class="full" role="status" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 10.5px; color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-border); padding: 6px 8px; border-radius: 5px;">
-          <span>Folding <b>{lfCapNow} of {lfUpCount}</b> upstream sequences</span>
-          <button
-            type="button"
-            class="mini-btn"
-            {disabled}
-            onclick={() => setParam('maxSequences', lfTargetBump)}
-          >
-            Fold all {lfTargetBump}
-          </button>
-        </div>
-      {/if}
-      {#if lfMeta.nonCommercial}
-        <div class="full" style="font-size: 10.5px; color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-border); padding: 6px 8px; border-radius: 5px;">
-          AlphaFold 3 weights are subject to DeepMind's Non-Commercial Academic Terms. For permissive open weights, use <b>RoseTTAFold3</b> (BSD-3), <b>Boltz-2</b> (MIT), or <b>OpenBind-0</b> (Apache-2.0).
-        </div>
-      {/if}
-
-      {#if lfMeta.family === 'af3' || lfMeta.family === 'esmfold2'}
-        <details class="adv-details full" open={lfHasHoloContext}>
-          <summary>
-            Holo co-folding (ligands / DNA / RNA)
-            {#if lfHasHoloContext}
-              <span class="adv-badge">Active</span>
-            {/if}
-          </summary>
-          <div class="adv-fields">
-            <label class="full">
-              Ligand CCD codes
-              <input
-                type="text"
-                {disabled}
-                placeholder="e.g. SAM, ZN, ATP"
-                value={String(node.params.ligandCcdCodes ?? '')}
-                oninput={(e) => setParam('ligandCcdCodes', e.currentTarget.value)}
-              />
-              <span class="field-hint">Comma-separated PDB Chemical Component Dictionary (CCD) IDs.</span>
-            </label>
-            <label class="full">
-              DNA sequences
-              <input
-                type="text"
-                {disabled}
-                placeholder="e.g. ACGTACGT (separate multiple chains with : or ,)"
-                value={String(node.params.dnaSequences ?? '')}
-                oninput={(e) => setParam('dnaSequences', e.currentTarget.value)}
-              />
-            </label>
-            <label class="full">
-              RNA sequences
-              <input
-                type="text"
-                {disabled}
-                placeholder="e.g. AUGCAUGC (separate multiple chains with : or ,)"
-                value={String(node.params.rnaSequences ?? '')}
-                oninput={(e) => setParam('rnaSequences', e.currentTarget.value)}
-              />
-            </label>
-          </div>
-        </details>
-      {/if}
-
-      <details class="adv-details full">
-        <summary>
-          Advanced parameters
-          {#if Number(node.params.maxTotalFolds ?? 16) !== 16}
-            <span class="adv-badge">Cap {Number(node.params.maxTotalFolds ?? 16)}</span>
-          {/if}
-        </summary>
-        <div class="adv-fields">
-          <label>
-            Max total folds
-            <NumericInput
-              {disabled}
-              ariaLabel="Max total folds across designs"
-              spec={MAX_TOTAL_FOLDS_SPEC}
-              value={Number(node.params.maxTotalFolds ?? 16)}
-              onChange={(v) => setParam('maxTotalFolds', v)}
-            />
-            <span class="field-hint">
-              Campaign cap across multi-backbone batches (round-robin up to {Number(node.params.maxSequences ?? 2)}/backbone).
-            </span>
-          </label>
-          <label>
-            Seed
-            <NumericInput
-              {disabled}
-              ariaLabel="Seed"
-              spec={NUMERIC_SPECS['localfold-af2'].seed}
-              value={Number(node.params.seed ?? 0)}
-              onChange={(v) => setParam('seed', v)}
-            />
-          </label>
-          {#if lfMeta.family === 'af2' || lfMeta.family === 'af2-multimer'}
-            <label>
-              Early-stop tolerance (Å)
-              <NumericInput
-                {disabled}
-                ariaLabel="Early-stop tolerance (Å)"
-                spec={lfTolSpec}
-                value={Number(node.params.tolerance ?? lfDefaultTol)}
-                onChange={(v) => setParam('tolerance', v)}
-              />
-              <span class="field-hint">
-                0 = run all recycles on AF2 monomer (0.5 Å default on AF2-Multimer).
-              </span>
-            </label>
-          {/if}
-        </div>
-      </details>
+      <LocalFoldWidget
+        {node}
+        {disabled}
+        {selectedLocalFoldMeta}
+        {msaA3mDraft}
+        {lfMultiDesignInfo}
+        {upstreamSequences}
+        maxTotalFoldsSpec={MAX_TOTAL_FOLDS_SPEC}
+        {onUpdate}
+        {onUpdateLabel}
+        onSetParam={setParam}
+        onScheduleTextParam={(key, value) => scheduleTextParam(key, value)}
+        onFlushPendingTextCommit={flushPendingTextCommit}
+        onA3mFileUpload={handleA3mFileUpload}
+      />
 
     {:else if node.adapterId === 'designability-scorer'}
       {@const scorerAdvFields = getVisibleParamFields(manifest, node.params, 'advanced')}
@@ -2669,109 +2261,6 @@
     border-radius: 0;
     padding: 12px 14px 14px;
   }
-  .head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-  .title-wrap {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-  .stage-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  h3 {
-    margin: 0;
-    font-size: 13.5px;
-    font-weight: 600;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .title-input {
-    margin: 0;
-    padding: 2px 6px;
-    font-family: inherit;
-    font-size: 13.5px;
-    font-weight: 600;
-    color: var(--text-primary);
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 5px;
-    min-width: 90px;
-    max-width: 240px;
-    transition: border-color 120ms ease, background 120ms ease;
-  }
-  .title-input:hover:not(:disabled) {
-    border-color: var(--border-strong);
-    background: var(--bg-surface-2);
-  }
-  .title-input:focus {
-    outline: none;
-    border-color: var(--accent);
-    background: var(--bg-input);
-  }
-  .sub-kind {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10px;
-    color: var(--text-dim);
-  }
-  .head-actions {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-  }
-  .studio-open-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    background: var(--bg-pill);
-    color: var(--accent-soft);
-    border: 1px solid var(--border-strong);
-    border-radius: 5px;
-    padding: 4px 9px;
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .studio-open-btn:hover {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  .run-here-btn {
-    background: var(--bg-surface-2);
-    color: var(--accent-bright);
-    border: 1px solid var(--border-strong);
-    border-radius: 5px;
-    padding: 4px 10px;
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    flex-shrink: 0;
-  }
-  .run-here-btn:hover:not(:disabled) {
-    background: var(--bg-surface-hover);
-    border-color: var(--accent);
-  }
-  .run-here-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
   .fields {
     display: flex;
     flex-wrap: wrap;
@@ -2803,22 +2292,6 @@
   label.inline-check.is-muted {
     opacity: 0.72;
     cursor: not-allowed;
-  }
-  .a3m-box {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .a3m-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .a3m-upload-btn {
-    padding: 3px 9px;
-    font-size: 10.5px;
   }
   .chip-field {
     display: flex;
@@ -2903,9 +2376,6 @@
   }
   .field-hint.err {
     color: var(--err-strong);
-  }
-  .field-hint.warn {
-    color: var(--warn-text);
   }
   .field-hint.ok {
     color: var(--ok-text, #10b981);

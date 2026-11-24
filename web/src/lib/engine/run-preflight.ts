@@ -4,6 +4,8 @@
 
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS, RFD4_BENCHMARK_OPTIONS } from './registry';
 import { validateSequenceText } from './param-validation';
+import { getActivePluginRegistry } from '$lib/kernel/active-registry';
+import type { PluginRegistry } from '$lib/kernel/plugin-registry';
 import type { AdapterManifest, WorkflowGraph, WorkflowNode } from './types';
 import { MAX_DESIGNS, MAX_SEQUENCES_PER_DESIGN } from './work-plan';
 
@@ -384,7 +386,11 @@ const AF2_DELTA_BASE: Record<string, { baseId: string; baseMB: number }> = {
   'multimer-5': { baseId: 'multimer', baseMB: 74 },
 };
 
-export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSummary {
+export function estimateRunRequirements(
+  graph: WorkflowGraph,
+  opts?: { registry?: PluginRegistry },
+): RunPreflightSummary {
+  const registry = opts?.registry ?? getActivePluginRegistry();
   const byKey = new Map<string, PreflightModelItem>();
   const af2ModelsInGraph = new Set<string>();
   for (const node of graph.nodes) {
@@ -406,9 +412,35 @@ export function estimateRunRequirements(graph: WorkflowGraph): RunPreflightSumma
   };
 
   for (const node of graph.nodes) {
-    const manifest = ADAPTER_REGISTRY[node.adapterId];
+    const plugin = registry?.getPlugin(node.adapterId);
+    const manifest = (plugin?.manifest as unknown as AdapterManifest | undefined) ?? ADAPTER_REGISTRY[node.adapterId];
     if (!manifest) continue;
     if (manifest.runtime === 'cpu-ts' && manifest.approxWeightsMB === 0) continue;
+
+    // Non-legacy / third-party / multi-domain plugin registered in PluginRegistry
+    if (plugin && !Object.hasOwn(ADAPTER_REGISTRY, node.adapterId)) {
+      const connectedInputs = new Set(
+        graph.edges.filter((e) => e.toNode === node.id).map((e) => e.toPort),
+      );
+      const est = plugin.preflight({
+        params: node.params,
+        upstreamProfiles: {},
+        connectedInputs,
+      });
+      if (!byKey.has(manifest.id)) {
+        byKey.set(manifest.id, {
+          key: manifest.id,
+          label: manifest.displayName,
+          approxMB: est.estimatedDownloadMB,
+          estimatedVramMB: est.estimatedVramMB,
+          runtime: manifest.runtime,
+          ...(manifest.nonCommercial ? { nonCommercial: true } : {}),
+          plannedItems: 0,
+        });
+      }
+      addPlannedItems(manifest.id, Math.max(1, est.workItems));
+      continue;
+    }
 
     const nodeItems = workload.nodeWorkItems.get(node.id) ?? 1;
 

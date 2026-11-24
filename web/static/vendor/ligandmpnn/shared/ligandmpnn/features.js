@@ -45,7 +45,8 @@ export function constraints(p, opts = {}) {
   const fixed = tokens(opts.fixedPositions),
     redesign = tokens(opts.redesignedResidues),
     chains = tokens(opts.designChains);
-  const match = (r, t) => r.token === t || r.chain === t;
+  const match = (r, t) =>
+    r.token === t || r.chain === t || `${r.chain}:${r.number}${r.insertionCode ?? ""}` === t;
   for (const t of [...fixed, ...redesign, ...chains])
     if (!p.residues.some((r) => match(r, t)))
       throw Error("Unknown residue/chain: " + t);
@@ -74,7 +75,12 @@ export function constraints(p, opts = {}) {
     const residues = Array.isArray(group) ? group : group.residues;
     const ids = residues.map((t) => {
       const i =
-        typeof t === "number" ? t : p.residues.findIndex((r) => r.token === t);
+        typeof t === "number"
+          ? t
+          : p.residues.findIndex(
+              (r) =>
+                `${r.chain}:${r.number}${r.insertionCode ?? ""}` === t || r.token === t,
+            );
       if (i < 0 || i >= p.L || seen.has(i))
         throw Error("Unknown or overlapping tied residue: " + t);
       seen.add(i);

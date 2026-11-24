@@ -39,17 +39,18 @@ for (const req of [
   }
 }
 
-for (const w of [
-  'vendor/genie3/weights',
-  'vendor/protpardelle/weights',
-  'vendor/esmc/weights',
-  'vendor/dyna1/weights',
-]) {
-  if (existsSync(resolve(buildDir, w))) {
-    console.error(
-      `[check:deploy] FAIL: ${w} should not be bundled in Cloudflare Pages output (serve weights from HuggingFace).`,
-    );
-    process.exit(1);
+// Dynamically forbid any bundled model weights directory anywhere under web/build/vendor/*/weights
+const vendorDir = resolve(buildDir, 'vendor');
+if (existsSync(vendorDir)) {
+  for (const entry of readdirSync(vendorDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const weightsDir = resolve(vendorDir, entry.name, 'weights');
+    if (existsSync(weightsDir)) {
+      console.error(
+        `[check:deploy] FAIL: vendor/${entry.name}/weights should not be bundled in Cloudflare Pages output (serve weights from HuggingFace).`,
+      );
+      process.exit(1);
+    }
   }
 }
 

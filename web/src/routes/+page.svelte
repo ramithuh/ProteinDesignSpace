@@ -63,6 +63,12 @@
   import { type PaperInsightExample } from '$lib/engine/paper-gallery';
   import ModelCardPopover from '$lib/ui/ModelCardPopover.svelte';
   import OnboardingModal from '$lib/ui/OnboardingModal.svelte';
+  import {
+    buildNodePreviewSignature,
+    formatGeomStripLabel,
+    getSiblingGeneratorIds as resolveSiblingGeneratorIds,
+    syncTaskToSiblingGenerators,
+  } from '$lib/ui/workbench-controller';
   import NodeInspector from '$lib/ui/NodeInspector.svelte';
   import NodeStudioPopover from '$lib/ui/NodeStudioPopover.svelte';
   import type { StudioBrushOption } from '$lib/ui/AnnotatedFastaView.svelte';
@@ -95,9 +101,33 @@
     requestResilientWebGpuAdapter,
     type WebGpuAdapterInfoSnapshot,
   } from '$lib/engine/webgpu-device';
+  import {
+    authenticateRemoteServerSession,
+    checkRemoteServerHealth,
+    DEFAULT_HOST_MAX_FOLD_RESIDUES,
+    defaultComputeBackendConfig,
+    formatHostGpuDetail,
+    loadComputeBackendConfig,
+    logoutRemoteServerSession,
+    releaseRemoteServerGpu,
+    resolveNodeFoldLimitOptions,
+    resolveRemoteBackendOrigin,
+    runNodeOnRemoteServer,
+    sanitizeMaxFoldResidues,
+    saveComputeBackendConfig,
+    shouldRouteNodeToRemote,
+    type ComputeBackendConfig,
+    type RemoteServerHealth,
+  } from '$lib/engine/compute-backend';
+  import type { BioFoldLimitOptions } from '$lib/engine/bio-capabilities';
+  import { setCachePluginRegistry } from '$lib/engine/opfs-cache';
+  import { defaultPluginRegistry } from '$lib/plugins';
+
+  setCachePluginRegistry(defaultPluginRegistry);
 
   const scheduler = new ExecutionScheduler({
     checkpointStore: createIndexedDbCheckpointStore(),
+    pluginRegistry: defaultPluginRegistry,
   });
 
   let rightPanelTab = $state<'params' | 'peek'>('params');
@@ -129,6 +159,152 @@
     activeGpuWorker ? (ADAPTER_REGISTRY[activeGpuWorker]?.shortName ?? activeGpuWorker) : null,
   );
   let cacheUsedMB = $state<number>(0);
+  let computeBackend = $state<ComputeBackendConfig>(defaultComputeBackendConfig());
+  let remoteHealth = $state<RemoteServerHealth | null>(null);
+  let remoteChecking = $state(false);
+  let remoteProbeSeq = 0;
+  let sameOriginHostDetected = $state<RemoteServerHealth | null>(null);
+  let acknowledgedRemoteOrigins = $state<Set<string>>(new Set());
+  const isRemoteCompute = $derived(computeBackend.mode !== 'local');
+  const remoteShortGpu = $derived(
+    remoteHealth?.ok
+      ? (remoteHealth.gpu?.shortName?.trim() || remoteHealth.gpu?.name?.trim() || '')
+      : '',
+  );
+
+  function buildFoldLimitOpts(
+    cfg: ComputeBackendConfig = computeBackend,
+    health: RemoteServerHealth | null = remoteHealth,
+  ): BioFoldLimitOptions {
+    return {
+      resolveNodeFoldLimits: (node) =>
+        resolveNodeFoldLimitOptions(node, cfg, health, {
+          localWebGpuAvailable: webgpuSupported !== false,
+          localWebGpuFallback: webgpuIsFallback,
+        }),
+    };
+  }
+
+  function syncSchedulerRemoteExecutor(cfg: ComputeBackendConfig) {
+    const localOpts = {
+      localWebGpuAvailable: webgpuSupported !== false,
+      localWebGpuFallback: webgpuIsFallback,
+    };
+    scheduler.setFoldLimitResolver((node) =>
+      resolveNodeFoldLimitOptions(node, cfg, remoteHealth, localOpts),
+    );
+    // M6: Partition memo & checkpoint cache keys across compute trust boundaries
+    const remoteOrigin = resolveRemoteBackendOrigin(cfg.serverUrl);
+    scheduler.setExecutionProvenanceResolver((node) =>
+      shouldRouteNodeToRemote(node, cfg, localOpts) ? `remote:${remoteOrigin}` : 'local',
+    );
+    if (cfg.mode === 'local') {
+      scheduler.setRemoteGpuExecutor(null);
+      return;
+    }
+    scheduler.setRemoteGpuExecutor((node, inputs, onProgress, signal) => {
+      if (!shouldRouteNodeToRemote(node, cfg, localOpts)) return null;
+      return runNodeOnRemoteServer({
+        serverUrl: cfg.serverUrl,
+        apiToken: cfg.apiToken,
+        node,
+        inputs,
+        onProgress,
+        signal,
+      });
+    });
+  }
+
+  async function probeRemoteBackend(cfg: ComputeBackendConfig = computeBackend) {
+    const seq = ++remoteProbeSeq;
+    remoteChecking = true;
+    try {
+      let activeCfg = cfg;
+      // On same-origin self-hosted URLs (Tailscale / SSH tunnel), exchange a pasted API token
+      // once for an HttpOnly SameSite=Strict session cookie and purge the raw token from JS memory.
+      if (!cfg.serverUrl.trim() && cfg.apiToken.trim()) {
+        const authRes = await authenticateRemoteServerSession('', cfg.apiToken);
+        if (seq !== remoteProbeSeq) return;
+        if (!authRes.ok) {
+          remoteHealth = { ok: false, error: authRes.error || 'Authentication failed' };
+          syncSchedulerRemoteExecutor(computeBackend);
+          return;
+        }
+        if (authRes.authMode === 'cookie') {
+          activeCfg = { ...cfg, apiToken: '' };
+          computeBackend = activeCfg;
+          saveComputeBackendConfig(activeCfg);
+        }
+      }
+      const nextHealth = await checkRemoteServerHealth(activeCfg.serverUrl, activeCfg.apiToken);
+      if (seq !== remoteProbeSeq) return;
+      remoteHealth = nextHealth;
+      syncSchedulerRemoteExecutor(computeBackend);
+    } finally {
+      if (seq === remoteProbeSeq) {
+        remoteChecking = false;
+      }
+    }
+  }
+
+  async function signOutRemoteBackend() {
+    if (isRunning || activeRunState.leaseHeld) return;
+    await logoutRemoteServerSession(computeBackend.serverUrl);
+    computeBackend = { ...computeBackend, apiToken: '' };
+    saveComputeBackendConfig(computeBackend);
+    remoteHealth = { ok: false, error: 'Signed out' };
+    syncSchedulerRemoteExecutor(computeBackend);
+  }
+
+  function handleHeaderComputeClick(target: 'local' | 'remote') {
+    moreMenuOpen = false;
+    shareMenuOpen = false;
+    const current: 'local' | 'remote' = computeBackend.mode === 'local' ? 'local' : 'remote';
+    const switching = target !== current;
+    const canSwitch = !isRunning && !activeRunState.leaseHeld;
+    if (switching && canSwitch) {
+      updateComputeBackend({ mode: target });
+    }
+    const nextOpen = switching ? (canSwitch ? target === 'remote' || sysMenuOpen : true) : !sysMenuOpen;
+    if (nextOpen && sysWrapEl) {
+      const rect = sysWrapEl.getBoundingClientRect();
+      sysPopAlignLeft = rect.right < 320;
+    }
+    sysMenuOpen = nextOpen;
+    if (!switching && nextOpen && computeBackend.mode !== 'local') {
+      void probeRemoteBackend(computeBackend);
+    }
+  }
+
+  function updateComputeBackend(patch: Partial<ComputeBackendConfig>) {
+    const prevOrigin = resolveRemoteBackendOrigin(computeBackend.serverUrl);
+    const nextRaw: ComputeBackendConfig = { ...computeBackend, ...patch };
+    const nextOrigin = resolveRemoteBackendOrigin(nextRaw.serverUrl);
+    // H7: Never send the previous host's Bearer token to a different origin!
+    const originChanged = patch.serverUrl !== undefined && nextOrigin !== prevOrigin;
+    const nextCfg: ComputeBackendConfig = originChanged
+      ? { ...nextRaw, apiToken: patch.apiToken ?? '' }
+      : nextRaw;
+    computeBackend = nextCfg;
+    if (originChanged) {
+      remoteHealth = null;
+    }
+    saveComputeBackendConfig(computeBackend);
+    syncSchedulerRemoteExecutor(computeBackend);
+    if (computeBackend.mode !== 'local' && !originChanged) {
+      void probeRemoteBackend(computeBackend);
+    }
+  }
+
+  async function freeRemoteVram() {
+    if (isRunning || activeRunState.leaseHeld) return;
+    try {
+      await releaseRemoteServerGpu(computeBackend.serverUrl, computeBackend.apiToken);
+      await probeRemoteBackend(computeBackend);
+    } catch {
+      /* ignore */
+    }
+  }
 
   // Header popovers & first-run confirmation dialog
   let sysMenuOpen = $state(false);
@@ -940,6 +1116,19 @@
         webgpuDetail = 'no GPU adapter';
       }
     }
+
+    // Load saved self-hosted compute backend config & probe same-origin server (H8: keep discovery informational, never silently upload)
+    const loadedBackend = loadComputeBackendConfig();
+    computeBackend = loadedBackend;
+    syncSchedulerRemoteExecutor(loadedBackend);
+    if (loadedBackend.mode !== 'local') {
+      void probeRemoteBackend(loadedBackend);
+    } else if (typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
+      void checkRemoteServerHealth('', '', fetch, 1500).then((health) => {
+        if (!health.ok) return;
+        sameOriginHostDetected = health;
+      });
+    }
     const { webMcpRegistered } = attachProgrammaticApi(scheduler, handleProgress);
     webMcpReady = webMcpRegistered;
 
@@ -995,8 +1184,16 @@
   }
 
   function handleProgress(ev: NodeProgressEvent) {
-    if (webgpuSupported === false && (ev.status === 'running' || ev.status === 'done')) {
-      const node = graph.nodes.find((n) => n.id === ev.nodeId);
+    const node = graph.nodes.find((n) => n.id === ev.nodeId);
+    const isRemoteEv =
+      ev.phase === 'remote' ||
+      Boolean(ev.detail?.startsWith('[Host GPU]')) ||
+      (Boolean(node) &&
+        shouldRouteNodeToRemote(node!, computeBackend, {
+          localWebGpuAvailable: webgpuSupported !== false,
+          localWebGpuFallback: webgpuIsFallback,
+        }));
+    if (!isRemoteEv && webgpuSupported === false && (ev.status === 'running' || ev.status === 'done')) {
       if (node && ADAPTER_REGISTRY[node.adapterId]?.runtime !== 'cpu-ts') {
         webgpuSupported = true;
         webgpuDetail = 'ready (worker verified)';
@@ -1169,7 +1366,7 @@
     canvasFitViewTrigger += 1;
   }
 
-  function autoStepTourBlock(adapterId: 'web-protein-mpnn' | 'localfold-af2' | 'designability-scorer') {
+  function autoStepTourBlock(adapterId: string) {
     if (isRunning) return;
     const opts =
       adapterId === 'web-protein-mpnn'
@@ -1616,8 +1813,17 @@
   });
   let inputPreviewErrors = $derived(Object.values(inputPreviewErrorsByNode));
   let validationErrors = $derived([...graphValidationErrors, ...inputPreviewErrors]);
+  let bioFoldLimitOpts = $derived.by(() =>
+    buildFoldLimitOpts(computeBackend, remoteHealth),
+  );
   let previewChecks = $derived(
-    computePreviewChecks(graph, activeDraftPreview, outputsByNode, inputPreviewErrorsByNode),
+    computePreviewChecks(
+      graph,
+      activeDraftPreview,
+      outputsByNode,
+      inputPreviewErrorsByNode,
+      bioFoldLimitOpts,
+    ),
   );
   let displayedValidationErrors = $derived(previewChecks.displayedValidationErrors);
   let bioIssues = $derived(previewChecks.bioIssues);
@@ -1631,242 +1837,33 @@
   const failedInputSigs = new Map<string, string>();
 
   function computeInputPreviewSig(node: { adapterId: string; params: Record<string, unknown> }): string | null {
-    const p = node.params ?? {};
-    if (node.adapterId === 'pdb-input') {
-      const mode = String(p.mode ?? 'demo-bundle');
-      const crop = String(p.cropSegments ?? '').trim();
-      if (mode === 'pdb-id') {
-        const normId = normalizePdbId(String(p.pdbId ?? ''));
-        if (!isValidPdbId(normId)) return null;
-        const cachedFor = normalizePdbId(String(p.fetchedPdbId ?? ''));
-        const txt = String(p.pdbText ?? '');
-        const hasCached = txt.trim().length > 0 && cachedFor === normId;
-        return `pdb-id|${normId}|${hasCached ? txt.length : 0}|${String(p.benchmarkId ?? '')}|${crop}`;
-      }
-      if (mode === 'custom') {
-        const txt = String(p.pdbText ?? '').trim();
-        if (txt.length === 0) return null;
-        return `custom|${txt.length}|${txt.slice(0, 64)}|${String(p.filename ?? '')}|${String(p.benchmarkId ?? '')}|${crop}`;
-      }
-      return `demo-bundle|${String(p.benchmarkId ?? '')}|${crop}`;
-    }
-    if (node.adapterId === 'sequence-input') {
-      const raw = String(p.sequence ?? '').trim();
-      if (raw.length < 5) return null;
-      return `seq|${raw.length}|${raw.slice(0, 64)}|${String(p.label ?? '')}`;
-    }
-    return null;
+    return buildNodePreviewSignature(node);
   }
 
   function getSiblingGeneratorIds(nodeId: string): string[] {
-    const structEdge = graph.edges.find(
-      (e) => e.toNode === nodeId && (e.toPort === 'structure' || e.toPort === 'template'),
-    );
-    if (!structEdge) return [];
-    return graph.nodes
-      .filter(
-        (n) =>
-          n.id !== nodeId &&
-          BENCHMARK_SYNC_ADAPTER_IDS.has(n.adapterId) &&
-          graph.edges.some(
-            (e) =>
-              e.fromNode === structEdge.fromNode &&
-              e.toNode === n.id &&
-              (e.toPort === 'structure' || e.toPort === 'template'),
-          ),
-      )
-      .map((n) => n.id);
+    return resolveSiblingGeneratorIds(graph, nodeId);
   }
 
   function handleSyncTaskToSiblings(sourceNodeId: string) {
-    const src = graph.nodes.find((n) => n.id === sourceNodeId);
-    if (!src) return;
-    const siblingIds = new Set(getSiblingGeneratorIds(sourceNodeId));
-    if (siblingIds.size === 0) return;
-
-    const sp = src.params ?? {};
-    const srcMode =
-      src.adapterId === 'rfd4-proteina'
-        ? String(sp.mode ?? 'unconditional')
-        : src.adapterId === 'genie2'
-          ? String(sp.motifRange ?? '').trim()
-            ? 'motif'
-            : 'unconditional'
-          : String(sp.taskMode ?? 'unconditional');
-    const parsedLen = parseLengthFromContig(String(sp.contig ?? ''));
-    const defaultSrcLen =
-      src.adapterId === 'boltzgen' ? 48 : src.adapterId === 'rfd4-proteina' ? 70 : 80;
-    const syncLen = Number(sp.length ?? parsedLen ?? defaultSrcLen);
-    const srcMotif = String(sp.motifSpan ?? sp.motifSelection ?? sp.motifRange ?? '').trim();
-    const srcHotspots = String(sp.hotspots ?? '').trim();
-    const srcContig = String(sp.contig ?? '').trim();
-    const srcLockChain = String(sp.lockChain ?? '').trim();
-    const unsupportedSiblingLabels: string[] = [];
-
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
+    const res = syncTaskToSiblingGenerators(prevSnapshot, sourceNodeId);
+    if (!res) return;
     pushGraphUndo(prevSnapshot);
     clearStaleUrlHash();
     sharePopoverState = null;
-    const nextGraph: WorkflowGraph = {
-      ...prevSnapshot,
-      nodes: prevSnapshot.nodes.map((n) => {
-        if (!siblingIds.has(n.id)) return n;
-        const shared = {
-          length: syncLen,
-          contig: srcContig,
-          lockChain: srcLockChain,
-          hotspots: srcHotspots,
-          motifSpan: srcMotif,
-          userEditedTask: true,
-        };
-        if (n.adapterId === 'genie3') {
-          const isSupported = srcMode === 'binder' || srcMode === 'motif' || srcMode === 'unconditional';
-          if (!isSupported) {
-            unsupportedSiblingLabels.push(n.label ?? 'Genie 3');
-            return {
-              ...n,
-              params: {
-                ...n.params,
-                taskMode: 'unconditional',
-                length: syncLen,
-                contig: '',
-                lockChain: '',
-                hotspots: '',
-                motifSpan: '',
-                userEditedTask: true,
-              },
-            };
-          }
-          if (srcMode === 'unconditional') {
-            return {
-              ...n,
-              params: {
-                ...n.params,
-                taskMode: 'unconditional',
-                length: syncLen,
-                contig: '',
-                lockChain: '',
-                hotspots: '',
-                motifSpan: '',
-                userEditedTask: true,
-              },
-            };
-          }
-          return { ...n, params: { ...n.params, ...shared, taskMode: srcMode } };
-        }
-        if (n.adapterId === 'boltzgen') {
-          const clampedLen = Math.max(16, Math.min(160, Math.round(syncLen)));
-          const isSupported = srcMode === 'binder' || srcMode === 'motif' || srcMode === 'unconditional';
-          if (!isSupported) {
-            unsupportedSiblingLabels.push(n.label ?? 'BoltzGen-1');
-            return {
-              ...n,
-              params: { ...n.params, taskMode: 'unconditional', length: clampedLen, hotspots: '', userEditedTask: true },
-            };
-          }
-          return {
-            ...n,
-            params: {
-              ...n.params,
-              taskMode: srcMode,
-              length: clampedLen,
-              hotspots: srcMode === 'binder' ? srcHotspots : '',
-              userEditedTask: true,
-            },
-          };
-        }
-        if (n.adapterId === 'protpardelle') {
-          const clampedLen = Math.max(20, Math.min(256, Math.round(syncLen)));
-          const isSupported = srcMode === 'motif' || srcMode === 'unconditional';
-          if (!isSupported) {
-            unsupportedSiblingLabels.push(n.label ?? 'ProtPardelle-1c');
-            return {
-              ...n,
-              params: { ...n.params, taskMode: 'unconditional', length: clampedLen, motifSelection: '', userEditedTask: true },
-            };
-          }
-          return {
-            ...n,
-            params: {
-              ...n.params,
-              taskMode: srcMode,
-              length: clampedLen,
-              motifSelection: srcMode === 'motif' ? srcMotif : '',
-              userEditedTask: true,
-            },
-          };
-        }
-        if (n.adapterId === 'rfdiffusion') {
-          const clampedLen = Math.max(16, Math.min(256, Math.round(syncLen)));
-          const isSupported = srcMode === 'motif' || srcMode === 'unconditional';
-          if (!isSupported) {
-            unsupportedSiblingLabels.push(n.label ?? 'RFdiffusion');
-            return {
-              ...n,
-              params: { ...n.params, taskMode: 'unconditional', length: clampedLen, contig: '', userEditedTask: true },
-            };
-          }
-          return {
-            ...n,
-            params: {
-              ...n.params,
-              taskMode: srcMode,
-              length: clampedLen,
-              contig: srcMode === 'motif' ? formatRfdiffusionContig(srcContig) : '',
-              userEditedTask: true,
-            },
-          };
-        }
-        if (n.adapterId === 'genie2') {
-          const clampedLen = Math.max(20, Math.min(256, Math.round(syncLen)));
-          const isSupported = srcMode === 'motif' || srcMode === 'unconditional';
-          if (!isSupported) {
-            unsupportedSiblingLabels.push(n.label ?? 'Genie 2');
-            return {
-              ...n,
-              params: { ...n.params, length: clampedLen, motifRange: '', userEditedTask: true },
-            };
-          }
-          return {
-            ...n,
-            params: {
-              ...n.params,
-              length: clampedLen,
-              motifRange: srcMode === 'motif' ? extractFirstContiguousMotifRange(srcMotif) : '',
-              userEditedTask: true,
-            },
-          };
-        }
-        return {
-          ...n,
-          params: {
-            ...n.params,
-            ...shared,
-            mode: srcMode,
-            ...(src.adapterId === 'rfd4-proteina'
-              ? {
-                  presetId: String(sp.presetId ?? n.params.presetId ?? 'custom_cath_monomer'),
-                  partialFraction: Number(sp.partialFraction ?? n.params.partialFraction ?? 0.5),
-                  unindexedMotif: Boolean(sp.unindexedMotif),
-                  hbondMode: String(sp.hbondMode ?? 'none'),
-                  hbondSelection: String(sp.hbondSelection ?? ''),
-                  cathCode: String(sp.cathCode ?? ''),
-                }
-              : {}),
-          },
-        };
-      }),
-    };
-    graph = nextGraph;
-    scheduler.invalidateEditedGraph(prevSnapshot, nextGraph);
-    invalidateNodes(getDownstreamNodeIds(nextGraph, siblingIds));
-    if (unsupportedSiblingLabels.length > 0) {
+    graph = res.nextGraph;
+    scheduler.invalidateEditedGraph(prevSnapshot, res.nextGraph);
+    invalidateNodes(getDownstreamNodeIds(res.nextGraph, res.siblingIds));
+    if (res.unsupportedSiblingLabels.length > 0) {
       showToastMessage(
-        `${unsupportedSiblingLabels.join(', ')} does not support "${srcMode}" mode — reset to unconditional (${syncLen} aa) and cleared incompatible constraints.`,
+        `${res.unsupportedSiblingLabels.join(', ')} does not support "${res.srcMode}" mode — reset to unconditional (${res.syncLen} aa) and cleared incompatible constraints.`,
         4500,
       );
     } else {
-      showToastMessage(`Synced task settings to ${siblingIds.size} sibling generator${siblingIds.size > 1 ? 's' : ''}.`, 2600);
+      showToastMessage(
+        `Synced task settings to ${res.siblingIds.size} sibling generator${res.siblingIds.size > 1 ? 's' : ''}.`,
+        2600,
+      );
     }
   }
 
@@ -2095,20 +2092,40 @@
       runError = errs.join('\n');
       return;
     }
-    const targetBioErrors = validateBioCapabilities(targetGraph, outputsByNode).filter(
-      (i) => i.severity === 'error',
-    );
+    const targetBioErrors = validateBioCapabilities(
+      targetGraph,
+      outputsByNode,
+      bioFoldLimitOpts,
+    ).filter((i) => i.severity === 'error');
     if (targetBioErrors.length > 0) {
       runError = targetBioErrors.map((i) => i.message).join('\n');
       return;
     }
+    const routesAnyRemote = targetGraph.nodes.some((n) =>
+      shouldRouteNodeToRemote(n, computeBackend, {
+        localWebGpuAvailable: webgpuSupported !== false,
+        localWebGpuFallback: webgpuIsFallback,
+      }),
+    );
+    const activeRemoteOrigin = routesAnyRemote
+      ? resolveRemoteBackendOrigin(computeBackend.serverUrl)
+      : null;
     if (!confirmed) {
       const preflight = estimateRunRequirements(targetGraph);
       const hasRemoteMsa = (preflight.remoteMsaTransfers?.length ?? 0) > 0;
-      if (hasRemoteMsa || (!firstRunAck && (preflight.usesWebGpu || preflight.totalDownloadMB > 0))) {
+      const needsRemoteConsent = Boolean(
+        activeRemoteOrigin && !acknowledgedRemoteOrigins.has(activeRemoteOrigin),
+      );
+      if (
+        hasRemoteMsa ||
+        needsRemoteConsent ||
+        (!firstRunAck && (preflight.usesWebGpu || preflight.totalDownloadMB > 0))
+      ) {
         pendingRun = { bypassCache, upToNodeId, preflight };
         return;
       }
+    } else if (activeRemoteOrigin) {
+      acknowledgedRemoteOrigins = new Set([...acknowledgedRemoteOrigins, activeRemoteOrigin]);
     }
     localRunning = true;
     appliedDraftNotice = null;
@@ -2868,7 +2885,7 @@
   let studioOpen = $derived(expandedPane === 'studio' && Boolean(selectedNode));
   let studioPreview = $derived.by(() => {
     if (!studioOpen || !selectedNode) return null;
-    return compileNodeInputPreview(graph, selectedNode.id, outputsByNode);
+    return compileNodeInputPreview(graph, selectedNode.id, outputsByNode, bioFoldLimitOpts);
   });
   let studioInputViewerActive = $derived(
     studioOpen && studioTab === 'input' && Boolean(studioPreview?.previewStructurePdb),
@@ -2878,7 +2895,9 @@
     selectedNode ? getNodePeekSlots(graph, selectedNode.id, outputsByNode) : [],
   );
 
-  let hasPeekData = $derived(peekSlots.some((s) => s.artifact !== null));
+  let hasPeekData = $derived(
+    peekSlots.some((s) => s.availability !== 'inactive-in-mode' && s.artifact !== null),
+  );
 
   let resolvedPeekSlotId = $derived.by(() => {
     if (selectedPeekSlotId && peekSlots.some((s) => s.id === selectedPeekSlotId)) {
@@ -3528,35 +3547,60 @@
   </div>
 
   <div class="hdr-right">
-    <!-- System Status Pill & Popover -->
+    <!-- 2-Way Compute Switch Pill & System Popover -->
     <div class="pop-wrap" bind:this={sysWrapEl}>
-      <button
-        type="button"
-        class="hdr-pill"
-        class:ok={webgpuSupported && !webgpuIsFallback && !activeGpuWorker}
-        class:warn={webgpuSupported && webgpuIsFallback && !activeGpuWorker}
-        class:bad={webgpuSupported === false}
-        class:gpu={Boolean(activeGpuWorker)}
-        aria-expanded={sysMenuOpen}
-        onclick={() => {
-          moreMenuOpen = false;
-          shareMenuOpen = false;
-          const nextOpen = !sysMenuOpen;
-          if (nextOpen && sysWrapEl) {
-            const rect = sysWrapEl.getBoundingClientRect();
-            sysPopAlignLeft = rect.right < 276;
-          }
-          sysMenuOpen = nextOpen;
-        }}
-        title="WebGPU status, VRAM & weight cache"
-      >
-        <span class="status-dot"></span>
-        {activeGpuWorkerLabel
-          ? `GPU: ${activeGpuWorkerLabel}`
-          : webgpuIsFallback
-            ? 'WebGPU (SW)'
-            : 'WebGPU'}
-      </button>
+      <div class="hdr-compute-switch" role="group" aria-label="Compute backend switch">
+        <button
+          type="button"
+          class="hdr-compute-seg"
+          class:active={!isRemoteCompute}
+          class:ok={!isRemoteCompute && webgpuSupported && !webgpuIsFallback && !activeGpuWorker}
+          class:warn={!isRemoteCompute && webgpuSupported && webgpuIsFallback && !activeGpuWorker}
+          class:bad={!isRemoteCompute && webgpuSupported === false && !activeGpuWorker}
+          class:gpu={!isRemoteCompute && Boolean(activeGpuWorker)}
+          aria-pressed={!isRemoteCompute}
+          aria-expanded={!isRemoteCompute && sysMenuOpen}
+          onclick={() => handleHeaderComputeClick('local')}
+          title="WebGPU (this computer) · click active tab for status & cache"
+        >
+          {#if !isRemoteCompute}
+            <span class="status-dot"></span>
+          {/if}
+          {#if !isRemoteCompute && activeGpuWorkerLabel}
+            GPU: {activeGpuWorkerLabel}
+          {:else if !isRemoteCompute && webgpuIsFallback}
+            WebGPU <span class="hdr-compute-sub">(SW)</span>
+          {:else}
+            WebGPU <span class="hdr-compute-sub">(this computer)</span>
+          {/if}
+        </button>
+
+        <button
+          type="button"
+          class="hdr-compute-seg"
+          class:active={isRemoteCompute}
+          class:ok={isRemoteCompute && remoteHealth?.ok && !activeGpuWorker}
+          class:bad={isRemoteCompute && remoteHealth?.ok === false && !activeGpuWorker}
+          class:gpu={isRemoteCompute && Boolean(activeGpuWorker)}
+          aria-pressed={isRemoteCompute}
+          aria-expanded={isRemoteCompute && sysMenuOpen}
+          onclick={() => handleHeaderComputeClick('remote')}
+          title={isRemoteCompute && remoteHealth?.ok
+            ? `${formatHostGpuDetail(remoteHealth)} (Self-Hosted remote machine · click for settings)`
+            : 'Self-Hosted (remote machine) · workstation or cluster GPU'}
+        >
+          {#if isRemoteCompute}
+            <span class="status-dot"></span>
+          {/if}
+          {#if isRemoteCompute && activeGpuWorkerLabel}
+            GPU: {activeGpuWorkerLabel}
+          {:else if isRemoteCompute && remoteShortGpu}
+            Self-Hosted <span class="hdr-compute-sub">({remoteShortGpu})</span>
+          {:else}
+            Self-Hosted <span class="hdr-compute-sub">(remote machine)</span>
+          {/if}
+        </button>
+      </div>
 
       {#if sysMenuOpen}
         <div
@@ -3566,7 +3610,7 @@
           aria-label="System & WebGPU status"
         >
           <div class="pop-row">
-            <span class="pop-k">WebGPU</span>
+            <span class="pop-k">Browser GPU</span>
             <span
               class="pop-v"
               class:ok-t={webgpuSupported && !webgpuIsFallback}
@@ -3584,13 +3628,175 @@
               </span>
             </div>
           {/if}
-          {#if webgpuIsFallback}
+          {#if webgpuIsFallback && !isRemoteCompute}
             <div class="pop-warn-note">
-              Software WebGPU fallback detected. Heavy GPU models will be slower (ThermoMPNN,
-              LigandMPNN &amp; ProteinMPNN fall back to CPU automatically). On Linux Chrome with
-              NVIDIA/AMD, try launching with <code>--enable-features=Vulkan</code>.
+              Software WebGPU fallback detected. Switch to <b>Self-Hosted (remote machine)</b>,
+              or launch Linux Chrome with <code>--enable-features=Vulkan</code>.
             </div>
           {/if}
+
+          <div class="pop-divider"></div>
+          <div class="pop-compute-sec">
+            <div class="pop-row">
+              <span class="pop-k">Active backend</span>
+              <span class="pop-mode-hint">
+                {isRemoteCompute ? 'Self-Hosted (remote machine)' : 'WebGPU (this computer)'}
+              </span>
+            </div>
+
+            {#if !isRemoteCompute && sameOriginHostDetected?.ok}
+              <div class="pop-row">
+                <span class="pop-k" title="Same-origin GPU server detected">
+                  {formatHostGpuDetail(sameOriginHostDetected)}
+                </span>
+                <button
+                  type="button"
+                  class="pop-action"
+                  disabled={isRunning || activeRunState.leaseHeld}
+                  onclick={() => {
+                    remoteHealth = sameOriginHostDetected;
+                    updateComputeBackend({ mode: 'remote', serverUrl: '' });
+                  }}
+                >
+                  Use Self-Hosted
+                </button>
+              </div>
+            {/if}
+
+            {#if isRemoteCompute}
+              <label class="pop-field">
+                <span>Host Server URL (blank = same origin)</span>
+                <input
+                  type="text"
+                  value={computeBackend.serverUrl}
+                  placeholder="http://localhost:8787"
+                  disabled={isRunning}
+                  onchange={(e) => updateComputeBackend({ serverUrl: (e.currentTarget as HTMLInputElement).value })}
+                />
+              </label>
+              {#if !computeBackend.serverUrl.trim() && remoteHealth?.ok && remoteHealth.authenticatedBy === 'cookie'}
+                <div class="pop-row">
+                  <span class="pop-k">Session</span>
+                  <span class="pop-v ok-t">Signed in</span>
+                  <button
+                    type="button"
+                    class="pop-action"
+                    disabled={isRunning || activeRunState.leaseHeld}
+                    onclick={() => void signOutRemoteBackend()}
+                  >
+                    Sign out
+                  </button>
+                </div>
+              {:else}
+                <label class="pop-field">
+                  <span>API Token{computeBackend.serverUrl.trim() ? ' (session only)' : ''}</span>
+                  <input
+                    type="password"
+                    value={computeBackend.apiToken}
+                    placeholder="Bearer token if set"
+                    disabled={isRunning}
+                    oninput={(e) => {
+                      computeBackend = {
+                        ...computeBackend,
+                        apiToken: (e.currentTarget as HTMLInputElement).value,
+                      };
+                    }}
+                    onchange={(e) => updateComputeBackend({ apiToken: (e.currentTarget as HTMLInputElement).value })}
+                    onkeydown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void probeRemoteBackend(computeBackend);
+                      }
+                    }}
+                  />
+                </label>
+              {/if}
+              {#if !remoteHealth?.ok}
+                <div class="pop-help-note">
+                  Run GPU blocks on your workstation or cluster (SSH / Tailscale):
+                  <code>node server/selfhost-server.mjs</code> ·
+                  <a
+                    href="https://github.com/ramithuh/ProteinDesignSpace/blob/main/server/README.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >Self-host guide ↗</a>
+                </div>
+              {/if}
+              <div class="pop-row">
+                <span
+                  class="pop-v"
+                  class:ok-t={remoteHealth?.ok}
+                  class:bad-t={remoteHealth?.ok === false}
+                  style="text-align: left; overflow: hidden; text-overflow: ellipsis;"
+                  title={remoteHealth?.error || remoteHealth?.gpu?.description || ''}
+                >
+                  {#if remoteChecking}
+                    Checking host GPU…
+                  {:else if remoteHealth?.ok}
+                    {formatHostGpuDetail(remoteHealth)}
+                    {(remoteHealth.queueDepth ?? 0) > 0 ? ` · q=${remoteHealth.queueDepth}` : ''}
+                  {:else if remoteHealth?.error}
+                    Offline: {remoteHealth.error}
+                  {:else}
+                    Not tested yet
+                  {/if}
+                </span>
+                <button
+                  type="button"
+                  class="pop-action"
+                  disabled={remoteChecking}
+                  onclick={() => void probeRemoteBackend(computeBackend)}
+                >
+                  {!computeBackend.serverUrl.trim() && computeBackend.apiToken.trim() ? 'Sign in' : 'Test'}
+                </button>
+              </div>
+              {#if remoteHealth?.ok && remoteHealth.activeAdapter}
+                <div class="pop-row">
+                  <span class="pop-k">Host VRAM</span>
+                  <button
+                    type="button"
+                    class="pop-action"
+                    disabled={isRunning || activeRunState.leaseHeld}
+                    onclick={freeRemoteVram}
+                  >
+                    Free ({remoteHealth.activeAdapter})
+                  </button>
+                </div>
+              {/if}
+            {/if}
+            <div class="pop-row">
+              <span
+                class="pop-k"
+                title="Maximum total residues allowed in LocalFold (AF3, Boltz, Protenix, AF2, ESMFold2). Auto uses 512/768 in Browser mode and the host GPU ceiling on self-hosted servers."
+              >
+                Max fold len
+              </span>
+              <select
+                class="pop-select"
+                aria-label="Maximum folding residue ceiling"
+                value={computeBackend.maxFoldResidues === null ? 'auto' : String(computeBackend.maxFoldResidues)}
+                disabled={isRunning || activeRunState.leaseHeld}
+                onchange={(e) =>
+                  updateComputeBackend({
+                    maxFoldResidues: sanitizeMaxFoldResidues((e.currentTarget as HTMLSelectElement).value),
+                  })}
+              >
+                <option value="auto">
+                  {!isRemoteCompute
+                    ? 'Auto (512 / 768)'
+                    : `Auto (Host ${remoteHealth?.maxFoldResidues ?? DEFAULT_HOST_MAX_FOLD_RESIDUES})`}
+                </option>
+                <option value="512">512 aa</option>
+                <option value="768">768 aa</option>
+                <option value="1024">1024 aa</option>
+                <option value="1536">1536 aa</option>
+                <option value="2048">2048 aa</option>
+                <option value="3072">3072 aa</option>
+                <option value="4096">4096 aa</option>
+              </select>
+            </div>
+          </div>
+          <div class="pop-divider"></div>
           {#if webMcpReady}
             <div class="pop-row">
               <span class="pop-k">Agent API</span>
@@ -4421,7 +4627,7 @@
         {#if !isCompareMode && viewerStructureMeta}
           <div class="geom-strip">
             <span class="geom-lbl">
-              {viewerStructureMeta.sourceModelId === 'pdb-input' && !peekMetrics ? 'Input:' : 'Designed:'}
+              {formatGeomStripLabel(activePeekSlot?.viewportRole, viewerStructureMeta.sourceModelId, Boolean(peekMetrics))}
             </span>
             <span>L = <b>{viewerStructureMeta.length} aa</b></span>
             <span>R<sub>g</sub> = <b>{viewerStructureMeta.geometry.rg.toFixed(1)} Å</b></span>
@@ -4717,6 +4923,9 @@
     webgpuSupported={webgpuSupported !== false}
     {webgpuDetail}
     isPartialRun={Boolean(pendingRun.upToNodeId)}
+    remoteHostOrigin={computeBackend.mode !== 'local'
+      ? resolveRemoteBackendOrigin(computeBackend.serverUrl)
+      : null}
     onConfirm={confirmPendingRun}
     onCancel={cancelPendingRun}
   />
@@ -4922,43 +5131,72 @@
   .pop-wrap {
     position: relative;
   }
-  .hdr-pill {
+  .hdr-compute-switch {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 2px;
+    padding: 2px;
+    height: 30px;
+    box-sizing: border-box;
+    border-radius: 999px;
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border);
+  }
+  .hdr-compute-seg {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 24px;
+    padding: 0 9px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-muted);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
-    color: var(--text-muted);
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    padding: 5px 10px;
-    border-radius: 999px;
+    font-weight: 500;
     cursor: pointer;
     white-space: nowrap;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
   }
-  .hdr-pill:hover {
-    border-color: var(--border-strong);
+  .hdr-compute-seg:hover:not(.active) {
     color: var(--text-primary);
+    background: var(--bg-surface-hover);
   }
-  .hdr-pill.ok {
+  .hdr-compute-seg.active {
+    color: var(--text-primary);
+    background: var(--bg-surface);
+    border-color: var(--border-strong);
+    font-weight: 600;
+  }
+  .hdr-compute-seg.active.ok {
     color: var(--ok-text);
     border-color: var(--ok-border);
     background: var(--ok-bg);
   }
-  .hdr-pill.warn {
+  .hdr-compute-seg.active.warn {
     color: var(--warn-text);
     border-color: var(--warn-border);
     background: var(--warn-bg);
   }
-  .hdr-pill.bad {
+  .hdr-compute-seg.active.bad {
     color: var(--err-strong);
     border-color: var(--err-border);
     background: var(--err-bg);
   }
-  .hdr-pill.gpu {
+  .hdr-compute-seg.active.gpu {
     color: var(--accent-soft);
     border-color: var(--accent);
     background: var(--bg-pill);
+  }
+  .hdr-compute-sub {
+    opacity: 0.78;
+    font-weight: 400;
+  }
+  @media (max-width: 1120px) {
+    .hdr-compute-sub {
+      display: none;
+    }
   }
   .status-dot {
     width: 7px;
@@ -5180,12 +5418,72 @@
     box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35), var(--node-shadow);
   }
   .sys-pop {
-    width: min(260px, calc(100vw - 24px));
+    width: min(304px, calc(100vw - 24px));
     padding: 10px 12px;
     display: flex;
     flex-direction: column;
     gap: 8px;
     font-size: 11.5px;
+  }
+  .pop-divider {
+    height: 1px;
+    background: var(--border-subtle);
+    margin: 1px 0;
+  }
+  .pop-compute-sec {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .pop-mode-hint {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  .pop-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+  .pop-field input,
+  .pop-select {
+    background: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 6px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  .pop-select {
+    font-size: 10.5px;
+    padding: 3px 6px;
+    max-width: 138px;
+    cursor: pointer;
+  }
+  .pop-help-note {
+    font-size: 10px;
+    line-height: 1.45;
+    color: var(--text-muted);
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+  }
+  .pop-help-note code {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    color: var(--text-primary);
+  }
+  .pop-help-note a {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+  }
+  .pop-help-note a:hover {
+    text-decoration: underline;
   }
   .sys-pop.align-left {
     left: 0;
@@ -5195,7 +5493,7 @@
     .sys-pop {
       left: 0;
       right: auto;
-      width: min(260px, calc(100vw - 24px));
+      width: min(290px, calc(100vw - 24px));
     }
   }
   @media (max-width: 640px) {

@@ -156,7 +156,7 @@ function makeStructureArtifact(
 
 describe('Single-source-of-truth worker import guards', () => {
   it('mpnn.worker.ts imports directly from mpnn-spec and has zero duplicated parser/lock functions', () => {
-    const src = readFileSync(resolve(process.cwd(), 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    const src = readFileSync(resolve(process.cwd(), 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts'), 'utf8');
     expect(src).toMatch(/from\s+['"]\$lib\/engine\/mpnn-spec['"]/);
     expect(src).toContain('compileMpnnInputSpec');
     expect(src).toContain('applyBackboneNoise');
@@ -168,8 +168,8 @@ describe('Single-source-of-truth worker import guards', () => {
   });
 
   it('rfd4.worker.ts and genie3.worker.ts use resolveRfd4CompiledInput / resolveGenie3CompiledInput', () => {
-    const rfd4Src = readFileSync(resolve(process.cwd(), 'src/lib/workers/rfd4.worker.ts'), 'utf8');
-    const g3Src = readFileSync(resolve(process.cwd(), 'src/lib/workers/genie3.worker.ts'), 'utf8');
+    const rfd4Src = readFileSync(resolve(process.cwd(), 'src/lib/plugins/rfd4-proteina/rfd4.worker.ts'), 'utf8');
+    const g3Src = readFileSync(resolve(process.cwd(), 'src/lib/plugins/genie3/genie3.worker.ts'), 'utf8');
     expect(rfd4Src).toContain('resolveRfd4CompiledInput');
     expect(g3Src).toContain('resolveGenie3CompiledInput');
   });

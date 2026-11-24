@@ -30,11 +30,17 @@ import type { AdapterManifest } from '../engine/types';
  */
 function extractWorkerRunParamKeys(workerRelPath: string): string[] {
   const src = readFileSync(resolve(process.cwd(), workerRelPath), 'utf8');
-  const runIdx = src.indexOf("msg.type === 'run'");
-  expect(runIdx, `Expected msg.type === 'run' handler in ${workerRelPath}`).toBeGreaterThan(-1);
+  let runIdx = src.indexOf("msg.type === 'run'");
+  if (runIdx === -1) {
+    runIdx = src.search(/\basync\s+run\s*\(/);
+  }
+  expect(
+    runIdx,
+    `Expected msg.type === 'run' or createWorkerHarness async run(ctx) handler in ${workerRelPath}`,
+  ).toBeGreaterThan(-1);
   const runSlice = src.slice(runIdx);
   const keys = new Set<string>();
-  for (const m of runSlice.matchAll(/\b(?:p|params|msg\.params)\??\.([A-Za-z_][A-Za-z0-9_]*)\b/g)) {
+  for (const m of runSlice.matchAll(/\b(?:p|params|msg\.params|ctx\.params)\??\.([A-Za-z_][A-Za-z0-9_]*)\b/g)) {
     keys.add(m[1]);
   }
   return [...keys].sort();
@@ -253,21 +259,21 @@ describe('declarative ParamSchema & modes single source of truth', () => {
     };
 
     const WORKER_TARGETS: Array<{ adapterId: string; file: string; extraHelperKeys?: string[] }> = [
-      { adapterId: 'rfd4-proteina', file: 'src/lib/workers/rfd4.worker.ts' },
-      { adapterId: 'genie3', file: 'src/lib/workers/genie3.worker.ts' },
-      { adapterId: 'web-protein-mpnn', file: 'src/lib/workers/mpnn.worker.ts' },
+      { adapterId: 'rfd4-proteina', file: 'src/lib/plugins/rfd4-proteina/rfd4.worker.ts' },
+      { adapterId: 'genie3', file: 'src/lib/plugins/genie3/genie3.worker.ts' },
+      { adapterId: 'web-protein-mpnn', file: 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts' },
       {
         adapterId: 'localfold-af2',
-        file: 'src/lib/workers/localfold.worker.ts',
+        file: 'src/lib/plugins/localfold-af2/localfold.worker.ts',
         extraHelperKeys: ['maxSequences'], // read inside selectFoldWorkItems(seqSet, p)
       },
-      { adapterId: 'thermompnn', file: 'src/lib/workers/thermompnn.worker.ts' },
-      { adapterId: 'ligandmpnn', file: 'src/lib/workers/ligandmpnn.worker.ts' },
-      { adapterId: 'lasermpnn', file: 'src/lib/workers/lasermpnn.worker.ts' },
-      { adapterId: 'antifold-esmif1', file: 'src/lib/workers/antifold.worker.ts' },
-      { adapterId: 'protpardelle', file: 'src/lib/workers/protpardelle.worker.ts' },
-      { adapterId: 'esmc', file: 'src/lib/workers/esmc.worker.ts' },
-      { adapterId: 'dyna1', file: 'src/lib/workers/dyna1.worker.ts' },
+      { adapterId: 'thermompnn', file: 'src/lib/plugins/thermompnn/thermompnn.worker.ts' },
+      { adapterId: 'ligandmpnn', file: 'src/lib/plugins/ligandmpnn/ligandmpnn.worker.ts' },
+      { adapterId: 'lasermpnn', file: 'src/lib/plugins/lasermpnn/lasermpnn.worker.ts' },
+      { adapterId: 'antifold-esmif1', file: 'src/lib/plugins/antifold-esmif1/antifold.worker.ts' },
+      { adapterId: 'protpardelle', file: 'src/lib/plugins/protpardelle/protpardelle.worker.ts' },
+      { adapterId: 'esmc', file: 'src/lib/plugins/esmc/esmc.worker.ts' },
+      { adapterId: 'dyna1', file: 'src/lib/plugins/dyna1/dyna1.worker.ts' },
     ];
 
     for (const target of WORKER_TARGETS) {
@@ -306,17 +312,11 @@ describe('declarative ParamSchema & modes single source of truth', () => {
     ).toBe(true);
   });
 
-  it('CPU-Node Param Coverage Guard: scheduler.ts CPU nodes (pdb-input, sequence-input, designability-scorer) params are declared in paramSchema', () => {
-    const schedSrc = readFileSync(resolve(process.cwd(), 'src/lib/engine/scheduler.ts'), 'utf8');
-
-    const extractSectionKeys = (startMarker: string, endMarker: string): string[] => {
-      const s = schedSrc.indexOf(startMarker);
-      const e = schedSrc.indexOf(endMarker, s + startMarker.length);
-      expect(s).toBeGreaterThan(-1);
-      expect(e).toBeGreaterThan(s);
-      const slice = schedSrc.slice(s, e);
+  it('CPU-Node Param Coverage Guard: migrated CPU plugin runners (pdb-input, sequence-input, top-k-filter, structure-compare, designability-scorer) params are declared in paramSchema', () => {
+    const extractFileKeys = (relPath: string): string[] => {
+      const src = readFileSync(resolve(process.cwd(), relPath), 'utf8');
       const keys = new Set<string>();
-      for (const m of slice.matchAll(/\bnode\.params\.([A-Za-z_][A-Za-z0-9_]*)\b/g)) {
+      for (const m of src.matchAll(/\bnode\.params\.([A-Za-z_][A-Za-z0-9_]*)\b/g)) {
         keys.add(m[1]);
       }
       return [...keys].sort();
@@ -324,40 +324,24 @@ describe('declarative ParamSchema & modes single source of truth', () => {
 
     const cpuChecks: Array<{
       adapterId: string;
-      start: string;
-      end: string;
+      file: string;
       aliases?: ReadonlySet<string>;
     }> = [
-      {
-        adapterId: 'pdb-input',
-        start: 'export async function materializePdbInputNode(',
-        end: 'export function materializeSequenceInputNode(',
-      },
-      {
-        adapterId: 'sequence-input',
-        start: 'export function materializeSequenceInputNode(',
-        end: 'function topoSort(',
-      },
-      {
-        adapterId: 'top-k-filter',
-        start: "if (node.adapterId === 'top-k-filter') {",
-        end: "if (node.adapterId === 'designability-scorer') {",
-      },
-      {
-        adapterId: 'designability-scorer',
-        start: "if (node.adapterId === 'designability-scorer') {",
-        end: 'throw new Error(`Unknown CPU adapter',
-      },
+      { adapterId: 'pdb-input', file: 'src/lib/plugins/pdb-input/cpu-runner.ts' },
+      { adapterId: 'sequence-input', file: 'src/lib/plugins/sequence-input/cpu-runner.ts' },
+      { adapterId: 'top-k-filter', file: 'src/lib/plugins/top-k-filter/cpu-runner.ts' },
+      { adapterId: 'structure-compare', file: 'src/lib/plugins/structure-compare/cpu-runner.ts' },
+      { adapterId: 'designability-scorer', file: 'src/lib/plugins/designability-scorer/cpu-runner.ts' },
     ];
 
     for (const check of cpuChecks) {
       const declared = new Set((ADAPTER_REGISTRY[check.adapterId].paramSchema ?? []).map((f) => f.key));
-      const readKeys = extractSectionKeys(check.start, check.end);
+      const readKeys = extractFileKeys(check.file);
       expect(readKeys.length).toBeGreaterThan(0);
       const missing = readKeys.filter((k) => !declared.has(k) && !check.aliases?.has(k));
       expect(
         missing,
-        `CPU node "${check.adapterId}" reads params missing from paramSchema: ${missing.join(', ')}`,
+        `CPU plugin "${check.adapterId}" (${check.file}) reads params missing from paramSchema: ${missing.join(', ')}`,
       ).toEqual([]);
     }
   });

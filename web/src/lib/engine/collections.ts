@@ -449,7 +449,9 @@ export function canonicalJson(value: unknown): string {
 
 /** Compute a deterministic content digest for a StructureArtifact's identity. */
 export function computeStructurePayloadDigest(
-  structure: Pick<StructureArtifact, 'id' | 'sequence' | 'length' | 'pdbText' | 'caCoords'>,
+  structure: Pick<StructureArtifact, 'id' | 'sequence' | 'length' | 'pdbText' | 'caCoords'> & {
+    cifText?: string;
+  },
 ): Digest {
   const caBytes =
     structure.caCoords instanceof Float32Array
@@ -462,12 +464,13 @@ export function computeStructurePayloadDigest(
   const caDigest = sha256Hex(caBytes);
   return sha256Hex(
     canonicalJson({
-      schema: 'denovo.structure-digest/v1',
+      schema: structure.cifText ? 'denovo.structure-digest/v2' : 'denovo.structure-digest/v1',
       id: structure.id,
       length: structure.length,
       sequence: structure.sequence,
       caDigest,
       pdbDigest: sha256Hex(structure.pdbText ?? ''),
+      ...(structure.cifText ? { cifDigest: sha256Hex(structure.cifText) } : {}),
     }),
   );
 }

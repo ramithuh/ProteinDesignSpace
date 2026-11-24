@@ -12,14 +12,15 @@ export function esmfold2ParamIssue(params: Record<string, unknown>): string | un
 }
 
 /** Preserve both explicit chain lengths and inline chain boundaries at the worker boundary. */
-export function esmfold2Chains(candidate: SequenceCandidate): string[] {
+export function esmfold2Chains(candidate: SequenceCandidate, maxResidues = 512): string[] {
   const parts = candidate.sequence.replace(/\s/g, '').toUpperCase().split(/[:/]/);
   if (parts.some((part) => !/^[ACDEFGHIKLMNPQRSTVWY]+$/.test(part))) {
     throw new Error(`ESMFold2 needs canonical protein residues in "${candidate.id}".`);
   }
   const sequence = parts.join('');
-  if (sequence.length < 5 || sequence.length > 512) {
-    throw new Error(`ESMFold2 supports 5–512 protein residues per candidate ("${candidate.id}" has ${sequence.length}).`);
+  const limit = Number.isFinite(maxResidues) && maxResidues >= 5 ? Math.round(maxResidues) : 512;
+  if (sequence.length < 5 || sequence.length > limit) {
+    throw new Error(`ESMFold2 supports 5–${limit} protein residues per candidate ("${candidate.id}" has ${sequence.length}).`);
   }
   const lengths = candidate.chainLengths ?? parts.map((part) => part.length);
   if (!Array.isArray(lengths) || !lengths.length || lengths.length > 62 ||

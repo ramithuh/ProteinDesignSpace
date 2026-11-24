@@ -3,6 +3,7 @@
 
 import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 import { AA1_TO_AA3 } from '$lib/protein-ops/pdb';
+import { getActivePluginRegistry } from '$lib/kernel/active-registry';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import type {
   CanonicalArtifact,
@@ -26,6 +27,12 @@ export interface PeekSlot {
   peerNodeLabel?: string;
   peerPortName?: string;
   artifact: CanonicalArtifact | null;
+  /** Optional plugin-declared slot availability in the node's active mode. */
+  availability?: 'active' | 'inactive-in-mode';
+  /** Human-readable explanation when `availability === 'inactive-in-mode'`. */
+  inactiveReason?: string;
+  /** Optional semantic role for the 3D stage header (e.g. `'receptor'`, `'designed'`, `'folded'`). */
+  viewportRole?: string;
 }
 
 export interface SequenceAnalysis {
@@ -59,24 +66,32 @@ export function getNodePeekSlots(
 ): PeekSlot[] {
   const node = graph.nodes.find((n) => n.id === nodeId);
   if (!node) return [];
-  const manifest = ADAPTER_REGISTRY[node.adapterId];
+  const registry = getActivePluginRegistry();
+  const plugin = registry?.getPlugin(node.adapterId);
+  const manifest = plugin?.manifest ?? ADAPTER_REGISTRY[node.adapterId];
   if (!manifest) return [];
 
   const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
   const slots: PeekSlot[] = [];
+  const connectedInputs = new Set<string>();
 
   for (const [portName, spec] of Object.entries(manifest.inputs)) {
     const edge = graph.edges.find((e) => e.toNode === nodeId && e.toPort === portName);
+    if (edge) connectedInputs.add(portName);
     const peer = edge ? nodeById.get(edge.fromNode) : undefined;
     const peerLabel = peer
-      ? peer.label || ADAPTER_REGISTRY[peer.adapterId]?.shortName || peer.id
+      ? peer.label ||
+        registry?.getPlugin(peer.adapterId)?.manifest.shortName ||
+        ADAPTER_REGISTRY[peer.adapterId]?.shortName ||
+        peer.id
       : undefined;
     const artifact = edge ? (outputsByNode[edge.fromNode]?.[edge.fromPort] ?? null) : null;
+    const primaryType = (Array.isArray(spec.type) ? spec.type[0] : spec.type) as PortType;
     slots.push({
       id: `in:${portName}`,
       direction: 'in',
       portName,
-      portType: spec.type,
+      portType: primaryType,
       required: spec.required !== false,
       wired: Boolean(edge),
       edgeId: edge ? makeEdgeId(edge.fromNode, edge.fromPort, edge.toNode, edge.toPort) : undefined,
@@ -89,15 +104,29 @@ export function getNodePeekSlots(
 
   for (const [portName, spec] of Object.entries(manifest.outputs)) {
     const artifact = outputsByNode[nodeId]?.[portName] ?? null;
+    const primaryType = (Array.isArray(spec.type) ? spec.type[0] : spec.type) as PortType;
     slots.push({
       id: `out:${portName}`,
       direction: 'out',
       portName,
-      portType: spec.type,
+      portType: primaryType,
       required: true,
       wired: true,
       artifact,
     });
+  }
+
+  // Apply plugin-owned slot availability / viewport-role metadata (e.g. GNINA inactive `track` in score/dock modes)
+  const resolvedSlots = plugin?.display.resolveSlots?.(node.params, connectedInputs);
+  if (resolvedSlots && resolvedSlots.length > 0) {
+    const slotMap = new Map(resolvedSlots.map((d) => [`${d.direction}:${d.portName}`, d]));
+    for (const slot of slots) {
+      const desc = slotMap.get(slot.id);
+      if (!desc) continue;
+      slot.availability = desc.availability;
+      if (desc.inactiveReason) slot.inactiveReason = desc.inactiveReason;
+      if (desc.viewportRole) slot.viewportRole = desc.viewportRole;
+    }
   }
 
   return slots;
@@ -116,25 +145,35 @@ const PORT_TYPE_PRIORITY: Record<PortType, number> = {
 };
 
 export function getPortTypePriority(portType: PortType): number {
+  const registry = getActivePluginRegistry();
+  if (registry?.portTypes.has(portType)) {
+    return registry.portTypes.resolvePeekPriority(portType);
+  }
   return PORT_TYPE_PRIORITY[portType] ?? 0;
 }
 
 /**
  * Choose the most informative default peek slot for a node using explicit output modality priority:
- * 1) Outgoing slot with live data, sorted by PORT_TYPE_PRIORITY (DesignabilityMetrics > MutationMatrix > ResidueTrack > FoldedStructure > StructureArtifact > SequenceSet > ...)
- * 2) Otherwise incoming slot with live data (useful while this node is still running)
- * 3) Otherwise highest-priority outgoing slot, or first incoming slot.
+ * 1) Active outgoing slot with live data, sorted by PORT_TYPE_PRIORITY
+ * 2) Otherwise active incoming slot with live data (useful while this node is still running)
+ * 3) Otherwise highest-priority active outgoing slot, or first slot.
  */
 export function pickDefaultPeekSlot(slots: PeekSlot[]): string | null {
-  const outWithData = slots.filter((s) => s.direction === 'out' && s.artifact !== null);
+  const isActive = (s: PeekSlot) => s.availability !== 'inactive-in-mode';
+  const outWithData = slots.filter((s) => s.direction === 'out' && s.artifact !== null && isActive(s));
   if (outWithData.length > 0) {
     outWithData.sort((a, b) => getPortTypePriority(b.portType) - getPortTypePriority(a.portType));
     return outWithData[0].id;
   }
-  const inWithData = slots.filter((s) => s.direction === 'in' && s.artifact !== null);
+  const inWithData = slots.filter((s) => s.direction === 'in' && s.artifact !== null && isActive(s));
   if (inWithData.length > 0) {
     inWithData.sort((a, b) => getPortTypePriority(b.portType) - getPortTypePriority(a.portType));
     return inWithData[0].id;
+  }
+  const activeOuts = slots.filter((s) => s.direction === 'out' && isActive(s));
+  if (activeOuts.length > 0) {
+    activeOuts.sort((a, b) => getPortTypePriority(b.portType) - getPortTypePriority(a.portType));
+    return activeOuts[0].id;
   }
   const outs = slots.filter((s) => s.direction === 'out');
   if (outs.length > 0) {

@@ -2,7 +2,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { esmfold2Chains } from '$lib/engine/localfold-esmfold2';
-import { computeCandidateIpsae, loadEsmfold2 } from '$lib/workers/localfold-esmfold2';
+import { computeCandidateIpsae, loadEsmfold2 } from '$lib/plugins/localfold-af2/localfold-esmfold2';
 import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 
 const vendor = (path: string) =>
@@ -30,7 +30,7 @@ describe('ESMFold2 worker contract', () => {
     const scope = { postMessage, onmessage: async (_event: { data: unknown }) => {} };
     vi.stubGlobal('self', scope);
     try {
-      await import('$lib/workers/localfold.worker');
+      await import('$lib/plugins/localfold-af2/localfold.worker');
       for (const params of [
         { msaMode: 'mmseqs2' }, { esmfold2Steps: 25 },
       ]) {

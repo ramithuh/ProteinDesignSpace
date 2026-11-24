@@ -95,6 +95,20 @@ export class GPUOps extends Ops {
         this.live.delete(t);
         this.pool.push(t);
       }
+    // Bound pooled scratch VRAM across varying sequence lengths (64 MiB cap)
+    const MAX_POOL_BYTES = 64 * 1024 * 1024;
+    let poolBytes = 0;
+    for (const t of this.pool) poolBytes += t.buffer.size;
+    while (poolBytes > MAX_POOL_BYTES && this.pool.length > 0) {
+      const evicted = this.pool.shift();
+      poolBytes -= evicted.buffer.size;
+      this.scratchBytes = Math.max(0, this.scratchBytes - evicted.buffer.size);
+      try {
+        evicted.buffer.destroy();
+      } catch {
+        /* ignore */
+      }
+    }
   }
   begin() {
     if (this.destroyed) throw Error("Engine destroyed");

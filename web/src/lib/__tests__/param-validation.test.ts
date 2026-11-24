@@ -214,7 +214,7 @@ describe('parameter validation & numeric sanitization', () => {
   });
 
   it('mpnn.worker.ts supports whole-chain locking, designChains, inherited locks, omitAminoAcids, tiedPositions, and aligned bounds', () => {
-    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts'), 'utf8');
     expect(mpnnSrc).toContain('parseFixedPositionsAndChains');
     expect(mpnnSrc).toContain('structure.lockedChains');
     expect(mpnnSrc).toContain('structure.fixedResidueIndices');
@@ -538,22 +538,23 @@ describe('parameter validation & numeric sanitization', () => {
     ).toMatch(/ipsaeThreshold/);
 
     // 5. Worker fidelity & metadata contracts (RFD4, Genie 3, MPNN)
-    const rfd4Src = readFileSync(resolve(process.cwd(), 'src/lib/workers/rfd4.worker.ts'), 'utf8');
+    const rfd4Src = readFileSync(resolve(process.cwd(), 'src/lib/plugins/rfd4-proteina/rfd4.worker.ts'), 'utf8');
     expect(rfd4Src).toContain("mode === 'inverse-folding' ? false : requestedEarlyStop");
-    expect(rfd4Src).toContain("bfactorSemantics: mode === 'partial' || mode === 'inverse-folding' ? 'crystal-b' : 'none'");
+    expect(rfd4Src).toContain("mode === 'partial' || mode === 'inverse-folding'");
+    expect(rfd4Src).toContain("template?.bfactorSemantics ?? 'none'");
     expect(rfd4Src).toContain("atomGranularity: 'all-atom'");
     expect(rfd4Src).toContain("quantization: 'int8'");
     expect(rfd4Src).toContain('degradedFallback');
     expect(rfd4Src).toContain('designMeta.lockedChains');
     expect(rfd4Src).toContain('designMeta.chainRoles');
 
-    const genie3Src = readFileSync(resolve(process.cwd(), 'src/lib/workers/genie3.worker.ts'), 'utf8');
+    const genie3Src = readFileSync(resolve(process.cwd(), 'src/lib/plugins/genie3/genie3.worker.ts'), 'utf8');
     expect(genie3Src).toContain("bfactorSemantics: 'none'");
     expect(genie3Src).toContain("atomGranularity: 'ca-only'");
     expect(genie3Src).toContain('...(lockedChains ? { lockedChains } : {})');
     expect(genie3Src).toContain('...(chainRoles ? { chainRoles } : {})');
 
-    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    const mpnnSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts'), 'utf8');
     expect(mpnnSrc).toContain('propagatedLockedChains');
     expect(mpnnSrc).toContain('structure.chainRoles');
   });

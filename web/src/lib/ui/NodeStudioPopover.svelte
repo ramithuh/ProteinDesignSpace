@@ -86,9 +86,12 @@
 
   let nodeChipsEl = $state<HTMLDivElement | null>(null);
 
-  // Reset brush choice when switching nodes and keep active node chip scrolled into view
+  // Reset brush choice only when switching to a different node ID (not when editing params on the same node)
+  let lastStudioNodeId = '';
   $effect(() => {
-    void node.id;
+    const currentId = node.id;
+    if (currentId === lastStudioNodeId) return;
+    lastStudioNodeId = currentId;
     selectedBrushKey = null;
     if (nodeChipsEl) {
       const activeEl = nodeChipsEl.querySelector('.node-chip.active');

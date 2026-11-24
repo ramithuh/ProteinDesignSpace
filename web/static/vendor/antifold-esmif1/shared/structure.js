@@ -23,7 +23,7 @@ function readCIF(text) {
       const row=t.slice(i+1,i+1+cols.length);if(row.length!==cols.length)throw new Error('Truncated CIF loop');i+=cols.length;
       if(!atom)continue;
       const get=(name,fallback)=>row[idx[name]??idx[fallback]];
-      atoms.push({group:get('group_PDB')??'ATOM',model:Number(get('pdbx_PDB_model_num')??1),atom:empty(get('auth_atom_id','label_atom_id')),name:empty(get('auth_comp_id','label_comp_id')),chain:empty(get('auth_asym_id','label_asym_id')),number:Number(get('auth_seq_id','label_seq_id')),insertion:empty(get('pdbx_PDB_ins_code')),alt:empty(get('label_alt_id')),xyz:['Cartn_x','Cartn_y','Cartn_z'].map(k=>Number(get(k)))});
+      atoms.push({group:get('group_PDB')??'ATOM',model:Number(get('pdbx_PDB_model_num')??1),atom:empty(get('auth_atom_id','label_atom_id')),name:empty(get('auth_comp_id','label_comp_id')),chain:empty(get('auth_asym_id','label_asym_id')),number:Number(get('auth_seq_id','label_seq_id')),insertion:empty(get('pdbx_PDB_ins_code')),alt:empty(get('label_alt_id')),xyz:['Cartn_x','Cartn_y','Cartn_z'].map(k=>{const s=empty(get(k));return s===''?NaN:Number(s);})});
     }
   }
   return atoms;
@@ -33,7 +33,7 @@ function readPDB(text) {
   for(const line of text.split(/\r?\n/)){
     const rec=line.slice(0,6).trim();if(rec==='MODEL'){if(seen)break;seen=true;model=1;continue;}if(rec==='ENDMDL')break;
     if(rec!=='ATOM'&&rec!=='HETATM')continue;
-    atoms.push({group:rec,model,atom:line.slice(12,16).trim(),alt:line.slice(16,17).trim(),name:line.slice(17,20).trim(),chain:line.slice(21,22).trim(),number:Number(line.slice(22,26)),insertion:line.slice(26,27).trim(),xyz:[30,38,46].map(i=>Number(line.slice(i,i+8)))});
+    atoms.push({group:rec,model,atom:line.slice(12,16).trim(),alt:line.slice(16,17).trim(),name:line.slice(17,20).trim(),chain:line.slice(21,22).trim(),number:Number(line.slice(22,26)),insertion:line.slice(26,27).trim(),xyz:[30,38,46].map(i=>{const s=line.slice(i,i+8).trim();return s===''?NaN:Number(s);})});
   }
   return atoms;
 }

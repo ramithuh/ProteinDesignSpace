@@ -1,20 +1,27 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
   import type { WorkflowGraph } from '$lib/engine/types';
+  import type { DomainPack } from '$lib/kernel';
+  import { defaultPluginRegistry } from '$lib/plugins';
+  import { PROTEIN_DOMAIN_ID } from '$lib/domains/protein-biopolymer';
   import { modalFocusTrap } from './modal-focus-trap';
+
+  type OnboardingTourStep = NonNullable<DomainPack['onboardingTour']>[number];
 
   interface Props {
     graph: WorkflowGraph;
     isRunning: boolean;
+    tourSteps?: readonly OnboardingTourStep[];
     onDismiss: () => void;
     onPrepareTourStarter: () => void;
-    onAutoStepBlock: (adapterId: 'web-protein-mpnn' | 'localfold-af2' | 'designability-scorer') => void;
+    onAutoStepBlock: (adapterId: string) => void;
     onInteractiveChange?: (active: boolean) => void;
   }
 
   let {
     graph,
     isRunning,
+    tourSteps = undefined,
     onDismiss,
     onPrepareTourStarter,
     onAutoStepBlock,
@@ -47,29 +54,33 @@
     'run-workflow',
   ];
 
-  const ADD_STEP_TARGETS: Record<
-    'add-mpnn' | 'add-fold' | 'add-scorer',
-    { categoryId: string; categoryLabel: string; subKey: string; subLabel: string }
-  > = {
-    'add-mpnn': {
-      categoryId: 'sequence-design',
-      categoryLabel: 'Sequence Design',
-      subKey: 'ca',
-      subLabel: 'Cα-ProteinMPNN',
-    },
-    'add-fold': {
-      categoryId: 'prediction',
-      categoryLabel: 'Structure Prediction',
-      subKey: 'monomer',
-      subLabel: 'AlphaFold2 · Model 1',
-    },
-    'add-scorer': {
-      categoryId: 'evaluation',
-      categoryLabel: 'Evaluation',
-      subKey: 'designability-scorer',
-      subLabel: 'scRMSD / scTM',
-    },
-  };
+  let resolvedTourSteps = $derived<readonly OnboardingTourStep[]>(
+    tourSteps ?? defaultPluginRegistry.domains.get(PROTEIN_DOMAIN_ID)?.onboardingTour ?? [],
+  );
+
+  let stepConfigById = $derived.by(() => {
+    const map = new Map<string, OnboardingTourStep>();
+    for (const item of resolvedTourSteps) {
+      map.set(item.id, item);
+    }
+    return map;
+  });
+
+  function escapeAttrSelectorValue(val: string): string {
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+      return CSS.escape(val);
+    }
+    return val.replace(/["\\]/g, '\\$&');
+  }
+
+  function getAddStepTarget(stepId: 'add-mpnn' | 'add-fold' | 'add-scorer') {
+    const cfg = stepConfigById.get(stepId);
+    return {
+      categoryId: cfg?.targetCategoryId ?? '',
+      subKey: cfg?.targetSubKey ?? '',
+      pluginId: cfg?.autoAddPluginId ?? '',
+    };
+  }
 
   let step = $state<TourStepId>('welcome');
   let subStage = $state<SubStage>('button');
@@ -146,11 +157,21 @@
     }
 
     if (step === 'add-mpnn' || step === 'add-fold' || step === 'add-scorer') {
-      const cfg = ADD_STEP_TARGETS[step];
+      const cfg = getAddStepTarget(step);
       const addBtn = document.querySelector<HTMLElement>('[data-tour="add-block-btn"]');
       const catalogShell = document.querySelector<HTMLElement>('.catalog-shell');
-      const subEl = catalogShell?.querySelector<HTMLElement>(`[data-sub-key="${cfg.subKey}"]`) ?? null;
-      const catEl = catalogShell?.querySelector<HTMLElement>(`[data-category-id="${cfg.categoryId}"]`) ?? null;
+      const subEl =
+        cfg.subKey && catalogShell
+          ? catalogShell.querySelector<HTMLElement>(
+              `[data-sub-key="${escapeAttrSelectorValue(cfg.subKey)}"]`,
+            )
+          : null;
+      const catEl =
+        cfg.categoryId && catalogShell
+          ? catalogShell.querySelector<HTMLElement>(
+              `[data-category-id="${escapeAttrSelectorValue(cfg.categoryId)}"]`,
+            )
+          : null;
 
       if (subEl) {
         subStage = 'item';
@@ -216,9 +237,12 @@
 
   // Live auto-advance when user clicks real blocks in + Add Block or clicks Run!
   $effect(() => {
-    const hasMpnn = graph.nodes.some((n) => n.adapterId === 'web-protein-mpnn');
-    const hasFold = graph.nodes.some((n) => n.adapterId === 'localfold-af2');
-    const hasScorer = graph.nodes.some((n) => n.adapterId === 'designability-scorer');
+    const mpnnPluginId = getAddStepTarget('add-mpnn').pluginId;
+    const foldPluginId = getAddStepTarget('add-fold').pluginId;
+    const scorerPluginId = getAddStepTarget('add-scorer').pluginId;
+    const hasMpnn = Boolean(mpnnPluginId && graph.nodes.some((n) => n.adapterId === mpnnPluginId));
+    const hasFold = Boolean(foldPluginId && graph.nodes.some((n) => n.adapterId === foldPluginId));
+    const hasScorer = Boolean(scorerPluginId && graph.nodes.some((n) => n.adapterId === scorerPluginId));
 
     if (step === 'add-mpnn' && hasMpnn) {
       step = hasFold ? (hasScorer ? 'inspect-params' : 'add-scorer') : 'add-fold';
@@ -573,7 +597,14 @@
       {/if}
       <div class="coach-actions">
         <button type="button" class="coach-link" onclick={onDismiss}>Skip tour</button>
-        <button type="button" class="coach-btn" onclick={() => onAutoStepBlock('web-protein-mpnn')}>
+        <button
+          type="button"
+          class="coach-btn"
+          onclick={() => {
+            const id = getAddStepTarget('add-mpnn').pluginId;
+            if (id) onAutoStepBlock(id);
+          }}
+        >
           Do it for me →
         </button>
       </div>
@@ -598,7 +629,14 @@
       {/if}
       <div class="coach-actions">
         <button type="button" class="coach-link" onclick={onDismiss}>Skip tour</button>
-        <button type="button" class="coach-btn" onclick={() => onAutoStepBlock('localfold-af2')}>
+        <button
+          type="button"
+          class="coach-btn"
+          onclick={() => {
+            const id = getAddStepTarget('add-fold').pluginId;
+            if (id) onAutoStepBlock(id);
+          }}
+        >
           Do it for me →
         </button>
       </div>
@@ -623,7 +661,14 @@
       {/if}
       <div class="coach-actions">
         <button type="button" class="coach-link" onclick={onDismiss}>Skip tour</button>
-        <button type="button" class="coach-btn" onclick={() => onAutoStepBlock('designability-scorer')}>
+        <button
+          type="button"
+          class="coach-btn"
+          onclick={() => {
+            const id = getAddStepTarget('add-scorer').pluginId;
+            if (id) onAutoStepBlock(id);
+          }}
+        >
           Do it for me →
         </button>
       </div>

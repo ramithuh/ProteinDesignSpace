@@ -67,7 +67,7 @@ describe('Track A + B regressions (#32–#37, #58, catalog & UX)', () => {
     expect(viewerSrc).toContain('non-polymer');
 
     const foldWorkerSrc = readFileSync(
-      resolve(WEB_ROOT, 'src/lib/workers/localfold.worker.ts'),
+      resolve(WEB_ROOT, 'src/lib/plugins/localfold-af2/localfold.worker.ts'),
       'utf8',
     );
     expect(foldWorkerSrc).toContain(".fill('LIG')");
@@ -78,7 +78,12 @@ describe('Track A + B regressions (#32–#37, #58, catalog & UX)', () => {
     expect(canvasSrc).toContain('left: compact ? 0.12 : 0.14');
 
     const inspectorSrc = readFileSync(resolve(WEB_ROOT, 'src/lib/ui/NodeInspector.svelte'), 'utf8');
-    expect(inspectorSrc).toContain('Fold all');
+    expect(inspectorSrc).toContain('LocalFoldWidget');
+    const localFoldWidgetSrc = readFileSync(
+      resolve(WEB_ROOT, 'src/lib/ui/inspector/LocalFoldWidget.svelte'),
+      'utf8',
+    );
+    expect(localFoldWidgetSrc).toContain('Fold all');
   });
 
   it('#37: resilient WebGPU helper classifies software adapters, detects device-loss errors, and falls back across retries', async () => {
@@ -157,20 +162,20 @@ describe('Track A + B regressions (#32–#37, #58, catalog & UX)', () => {
     }
 
     const thermoWorker = readFileSync(
-      resolve(WEB_ROOT, 'src/lib/workers/thermompnn.worker.ts'),
+      resolve(WEB_ROOT, 'src/lib/plugins/thermompnn/thermompnn.worker.ts'),
       'utf8',
     );
     expect(thermoWorker).toContain('/vendor/thermompnn/cpu/index.js');
     expect(thermoWorker).toContain('createThermoMPNNCPU');
 
     const ligandWorker = readFileSync(
-      resolve(WEB_ROOT, 'src/lib/workers/ligandmpnn.worker.ts'),
+      resolve(WEB_ROOT, 'src/lib/plugins/ligandmpnn/ligandmpnn.worker.ts'),
       'utf8',
     );
     expect(ligandWorker).toContain('/vendor/ligandmpnn/cpu/index.js');
     expect(ligandWorker).toContain('createLigandMpnnCpuEngine');
 
-    const mpnnWorker = readFileSync(resolve(WEB_ROOT, 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    const mpnnWorker = readFileSync(resolve(WEB_ROOT, 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts'), 'utf8');
     expect(mpnnWorker).toContain("executeRun('wasm')");
     expect(mpnnWorker).toContain('isWebGpuDeviceLostError');
   });

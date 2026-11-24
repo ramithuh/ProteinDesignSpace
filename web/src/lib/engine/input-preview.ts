@@ -29,6 +29,7 @@ import {
   summarizeCropSegments,
   validateBioCapabilities,
   validateRuntimeNodeInputs,
+  type BioFoldLimitOptions,
 } from './bio-capabilities';
 import {
   extractRfd4TemplateContext,
@@ -1104,6 +1105,7 @@ export function compileNodeInputPreview(
   graph: WorkflowGraph,
   nodeId: string,
   outputsByNode: Readonly<Record<string, Record<string, CanonicalArtifact>>>,
+  foldLimitOpts?: BioFoldLimitOptions,
 ): NodeInputPreview {
   const node = graph.nodes.find((n) => n.id === nodeId);
   if (!node) {
@@ -1195,7 +1197,7 @@ export function compileNodeInputPreview(
   }
 
   const mutableOutputs = outputsByNode as Record<string, Record<string, CanonicalArtifact>>;
-  for (const bio of validateBioCapabilities(graph, mutableOutputs)) {
+  for (const bio of validateBioCapabilities(graph, mutableOutputs, foldLimitOpts)) {
     if (bio.nodeId === nodeId) {
       pushIssue({
         severity: bio.severity,
@@ -1241,7 +1243,7 @@ export function compileNodeInputPreview(
 
   const runRuntimeValidation = () => {
     try {
-      const rt = validateRuntimeNodeInputs(node, resolvedInputs);
+      const rt = validateRuntimeNodeInputs(node, resolvedInputs, foldLimitOpts);
       for (const w of rt.warnings) {
         pushIssue({ severity: 'warning', source: 'runtime', message: w });
       }
@@ -2681,8 +2683,12 @@ export function compileNodeInputPreview(
           .toUpperCase()
           .replace(/[\s/:,]+/g, '')
           .replace(/[^ACDEFGHIKLMNPQRSTVWYX]/g, 'X');
+        const resolvedEf2Limit =
+          foldLimitOpts?.resolveNodeFoldLimits?.(node)?.maxFoldResidues ??
+          foldLimitOpts?.maxFoldResidues ??
+          undefined;
         chainLengths = isEsmFold
-          ? esmfold2Chains(rep).map((chain) => chain.length)
+          ? esmfold2Chains(rep, resolvedEf2Limit ?? 512).map((chain) => chain.length)
           : Array.isArray(rep.chainLengths) &&
           rep.chainLengths.length > 0 &&
           rep.chainLengths.every((n) => Number.isInteger(n) && n > 0) &&

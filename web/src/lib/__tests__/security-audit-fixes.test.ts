@@ -146,12 +146,12 @@ describe('Security audit hardening regressions', () => {
     expect(ciYml).toContain('SCARF_ANALYTICS');
 
     // Supply-chain C1: mpnn.worker.ts loads first-party /vendor/ort/ instead of cdn.jsdelivr.net
-    const mpnnWorker = readFileSync(resolve(WEB_ROOT, 'src/lib/workers/mpnn.worker.ts'), 'utf8');
+    const mpnnWorker = readFileSync(resolve(WEB_ROOT, 'src/lib/plugins/web-protein-mpnn/mpnn.worker.ts'), 'utf8');
     expect(mpnnWorker).not.toContain('cdn.jsdelivr.net');
     expect(mpnnWorker).toContain('/vendor/ort/');
 
     // M2: rfd4.worker.ts rejects arbitrary http/https URLs and .. traversal in fetchExampleCifBytes
-    const rfd4Worker = readFileSync(resolve(WEB_ROOT, 'src/lib/workers/rfd4.worker.ts'), 'utf8');
+    const rfd4Worker = readFileSync(resolve(WEB_ROOT, 'src/lib/plugins/rfd4-proteina/rfd4.worker.ts'), 'utf8');
     expect(rfd4Worker).toContain('SAFE_EXAMPLE_CIF_RE');
   });
 });

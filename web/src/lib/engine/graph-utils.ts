@@ -4,7 +4,30 @@
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { getDefaultParamsFromSchema } from './param-schema';
 import { validateNodeParams } from './param-validation';
-import type { PortType, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
+import { getActivePluginRegistry } from '$lib/kernel/active-registry';
+import type { AdapterManifest, PortType, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types';
+import type { PortSpec } from '$lib/kernel/plugin-types';
+
+function lookupManifest(adapterId: string): AdapterManifest | undefined {
+  const plugin = getActivePluginRegistry()?.getPlugin(adapterId);
+  if (plugin) return plugin.manifest as unknown as AdapterManifest;
+  return Object.hasOwn(ADAPTER_REGISTRY, adapterId) ? ADAPTER_REGISTRY[adapterId] : undefined;
+}
+
+function lookupPortLabel(portType: string | readonly string[]): string {
+  const primary = Array.isArray(portType) ? portType[0] : (portType as string);
+  const fromReg = getActivePluginRegistry()?.portTypes.get(primary);
+  if (fromReg) return fromReg.label;
+  return PORT_COLORS[primary as PortType]?.label ?? primary;
+}
+
+function areSpecsCompatible(outSpec: PortSpec, inSpec: PortSpec): boolean {
+  const reg = getActivePluginRegistry();
+  if (reg) return reg.arePortsCompatible(outSpec, inSpec);
+  const outTypes = Array.isArray(outSpec.type) ? outSpec.type : [outSpec.type];
+  const inTypes = new Set(Array.isArray(inSpec.type) ? inSpec.type : [inSpec.type]);
+  return outTypes.some((t) => inTypes.has(t));
+}
 
 export const PORT_COLORS: Record<PortType, { bg: string; label: string; short: string }> = {
   StructureArtifact: { bg: '#3b82f6', label: 'Structure (3D)', short: 'Structure' },
@@ -49,9 +72,7 @@ const LOCALFOLD_DEFAULT_BASELINE_KEYS = new Set([
  * `ADAPTER_REGISTRY[adapterId].paramSchema` (single source of truth).
  */
 export function defaultParamsForAdapter(adapterId: string): Record<string, unknown> {
-  const manifest = Object.hasOwn(ADAPTER_REGISTRY, adapterId)
-    ? ADAPTER_REGISTRY[adapterId]
-    : undefined;
+  const manifest = lookupManifest(adapterId);
   if (!manifest?.paramSchema) return {};
   const full = getDefaultParamsFromSchema(manifest);
   // Keep LocalFold's baseline default keyset concise so AF2-Multimer retains dynamic
@@ -76,9 +97,11 @@ export function sanitizeParamsOnModeSwitch(
   prev: Record<string, unknown>,
   nextMode: string,
 ): Record<string, unknown> {
-  const manifest = Object.hasOwn(ADAPTER_REGISTRY, adapterId)
-    ? ADAPTER_REGISTRY[adapterId]
-    : undefined;
+  const plugin = getActivePluginRegistry()?.getPlugin(adapterId);
+  if (plugin?.display.onModeSwitch) {
+    return plugin.display.onModeSwitch(prev, nextMode);
+  }
+  const manifest = lookupManifest(adapterId);
   const next: Record<string, unknown> = { ...prev };
 
   const cloneDefault = (val: unknown): unknown =>
@@ -224,8 +247,8 @@ export function validateConnection(
   const dst = graph.nodes.find((n) => n.id === toNode);
   if (!src || !dst) return { valid: false, reason: 'Missing source or target node' };
 
-  const srcManifest = Object.hasOwn(ADAPTER_REGISTRY, src.adapterId) ? ADAPTER_REGISTRY[src.adapterId] : undefined;
-  const dstManifest = Object.hasOwn(ADAPTER_REGISTRY, dst.adapterId) ? ADAPTER_REGISTRY[dst.adapterId] : undefined;
+  const srcManifest = lookupManifest(src.adapterId);
+  const dstManifest = lookupManifest(dst.adapterId);
   if (!srcManifest || !dstManifest) return { valid: false, reason: 'Unknown adapter' };
 
   const outSpec = Object.hasOwn(srcManifest.outputs, fromPort) ? srcManifest.outputs[fromPort] : undefined;
@@ -233,9 +256,9 @@ export function validateConnection(
   if (!outSpec) return { valid: false, reason: `Unknown output port "${fromPort}"` };
   if (!inSpec) return { valid: false, reason: `Unknown input port "${toPort}"` };
 
-  if (outSpec.type !== inSpec.type) {
-    const outLabel = PORT_COLORS[outSpec.type]?.label ?? outSpec.type;
-    const inLabel = PORT_COLORS[inSpec.type]?.label ?? inSpec.type;
+  if (!areSpecsCompatible(outSpec as PortSpec, inSpec as PortSpec)) {
+    const outLabel = lookupPortLabel(outSpec.type);
+    const inLabel = lookupPortLabel(inSpec.type);
     return {
       valid: false,
       reason: `Type mismatch: ${outLabel} cannot connect to ${inLabel}`,
@@ -265,7 +288,7 @@ export function validateGraph(graph: WorkflowGraph, { requireRunnable = true } =
     } else {
       byId.set(node.id, node);
     }
-    if (!Object.hasOwn(ADAPTER_REGISTRY, node.adapterId)) {
+    if (!lookupManifest(node.adapterId)) {
       errors.push(`Node "${node.id}" references unknown adapter "${node.adapterId}".`);
     }
   }
@@ -296,8 +319,8 @@ export function validateGraph(graph: WorkflowGraph, { requireRunnable = true } =
       errors.push(`Self-loop detected on node "${e.fromNode}".`);
     }
 
-    const srcManifest = Object.hasOwn(ADAPTER_REGISTRY, src.adapterId) ? ADAPTER_REGISTRY[src.adapterId] : undefined;
-    const dstManifest = Object.hasOwn(ADAPTER_REGISTRY, dst.adapterId) ? ADAPTER_REGISTRY[dst.adapterId] : undefined;
+    const srcManifest = lookupManifest(src.adapterId);
+    const dstManifest = lookupManifest(dst.adapterId);
     const inSpec =
       dstManifest && Object.hasOwn(dstManifest.inputs, e.toPort)
         ? dstManifest.inputs[e.toPort]
@@ -313,9 +336,9 @@ export function validateGraph(graph: WorkflowGraph, { requireRunnable = true } =
         errors.push(`Node "${dst.id}" has unknown input port "${e.toPort}".`);
         edgePortsOk = false;
       }
-      if (outSpec && inSpec && outSpec.type !== inSpec.type) {
-        const outLabel = PORT_COLORS[outSpec.type]?.label ?? outSpec.type;
-        const inLabel = PORT_COLORS[inSpec.type]?.label ?? inSpec.type;
+      if (outSpec && inSpec && !areSpecsCompatible(outSpec as PortSpec, inSpec as PortSpec)) {
+        const outLabel = lookupPortLabel(outSpec.type);
+        const inLabel = lookupPortLabel(inSpec.type);
         errors.push(
           `Type mismatch on connection ${src.label ?? src.id}.${e.fromPort} → ${dst.label ?? dst.id}.${e.toPort} (${outLabel} vs ${inLabel}).`,
         );
@@ -353,13 +376,12 @@ export function validateGraph(graph: WorkflowGraph, { requireRunnable = true } =
 
   // Check required inputs and node parameter validity
   for (const node of byId.values()) {
-    if (!requireRunnable || !Object.hasOwn(ADAPTER_REGISTRY, node.adapterId)) continue;
-    const manifest = ADAPTER_REGISTRY[node.adapterId];
-    if (!manifest) continue;
+    const manifest = lookupManifest(node.adapterId);
+    if (!requireRunnable || !manifest) continue;
     for (const [portName, spec] of Object.entries(manifest.inputs)) {
       if (spec.required === false) continue;
       if (!validConnectedTargets.has(`${node.id}:${portName}`)) {
-        const portLabel = PORT_COLORS[spec.type]?.label ?? spec.type;
+        const portLabel = lookupPortLabel(spec.type);
         errors.push(
           `"${node.label ?? manifest.shortName}" is missing required input "${portName}" (${portLabel}).`,
         );
@@ -405,7 +427,7 @@ function getPortIndexForAdapter(
   dir: 'inputs' | 'outputs',
   portName: string,
 ): number {
-  const keys = Object.keys(ADAPTER_REGISTRY[adapterId]?.[dir] ?? {});
+  const keys = Object.keys(lookupManifest(adapterId)?.[dir] ?? {});
   const idx = keys.indexOf(portName);
   return idx >= 0 ? idx : 0;
 }
@@ -470,9 +492,7 @@ export function snapNodePositionToPorts(
  * so multi-port cards (e.g. 4-output `ESM-C 300M`) receive generous vertical clearance in `autoLayoutGraph`.
  */
 export function estimateNodeCardHeight(node: WorkflowNode): number {
-  const manifest = Object.hasOwn(ADAPTER_REGISTRY, node.adapterId)
-    ? ADAPTER_REGISTRY[node.adapterId]
-    : undefined;
+  const manifest = lookupManifest(node.adapterId);
   const inputCount = manifest ? Object.keys(manifest.inputs).length : 1;
   const outputCount = manifest ? Object.keys(manifest.outputs).length : 1;
   const maxPorts = Math.max(1, inputCount, outputCount);
@@ -520,7 +540,7 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
   const portIdx = (nodeId: string, dir: 'inputs' | 'outputs', portName: string): number => {
     const node = byId.get(nodeId);
     if (!node) return 0;
-    const keys = Object.keys(ADAPTER_REGISTRY[node.adapterId]?.[dir] ?? {});
+    const keys = Object.keys(lookupManifest(node.adapterId)?.[dir] ?? {});
     const idx = keys.indexOf(portName);
     return idx >= 0 ? idx : 0;
   };
@@ -645,7 +665,7 @@ export function proposeConnectionsForNode(
 ): WorkflowEdge[] {
   const newNode = graphWithNode.nodes.find((n) => n.id === newNodeId);
   if (!newNode) return [];
-  const manifest = ADAPTER_REGISTRY[newNode.adapterId];
+  const manifest = lookupManifest(newNode.adapterId);
   if (!manifest) return [];
 
   const occupiedTargets = new Set(graphWithNode.edges.map((e) => `${e.toNode}:${e.toPort}`));
@@ -668,8 +688,8 @@ export function proposeConnectionsForNode(
     const fromNode = graphWithNode.nodes.find((n) => n.id === fromId);
     const toNode = graphWithNode.nodes.find((n) => n.id === toId);
     if (!fromNode || !toNode) return undefined;
-    const fromManifest = ADAPTER_REGISTRY[fromNode.adapterId];
-    const toManifest = ADAPTER_REGISTRY[toNode.adapterId];
+    const fromManifest = lookupManifest(fromNode.adapterId);
+    const toManifest = lookupManifest(toNode.adapterId);
     if (!fromManifest || !toManifest) return undefined;
 
     for (const fromPort of Object.keys(fromManifest.outputs)) {
@@ -742,7 +762,7 @@ export function proposeConnectionsForNode(
 
   if (!anchorNode) return [];
 
-  const anchorManifest = ADAPTER_REGISTRY[anchorNode.adapterId];
+  const anchorManifest = lookupManifest(anchorNode.adapterId);
   const insertUpstream =
     manifest.stage === 'source' ||
     (manifest.stage === 'condition' && anchorManifest?.stage !== 'source');
@@ -792,7 +812,7 @@ export function proposeConnectionsForNode(
     while (queue.length > 0 && proposed.length < 2) {
       const ancId = queue.shift()!;
       const ancNode = graphWithNode.nodes.find((n) => n.id === ancId);
-      const ancManifest = ancNode ? ADAPTER_REGISTRY[ancNode.adapterId] : undefined;
+      const ancManifest = ancNode ? lookupManifest(ancNode.adapterId) : undefined;
       if (ancNode && ancManifest) {
         for (const toPort of missingRequiredPorts) {
           if (occupiedTargets.has(`${newNodeId}:${toPort}`)) continue;
@@ -828,7 +848,7 @@ export function insertBlockSmart(
   dropPos?: { x: number; y: number },
   options?: InsertBlockOptions,
 ): InsertBlockResult {
-  const manifest = ADAPTER_REGISTRY[adapterId];
+  const manifest = lookupManifest(adapterId);
   if (!manifest) {
     throw new Error(`Unknown adapter "${adapterId}"`);
   }
@@ -874,7 +894,7 @@ export function insertBlockSmart(
   if (dropPos) {
     position = { x: Math.round(dropPos.x), y: Math.round(dropPos.y) };
   } else if (selectedNode) {
-    const selectedManifest = ADAPTER_REGISTRY[selectedNode.adapterId];
+    const selectedManifest = lookupManifest(selectedNode.adapterId);
     const insertUpstream =
       manifest.stage === 'source' ||
       (manifest.stage === 'condition' && selectedManifest?.stage !== 'source');

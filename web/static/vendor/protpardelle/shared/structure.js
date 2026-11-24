@@ -19,15 +19,19 @@ function pdbRows(text) {
     }
     if (record === "ENDMDL") break;
     if (record !== "ATOM" && record !== "HETATM") continue;
+    const rawResid = line.slice(22, 26).trim();
     rows.push({
       record,
       atom: line.slice(12, 16).trim(),
       alt: line.slice(16, 17).trim(),
       resname: line.slice(17, 20).trim(),
       chain: line.slice(21, 22),
-      resid: Number(line.slice(22, 26)),
+      resid: rawResid === "" ? NaN : Number(rawResid),
       icode: line.slice(26, 27).trim(),
-      xyz: [30, 38, 46].map((i) => Number(line.slice(i, i + 8))),
+      xyz: [30, 38, 46].map((i) => {
+        const s = line.slice(i, i + 8).trim();
+        return s === "" ? NaN : Number(s);
+      }),
       occupancy: Number(line.slice(54, 60)),
       bfactor: Number(line.slice(60, 66)),
     });
@@ -132,7 +136,10 @@ function cifRows(text, { seqIdField = "auth" } = {}) {
           icode: [".", "?"].includes(get("pdbx_PDB_ins_code"))
             ? ""
             : get("pdbx_PDB_ins_code"),
-          xyz: ["Cartn_x", "Cartn_y", "Cartn_z"].map((k) => Number(get(k))),
+          xyz: ["Cartn_x", "Cartn_y", "Cartn_z"].map((k) => {
+            const s = get(k);
+            return !s || s === "." || s === "?" ? NaN : Number(s);
+          }),
           occupancy: Number(get("occupancy")),
           bfactor: Number(get("B_iso_or_equiv")),
         });

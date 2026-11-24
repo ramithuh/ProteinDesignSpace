@@ -165,28 +165,28 @@ class MockWorker {
   }
 }
 
-vi.mock('$lib/workers/genie3.worker?worker', () => ({
+vi.mock('$lib/plugins/genie3/genie3.worker?worker', () => ({
   default: class {
     constructor() {
       return new MockWorker();
     }
   },
 }));
-vi.mock('$lib/workers/rfd4.worker?worker', () => ({
+vi.mock('$lib/plugins/rfd4-proteina/rfd4.worker?worker', () => ({
   default: class {
     constructor() {
       return new MockWorker();
     }
   },
 }));
-vi.mock('$lib/workers/mpnn.worker?worker', () => ({
+vi.mock('$lib/plugins/web-protein-mpnn/mpnn.worker?worker', () => ({
   default: class {
     constructor() {
       return new MockWorker();
     }
   },
 }));
-vi.mock('$lib/workers/localfold.worker?worker', () => ({
+vi.mock('$lib/plugins/localfold-af2/localfold.worker?worker', () => ({
   default: class {
     constructor() {
       return new MockWorker();

@@ -20,6 +20,7 @@ import type {
   ResidueTrackArtifact,
   SequenceSet,
   StructureArtifact,
+  WorkflowGraph,
 } from '$lib/engine/types';
 
 function makeDummyStructure(id: string, sequence = 'MKTAYIAKQRQISFVKSHFSRQ'): StructureArtifact {
@@ -320,5 +321,40 @@ describe('peek helpers', () => {
     expect(formatCandidateSequence(seq40, rowLens)).toBe(
       'NLYIQWLKDGGPSSGRPPPS:NLYIQWLKDGGPSSGRPPPS',
     );
+  });
+
+  it('Batch 3E: GNINA resolveSlots marks out:track inactive-in-mode outside pocket-scan and tags out:structure as receptor', async () => {
+    // Boot defaultPluginRegistry so GNINA plugin's display.resolveSlots is active
+    await import('$lib/plugins');
+    const scoreGraph: WorkflowGraph = {
+      id: 'gnina-slots-score',
+      name: 'GNINA Score',
+      nodes: [
+        { id: 'pdb', adapterId: 'pdb-input', params: { mode: 'demo-bundle' } },
+        { id: 'gn', adapterId: 'gnina', params: { taskMode: 'score' } },
+      ],
+      edges: [{ fromNode: 'pdb', fromPort: 'structure', toNode: 'gn', toPort: 'structure' }],
+    };
+    const scoreSlots = getNodePeekSlots(scoreGraph, 'gn', {});
+    const trackSlot = scoreSlots.find((s) => s.id === 'out:track');
+    const structSlot = scoreSlots.find((s) => s.id === 'out:structure');
+    expect(trackSlot?.availability).toBe('inactive-in-mode');
+    expect(trackSlot?.inactiveReason).toContain('Pocket Contribution Scan');
+    expect(structSlot?.availability).toBe('active');
+    expect(structSlot?.viewportRole).toBe('receptor');
+    // Default slot skips inactive track and selects active structure!
+    expect(pickDefaultPeekSlot(scoreSlots)).toBe('out:structure');
+
+    // In pocket-scan mode, out:track is active and preferred!
+    const scanGraph: WorkflowGraph = {
+      ...scoreGraph,
+      nodes: [
+        scoreGraph.nodes[0],
+        { id: 'gn', adapterId: 'gnina', params: { taskMode: 'pocket-scan' } },
+      ],
+    };
+    const scanSlots = getNodePeekSlots(scanGraph, 'gn', {});
+    expect(scanSlots.find((s) => s.id === 'out:track')?.availability).toBe('active');
+    expect(pickDefaultPeekSlot(scanSlots)).toBe('out:track');
   });
 });

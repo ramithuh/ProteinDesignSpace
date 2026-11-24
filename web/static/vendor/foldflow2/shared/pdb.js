@@ -17,8 +17,10 @@ export function toPDB(
   let text = "",
     serial = 1;
   for (let r = 0; r < length; r++) {
-    const resName = AA1_TO_3[seqUpper[r]] ?? "ALA";
+    const aa = seqUpper[r];
+    const resName = aa ? (AA1_TO_3[aa] ?? "UNK") : "ALA";
     for (let a = 0; a < 5; a++) {
+      if (resName === "GLY" && names[a] === "CB") continue;
       const xyz = Array.from(
         atoms.subarray(r * 15 + a * 3, r * 15 + a * 3 + 3),
       );

@@ -603,10 +603,9 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
         }
         return { labelChain: authInfo.labelChain, start: minL, end: maxL };
       }
-      // Never fall through to label_seq_id when an explicit insertion code missed in auth numbering!
-      if (hasExplicitIns) {
-        return { labelChain: authInfo.labelChain, start, end };
-      }
+      // Never silently fall back to label_seq_id when an explicit author chain exists and the
+      // requested author residue number missed (e.g. A1 on A101-A103 must NOT silently lock A101!).
+      return { labelChain: authInfo.labelChain, start, end };
     }
     if (!hasExplicitIns) {
       const labelInfo = lookupLabelChain(t);
@@ -858,8 +857,12 @@ export function extractRfd4TemplateContext(rawStructureText: string): Rfd4Templa
     const proteinChains = [...polymerByAuthChain.values()].filter((c) => !c.isNucleic);
     let target: Rfd4PolymerChainInfo | undefined;
     if (lockChain) {
-      const ch = lockChain.trim().toUpperCase();
-      target = polymerByAuthChain.get(ch) ?? polymerByLabelChain.get(ch);
+      const ch = lockChain.trim();
+      target =
+        polymerByAuthChain.get(ch) ??
+        polymerByLabelChain.get(ch) ??
+        polymerByAuthChain.get(ch.toUpperCase()) ??
+        polymerByLabelChain.get(ch.toUpperCase());
     }
     if (!target) target = proteinChains[0];
     if (!target) return null;
@@ -1578,10 +1581,10 @@ export function extractRfd4DesignMetadata(
   }
 
   const uniqueChains: string[] = [];
-  const chainStats = new Map<string, { total: number; fixed: number }>();
+  const chainStats = new Map<string, { total: number; seqFixed: number; coordFixed: number }>();
   const perResFlags: Array<{
     chain: string;
-    isFixed: boolean;
+    isSeqFixed: boolean;
     isMotifCandidate: boolean;
     nativeCoord: number[] | null;
   }> = [];
@@ -1589,7 +1592,7 @@ export function extractRfd4DesignMetadata(
   for (let i = 0; i < parsed.nResidues; i++) {
     const chain = parsed.chainIds[i] || 'A';
     if (!chainStats.has(chain)) {
-      chainStats.set(chain, { total: 0, fixed: 0 });
+      chainStats.set(chain, { total: 0, seqFixed: 0, coordFixed: 0 });
       uniqueChains.push(chain);
     }
     const stat = chainStats.get(chain)!;
@@ -1600,8 +1603,10 @@ export function extractRfd4DesignMetadata(
     const hasSeqCond = tid >= 0 && condSeqRaw && Number(condSeqRaw[tid]) > 0;
     const coordGroup = typeof rec?.coordGroup === 'number' ? rec.coordGroup : -1;
     const isUnidx = Boolean(rec?.isUnindexedInsertion);
-    const isFixed = hasSeqCond || coordGroup >= 0 || isUnidx;
-    if (isFixed) stat.fixed++;
+    const isSeqFixed = Boolean(hasSeqCond);
+    const isCoordFixed = coordGroup >= 0 || isUnidx;
+    if (isSeqFixed) stat.seqFixed++;
+    if (isCoordFixed) stat.coordFixed++;
 
     const rawCoord =
       (Array.isArray(rec?.inCoord) && rec.inCoord.length === 3 ? rec.inCoord : null) ??
@@ -1614,7 +1619,7 @@ export function extractRfd4DesignMetadata(
 
     perResFlags.push({
       chain,
-      isFixed,
+      isSeqFixed,
       isMotifCandidate: coordGroup > 0 || isUnidx || (coordGroup === 0 && nativeCoord !== null),
       nativeCoord,
     });
@@ -1626,14 +1631,14 @@ export function extractRfd4DesignMetadata(
   if (uniqueChains.length > 1) {
     const anyFullyFixed = uniqueChains.some((ch) => {
       const s = chainStats.get(ch)!;
-      return s.total > 0 && s.fixed === s.total;
+      return s.total > 0 && s.seqFixed === s.total;
     });
     for (const ch of uniqueChains) {
       const s = chainStats.get(ch)!;
-      if (s.total > 0 && s.fixed === s.total) {
+      if (s.total > 0 && s.seqFixed === s.total) {
         lockedChains.push(ch);
         chainRoles[ch] = 'target';
-      } else if (anyFullyFixed && s.fixed === 0) {
+      } else if (anyFullyFixed && s.seqFixed === 0 && s.coordFixed === 0) {
         chainRoles[ch] = 'binder';
       } else {
         chainRoles[ch] = 'scaffold';
@@ -1651,8 +1656,8 @@ export function extractRfd4DesignMetadata(
   for (let i = 0; i < perResFlags.length; i++) {
     const f = perResFlags[i];
     if (lockedSet.has(f.chain)) continue;
-    if (f.isFixed) {
-      fixedResidueIndices.push(i + 1); // 1-based output index
+    if (f.isSeqFixed) {
+      fixedResidueIndices.push(i + 1); // 1-based output index (sequence-fixed only!)
     }
     if (f.isMotifCandidate && f.nativeCoord) {
       motifIndices.push(i); // 0-based index into caCoords
@@ -2185,11 +2190,17 @@ export function compileConditionToGenie3Spec(
   for (const part of contigParts) {
     if (/^[A-Za-z]/.test(part) || part.includes(':')) {
       const ranges = parseResidueRangeTokens(part);
-      const res = selectTemplateResidues(ranges);
-      if (res.length > 0) {
-        hasExplicitMotifInContig = true;
-        segments.push({ kind: 'motif', residues: res });
+      if (ranges.length === 0) {
+        throw new Error(`Invalid Genie 3 motif contig token "${part}".`);
       }
+      const res = selectTemplateResidues(ranges);
+      if (res.length === 0) {
+        throw new Error(
+          `Genie 3 motif contig span "${part}" matched 0 residues in the wired template structure.`,
+        );
+      }
+      hasExplicitMotifInContig = true;
+      segments.push({ kind: 'motif', residues: res });
     } else {
       const mid = parseLengthRangeMid(part);
       if (mid !== null) segments.push({ kind: 'scaffold', len: mid });
@@ -2201,9 +2212,19 @@ export function compileConditionToGenie3Spec(
   if (!hasExplicitMotifInContig) {
     const motifGroups = parseResidueRangeTokens((intent.motifSpans ?? []).join(', '));
     const motifBlocks: TplRes[][] = [];
+    const unmatchedSpans: string[] = [];
     for (const r of motifGroups) {
       const res = selectTemplateResidues([r]);
-      if (res.length > 0) motifBlocks.push(res);
+      if (res.length > 0) {
+        motifBlocks.push(res);
+      } else {
+        unmatchedSpans.push(`${r.chain}${r.start}${r.startInsCode ?? ''}${r.end !== r.start || r.endInsCode !== r.startInsCode ? `-${r.end}${r.endInsCode ?? ''}` : ''}`);
+      }
+    }
+    if (unmatchedSpans.length > 0) {
+      throw new Error(
+        `Genie 3 motif span(s) matched 0 residues in the wired template structure: ${unmatchedSpans.join(', ')}.`,
+      );
     }
     if (motifBlocks.length === 0) {
       throw new Error(
@@ -2379,7 +2400,7 @@ export function resolveRfd4CompiledInput(
   const customSpecYaml = String(params.customSpecYaml ?? '').trim();
   const partialFraction = Math.max(0.05, Math.min(0.95, Number(params.partialFraction ?? 0.5)));
   const inlineContig = String(params.contig ?? '').trim();
-  const inlineLock = String(params.lockChain ?? '').trim().toUpperCase();
+  const inlineLock = String(params.lockChain ?? '').trim();
   const inlineHotspots = String(params.hotspots ?? '').trim();
   const inlineMotif = String(params.motifSpan ?? '').trim();
   const inlineUnidx = Boolean(params.unindexedMotif);
@@ -2523,7 +2544,7 @@ export function resolveRfd4CompiledInput(
 
     // Inline conditioning directly from RFD4-Proteina node parameters
     const templateContext = ensureTemplateContext();
-    const defaultChain = (template?.chainIds?.[0] || 'A').toUpperCase();
+    const defaultChain = template?.chainIds?.[0] || 'A';
     const effectiveLock = mode === 'binder' ? inlineLock || defaultChain : inlineLock;
 
     let effectiveContig = inlineContig;
@@ -2725,7 +2746,7 @@ export function resolveGenie3CompiledInput(
   const seed = Math.max(0, Math.round(Number(params.seed ?? 42)));
   const taskMode = String(params.taskMode ?? 'unconditional');
   const inlineContig = String(params.contig ?? '').trim();
-  const inlineLock = String(params.lockChain ?? '').trim().toUpperCase();
+  const inlineLock = String(params.lockChain ?? '').trim();
   const inlineHotspots = String(params.hotspots ?? '').trim();
   const inlineMotif = String(params.motifSpan ?? '').trim();
 
@@ -2777,15 +2798,16 @@ export function resolveGenie3CompiledInput(
     !effectiveCond &&
     (taskMode === 'binder' || taskMode === 'motif' || inlineLock || inlineMotif)
   ) {
-    const isBinder = taskMode === 'binder' || Boolean(inlineLock);
-    const defaultChain = (template?.chainIds?.[0] || 'A').toUpperCase();
+    // Ignore stale binder-only lockChain when taskMode is explicitly 'motif'
+    const isBinder = taskMode === 'binder' || (taskMode !== 'motif' && Boolean(inlineLock));
+    const defaultChain = template?.chainIds?.[0] || 'A';
     const resolvedLock = isBinder ? inlineLock || defaultChain : '';
     const resolvedContig =
       inlineContig || (isBinder ? `/0,${length}-${length}` : `${length}-${length}`);
     const intent = buildCanonicalConditionIntent({
       contig: resolvedContig,
       lockChain: resolvedLock,
-      hotspots: inlineHotspots,
+      hotspots: isBinder ? inlineHotspots : '',
       motifSpan: inlineMotif,
     });
     effectiveCond = {
@@ -2806,6 +2828,14 @@ export function resolveGenie3CompiledInput(
   const compiledSpec = effectiveCond
     ? compileConditionToGenie3Spec(effectiveCond, template, length)
     : undefined;
+  if (
+    taskMode === 'motif' &&
+    (!compiledSpec || compiledSpec.mode !== 'motif' || compiledSpec.selectedSourceResidues.length === 0)
+  ) {
+    throw new Error(
+      'Genie 3 motif mode requires at least 1 selected motif residue (provide motifSpan or a contig containing template residue spans like 15-15,A16-35,15-15).',
+    );
+  }
   const effectiveSteps = effectiveGenie3DdimSteps(nSampleStep);
 
   return {

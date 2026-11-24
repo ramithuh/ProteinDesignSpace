@@ -353,7 +353,7 @@ describe('CT-01 & #80 — buildMotifLineage & ProtPardelle motifGuidance', () =>
     ]);
 
     const workerSrc = readFileSync(
-      resolve(process.cwd(), 'src/lib/workers/protpardelle.worker.ts'),
+      resolve(process.cwd(), 'src/lib/plugins/protpardelle/protpardelle.worker.ts'),
       'utf8',
     );
     expect(workerSrc).toContain('buildMotifLineage');
@@ -622,7 +622,7 @@ describe('CT-05 — resolveLocalFoldEffectiveConfig parity across worker & previ
 
     // Worker encodes effectiveEsmfold2Steps into runHash and FoldedStructure.id
     const lfSrc = readFileSync(
-      resolve(process.cwd(), 'src/lib/workers/localfold.worker.ts'),
+      resolve(process.cwd(), 'src/lib/plugins/localfold-af2/localfold.worker.ts'),
       'utf8',
     );
     expect(lfSrc).toContain('resolveLocalFoldEffectiveConfig');
@@ -811,7 +811,7 @@ describe('Generic field.warnBelow, disjoint motifSpan, WF-13 defaults, and Dyna-
     ).toBe(true);
 
     const dynaSrc = readFileSync(
-      resolve(process.cwd(), 'src/lib/workers/dyna1.worker.ts'),
+      resolve(process.cwd(), 'src/lib/plugins/dyna1/dyna1.worker.ts'),
       'utf8',
     );
     expect(dynaSrc).toContain("'seq-only'");

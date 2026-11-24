@@ -1,4 +1,4 @@
-import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
+import { validateBioCapabilities, type BioFoldLimitOptions } from '$lib/engine/bio-capabilities';
 import { validateGraph } from '$lib/engine/graph-utils';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type {
@@ -42,12 +42,13 @@ export function computePreviewChecks(
   activeDraftPreview: PlannedWorkflowResult | null,
   outputsByNode: Record<string, Record<string, CanonicalArtifact>>,
   inputPreviewErrorsByNode: Record<string, string>,
+  foldLimitOpts?: BioFoldLimitOptions,
 ): PreviewChecksResult {
   if (!activeDraftPreview) {
     const inputErrs = Object.values(inputPreviewErrorsByNode);
     return {
       displayedValidationErrors: [...validateGraph(committedGraph), ...inputErrs],
-      bioIssues: validateBioCapabilities(committedGraph, outputsByNode),
+      bioIssues: validateBioCapabilities(committedGraph, outputsByNode, foldLimitOpts),
       hideBioFixes: false,
       hideRunError: false,
     };
@@ -57,7 +58,7 @@ export function computePreviewChecks(
   if (!activeDraftPreview.isIncrementalEdit) {
     return {
       displayedValidationErrors: validateGraph(previewGraph),
-      bioIssues: validateBioCapabilities(previewGraph, {}),
+      bioIssues: validateBioCapabilities(previewGraph, {}, foldLimitOpts),
       hideBioFixes: true,
       hideRunError: true,
     };
@@ -82,7 +83,7 @@ export function computePreviewChecks(
 
   return {
     displayedValidationErrors: [...validateGraph(previewGraph), ...filteredInputErrs],
-    bioIssues: validateBioCapabilities(previewGraph, filteredOutputs),
+    bioIssues: validateBioCapabilities(previewGraph, filteredOutputs, foldLimitOpts),
     hideBioFixes: true,
     hideRunError: false,
   };

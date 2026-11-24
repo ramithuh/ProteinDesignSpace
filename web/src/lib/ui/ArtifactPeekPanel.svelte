@@ -1,15 +1,17 @@
 <script lang="ts">
   import { ADAPTER_REGISTRY } from '$lib/engine/registry';
+  import { defaultPluginRegistry } from '$lib/plugins';
   import { PORT_COLORS } from '$lib/engine/graph-utils';
+  import DockingScoreCard from './DockingScoreCard.svelte';
+  import EmbeddingPeekView from './peek/EmbeddingPeekView.svelte';
+  import TrajectoryPeekView from './peek/TrajectoryPeekView.svelte';
   import { mmcifToPdb } from '$lib/protein-ops/pdb';
   import {
     analyzeSequence,
-    buildTrajectoryMultiModelPdb,
     foldModelSlug,
     formatCandidateSequence,
     formatFoldModelName,
     inferPdbChainLengths,
-    inferTrajectoryResidueCount,
     previewTextLines,
     resolveActiveRowChainLengths,
     resolveFoldIpsae,
@@ -188,12 +190,7 @@
 
   function isSelfGeneratorId(id?: string): boolean {
     if (!id) return false;
-    return (
-      id.startsWith('rfd4-proteina') ||
-      id.startsWith('genie3') ||
-      id.startsWith('la-proteina') ||
-      id.startsWith('protpardelle')
-    );
+    return Boolean(defaultPluginRegistry.getPlugin(id)?.display.isSelfGenerator);
   }
 
   function formatMsaBadge(msaMode?: MsaMode, msaDepth?: number): string {
@@ -268,14 +265,6 @@
   let trackArt = $derived(artifact?.kind === 'ResidueTrack' ? (artifact as ResidueTrackArtifact) : null);
   let embArt = $derived(artifact?.kind === 'SequenceEmbedding' ? (artifact as SequenceEmbeddingArtifact) : null);
   let trajArt = $derived(artifact?.kind === 'TrajectoryFrames' ? (artifact as TrajectoryFramesArtifact) : null);
-  let embStats = $derived(embArt ? embeddingSummary(embArt.pooled) : null);
-  let trajResCount = $derived(trajArt ? inferTrajectoryResidueCount(trajArt, contextStructure) : null);
-  let trajPdbText = $derived(
-    trajArt ? buildTrajectoryMultiModelPdb(trajArt, contextStructure) : null,
-  );
-  let trajRawPrev = $derived(
-    rawPreviewOpen && trajPdbText ? previewTextLines(trajPdbText, 36) : null,
-  );
 
   $effect(() => {
     void artifact?.id;
@@ -944,85 +933,6 @@
       ge70Pct: (ge70 / count) * 100,
     };
   }
-
-  function embeddingSummary(arr: Float32Array) {
-    if (!arr || arr.length === 0) return null;
-    let sumSq = 0;
-    let sum = 0;
-    let min = Infinity;
-    let max = -Infinity;
-    let count = 0;
-    for (let i = 0; i < arr.length; i++) {
-      const v = arr[i];
-      if (!Number.isFinite(v)) continue;
-      count++;
-      sumSq += v * v;
-      sum += v;
-      if (v < min) min = v;
-      if (v > max) max = v;
-    }
-    if (count === 0) return null;
-    const mean = sum / count;
-    const l2Norm = Math.sqrt(sumSq);
-    const preview: number[] = [];
-    for (let i = 0; i < Math.min(8, arr.length); i++) {
-      preview.push(arr[i]);
-    }
-    return { count, l2Norm, mean, min, max, preview };
-  }
-
-  function formatEmbeddingJson(emb: SequenceEmbeddingArtifact): string {
-    const stats = embeddingSummary(emb.pooled);
-    const perResNorms =
-      emb.perResidue && emb.dim > 0
-        ? (() => {
-            const L = Math.floor(emb.perResidue.length / emb.dim);
-            const norms: number[] = new Array(L);
-            for (let i = 0; i < L; i++) {
-              let sq = 0;
-              const off = i * emb.dim;
-              for (let d = 0; d < emb.dim; d++) {
-                const v = emb.perResidue[off + d];
-                if (Number.isFinite(v)) sq += v * v;
-              }
-              norms[i] = Number(Math.sqrt(sq).toFixed(6));
-            }
-            return norms;
-          })()
-        : undefined;
-    return (
-      JSON.stringify(
-        {
-          id: emb.id,
-          ...(emb.label ? { label: emb.label } : {}),
-          sourceModelId: emb.sourceModelId,
-          ...(emb.parentStructureId ? { parentStructureId: emb.parentStructureId } : {}),
-          ...(emb.sequenceId ? { sequenceId: emb.sequenceId } : {}),
-          sequence: emb.sequence,
-          length: emb.sequence.length,
-          dim: emb.dim,
-          ...(isFiniteNum(emb.pseudoPerplexity) ? { pseudoPerplexity: emb.pseudoPerplexity } : {}),
-          ...(stats
-            ? {
-                pooledNorm: Number(stats.l2Norm.toFixed(6)),
-                pooledMean: Number(stats.mean.toFixed(6)),
-                pooledRange: [Number(stats.min.toFixed(6)), Number(stats.max.toFixed(6))],
-              }
-            : {}),
-          pooled: Array.from(emb.pooled, (v) => (Number.isFinite(v) ? Number(v.toFixed(6)) : null)),
-          ...(perResNorms
-            ? {
-                perResidueShape: [perResNorms.length, emb.dim],
-                perResidueL2Norms: perResNorms,
-              }
-            : {}),
-          ...(emb.provenance ? { provenance: emb.provenance } : {}),
-        },
-        null,
-        2,
-      ) + '\n'
-    );
-  }
 </script>
 
 <div class="panel" class:embedded>
@@ -1085,15 +995,22 @@
           {#each outSlots as slot (slot.id)}
             {@const col = PORT_COLORS[slot.portType]?.bg ?? '#64748b'}
             {@const typeLabel = PORT_COLORS[slot.portType]?.label ?? slot.portType}
+            {@const isInactiveMode = slot.availability === 'inactive-in-mode'}
             <button
               class="slot-pill"
               class:active={activeSlot?.id === slot.id}
-              class:has-data={slot.artifact !== null}
+              class:has-data={slot.artifact !== null && !isInactiveMode}
+              class:inactive-mode={isInactiveMode}
               onclick={() => onSelectSlot(slot.id)}
-              title={`Inspect output "${slot.portName}" (${typeLabel})`}
+              title={isInactiveMode
+                ? (slot.inactiveReason ?? `Output "${slot.portName}" is inactive in the current mode`)
+                : `Inspect output "${slot.portName}" (${typeLabel})`}
             >
               <span class="pdot" style="background: {col}"></span>
               <span>{slot.portName}</span>
+              {#if isInactiveMode}
+                <span class="peer">inactive</span>
+              {/if}
             </button>
           {/each}
         </div>
@@ -1896,6 +1813,15 @@
             class="link-btn"
             onclick={() => {
               const dm = activeStruct.dockingMetrics!;
+              const csvCell = (raw: unknown): string => {
+                let str = String(raw ?? '');
+                if (/^[=+@\t\r]/.test(str) || (/^-/.test(str) && Number.isNaN(Number(str)))) {
+                  str = `'${str}`;
+                }
+                return /[",\r\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+              };
+              const fmtNum = (v: unknown, digits: number): string =>
+                typeof v === 'number' && Number.isFinite(v) ? v.toFixed(digits) : '';
               const hdr = [
                 'rank',
                 'pose_id',
@@ -1918,20 +1844,20 @@
                 ...dm.rows.map((r, idx) =>
                   [
                     r.rank ?? idx + 1,
-                    JSON.stringify(r.poseId),
-                    JSON.stringify(r.ligandCode),
-                    dm.taskMode,
-                    dm.precision,
+                    csvCell(r.poseId),
+                    csvCell(r.ligandCode),
+                    csvCell(dm.taskMode),
+                    csvCell(dm.precision),
                     r.heavyAtoms,
                     r.rotors,
-                    r.cnnScore.toFixed(4),
-                    r.cnnAffinity.toFixed(4),
-                    r.cnnVS.toFixed(4),
-                    r.vinaScore.toFixed(4),
-                    r.rmsdToBest !== undefined ? r.rmsdToBest.toFixed(3) : '',
-                    r.initialCnnScore !== undefined ? r.initialCnnScore.toFixed(4) : '',
-                    r.initialVinaScore !== undefined ? r.initialVinaScore.toFixed(4) : '',
-                    r.poseRmsd !== undefined ? r.poseRmsd.toFixed(3) : '',
+                    fmtNum(r.cnnScore, 4),
+                    fmtNum(r.cnnAffinity, 4),
+                    fmtNum(r.cnnVS, 4),
+                    fmtNum(r.vinaScore, 4),
+                    fmtNum(r.rmsdToBest, 3),
+                    fmtNum(r.initialCnnScore, 4),
+                    fmtNum(r.initialVinaScore, 4),
+                    fmtNum(r.poseRmsd, 3),
                   ].join(','),
                 ),
               ];
@@ -1974,163 +1900,14 @@
     </div>
 
     {#if activeStruct.dockingMetrics && activeStruct.dockingMetrics.rows.length > 0}
-      {@const dm = activeStruct.dockingMetrics}
-      {@const primaryDock = dm.rows[0]}
-      {@const modelEntries = Object.entries(primaryDock.models ?? {})}
-      <div class="gnina-card" role="region" aria-label="GNINA 1.3 docking and affinity scores">
-        <div class="gnina-head">
-          <span class="gnina-title">
-            GNINA 1.3 · {primaryDock.ligandCode}
-            <span class="gnina-sub">
-              ({primaryDock.heavyAtoms} heavy atoms · {primaryDock.rotors} rotatable bond{primaryDock.rotors === 1 ? '' : 's'})
-            </span>
-          </span>
-          <span class="gnina-mode-pill">
-            {dm.taskMode === 'dock'
-              ? `Flexible Dock (${dm.rows.length} pose${dm.rows.length === 1 ? '' : 's'})`
-              : dm.taskMode === 'pocket-scan'
-                ? `Pocket Scan (${dm.pocketResiduesScanned ?? 0} res ≤ ${dm.pocketRadius ?? 5} Å)`
-                : dm.taskMode === 'minimize'
-                  ? 'Minimized Pose'
-                  : '3-Model Ensemble'}
-          </span>
-        </div>
-
-        {#if dm.taskMode === 'dock' && (dm.dockStats || dm.box)}
-          <div class="gnina-dock-meta">
-            {#if dm.box}
-              <span>Box {dm.box.size.map((v) => v.toFixed(1)).join('×')} Å</span>
-            {/if}
-            {#if dm.dockStats}
-              <span>
-                Grid {(dm.dockStats.gridMs / 1000).toFixed(2)}s · Search {(dm.dockStats.searchMs / 1000).toFixed(2)}s · CNN {(dm.dockStats.rescoreMs / 1000).toFixed(2)}s
-              </span>
-              <span>{dm.dockStats.evaluatedCandidates} candidates</span>
-            {/if}
-            {#if activeStruct.trajectoryPdb && (activeStruct.trajectoryFrameCount ?? 0) > 1}
-              <span>Use 3D frame slider to scrub poses #1–#{activeStruct.trajectoryFrameCount}</span>
-            {/if}
-          </div>
-        {/if}
-
-        <div class="gnina-kpi-grid">
-          <div class="gnina-kpi" title="Ensemble pose probability (0–1; higher = more native-like)">
-            <span class="gnina-kpi-lbl">CNNscore</span>
-            <span class="gnina-kpi-val" class:good-val={primaryDock.cnnScore >= 0.5}>
-              {primaryDock.cnnScore.toFixed(3)}
-            </span>
-            {#if isFiniteNum(primaryDock.initialCnnScore)}
-              <span class="gnina-kpi-delta">
-                from {primaryDock.initialCnnScore.toFixed(3)}
-              </span>
-            {/if}
-          </div>
-          <div class="gnina-kpi" title="Predicted binding affinity in pK units (−log10 Kd; higher = tighter)">
-            <span class="gnina-kpi-lbl">CNNaffinity</span>
-            <span class="gnina-kpi-val">{primaryDock.cnnAffinity.toFixed(2)} <small>pK</small></span>
-            {#if isFiniteNum(primaryDock.initialCnnAffinity)}
-              <span class="gnina-kpi-delta">
-                from {primaryDock.initialCnnAffinity.toFixed(2)}
-              </span>
-            {/if}
-          </div>
-          <div class="gnina-kpi" title="Virtual screening score = CNNscore × CNNaffinity">
-            <span class="gnina-kpi-lbl">CNN_VS</span>
-            <span class="gnina-kpi-val" class:good-val={primaryDock.cnnVS >= 3.0}>
-              {primaryDock.cnnVS.toFixed(2)}
-            </span>
-            {#if isFiniteNum(primaryDock.initialCnnVS)}
-              <span class="gnina-kpi-delta">
-                from {primaryDock.initialCnnVS.toFixed(2)}
-              </span>
-            {/if}
-          </div>
-          <div class="gnina-kpi" title="Empirical AutoDock Vina interaction energy (kcal/mol; more negative = stronger)">
-            <span class="gnina-kpi-lbl">Vina</span>
-            <span class="gnina-kpi-val" class:good-val={primaryDock.vinaScore < -5}>
-              {primaryDock.vinaScore.toFixed(2)} <small>kcal/mol</small>
-            </span>
-            {#if isFiniteNum(primaryDock.initialVinaScore)}
-              <span class="gnina-kpi-delta">
-                from {primaryDock.initialVinaScore.toFixed(2)}{isFiniteNum(primaryDock.poseRmsd) ? ` · Δ${primaryDock.poseRmsd.toFixed(2)} Å` : ''}
-              </span>
-            {/if}
-          </div>
-        </div>
-
-        {#if dm.rows.length > 1}
-          <table class="scores gnina-poses">
-            <thead>
-              <tr>
-                {#if dm.taskMode === 'dock'}
-                  <th>Rank</th>
-                {/if}
-                <th>Pose</th>
-                <th>CNNscore</th>
-                <th>CNNaffinity (pK)</th>
-                <th>CNN_VS</th>
-                <th>Vina (kcal/mol)</th>
-                {#if dm.taskMode === 'dock'}
-                  <th>RMSD (Å)</th>
-                {/if}
-              </tr>
-            </thead>
-            <tbody>
-              {#each dm.rows as row, idx (`${row.poseId}_${idx}`)}
-                <tr>
-                  {#if dm.taskMode === 'dock'}
-                    <td>#{row.rank ?? idx + 1}</td>
-                  {/if}
-                  <td><code>{row.poseId}</code></td>
-                  <td class:good-val={row.cnnScore >= 0.5}>{row.cnnScore.toFixed(3)}</td>
-                  <td>{row.cnnAffinity.toFixed(2)}</td>
-                  <td>{row.cnnVS.toFixed(2)}</td>
-                  <td>{row.vinaScore.toFixed(2)}</td>
-                  {#if dm.taskMode === 'dock'}
-                    <td>{isFiniteNum(row.rmsdToBest) ? row.rmsdToBest.toFixed(2) : '—'}</td>
-                  {/if}
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
-
-        <details class="raw-details gnina-breakdown">
-          <summary>Ensemble models ({modelEntries.length}) &amp; Vina energy terms</summary>
-          <div class="gnina-breakdown-grid">
-            {#if modelEntries.length > 0}
-              <table class="scores gnina-mini-tbl">
-                <thead>
-                  <tr>
-                    <th>Ensemble Model</th>
-                    <th>CNNscore</th>
-                    <th>CNNaffinity (pK)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each modelEntries as [mName, mScore] (mName)}
-                    <tr>
-                      <td><code>{mName}</code></td>
-                      <td>{mScore.cnnScore.toFixed(3)}</td>
-                      <td>{mScore.cnnAffinity.toFixed(2)}</td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            {/if}
-            {#if primaryDock.vinaTerms}
-              <div class="gnina-vina-terms">
-                <span><b>gauss1:</b> {primaryDock.vinaTerms.gauss1.toFixed(2)}</span>
-                <span><b>gauss2:</b> {primaryDock.vinaTerms.gauss2.toFixed(2)}</span>
-                <span><b>repulsion:</b> {primaryDock.vinaTerms.repulsion.toFixed(2)}</span>
-                <span><b>hydrophobic:</b> {primaryDock.vinaTerms.hydrophobic.toFixed(2)}</span>
-                <span><b>h-bond:</b> {primaryDock.vinaTerms.hydrogen.toFixed(2)}</span>
-                <span><b>rotors:</b> {primaryDock.vinaTerms.rotors}</span>
-              </div>
-            {/if}
-          </div>
-        </details>
-      </div>
+      {#key activeStruct.id}
+        <DockingScoreCard
+          structure={activeStruct}
+          dockingMetrics={activeStruct.dockingMetrics}
+          {onDownloadText}
+          {safeFilename}
+        />
+      {/key}
     {/if}
 
     <div class="stat-chips">
@@ -2285,190 +2062,33 @@
     </div>
     <ResidueTrackPlot track={trackArt} {onDownloadText} {onSelectResidue} />
   {:else if embArt}
-    <div class="meta-bar">
-      <span>
-        <b>{embArt.label ?? 'Sequence Embedding'}</b> · <span>{formatAdapterName(embArt.sourceModelId)}</span>
-      </span>
-      <div class="dl-links">
-        <button class="link-btn" onclick={() => copyText(embArt.sequence, 'emb-seq')}>
-          {copyBtnLabel('emb-seq', 'Copy seq')}
-        </button>
-        <button
-          class="link-btn"
-          onclick={() =>
-            onDownloadText(
-              formatEmbeddingJson(embArt),
-              safeFilename(`${embArt.id}.embedding.json`),
-            )}
-        >
-          ↓ JSON
-        </button>
-      </div>
-    </div>
-
-    <div class="stat-chips">
-      <span class="stat-chip cond-key">dim = {embArt.dim}</span>
-      <span class="stat-chip">L = {embArt.sequence.length} aa</span>
-      {#if isFiniteNum(embArt.pseudoPerplexity)}
-        <span class="stat-chip cond-key" title="Sequence pseudo-perplexity (lower = more natural)">
-          pseudo-PPL = {embArt.pseudoPerplexity.toFixed(2)}
-        </span>
-      {/if}
-      {#if embStats}
-        <span class="stat-chip" title="L2 norm of mean-pooled embedding vector">
-          ‖pooled‖₂ = {embStats.l2Norm.toFixed(3)}
-        </span>
-        <span class="stat-chip">mean = {embStats.mean.toFixed(4)}</span>
-        <span class="stat-chip">range [{embStats.min.toFixed(3)}, {embStats.max.toFixed(3)}]</span>
-      {/if}
-      {#if embArt.perResidue}
-        <span class="stat-chip">per-residue [{embArt.sequence.length}×{embArt.dim}]</span>
-      {/if}
-      {#if embArt.provenance?.quantization}
-        <span class="stat-chip">{embArt.provenance.quantization.toUpperCase()}</span>
-      {/if}
-      {#if embArt.provenance?.degradedFallback}
-        <span class="warn-chip">⚠ {embArt.provenance.degradedFallback}</span>
-      {/if}
-      {#if embArt.provenance?.warnings?.length}
-        {#each embArt.provenance.warnings as pw (pw)}
-          <span class="warn-chip">⚠ {pw}</span>
-        {/each}
-      {/if}
-    </div>
-
-    {#if embStats && embStats.preview.length > 0}
-      <div class="seq-box">
-        <div class="seq-head">
-          <span>Pooled embedding vector preview (first {embStats.preview.length} of {embArt.dim} dims)</span>
-          {#if embArt.sequenceId}
-            <code>{embArt.sequenceId}</code>
-          {/if}
-        </div>
-        <div class="seq-text">
-          [{embStats.preview.map((v) => (Number.isFinite(v) ? v.toFixed(4) : 'NaN')).join(', ')}{embArt.dim > embStats.preview.length ? ', …' : ''}]
-        </div>
-      </div>
-    {/if}
-
-    <div class="seq-box">
-      <div class="seq-head">
-        <span>Embedded sequence ({embArt.sequence.length} aa)</span>
-        <button class="link-btn" onclick={() => copyText(embArt.sequence, 'emb-seq-box')}>
-          {copyBtnLabel('emb-seq-box', 'Copy seq')}
-        </button>
-      </div>
-      <div class="seq-text">{embArt.sequence}</div>
-    </div>
+    <EmbeddingPeekView
+      artifact={embArt}
+      {formatAdapterName}
+      {safeFilename}
+      {copyText}
+      {copyBtnLabel}
+      {onDownloadText}
+    />
   {:else if trajArt}
-    {@const frames = trajArt.frames ?? []}
-    {@const effectiveFrameCount = frames.length > 0 ? frames.length : trajArt.frameCount}
-    {@const trajColLabel = formatCollectionKind(trajArt.collectionKind ?? trajArt.ordering)}
-    {@const firstStep = frames[0]?.timeStep}
-    {@const lastStep = frames[frames.length - 1]?.timeStep}
-    {@const previewFrames =
-      frames.length <= 10
-        ? frames
-        : [
-            ...frames.slice(0, 4),
-            frames[Math.floor(frames.length / 2)],
-            ...frames.slice(-4),
-          ]}
-    <div class="meta-bar">
-      <span>
-        <b>{trajArt.label ?? 'Diffusion Trajectory'}</b>
-        {#if trajArt.sourceModelId}
-          · <span>{formatAdapterName(trajArt.sourceModelId)}</span>
-        {/if}
-      </span>
-      <div class="dl-links">
-        {#if trajPdbText}
-          <button
-            class="link-btn"
-            onclick={() =>
-              onDownloadText(trajPdbText, safeFilename(`${trajArt.id}_trajectory.pdb`))}
-          >
-            ↓ Trajectory PDB
-          </button>
-        {/if}
-        {#if trajArt.cifText}
-          <button
-            class="link-btn"
-            onclick={() =>
-              onDownloadText(trajArt.cifText!, safeFilename(`${trajArt.id}_trajectory.cif`))}
-          >
-            ↓ Trajectory mmCIF
-          </button>
-        {/if}
-      </div>
-    </div>
-
-    <div class="stat-chips">
-      <span class="stat-chip cond-key">
-        {effectiveFrameCount} {effectiveFrameCount === 1 ? 'frame' : 'frames'}
-      </span>
-      {#if trajResCount !== null}
-        <span class="stat-chip">L = {trajResCount} aa</span>
-      {/if}
-      {#if trajColLabel}
-        <span class="stat-chip">{trajColLabel}</span>
-      {/if}
-      {#if isFiniteNum(firstStep) && isFiniteNum(lastStep)}
-        <span class="stat-chip">t: {firstStep} → {lastStep}</span>
-      {/if}
-      {#if !trajArt.pdbText && frames.some((f) => f.caCoords && !f.pdbText)}
-        <span class="stat-chip">Cα trace</span>
-      {/if}
-    </div>
-
-    {#if previewFrames.length > 0}
-      <table class="scores">
-        <thead>
-          <tr>
-            <th>Frame</th>
-            <th>Key</th>
-            <th>Step (t)</th>
-            <th>Residues</th>
-            {#if frames.some((f) => isFiniteNum(f.confidence))}
-              <th>Conf</th>
-            {/if}
-          </tr>
-        </thead>
-        <tbody>
-          {#each previewFrames as fr (`${fr.key}_${fr.frameIndex}`)}
-            {@const frameRes = fr.caCoords ? Math.floor(fr.caCoords.length / 3) : trajResCount}
-            <tr>
-              <td>#{fr.frameIndex + 1}</td>
-              <td><code>{fr.key}</code></td>
-              <td>{isFiniteNum(fr.timeStep) ? fr.timeStep : '—'}</td>
-              <td>{frameRes !== null ? `${frameRes} aa` : '—'}</td>
-              {#if frames.some((f) => isFiniteNum(f.confidence))}
-                <td>{isFiniteNum(fr.confidence) ? fr.confidence.toFixed(1) : '—'}</td>
-              {/if}
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    {/if}
-
-    {#if trajPdbText}
-      <details class="raw-details" bind:open={rawPreviewOpen}>
-        <summary>
-          Raw Trajectory PDB preview
-          {#if trajRawPrev}
-            ({trajRawPrev.totalLines} lines)
-          {:else}
-            ({(trajPdbText.length / 1024).toFixed(1)} KB)
-          {/if}
-        </summary>
-        {#if trajRawPrev}
-          <pre class="raw-pre">{trajRawPrev.preview}{trajRawPrev.truncated ? `\n… (${trajRawPrev.totalLines - 36} more lines)` : ''}</pre>
-        {/if}
-      </details>
-    {/if}
+    <TrajectoryPeekView
+      artifact={trajArt}
+      {contextStructure}
+      {formatAdapterName}
+      {formatCollectionKind}
+      {safeFilename}
+      {onDownloadText}
+    />
   {:else}
     <div class="placeholder-box">
-      {#if activeSlot && !activeSlot.wired}
+      {#if activeSlot?.availability === 'inactive-in-mode'}
+        <p class="placeholder-msg">
+          <b>{activeSlot.portName}</b> is inactive in the current mode.
+          {#if activeSlot.inactiveReason}
+            {activeSlot.inactiveReason}
+          {/if}
+        </p>
+      {:else if activeSlot && !activeSlot.wired}
         <p class="placeholder-msg">
           {activeSlot.required ? 'Required' : 'Optional'} input <code>{activeSlot.portName}</code> ({PORT_COLORS[activeSlot.portType]?.label ?? activeSlot.portType}) is not connected.
           Drag a matching colored wire into this port on the canvas to pass data in.
@@ -2621,7 +2241,8 @@
   .slot-pill.has-data {
     color: var(--text-body);
   }
-  .slot-pill.unwired {
+  .slot-pill.unwired,
+  .slot-pill.inactive-mode {
     opacity: 0.55;
     border-style: dashed;
   }
@@ -3076,104 +2697,5 @@
   code {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
-  }
-
-  .gnina-card {
-    border: 1px solid var(--border);
-    background: var(--bg-surface);
-    border-radius: 8px;
-    padding: 10px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .gnina-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .gnina-title {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-  .gnina-sub {
-    font-weight: 400;
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-  .gnina-mode-pill {
-    font-size: 10.5px;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    padding: 2px 7px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    color: var(--text-secondary);
-    background: var(--bg-pill);
-  }
-  .gnina-dock-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px 12px;
-    font-size: 10.5px;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    color: var(--text-dim);
-  }
-  .gnina-kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 8px;
-  }
-  .gnina-kpi {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 7px 9px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: var(--bg-surface-2);
-  }
-  .gnina-kpi-lbl {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-dim);
-  }
-  .gnina-kpi-val {
-    font-size: 15px;
-    font-weight: 700;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    color: var(--text-primary);
-  }
-  .gnina-kpi-val small {
-    font-size: 10px;
-    font-weight: 500;
-    color: var(--text-dim);
-  }
-  .gnina-kpi-delta {
-    font-size: 10px;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    color: var(--text-dim);
-  }
-  .gnina-breakdown-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-top: 6px;
-  }
-  .gnina-vina-terms {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px 14px;
-    font-size: 11px;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    color: var(--text-secondary);
-  }
-  @media (max-width: 680px) {
-    .gnina-kpi-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
   }
 </style>

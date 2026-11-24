@@ -1696,6 +1696,15 @@ export function extractUpstreamHoloHints(
   return { ligandCcdCodes: [...ligands], dnaSequences: [...dnas] };
 }
 
+export interface BioFoldLimitOptions {
+  /** Override maximum residue count for LocalFold (AF3 / Boltz / AF2 / ESMFold2). Omit/null for browser defaults (512 AF3, 768 AF2). */
+  maxFoldResidues?: number | null;
+  /** True when the folding node executes on a self-hosted Host GPU rather than local browser WebGPU. */
+  isHostGpu?: boolean;
+  /** Optional per-node resolver (used in Hybrid mode where only some nodes route to Host GPU). */
+  resolveNodeFoldLimits?: (node: WorkflowNode) => { maxFoldResidues?: number | null; isHostGpu?: boolean } | undefined;
+}
+
 /**
  * Layer 1: Static biological capability validation across the workflow graph.
  * Accepts optional materialized `outputsByNode` to inspect live `StructureArtifact.diagnostics`.
@@ -1704,6 +1713,7 @@ export function extractUpstreamHoloHints(
 export function validateBioCapabilities(
   graph: WorkflowGraph,
   outputsByNode?: Record<string, Record<string, CanonicalArtifact>>,
+  foldLimitOpts?: BioFoldLimitOptions,
 ): BioCompatibilityIssue[] {
   const issues: BioCompatibilityIssue[] = [];
   const cache = new Map<string, NodeBioProfile>();
@@ -2370,7 +2380,11 @@ export function validateBioCapabilities(
         const sym = String(node.params.symmetry ?? 'c3').trim().toLowerCase();
         const copies = SYM_COPIES[sym] ?? 3;
         const rawLen = Math.max(16, Math.min(256, Math.round(Number(node.params.length ?? 80))));
-        const effectiveLen = Math.max(copies * 8, Math.round(rawLen / copies) * copies);
+        const maxSymLen = Math.floor(256 / copies) * copies;
+        const effectiveLen = Math.min(
+          maxSymLen,
+          Math.max(copies * 8, Math.round(rawLen / copies) * copies),
+        );
         if (effectiveLen !== rawLen) {
           issues.push({
             severity: 'warning',
@@ -2927,13 +2941,29 @@ export function validateBioCapabilities(
         }
       }
 
-      const tokenLimit = meta.family === 'af3' || meta.family === 'esmfold2' ? 384 : 512;
+      const nodeLimit = foldLimitOpts?.resolveNodeFoldLimits?.(node) ?? foldLimitOpts;
+      const customMax =
+        typeof nodeLimit?.maxFoldResidues === 'number' &&
+        Number.isFinite(nodeLimit.maxFoldResidues) &&
+        nodeLimit.maxFoldResidues >= 64
+          ? Math.round(nodeLimit.maxFoldResidues)
+          : null;
+      const isHostGpu = Boolean(nodeLimit?.isHostGpu);
+      const defaultTokenLimit = meta.family === 'af3' || meta.family === 'esmfold2' ? 384 : 512;
+      const tokenLimit =
+        customMax !== null
+          ? isHostGpu
+            ? customMax
+            : Math.max(defaultTokenLimit, Math.round(customMax * 0.85))
+          : defaultTokenLimit;
       if (up.estimatedTokens > tokenLimit) {
         issues.push({
           severity: 'warning',
           code: 'webgpu-token-ceiling',
           nodeId: node.id,
-          message: `Estimated length (~${up.estimatedTokens} tokens) exceeds the recommended browser WebGPU ceiling (${tokenLimit}) for ${meta.shortLabel} and may hit GPU memory limits.`,
+          message: isHostGpu
+            ? `Estimated length (~${up.estimatedTokens} tokens) exceeds the configured Host GPU ceiling (${tokenLimit}) for ${meta.shortLabel}. Raise "Max fold len" in the GPU menu if your host VRAM permits.`
+            : `Estimated length (~${up.estimatedTokens} tokens) exceeds the recommended browser WebGPU ceiling (${tokenLimit}) for ${meta.shortLabel} and may hit GPU memory limits.`,
         });
       }
     }
@@ -2949,6 +2979,7 @@ export function validateBioCapabilities(
 export function validateRuntimeNodeInputs(
   node: WorkflowNode,
   inputs: Record<string, CanonicalArtifact>,
+  foldLimitOpts?: BioFoldLimitOptions,
 ): {
   warnings: string[];
   excludedCandidates?: ExcludedCandidateRecord[];
@@ -2965,7 +2996,16 @@ export function validateRuntimeNodeInputs(
     }
     const modelId = String(node.params.model ?? 'monomer');
     const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
-    const hardLimit = meta.family === 'af3' || meta.family === 'esmfold2' ? 512 : 768;
+    const defaultHardLimit = meta.family === 'af3' || meta.family === 'esmfold2' ? 512 : 768;
+    const nodeLimit = foldLimitOpts?.resolveNodeFoldLimits?.(node) ?? foldLimitOpts;
+    const customMax =
+      typeof nodeLimit?.maxFoldResidues === 'number' &&
+      Number.isFinite(nodeLimit.maxFoldResidues) &&
+      nodeLimit.maxFoldResidues >= 64
+        ? Math.round(nodeLimit.maxFoldResidues)
+        : null;
+    const isHostGpu = Boolean(nodeLimit?.isHostGpu);
+    const hardLimit = customMax !== null ? customMax : defaultHardLimit;
     if (meta.family === 'esmfold2') {
       const issue = esmfold2ParamIssue(node.params);
       if (issue) throw new Error(issue);
@@ -2981,17 +3021,40 @@ export function validateRuntimeNodeInputs(
       );
     }
 
+    const extraPolymerTokens =
+      meta.family === 'af3' || meta.family === 'esmfold2'
+        ? (Array.isArray(node.params.dnaSequences)
+            ? (node.params.dnaSequences as unknown[]).map((s) => String(s ?? ''))
+            : String(node.params.dnaSequences ?? '').split(/[:,;\s]+/)
+          ).reduce((sum, s) => sum + s.replace(/[^A-Za-z]/g, '').length, 0) +
+          (Array.isArray(node.params.rnaSequences)
+            ? (node.params.rnaSequences as unknown[]).map((s) => String(s ?? ''))
+            : String(node.params.rnaSequences ?? '').split(/[:,;\s]+/)
+          ).reduce((sum, s) => sum + s.replace(/[^A-Za-z]/g, '').length, 0) +
+          (Array.isArray(node.params.ligandCcdCodes)
+            ? (node.params.ligandCcdCodes as unknown[]).map((s) => String(s ?? '').trim()).filter(Boolean).length
+            : String(node.params.ligandCcdCodes ?? '')
+                .split(/[,;\s]+/)
+                .map((s) => s.trim())
+                .filter(Boolean).length)
+        : 0;
+
     for (const cand of work.selected) {
       const len = cand.sequence.replace(/[\s/:,]+/g, '').length;
       if (len < 5) {
         throw new Error(`Refusing to fold "${cand.id}": sequence is too short (${len} aa; minimum 5 aa).`);
       }
-      if (len > hardLimit) {
+      const totalTokens = len + extraPolymerTokens;
+      if (totalTokens > hardLimit) {
+        const sizeDesc =
+          extraPolymerTokens > 0
+            ? `${len} aa + ${extraPolymerTokens} nucleic/ligand = ${totalTokens} tokens`
+            : `${len} aa`;
         throw new Error(
-          `Refusing to fold "${cand.id}" (${len} aa) with ${meta.shortLabel}: exceeds browser WebGPU memory ceiling (${hardLimit} residues). Crop the target domain or shorten the sequence before running.`,
+          `Refusing to fold "${cand.id}" (${sizeDesc}) with ${meta.shortLabel}: exceeds ${isHostGpu ? 'host' : 'browser'} WebGPU memory ceiling (${hardLimit} residues). Raise "Max fold len" in the GPU / Compute menu${isHostGpu ? '' : ', switch to Self-Hosted,'} or crop the target domain before running.`,
         );
       }
-      if (meta.family === 'esmfold2') esmfold2Chains(cand);
+      if (meta.family === 'esmfold2') esmfold2Chains(cand, hardLimit);
       if (cand.chainLengths && cand.chainLengths.length > 1 && meta.family === 'af2') {
         warnings.push(
           `Folding ${cand.chainLengths.length}-chain complex (${cand.chainLengths.join(' + ')} aa) with AF2 monomer (using unpaired multi-chain A3M); consider AF2-Multimer v3 or Boltz-2 for accurate interface scoring.`,

@@ -209,7 +209,7 @@ describe('M1 RTX 5090 audit fixes', () => {
   });
 
   it('§3.2a-c: ProtPardelle-1c worker strategy, partial diffusion schedule/stateT/absStep/gamma, and mmCIF auth_seq_id numbering', async () => {
-    const workerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/protpardelle.worker.ts'), 'utf8');
+    const workerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/protpardelle/protpardelle.worker.ts'), 'utf8');
     expect(workerSrc).not.toContain("'allatom'");
     expect(workerSrc).toContain("'sidechain-tip'");
     expect(workerSrc).toContain("'backbone-sidechain'");
@@ -364,7 +364,7 @@ describe('M1 RTX 5090 audit fixes', () => {
   });
 
   it('§3.3 Genie 2 worker centers motif coordinates, preserves nativeMotifCoords, and avoids per-step GPU readback', async () => {
-    const workerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/genie2.worker.ts'), 'utf8');
+    const workerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/genie2/genie2.worker.ts'), 'utf8');
     expect(workerSrc).toContain('readStepCoordinates: false');
     expect(workerSrc).toContain('nativeMotifCoords');
     expect(workerSrc).toContain("bfactorSemantics: 'none'");
@@ -487,7 +487,7 @@ describe('M1 RTX 5090 audit fixes', () => {
     expect(f.metadata.hotspotCount).toBe(2);
     expect(() => createFeatures({ mode: 'binder', L: 4, targetPDB, hotspots: ['B:999'] })).toThrow(/not found/);
 
-    const bgWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/boltzgen.worker.ts'), 'utf8');
+    const bgWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/boltzgen/boltzgen.worker.ts'), 'utf8');
     expect(bgWorkerSrc).toContain('lockedChains');
     expect(bgWorkerSrc).toContain('chainRoles');
     expect(bgWorkerSrc).toContain("atomGranularity: 'backbone4'");
@@ -914,7 +914,7 @@ describe('M1 RTX 5090 audit fixes', () => {
     expect(resRow.maskedLogits).toHaveLength(5 * 64);
 
     // EvoDiff #MASK# / [MASK] / <mask> sanitization contract
-    const evoSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/evodiff.worker.ts'), 'utf8');
+    const evoSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/evodiff/evodiff.worker.ts'), 'utf8');
     expect(evoSrc).toContain('sanitizeEvoDiffFixedSequence');
     expect(sanitizeEvoDiffFixedSequence('acdefg #MASK# hiklm')).toBe('ACDEFG#HIKLM');
     expect(sanitizeEvoDiffFixedSequence('ACDEFG[MASK]HIKLM')).toBe('ACDEFG#HIKLM');
@@ -961,7 +961,7 @@ describe('M1 RTX 5090 audit fixes', () => {
     expect(chainA.residues.find((r) => r.authSeqId === 95)!.roles).toEqual(['designable']);
 
     // Worker uses the same two-step resolvedTargetChain parsing & skips locked chains when picking effectiveTargetChain
-    const afWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/antifold.worker.ts'), 'utf8');
+    const afWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/antifold-esmif1/antifold.worker.ts'), 'utf8');
     expect(afWorkerSrc).toContain('parseFixedPositionsAndChains(fixedPositionsSpec, resolvedTargetChain, orderedResidues)');
     expect(afWorkerSrc).toContain('unlockedHeavy ?? unlockedLight ?? firstUnlocked');
 
@@ -1028,7 +1028,7 @@ describe('M1 RTX 5090 audit fixes', () => {
     expect(laserParsed.ligands.map((l: { resname: string; name: string }) => `${l.resname}:${l.name}`)).toEqual([
       'SAM:N1',
     ]);
-    const laserWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/lasermpnn.worker.ts'), 'utf8');
+    const laserWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/lasermpnn/lasermpnn.worker.ts'), 'utf8');
     expect(laserWorkerSrc).toContain('completeChainList');
     expect(laserWorkerSrc).toContain('!entry.candidate.chainLengths');
 
@@ -1222,7 +1222,7 @@ describe('M1 RTX 5090 audit fixes', () => {
       { chain: 'HL', number: 100, insertionCode: 'B' },
       { chain: 'HL', number: 100, insertionCode: 'C' },
     ]);
-    const bgWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/workers/boltzgen.worker.ts'), 'utf8');
+    const bgWorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/boltzgen/boltzgen.worker.ts'), 'utf8');
     expect(bgWorkerSrc).toContain('chain: sr.authChainId');
 
     // 6. AntiFold regionMask & input-preview support end-bound insertion codes ('H:100A-100C')

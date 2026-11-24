@@ -63,10 +63,19 @@ export class Genie3GeneratorGpu {
   static async create(device, weights, cfg = null, opts = {}) {
     const gen = new Genie3GeneratorGpu(device, weights, cfg, { ...opts, deferUpload: true });
     gen.opts = opts;
-    for (const _ of gen.denoiser.uploadSteps()) {
-      await yieldToBrowser();
+    try {
+      for (const _ of gen.denoiser.uploadSteps()) {
+        await yieldToBrowser();
+      }
+      return gen;
+    } catch (err) {
+      try {
+        gen.destroy?.();
+      } catch {
+        /* ignore cleanup errors */
+      }
+      throw err;
     }
-    return gen;
   }
 
   /**
