@@ -638,6 +638,7 @@ createWorkerHarness({
       }
     }
 
+    // Release transient activation buffers (engine.releaseActivations()) and reset recorded-size caches (#96)
     const releaseGeneratorActivations = () => {
       releaseRfd4GeneratorActivations(generator);
     };
