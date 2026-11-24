@@ -13,7 +13,9 @@ import {
   extractRfd4DesignMetadata,
   extractRfd4TemplateContext,
   pdbTextToSplitCifText,
+  remapAndValidateRfd4CustomSpec,
   resolveRfd4CompiledInput,
+  validateRfd4InputsAgainstTemplate,
   type Rfd4TemplateContext,
 } from '$lib/engine/conditioning';
 import { makeSequenceKey } from '$lib/engine/collections';
@@ -251,6 +253,7 @@ async function prepareTemplateForRfd4(
   atomArray: any;
   templateContext: Rfd4TemplateContext;
   cifText: string;
+  isFromPdb: boolean;
 } | null> {
   if (!rawInput) return null;
   const decoded =
@@ -290,7 +293,7 @@ async function prepareTemplateForRfd4(
   }
   rfd4PrepareMod.assignIonCharges(atomArray);
 
-  return { atomArray, templateContext, cifText };
+  return { atomArray, templateContext, cifText, isFromPdb: !isCif };
 }
 
 /**
@@ -483,6 +486,10 @@ createWorkerHarness({
       }
     }
 
+    // Fail fast BEFORE downloading 330–468 MB weights if any preserved residue/range selector
+    // in contig, motifSpan, motifAtoms, hotspots, or customSpecYaml is missing from the template (#97)
+    validateRfd4InputsAgainstTemplate(rawParams, template, condArtifact);
+
     await ensureLoaded(ctx, needEncoder);
 
     // Prepare static inputs / template / preset CIF ONCE before the resident-weight design loop
@@ -578,12 +585,18 @@ createWorkerHarness({
       }
 
       if (resolved.kind === 'template-custom-yaml') {
-        const parsedYaml = rfd4Mod.parseConditionSpecYaml(resolved.customSpecYaml);
+        const rawParsedYaml = rfd4Mod.parseConditionSpecYaml(resolved.customSpecYaml);
+        const parsedYaml = prepared
+          ? remapAndValidateRfd4CustomSpec(rawParsedYaml, prepared.templateContext, {
+              isFromPdb: prepared.isFromPdb,
+              templateLabel: template?.label || condArtifact?.label || null,
+            })
+          : rawParsedYaml;
         const yamlConds = (parsedYaml?.conditions ?? {}) as Record<string, unknown>;
         if (prepared && Object.keys(yamlConds).length > 0) {
           assertRfd4ConditionSelectorsMatch(
             prepared.atomArray,
-            parsedYaml?.contig ?? null,
+            (parsedYaml?.contig as string | undefined) ?? null,
             yamlConds,
             rfd4SpecMod,
           );
@@ -610,13 +623,37 @@ createWorkerHarness({
             { inputAtomArray: prepared!.atomArray, seed: itemSeed },
           );
       } else if (resolved.kind === 'custom-yaml') {
-        buildBatchForSeed = (itemSeed: number) =>
-          rfd4Mod.buildBatch(
-            resolved.customSpecYaml,
-            prepared
-              ? { inputAtomArray: prepared.atomArray, seed: itemSeed }
-              : { inputCif: template?.cifText || template?.pdbText, seed: itemSeed },
+        if (prepared) {
+          const rawParsedYaml = rfd4Mod.parseConditionSpecYaml(resolved.customSpecYaml);
+          const remappedYaml = remapAndValidateRfd4CustomSpec(
+            rawParsedYaml,
+            prepared.templateContext,
+            {
+              isFromPdb: prepared.isFromPdb,
+              templateLabel: template?.label || condArtifact?.label || null,
+            },
           );
+          const yamlConds = (remappedYaml?.conditions ?? {}) as Record<string, unknown>;
+          if (Object.keys(yamlConds).length > 0) {
+            assertRfd4ConditionSelectorsMatch(
+              prepared.atomArray,
+              (remappedYaml?.contig as string | undefined) ?? null,
+              yamlConds,
+              rfd4SpecMod,
+            );
+          }
+          buildBatchForSeed = (itemSeed: number) =>
+            rfd4Mod.buildBatch(remappedYaml, {
+              inputAtomArray: prepared.atomArray,
+              seed: itemSeed,
+            });
+        } else {
+          buildBatchForSeed = (itemSeed: number) =>
+            rfd4Mod.buildBatch(resolved.customSpecYaml, {
+              inputCif: template?.cifText || template?.pdbText,
+              seed: itemSeed,
+            });
+        }
       } else {
         if (prepared && Object.keys(resolved.conditions).length > 0) {
           assertRfd4ConditionSelectorsMatch(

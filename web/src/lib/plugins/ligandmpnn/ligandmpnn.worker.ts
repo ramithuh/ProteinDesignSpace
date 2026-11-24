@@ -239,7 +239,7 @@ async function ensureEngine(
     try {
       if (!ligandMod) {
         ctx.progress('init', 0.02, 'Loading LigandMPNN WebGPU modules...');
-        const moduleUrl = new URL('/vendor/ligandmpnn/webgpu/index.js?v=2', self.location.origin).href;
+        const moduleUrl = new URL('/vendor/ligandmpnn/webgpu/index.js?v=3', self.location.origin).href;
         ligandMod = await import(/* @vite-ignore */ moduleUrl);
       }
 
@@ -270,7 +270,7 @@ async function ensureEngine(
 
   if (!ligandCpuMod) {
     ctx.progress('init', 0.02, 'WebGPU unavailable — loading LigandMPNN CPU fallback...');
-    const cpuUrl = new URL('/vendor/ligandmpnn/cpu/index.js?v=1', self.location.origin).href;
+    const cpuUrl = new URL('/vendor/ligandmpnn/cpu/index.js?v=2', self.location.origin).href;
     ligandCpuMod = await import(/* @vite-ignore */ cpuUrl);
   }
 

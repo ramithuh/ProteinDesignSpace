@@ -2,7 +2,7 @@ import { getBenchmarkById } from '$lib/engine/benchmarks';
 import { resolveEffectiveMaxSequences } from '$lib/engine/batch-flow';
 import { parseFixedPositionsAndChains } from '$lib/engine/mpnn-spec';
 import { LOCALFOLD_MODEL_OPTIONS, MPNN_VARIANT_OPTIONS, RFD4_BENCHMARK_OPTIONS } from '$lib/engine/registry';
-import { validateSequenceText } from '$lib/engine/param-validation';
+import { computeUploadDigest, isValidSha256Hex, validateSequenceText } from '$lib/engine/param-validation';
 import type {
   CanonicalArtifact,
   MutationMatrixArtifact,
@@ -962,4 +962,46 @@ export function resolveAutoModelLabelOnChange(
   }
 
   return null;
+}
+
+export function resolveLocalFoldModelMeta(params?: Record<string, unknown>) {
+  const modelId = String(params?.model ?? 'monomer').trim();
+  return LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
+}
+
+export function buildInspectorTextParamUpdate(
+  baseParams: Record<string, unknown>,
+  key: 'pdbText' | 'templatePdbText' | 'sequence' | 'msaA3mText',
+  value: string,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...baseParams, [key]: value };
+  if (key === 'pdbText') {
+    const curFn = String(baseParams.filename ?? '').trim();
+    if (!value.trim() && !baseParams.missingUpload) {
+      next.filename = '';
+    } else if (curFn === 'demo_3helix_53aa.pdb') {
+      next.filename = '';
+    }
+  } else if (key === 'templatePdbText') {
+    const expectedShaRaw = String(baseParams.expectedTemplateSha256 ?? '')
+      .trim()
+      .toLowerCase();
+    if (!value.trim()) {
+      if (!baseParams.missingTemplateUpload && !expectedShaRaw) {
+        delete next.templatePdbText;
+        delete next.templateFilename;
+        delete next.missingTemplateUpload;
+      }
+    } else if (expectedShaRaw && isValidSha256Hex(expectedShaRaw)) {
+      const actualSha = computeUploadDigest(value);
+      if (actualSha === expectedShaRaw) {
+        delete next.missingTemplateUpload;
+        delete next.expectedTemplateSha256;
+        delete next.expectedTemplateFilename;
+      } else {
+        next.missingTemplateUpload = true;
+      }
+    }
+  }
+  return next;
 }

@@ -15,6 +15,12 @@ const config = {
       precompress: false,
       strict: true,
     }),
+    typescript: {
+      config(tsConfig) {
+        tsConfig.exclude = [...(tsConfig.exclude ?? []), '../tests/e2e-localfold-template/**'];
+        return tsConfig;
+      },
+    },
   },
 };
 

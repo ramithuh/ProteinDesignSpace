@@ -799,6 +799,35 @@ export function validateNodeParams(
     }
   }
 
+  if (node.adapterId === 'localfold-af2' && !connectedSet?.has('template')) {
+    const rawTpl = String(p.templatePdbText ?? '');
+    const missingTplUpload = Boolean(p.missingTemplateUpload);
+    const expectedShaRaw = String(p.expectedTemplateSha256 ?? '').trim();
+    const expectedSha = expectedShaRaw.toLowerCase();
+    const expectedFilename = String(p.expectedTemplateFilename ?? p.templateFilename ?? '').trim();
+
+    if (expectedSha && !isValidSha256Hex(expectedSha)) {
+      errs.push(
+        `"${label}": Invalid expectedTemplateSha256 digest "${expectedShaRaw}" (expected a 64-character SHA-256 hex digest).`,
+      );
+    } else if (!rawTpl.trim()) {
+      if (expectedSha && !missingTplUpload) {
+        const fileNote = expectedFilename ? ` "${expectedFilename}"` : '';
+        errs.push(
+          `"${label}": Expected inline template${fileNote} (SHA-256 ${expectedSha.slice(0, 12)}…) is missing. Re-upload the matching PDB/mmCIF file, or clear expectedTemplateSha256.`,
+        );
+      }
+    } else if (expectedSha) {
+      const actualSha = computeUploadDigest(rawTpl);
+      if (actualSha !== expectedSha) {
+        const fileNote = expectedFilename ? ` "${expectedFilename}"` : '';
+        errs.push(
+          `"${label}": Uploaded template digest (${actualSha.slice(0, 12)}…) does not match expected inline template${fileNote} (SHA-256 ${expectedSha.slice(0, 12)}…). Re-upload the matching file, or explicitly clear expectedTemplateSha256 to replace the template.`,
+        );
+      }
+    }
+  }
+
   if (node.adapterId === 'sequence-input') {
     if (p.sequence !== undefined && p.sequence !== null && typeof p.sequence !== 'string') {
       errs.push(`"${label}": sequence must be a string.`);

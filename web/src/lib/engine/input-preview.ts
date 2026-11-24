@@ -44,8 +44,15 @@ import {
 import {
   computeAf2MsaBudgets,
   computeTargetOnlyOffMask,
+  parseCandidateProteinChains,
   validateAndParseA3mText,
 } from './localfold-msa';
+import {
+  alignQueryToTemplate,
+  getLocalFoldTemplateDialectPolicy,
+  parseTemplateStructure,
+  type TemplateAlignmentResult,
+} from './localfold-template';
 import { esmfold2Chains } from './localfold-esmfold2';
 import {
   compileAntiFoldDesignPlan,
@@ -1165,7 +1172,11 @@ export function compileNodeInputPreview(
     let art: CanonicalArtifact | undefined = outputsByNode[edge.fromNode]?.[edge.fromPort];
     if (!art) {
       const srcNode = nodeById.get(edge.fromNode);
-      if (srcNode?.adapterId === 'pdb-input' && edge.fromPort === 'structure') {
+      if (
+        srcNode?.adapterId === 'pdb-input' &&
+        edge.fromPort === 'structure' &&
+        !(node.adapterId === 'localfold-af2' && edge.toPort === 'template')
+      ) {
         art = tryMaterializeLocalPdbInput(srcNode) ?? undefined;
       } else if (srcNode?.adapterId === 'pdb-input' && edge.fromPort === 'sequences') {
         const cachedStruct = outputsByNode[edge.fromNode]?.structure as
@@ -2584,10 +2595,17 @@ export function compileNodeInputPreview(
     }
   } else if (node.adapterId === 'localfold-af2') {
     const seqSet = resolvedInputs.sequences as SequenceSet | undefined;
-    const modelKey = String(node.params.model ?? 'monomer');
+    const templateInput = resolvedInputs.template as StructureArtifact | undefined;
+    const hasWiredTemplatePort = connectedInputs.includes('template');
+    const missingTplUp = missingUpstreamByPort.get('template');
+    const modelKey = String(node.params.model ?? 'monomer').trim();
     const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelKey) ?? LOCALFOLD_MODEL_OPTIONS[0];
     const isEsmFold = meta.family === 'esmfold2';
-    const baseCfg = resolveLocalFoldEffectiveConfig({ modelKey, params: node.params });
+    const baseCfg = resolveLocalFoldEffectiveConfig({
+      modelKey,
+      params: node.params,
+      templateInput,
+    });
     const {
       recycles,
       tolerance,
@@ -2598,6 +2616,14 @@ export function compileNodeInputPreview(
       dnaSeqs,
       rnaSeqs,
     } = baseCfg;
+    if (baseCfg.templateSourceError && (templateInput || !hasWiredTemplatePort)) {
+      availability = 'error';
+      pushIssue({
+        severity: 'error',
+        source: 'compiler',
+        message: baseCfg.templateSourceError,
+      });
+    }
     const nodeFoldLimit = foldLimitOpts?.resolveNodeFoldLimits?.(node) ?? foldLimitOpts;
     const defaultFoldLimit = meta.family === 'af3' || meta.family === 'esmfold2' ? 512 : 768;
     const resolvedFoldLimit =
@@ -2625,22 +2651,81 @@ export function compileNodeInputPreview(
 
     if (!seqSet) {
       const missingUp = missingUpstreamByPort.get('sequences');
-      if (missingUp) {
+      const missingIds = [...new Set([missingUp, missingTplUp].filter((x): x is string => Boolean(x)))];
+      const hasBlockingError =
+        availability === 'error' ||
+        issues.some((i) => i.severity === 'error') ||
+        (!baseCfg.isTemplateCapable && (Boolean(missingTplUp) || hasWiredTemplatePort));
+      if (missingUp && !hasBlockingError) {
         availability = 'pending-upstream';
-        missingUpstreamNodeIds = [missingUp];
+        missingUpstreamNodeIds = missingIds;
       } else {
         availability = 'error';
+        if (missingIds.length > 0) missingUpstreamNodeIds = missingIds;
       }
+      const pendingTemplateFields: CompiledModelPayloadView['compiledSummary'] = baseCfg.templateSource
+        ? {
+            templateSource: baseCfg.templateSource.sourceKind,
+            templateFormat: baseCfg.templateSource.format,
+            ...(baseCfg.templateSource.filename
+              ? { templateFilename: baseCfg.templateSource.filename }
+              : {}),
+            templateSpanChains: baseCfg.templateSpanChains,
+          }
+        : {};
       payload = {
         format: 'localfold-batch',
         headline: missingUp
           ? `LocalFold (${meta.shortLabel}) · waiting for upstream sequences`
           : `LocalFold (${meta.shortLabel}) · connect a SequenceSet input`,
-        compiledSummary: foldSettings,
+        compiledSummary: { ...foldSettings, ...pendingTemplateFields },
         rawSpecText: JSON.stringify(node.params, null, 2),
       };
     } else {
-      const validInputs = runRuntimeValidation();
+      let validInputs = true;
+      if (hasWiredTemplatePort && !templateInput) {
+        try {
+          const rt = validateRuntimeNodeInputs(
+            {
+              ...node,
+              params: {
+                ...node.params,
+                templatePdbText: '',
+                missingTemplateUpload: false,
+                expectedTemplateSha256: '',
+              },
+            },
+            resolvedInputs,
+            foldLimitOpts,
+          );
+          for (const w of rt.warnings) {
+            pushIssue({ severity: 'warning', source: 'runtime', message: w });
+          }
+        } catch (err) {
+          pushIssue({
+            severity: 'error',
+            source: 'runtime',
+            message: err instanceof Error ? err.message : String(err),
+          });
+          validInputs = false;
+        }
+      } else {
+        validInputs = runRuntimeValidation();
+      }
+      if (!validInputs) {
+        availability = 'error';
+      }
+      if (missingTplUp) {
+        if (!missingUpstreamNodeIds.includes(missingTplUp)) {
+          missingUpstreamNodeIds = [...missingUpstreamNodeIds, missingTplUp];
+        }
+        if (availability === 'ready') {
+          availability = 'partial';
+        }
+      }
+      if (!baseCfg.isTemplateCapable && (missingTplUp || hasWiredTemplatePort)) {
+        availability = 'error';
+      }
       const work = selectFoldWorkItems(seqSet, node.params);
       if (isEsmFold) {
         const maxResidueLength = work.selected.reduce(
@@ -2847,17 +2932,95 @@ export function compileNodeInputPreview(
         estimatedTokens = totalResidues + (meta.family === 'af3' || meta.family === 'esmfold2' ? ligandCcdCodes.length : 0);
       }
 
-      const ctxStruct = findContextStructure(graph, nodeId, mutableOutputs);
-      if (ctxStruct) {
-        previewStructurePdb = ctxStruct.pdbText || ctxStruct.cifText || '';
-        previewStructureMeta = {
-          label: ctxStruct.label,
-          atomGranularity: ctxStruct.atomGranularity,
-          bfactorSemantics:
-            ctxStruct.bfactorSemantics ??
-            (ctxStruct.sourceModelId === 'pdb-input' ? 'crystal-b' : undefined),
-          length: ctxStruct.length,
+      let templateSummaryFields: CompiledModelPayloadView['compiledSummary'] = {};
+      let templateHeadlinePart = '';
+      let parsedTplResidueCount = 0;
+      if (baseCfg.templateSource && (templateInput || !hasWiredTemplatePort)) {
+        templateSummaryFields = {
+          templateSource: baseCfg.templateSource.sourceKind,
+          templateFormat: baseCfg.templateSource.format,
+          ...(baseCfg.templateSource.filename
+            ? { templateFilename: baseCfg.templateSource.filename }
+            : {}),
+          templateSpanChains: baseCfg.templateSpanChains,
         };
+        if (!baseCfg.isTemplateCapable) {
+          availability = 'error';
+        } else if (rep) {
+          try {
+            const tplPolicy = getLocalFoldTemplateDialectPolicy(modelKey);
+            const parsedTpl = parseTemplateStructure(baseCfg.templateSource.text, {
+              altlocFirst: tplPolicy.altlocFirst,
+              arginines: baseCfg.templateFamily === 'af3',
+            });
+            parsedTplResidueCount = parsedTpl.totalResidues;
+            const parsedRep = parseCandidateProteinChains(rep.sequence, rep.chainLengths);
+            const queryChains = parsedRep.chainSeqs
+              .map((seq, idx) => ({
+                chainId:
+                  rep.chainIds?.[idx]?.trim() ||
+                  (idx < 26 ? String.fromCharCode(65 + idx) : `C${idx + 1}`),
+                sequence: seq,
+              }))
+              .filter((c) => c.sequence.length > 0);
+            const tplAlignment: TemplateAlignmentResult = alignQueryToTemplate(
+              queryChains,
+              parsedTpl,
+            );
+            const pct =
+              tplAlignment.totalQueryResidues > 0
+                ? Math.round(tplAlignment.overallCoverage * 100)
+                : 0;
+            templateSummaryFields = {
+              ...templateSummaryFields,
+              templateMatchedResidues: tplAlignment.matchedQueryResidues,
+              templateTotalResidues: tplAlignment.totalQueryResidues,
+              templateCoverage: `${tplAlignment.matchedQueryResidues}/${tplAlignment.totalQueryResidues} (${pct}%)`,
+            };
+            const tplLabel =
+              baseCfg.templateSource.filename || baseCfg.templateSource.format.toUpperCase();
+            templateHeadlinePart = ` · Template: ${tplLabel} (${pct}% matched)`;
+          } catch (err) {
+            availability = 'error';
+            pushIssue({
+              severity: 'error',
+              source: 'compiler',
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+
+      if (templateInput) {
+        previewStructurePdb = templateInput.cifText || templateInput.pdbText || '';
+        previewStructureMeta = {
+          label: templateInput.label,
+          atomGranularity: templateInput.atomGranularity,
+          bfactorSemantics:
+            templateInput.bfactorSemantics ??
+            (templateInput.sourceModelId === 'pdb-input' ? 'crystal-b' : undefined),
+          length: templateInput.length,
+        };
+      } else if (baseCfg.templateSource?.sourceKind === 'inline') {
+        previewStructurePdb = baseCfg.templateSource.text;
+        previewStructureMeta = {
+          label: baseCfg.templateSource.filename ?? 'Inline template',
+          atomGranularity: 'all-atom',
+          length: parsedTplResidueCount,
+        };
+      } else {
+        const ctxStruct = findContextStructure(graph, nodeId, mutableOutputs);
+        if (ctxStruct) {
+          previewStructurePdb = ctxStruct.pdbText || ctxStruct.cifText || '';
+          previewStructureMeta = {
+            label: ctxStruct.label,
+            atomGranularity: ctxStruct.atomGranularity,
+            bfactorSemantics:
+              ctxStruct.bfactorSemantics ??
+              (ctxStruct.sourceModelId === 'pdb-input' ? 'crystal-b' : undefined),
+            length: ctxStruct.length,
+          };
+        }
       }
 
       const af2Budgets =
@@ -2867,9 +3030,10 @@ export function compileNodeInputPreview(
 
       payload = {
         format: 'localfold-batch',
-        headline: `LocalFold (${meta.shortLabel}) · ${work.selected.length}/${work.totalCandidates} seqs · ${isEsmFold ? 'ESM-C language model' : `MSA: ${msaMode}`}`,
+        headline: `LocalFold (${meta.shortLabel}) · ${work.selected.length}/${work.totalCandidates} seqs · ${isEsmFold ? 'ESM-C language model' : `MSA: ${msaMode}`}${templateHeadlinePart}`,
         compiledSummary: {
           ...foldSettings,
+          ...templateSummaryFields,
           selectedCount: work.selected.length,
           excludedCount: work.excludedCandidates.length,
           totalCandidates: work.totalCandidates,
@@ -2884,6 +3048,7 @@ export function compileNodeInputPreview(
         rawSpecText: JSON.stringify(
           {
             ...foldSettings,
+            ...templateSummaryFields,
             ...(meta.family === 'af3' || meta.family === 'esmfold2'
               ? { ligandCcdCodes, dnaSequences: dnaSeqs, rnaSequences: rnaSeqs }
               : { af2Budgets }),

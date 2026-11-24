@@ -30,6 +30,7 @@ export const UI_TRACKING_PARAM_KEYS: ReadonlySet<string> = new Set(
 /** All template-conditioned generator adapters participating in symmetric benchmark sync (`WF-06`). */
 export const BENCHMARK_SYNC_ADAPTER_IDS: ReadonlySet<string> = new Set([
   'rfd4-proteina',
+  'rfd3',
   'genie3',
   'boltzgen',
   'protpardelle',
@@ -44,6 +45,7 @@ export function isBenchmarkSupportedForAdapter(
 ): boolean {
   switch (adapterId) {
     case 'rfd4-proteina':
+    case 'rfd3':
       return true;
     case 'genie3':
       return Boolean(bench.supportsGenie3);
@@ -73,6 +75,54 @@ export function formatRfdiffusionContig(contig: string | undefined): string {
     .map((t) => t.trim())
     .filter((t) => Boolean(t) && t !== '/0' && t !== '0')
     .join('/');
+}
+
+/** Convert benchmark contigs (`25-25,A163-181,31-31`) to concrete RFD3 syntax (`25,A163-181,31`). */
+export function formatRfd3Contig(contig: string | undefined): string {
+  const raw = String(contig ?? '').trim();
+  if (!raw) return '';
+  return raw
+    .split(/[\s,]+/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .map((tok) => {
+      if (tok === '0' || tok === '/0') return '/0';
+      const bareRange = /^(\d+)(?:-(\d+))?[PRDN]?$/i.exec(tok);
+      if (bareRange) {
+        const lo = Number(bareRange[1]);
+        const hi = bareRange[2] !== undefined ? Number(bareRange[2]) : lo;
+        return String(Math.max(1, Math.round((lo + hi) / 2)));
+      }
+      return tok;
+    })
+    .join(',');
+}
+
+function extractCropLigandCodes(cropSegments: string | undefined): string {
+  const raw = String(cropSegments ?? '').trim();
+  if (!raw) return '';
+  const codes: string[] = [];
+  for (const tok of raw.split(/[,;\s]+/).filter(Boolean)) {
+    const idx = tok.indexOf(':');
+    if (idx <= 0) continue;
+    const rhs = tok.slice(idx + 1).trim();
+    if (rhs && !/^-?\d+(?:--?\d+)?$/.test(rhs)) {
+      const upper = rhs.toUpperCase();
+      if (!codes.includes(upper)) codes.push(upper);
+    }
+  }
+  return codes.join(', ');
+}
+
+function extractBinderTargetContig(contig: string | undefined): string {
+  const raw = String(contig ?? '').trim();
+  if (!raw || !raw.includes('/0')) return '';
+  const before = raw.split('/0')[0] ?? '';
+  return before
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(',');
 }
 
 /** Extract the first single contiguous chain-residue span for Genie 2's single-motif `motifRange`. */
@@ -115,6 +165,18 @@ export function buildResetToBenchmarkParams(
     next.hbondAcceptorSelection = '';
     next.cathCode = '';
     next.customSpecYaml = '';
+  } else if (adapterId === 'rfd3') {
+    next.mode = 'unconditional';
+    next.length = defLen;
+    next.contig = '';
+    next.unindex = '';
+    next.fixedAtoms = '';
+    next.target = '';
+    next.hotspots = '';
+    next.ligand = '';
+    next.hbondDonor = '';
+    next.hbondAcceptor = '';
+    next.unfixedSequence = '';
   } else if (adapterId === 'genie3') {
     next.taskMode = 'unconditional';
     next.length = defLen;
@@ -221,7 +283,7 @@ export function parseResidueIntervals(spec: string | undefined): ParsedResidueIn
   for (const tok of tokens) {
     if (tok === '0' || /^\d+(?:-\d+)?[PRDN]?$/i.test(tok)) continue;
     if (tok.includes(':')) continue;
-    const span = /^([A-Za-z_])(-?\d+)(?:-(-?\d+))?$/.exec(tok);
+    const span = /^([A-Za-z_]+)(-?\d+)[A-Za-z]?(?:-(-?\d+)[A-Za-z]?)?$/.exec(tok);
     if (span) {
       const chain = span[1].toUpperCase();
       const a = Number(span[2]);
@@ -231,16 +293,70 @@ export function parseResidueIntervals(spec: string | undefined): ParsedResidueIn
       }
       continue;
     }
-    if (/^[A-Za-z_]$/.test(tok)) {
+    if (/^[A-Za-z_]+$/.test(tok)) {
       out.push({ chain: tok.toUpperCase(), start: -Infinity, end: Infinity });
     }
   }
   return out;
 }
 
+function mergeResidueIntervalsByChain(
+  intervals: readonly ParsedResidueInterval[],
+): Map<string, Array<{ start: number; end: number }>> {
+  const byChain = new Map<string, Array<{ start: number; end: number }>>();
+  for (const r of intervals) {
+    const ch = r.chain.toUpperCase();
+    let list = byChain.get(ch);
+    if (!list) {
+      list = [];
+      byChain.set(ch, list);
+    }
+    list.push({ start: Math.min(r.start, r.end), end: Math.max(r.start, r.end) });
+  }
+  for (const [ch, list] of byChain.entries()) {
+    list.sort((a, b) => a.start - b.start || a.end - b.end);
+    const merged: Array<{ start: number; end: number }> = [];
+    for (const seg of list) {
+      const prev = merged[merged.length - 1];
+      if (!prev) {
+        merged.push({ ...seg });
+      } else if (!Number.isFinite(prev.end) || seg.start <= prev.end + 1) {
+        prev.end = Math.max(prev.end, seg.end);
+      } else {
+        merged.push({ ...seg });
+      }
+    }
+    byChain.set(ch, merged);
+  }
+  return byChain;
+}
+
 /**
- * Return `true` when `spec` specifies at least one residue interval and NONE of its
- * residue intervals overlap any interval in `refIntervals`.
+ * Parse residue intervals from `motifAtoms` entries (`A102:ND1,CG; A128:SG,CB` -> `[A102, A128]`),
+ * ignoring global shorthands (`TIP`, `BKBN`, `ALL`).
+ */
+export function parseMotifAtomsResidueIntervals(motifAtoms: string | undefined): ParsedResidueInterval[] {
+  const raw = String(motifAtoms ?? '').trim();
+  if (!raw) return [];
+  const upper = raw.toUpperCase();
+  if (upper === 'ALL' || upper === '*' || upper === 'BKBN' || upper === 'BACKBONE' || upper === 'TIP') {
+    return [];
+  }
+  const out: ParsedResidueInterval[] = [];
+  for (const part of raw.split(/[;\n]+/).map((s) => s.trim()).filter(Boolean)) {
+    const colonIdx = part.lastIndexOf(':');
+    if (colonIdx <= 0 || colonIdx >= part.length - 1) continue;
+    const lhs = part.slice(0, colonIdx).trim();
+    out.push(...parseResidueIntervals(lhs));
+  }
+  return out;
+}
+
+/**
+ * Return `true` when `spec` specifies at least one residue interval and EITHER:
+ * - NONE of its intervals overlap any interval in `refIntervals` (100% disjoint across chains/spans), OR
+ * - ANY residue/range token on a polymer chain covered by `refIntervals` falls outside `refIntervals`
+ *   (e.g. `A102, A104, A128, A132` against `A102, A104, A129, A132` where `A128` is missing!).
  */
 export function isResidueSpecDisjointFromIntervals(
   spec: string | undefined,
@@ -248,14 +364,20 @@ export function isResidueSpecDisjointFromIntervals(
 ): boolean {
   const specIntervals = parseResidueIntervals(spec);
   if (specIntervals.length === 0 || refIntervals.length === 0) return false;
+  const mergedRefByChain = mergeResidueIntervalsByChain(refIntervals);
+  let overlappedAny = false;
   for (const s of specIntervals) {
-    for (const r of refIntervals) {
-      if (s.chain === r.chain && s.start <= r.end && r.start <= s.end) {
-        return false;
-      }
+    const refOnChain = mergedRefByChain.get(s.chain);
+    if (!refOnChain) {
+      continue;
     }
+    const covered = refOnChain.some((r) => r.start <= s.start && s.end <= r.end);
+    if (!covered) {
+      return true;
+    }
+    overlappedAny = true;
   }
-  return true;
+  return !overlappedAny;
 }
 
 /**
@@ -438,6 +560,38 @@ export function computeBenchmarkAutoSeedPatches(
         }
         patches ??= {};
         patches[node.id] = nextPatch;
+      } else if (node.adapterId === 'rfd3') {
+        const curMode = String(cp.mode ?? 'unconditional').trim().toLowerCase() || 'unconditional';
+        if (curMode === 'partial') continue;
+
+        const shouldResetLen =
+          !cp.userEditedLength &&
+          (!Number.isFinite(curLen) ||
+            curLen <= 0 ||
+            curLen === prevAutoLen ||
+            curLen === adapterDefaultLen);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          mode: 'unconditional',
+          contig: '',
+          unindex: '',
+          fixedAtoms: '',
+          target: '',
+          hotspots: '',
+          ligand: '',
+          hbondDonor: '',
+          hbondAcceptor: '',
+          unfixedSequence: '',
+          ...(shouldResetLen ? { length: adapterDefaultLen } : {}),
+        };
+        delete nextPatch.autoSeededBenchmarkId;
+        delete nextPatch.autoSeededFromBenchmark;
+        delete nextPatch.autoSeededLength;
+        if (!shouldResetLen && Number.isFinite(curLen) && curLen > 0) {
+          nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
       } else if (node.adapterId === 'genie3') {
         const shouldResetLen =
           !cp.userEditedLength &&
@@ -582,6 +736,28 @@ export function computeBenchmarkAutoSeedPatches(
             patches ??= {};
             patches[node.id] = nextPatch;
           }
+        } else if (
+          node.adapterId === 'rfd3' &&
+          rawCurContig &&
+          String(cp.mode ?? 'unconditional').trim().toLowerCase() === 'motif'
+        ) {
+          const clampedTarget = Math.max(16, Math.min(200, targetLen));
+          const adapted =
+            parsedBenchLen !== null && clampedTarget === parsedBenchLen
+              ? bp.contig
+              : adaptBenchmarkContigForLength(bp.contig, clampedTarget, bench.category);
+          const expectedContig = formatRfd3Contig(adapted);
+          if (expectedContig !== rawCurContig) {
+            const nextPatch: Record<string, unknown> = {
+              ...cp,
+              contig: expectedContig,
+            };
+            if (parsedBenchLen !== null && clampedTarget !== parsedBenchLen) {
+              delete nextPatch.autoSeededLength;
+            }
+            patches ??= {};
+            patches[node.id] = nextPatch;
+          }
         } else if (node.adapterId === 'genie3' && rawCurContig && bench.supportsGenie3) {
           const expectedContig =
             parsedBenchLen !== null && targetLen === parsedBenchLen
@@ -673,6 +849,62 @@ export function computeBenchmarkAutoSeedPatches(
         hbondAcceptorSelection: bp.hbondAcceptorSelection ?? '',
         cathCode: '',
         customSpecYaml: '',
+        autoSeededBenchmarkId: bench.id,
+      };
+      delete nextPatch.autoSeededFromBenchmark;
+      if (!hasCustomLength && nextLength !== null) {
+        nextPatch.autoSeededLength = nextLength;
+      } else {
+        delete nextPatch.autoSeededLength;
+        if (hasCustomLength) {
+          nextPatch.userEditedLength = true;
+        }
+      }
+      patches ??= {};
+      patches[node.id] = nextPatch;
+    } else if (node.adapterId === 'rfd3') {
+      const curMode = String(cp.mode ?? 'unconditional').trim().toLowerCase() || 'unconditional';
+      if (curMode === 'partial') continue;
+      if (!seededId && curMode !== 'unconditional') continue;
+      const hasNoTaskParams =
+        !String(cp.contig ?? '').trim() &&
+        !String(cp.unindex ?? '').trim() &&
+        !String(cp.fixedAtoms ?? '').trim() &&
+        !String(cp.target ?? '').trim() &&
+        !String(cp.hotspots ?? '').trim() &&
+        !String(cp.ligand ?? '').trim() &&
+        !String(cp.hbondDonor ?? '').trim() &&
+        !String(cp.hbondAcceptor ?? '').trim();
+      if (!hasNoTaskParams && !seededId) continue;
+
+      const bp = bench.conditionParams;
+      const parsedLen = parseLengthFromContig(bp.contig);
+      const clampedParsedLen =
+        parsedLen !== null ? Math.max(16, Math.min(200, parsedLen)) : null;
+      const nextLength = hasCustomLength
+        ? Math.max(16, Math.min(200, Math.round(curLen)))
+        : clampedParsedLen;
+      const isBinder = bench.category === 'binder';
+      const isUnindexed = Boolean(bp.unindexedMotif);
+      const nextMode = isBinder ? 'binder' : 'motif';
+      let seededContig = '';
+      if (!isBinder && !isUnindexed && bench.category === 'motif' && bp.contig) {
+        const adapted =
+          hasCustomLength && nextLength !== null
+            ? adaptBenchmarkContigForLength(bp.contig, nextLength, bench.category)
+            : bp.contig;
+        seededContig = formatRfd3Contig(adapted);
+      }
+      const nextPatch: Record<string, unknown> = {
+        ...cp,
+        mode: nextMode,
+        ...(nextLength !== null ? { length: nextLength } : {}),
+        contig: seededContig,
+        unindex: isUnindexed ? (bp.motifSpan ?? '') : '',
+        fixedAtoms: bp.motifAtoms ?? '',
+        target: isBinder ? extractBinderTargetContig(bp.contig) : '',
+        hotspots: isBinder ? (bp.hotspots ?? '') : '',
+        ligand: extractCropLigandCodes(bench.cropSegments),
         autoSeededBenchmarkId: bench.id,
       };
       delete nextPatch.autoSeededFromBenchmark;
@@ -1065,7 +1297,16 @@ export function applyPlannerBenchmarkSeedingToNode(
     if (bp.lockChain && !String(params.lockChain ?? '').trim()) {
       params.lockChain = bp.lockChain;
     }
-    if (bp.motifAtoms && !String(params.motifAtoms ?? '').trim()) {
+    const curMotifAtoms = String(params.motifAtoms ?? '').trim();
+    const motifAtomsIntervals = parseMotifAtomsResidueIntervals(curMotifAtoms);
+    const motifAtomsDisjoint =
+      motifAtomsIntervals.length > 0 &&
+      isResidueSpecDisjointFromBenchmark(
+        motifAtomsIntervals.map((r) => `${r.chain}${r.start}-${r.end}`).join(', '),
+        bench,
+      );
+    if (bp.motifAtoms && (!curMotifAtoms || motifAtomsDisjoint || (opts?.overwriteUnpromptedResidues && curMotifAtoms !== bp.motifAtoms))) {
+      if (curMotifAtoms && curMotifAtoms !== bp.motifAtoms) repairedHallucination = true;
       params.motifAtoms = bp.motifAtoms;
     }
     if (bp.unindexedMotif && params.unindexedMotif !== true) {
@@ -1109,6 +1350,78 @@ export function applyPlannerBenchmarkSeedingToNode(
     params.autoSeededBenchmarkId = bench.id;
     if (explicitLen === null && parsedBenchLen !== null) {
       params.autoSeededLength = parsedBenchLen;
+    } else if (explicitLen !== null) {
+      delete params.autoSeededLength;
+    }
+  } else if (gen.adapterId === 'rfd3') {
+    const curMode = String(params.mode ?? 'unconditional').trim().toLowerCase() || 'unconditional';
+    if (curMode === 'partial') {
+      params.autoSeededBenchmarkId = bench.id;
+      return { repairedHallucination: false };
+    }
+    const isBinder = bench.category === 'binder';
+    const isUnindexed = Boolean(bp.unindexedMotif);
+    if (!params.mode || params.mode === 'unconditional') {
+      params.mode = isBinder ? 'binder' : 'motif';
+    }
+    if (isBinder) {
+      const curHotspots = String(params.hotspots ?? '').trim();
+      if (bp.hotspots) {
+        const disjoint = curHotspots && isResidueSpecDisjointFromBenchmark(curHotspots, bench);
+        if (!curHotspots || disjoint || (opts?.overwriteUnpromptedResidues && curHotspots !== bp.hotspots)) {
+          if (curHotspots && curHotspots !== bp.hotspots) repairedHallucination = true;
+          params.hotspots = bp.hotspots;
+        }
+      }
+      const targetSpan = extractBinderTargetContig(bp.contig);
+      if (targetSpan && !String(params.target ?? '').trim()) {
+        params.target = targetSpan;
+      }
+    } else if (isUnindexed && bp.motifSpan) {
+      const curUnindex = String(params.unindex ?? '').trim();
+      const disjoint = curUnindex && isResidueSpecDisjointFromBenchmark(curUnindex, bench);
+      if (!curUnindex || disjoint || (opts?.overwriteUnpromptedResidues && curUnindex !== bp.motifSpan)) {
+        if (curUnindex && curUnindex !== bp.motifSpan) repairedHallucination = true;
+        params.unindex = bp.motifSpan;
+      }
+    }
+    if (bp.motifAtoms && !String(params.fixedAtoms ?? '').trim()) {
+      params.fixedAtoms = bp.motifAtoms;
+    }
+    const cropLigs = extractCropLigandCodes(bench.cropSegments);
+    if (cropLigs && !String(params.ligand ?? '').trim()) {
+      params.ligand = cropLigs;
+    }
+    const parsedBenchLen = parseLengthFromContig(bp.contig);
+    const clampedBenchLen =
+      parsedBenchLen !== null ? Math.max(16, Math.min(200, parsedBenchLen)) : null;
+    const curLen = typeof params.length === 'number' && Number.isFinite(params.length) ? params.length : null;
+    const explicitLen =
+      opts?.explicitLength !== undefined
+        ? opts.explicitLength
+        : curLen !== null && curLen !== getAdapterDefaultLength('rfd3')
+          ? curLen
+          : null;
+    const targetLen =
+      explicitLen !== null ? Math.max(16, Math.min(200, explicitLen)) : clampedBenchLen;
+    if (!isBinder && !isUnindexed && bench.category === 'motif' && bp.contig) {
+      const curContig = String(params.contig ?? '').trim();
+      const contigDisjoint = curContig && isResidueSpecDisjointFromBenchmark(curContig, bench);
+      if (!curContig || contigDisjoint || opts?.overwriteUnpromptedResidues) {
+        if (contigDisjoint) repairedHallucination = true;
+        const adapted =
+          explicitLen !== null && targetLen !== null
+            ? adaptBenchmarkContigForLength(bp.contig, targetLen, bench.category)
+            : bp.contig;
+        params.contig = formatRfd3Contig(adapted);
+      }
+    }
+    if (targetLen !== null) {
+      params.length = targetLen;
+    }
+    params.autoSeededBenchmarkId = bench.id;
+    if (explicitLen === null && clampedBenchLen !== null) {
+      params.autoSeededLength = clampedBenchLen;
     } else if (explicitLen !== null) {
       delete params.autoSeededLength;
     }

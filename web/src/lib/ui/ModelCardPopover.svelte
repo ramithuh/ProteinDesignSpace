@@ -45,7 +45,13 @@
   });
 
   const activePrecision = $derived(card ? getActivePrecision(card) : null);
-  const pillLabel = $derived(card ? formatModelCardPillLabel(card, compact) : '');
+  const pillLabel = $derived.by(() => {
+    if (!card) return '';
+    const raw = formatModelCardPillLabel(card, compact);
+    if (!compact) return raw;
+    const stripped = raw.replace(/\s*\([^)]*\)/g, '').split(/\s*·\s*/)[0]?.trim();
+    return stripped || raw;
+  });
   const dialogTitleId = $derived(card ? `model-card-title-${card.id}` : 'model-card-title');
 
   function shortSha(sha: string | undefined): string {

@@ -2,10 +2,20 @@
   import { ESMFOLD2_STEPS, LOCALFOLD_MODEL_OPTIONS } from '$lib/engine/registry';
   import { sanitizeParamsOnModeSwitch } from '$lib/engine/graph-utils';
   import { resolveSequenceCapMode, type NodeFlowInfo } from '$lib/engine/batch-flow';
+  import { parseCandidateProteinChains } from '$lib/engine/localfold-msa';
+  import {
+    alignQueryToTemplate,
+    getLocalFoldTemplateDialectPolicy,
+    isLocalFoldTemplateCapable,
+    localFoldTemplateFamily,
+    parseTemplateStructure,
+    resolveLocalFoldTemplateSource,
+    suggestTemplateCapableModel,
+  } from '$lib/engine/localfold-template';
   import { NUMERIC_SPECS, type NumericFieldSpec } from '$lib/engine/param-validation';
   import { resolveAutoModelLabelOnChange } from '../node-display-helpers';
   import NumericInput from '../NumericInput.svelte';
-  import type { MsaMode, SequenceSet, WorkflowNode } from '$lib/engine/types';
+  import type { MsaMode, SequenceSet, StructureArtifact, WorkflowNode } from '$lib/engine/types';
 
   interface Props {
     node: WorkflowNode;
@@ -14,14 +24,22 @@
     msaA3mDraft: string;
     lfMultiDesignInfo: { backboneCount: number; sequenceCount: number | null } | null;
     upstreamSequences: SequenceSet | null;
+    hasTemplatePort?: boolean;
+    upstreamTemplate?: StructureArtifact | null;
+    templatePdbTextDraft?: string;
+    templateUploadError?: string | null;
+    templateUploadSummary?: string | null;
     flowInfo?: NodeFlowInfo | null;
     maxTotalFoldsSpec: NumericFieldSpec;
     onUpdate: (nodeId: string, params: Record<string, unknown>) => void;
     onUpdateLabel?: (nodeId: string, label: string) => void;
     onSetParam: (key: string, value: unknown) => void;
-    onScheduleTextParam: (key: 'msaA3mText', value: string) => void;
-    onFlushPendingTextCommit: () => void;
+    onScheduleTextParam: (key: 'msaA3mText' | 'templatePdbText', value: string) => void;
+    onFlushPendingTextCommit: () => { nodeId: string; params: Record<string, unknown> } | null | void;
     onA3mFileUpload: (ev: Event) => void;
+    onTemplateFileUpload?: (ev: Event) => void;
+    onClearInlineTemplate?: () => void;
+    onClearTemplateMissingExpectation?: () => void;
   }
 
   let {
@@ -31,6 +49,11 @@
     msaA3mDraft,
     lfMultiDesignInfo,
     upstreamSequences,
+    hasTemplatePort = false,
+    upstreamTemplate = null,
+    templatePdbTextDraft = '',
+    templateUploadError = null,
+    templateUploadSummary = null,
     flowInfo = null,
     maxTotalFoldsSpec,
     onUpdate,
@@ -39,7 +62,16 @@
     onScheduleTextParam,
     onFlushPendingTextCommit,
     onA3mFileUpload,
+    onTemplateFileUpload = undefined,
+    onClearInlineTemplate = undefined,
+    onClearTemplateMissingExpectation = undefined,
   }: Props = $props();
+
+  function commitPatch(patch: Record<string, unknown>) {
+    const flushed = onFlushPendingTextCommit();
+    const baseParams = flushed && flushed.nodeId === node.id ? flushed.params : node.params;
+    onUpdate(node.id, { ...baseParams, ...patch });
+  }
 
   function localFoldMaxRecycles(modelId: string, family: string): number {
     return modelId === 'mol1' || family === 'af2-multimer' ? 20 : 10;
@@ -96,7 +128,7 @@
     return { seqCount, queryLength };
   }
 
-  let lfModelId = $derived(String(node.params.model ?? 'monomer'));
+  let lfModelId = $derived(String(node.params.model ?? 'monomer').trim());
   let lfCapMode = $derived(resolveSequenceCapMode('localfold-af2', node.params));
   let lfMeta = $derived(selectedLocalFoldMeta ?? LOCALFOLD_MODEL_OPTIONS[0]);
   let lfMsaMode = $derived(String(node.params.msaMode ?? 'single') as MsaMode);
@@ -120,6 +152,113 @@
       Boolean(String(node.params.dnaSequences ?? '').trim()) ||
       Boolean(String(node.params.rnaSequences ?? '').trim()),
   );
+  let lfIsTemplateCapable = $derived(isLocalFoldTemplateCapable(lfModelId));
+  let lfTemplateFamily = $derived(localFoldTemplateFamily(lfModelId));
+  let hasConnectedTemplatePort = $derived(Boolean(hasTemplatePort));
+  let hasInlineTemplate = $derived(templatePdbTextDraft.trim().length > 0);
+  let expectedTemplateSha = $derived(String(node.params.expectedTemplateSha256 ?? '').trim());
+  let expectedTemplateName = $derived(
+    String(node.params.expectedTemplateFilename ?? node.params.templateFilename ?? '').trim(),
+  );
+  let hasMissingTemplateUpload = $derived(
+    !hasConnectedTemplatePort &&
+      (Boolean(node.params.missingTemplateUpload) || Boolean(expectedTemplateSha)),
+  );
+  let hasAnyTemplate = $derived(
+    hasConnectedTemplatePort || hasInlineTemplate || hasMissingTemplateUpload,
+  );
+  let suggestedTemplateModel = $derived.by(() => {
+    const rep = upstreamSequences?.candidates?.[0];
+    const isMultimer =
+      Boolean(rep?.chainLengths && rep.chainLengths.length > 1) ||
+      Boolean(rep?.sequence && /[:/]/.test(rep.sequence));
+    return suggestTemplateCapableModel(lfModelId, {
+      isMultimer,
+      hasHolo: lfHasHoloContext,
+    });
+  });
+
+  type TemplatePreviewState =
+    | { kind: 'none' }
+    | { kind: 'pending-port' }
+    | {
+        kind: 'ready';
+        sourceKind: 'port' | 'inline';
+        format: 'pdb' | 'mmcif';
+        chainCount: number;
+        totalResidues: number;
+        bothProvided: boolean;
+        matchedResidues: number | null;
+        totalQueryResidues: number | null;
+        coveragePct: number | null;
+        warnings: string[];
+      }
+    | { kind: 'error'; message: string };
+
+  let templatePreview = $derived.by((): TemplatePreviewState => {
+    if (hasConnectedTemplatePort && !upstreamTemplate && !hasInlineTemplate) {
+      return { kind: 'pending-port' };
+    }
+    try {
+      const src = resolveLocalFoldTemplateSource({
+        templateInput: hasConnectedTemplatePort ? upstreamTemplate : null,
+        params: {
+          templatePdbText: templatePdbTextDraft,
+          templateFilename: node.params.templateFilename,
+          templateSpanChains: node.params.templateSpanChains,
+        },
+      });
+      if (!src) return { kind: 'none' };
+      const policy = getLocalFoldTemplateDialectPolicy(lfModelId);
+      const parsed = parseTemplateStructure(src.text, {
+        altlocFirst: policy.altlocFirst,
+        arginines: lfTemplateFamily === 'af3',
+      });
+      let matchedResidues: number | null = null;
+      let totalQueryResidues: number | null = null;
+      let coveragePct: number | null = null;
+      const warnings = [...src.warnings];
+      const rep = upstreamSequences?.candidates?.[0];
+      if (rep) {
+        const parsedCand = parseCandidateProteinChains(rep.sequence, rep.chainLengths);
+        const queryChains = parsedCand.chainSeqs
+          .map((seq, idx) => ({
+            chainId:
+              rep.chainIds?.[idx]?.trim() ||
+              (idx < 26 ? String.fromCharCode(65 + idx) : `C${idx + 1}`),
+            sequence: seq,
+          }))
+          .filter((c) => c.sequence.length > 0);
+        if (queryChains.length > 0) {
+          const alignment = alignQueryToTemplate(queryChains, parsed);
+          matchedResidues = alignment.matchedQueryResidues;
+          totalQueryResidues = alignment.totalQueryResidues;
+          coveragePct =
+            alignment.totalQueryResidues > 0
+              ? Math.round(alignment.overallCoverage * 100)
+              : 0;
+          warnings.push(...alignment.warnings);
+        }
+      }
+      return {
+        kind: 'ready',
+        sourceKind: src.sourceKind,
+        format: parsed.format,
+        chainCount: parsed.chains.length,
+        totalResidues: parsed.totalResidues,
+        bothProvided: src.bothProvided,
+        matchedResidues,
+        totalQueryResidues,
+        coveragePct,
+        warnings,
+      };
+    } catch (err) {
+      return {
+        kind: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
 </script>
 
 <label class="wide">
@@ -128,12 +267,14 @@
     {disabled}
     value={lfModelId}
     onchange={(e) => {
+      const flushed = onFlushPendingTextCommit();
+      const baseParams = flushed && flushed.nodeId === node.id ? flushed.params : node.params;
       const nextModel = e.currentTarget.value;
       const nextLabel = resolveAutoModelLabelOnChange('localfold-af2', node.label, nextModel);
       if (nextLabel) {
         onUpdateLabel?.(node.id, nextLabel);
       }
-      const sanitized = sanitizeParamsOnModeSwitch('localfold-af2', node.params, nextModel);
+      const sanitized = sanitizeParamsOnModeSwitch('localfold-af2', baseParams, nextModel);
       onUpdate(node.id, sanitized);
     }}
   >
@@ -185,11 +326,7 @@
       <button
         type="button"
         {disabled}
-        onclick={() =>
-          onUpdate(node.id, {
-            ...node.params,
-            msaMode: 'single',
-          })}
+        onclick={() => commitPatch({ msaMode: 'single' })}
       >
         Switch to single-sequence
       </button>
@@ -285,10 +422,7 @@
     value={lfCapMode}
     onchange={(e) => {
       const nextMode = e.currentTarget.value === 'fixed' ? 'fixed' : 'follow-upstream';
-      onUpdate(node.id, {
-        ...node.params,
-        capMode: nextMode,
-      });
+      commitPatch({ capMode: nextMode });
     }}
   >
     <option value="follow-upstream">Follow upstream (≤8)</option>
@@ -304,12 +438,7 @@
       ariaLabel="Max sequences to fold"
       spec={NUMERIC_SPECS['localfold-af2'].maxSequences}
       value={Number(node.params.maxSequences ?? 2)}
-      onChange={(v) =>
-        onUpdate(node.id, {
-          ...node.params,
-          capMode: 'fixed',
-          maxSequences: v,
-        })}
+      onChange={(v) => commitPatch({ capMode: 'fixed', maxSequences: v })}
     />
   </label>
 {/if}
@@ -341,11 +470,7 @@
         type="button"
         class="mini-btn"
         {disabled}
-        onclick={() =>
-          onUpdate(node.id, {
-            ...node.params,
-            capMode: 'follow-upstream',
-          })}
+        onclick={() => commitPatch({ capMode: 'follow-upstream' })}
       >
         Fold all{flowInfo.incomingCount <= 8 ? ` ${flowInfo.incomingCount}` : ''} (auto)
       </button>
@@ -386,11 +511,7 @@
       type="button"
       class="mini-btn"
       {disabled}
-      onclick={() =>
-        onUpdate(node.id, {
-          ...node.params,
-          capMode: 'follow-upstream',
-        })}
+      onclick={() => commitPatch({ capMode: 'follow-upstream' })}
     >
       Follow upstream
     </button>
@@ -402,6 +523,194 @@
     AlphaFold 3 weights are subject to DeepMind's Non-Commercial Academic Terms. For permissive open weights, use <b>RoseTTAFold3</b> (BSD-3), <b>Boltz-2</b> (MIT), or <b>OpenBind-0</b> (Apache-2.0).
   </div>
 {/if}
+
+{#if hasAnyTemplate && !lfIsTemplateCapable}
+  <div class="full lf-err-banner" role="alert">
+    <span>
+      <b>{lfMeta.shortLabel}</b> is template-free and cannot use structural templates.
+    </span>
+    <button
+      type="button"
+      class="mini-btn"
+      {disabled}
+      onclick={() => {
+        const flushed = onFlushPendingTextCommit();
+        const baseParams = flushed && flushed.nodeId === node.id ? flushed.params : node.params;
+        const nextLabel = resolveAutoModelLabelOnChange(
+          'localfold-af2',
+          node.label,
+          suggestedTemplateModel.modelId,
+        );
+        if (nextLabel) {
+          onUpdateLabel?.(node.id, nextLabel);
+        }
+        onUpdate(
+          node.id,
+          sanitizeParamsOnModeSwitch('localfold-af2', baseParams, suggestedTemplateModel.modelId),
+        );
+      }}
+    >
+      Switch to {suggestedTemplateModel.label}
+    </button>
+  </div>
+{/if}
+
+<details class="adv-details full" open={hasAnyTemplate}>
+  <summary>
+    Structural template (PDB / mmCIF)
+    {#if hasConnectedTemplatePort}
+      <span class="adv-badge">Port</span>
+    {:else if hasMissingTemplateUpload}
+      <span class="adv-badge">Missing</span>
+    {:else if hasInlineTemplate}
+      <span class="adv-badge">Inline</span>
+    {/if}
+  </summary>
+  <div class="adv-fields tpl-fields">
+    {#if hasConnectedTemplatePort}
+      <div class="full tpl-port-banner" role="status">
+        <span>
+          Connected <code>template</code> port:
+          <b>{upstreamTemplate?.label || 'Waiting for upstream structure'}</b>
+        </span>
+        {#if hasInlineTemplate}
+          <span class="field-hint">
+            Wired <code>template</code> port overrides inline template text.
+          </span>
+          {#if onClearInlineTemplate}
+            <button
+              type="button"
+              class="mini-btn"
+              {disabled}
+              onclick={onClearInlineTemplate}
+            >
+              Clear inline template
+            </button>
+          {/if}
+        {/if}
+      </div>
+    {/if}
+
+    {#if hasMissingTemplateUpload}
+      <div class="missing-upload-card full" role="alert">
+        <div class="mu-head">
+          <span class="mu-title">⚠ Missing Shared Template</span>
+          {#if expectedTemplateSha}
+            <code class="mu-sha" title={`Expected SHA-256: ${expectedTemplateSha}`}>
+              SHA-256 {expectedTemplateSha.slice(0, 12)}…
+            </code>
+          {/if}
+        </div>
+        <p class="mu-body">
+          This shared recipe expects inline template
+          {#if expectedTemplateName}
+            <code class="filename-wrap">{expectedTemplateName}</code>
+          {:else}
+            an omitted PDB/mmCIF structure
+          {/if}. Re-upload the matching file or clear the expectation.
+        </p>
+        <div class="mu-actions">
+          <label class="mu-upload-btn" class:is-disabled={disabled}>
+            <span>Re-upload matching file</span>
+            <input
+              type="file"
+              accept=".pdb,.cif,.mmcif,.ent,.txt"
+              hidden
+              {disabled}
+              onchange={onTemplateFileUpload}
+            />
+          </label>
+          {#if onClearTemplateMissingExpectation}
+            <button
+              type="button"
+              class="mu-clear-btn"
+              {disabled}
+              onclick={onClearTemplateMissingExpectation}
+            >
+              Clear expectation
+            </button>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
+    <div class="a3m-box full">
+      <div class="a3m-head">
+        <label class="mu-upload-btn a3m-upload-btn" class:is-disabled={disabled}>
+          <span>↑ Upload .pdb / .cif</span>
+          <input
+            type="file"
+            accept=".pdb,.cif,.mmcif,.ent,.txt"
+            hidden
+            {disabled}
+            onchange={onTemplateFileUpload}
+          />
+        </label>
+        {#if (hasInlineTemplate || Boolean(String(node.params.templateFilename ?? '').trim()) || Boolean(node.params.missingTemplateUpload)) && onClearInlineTemplate}
+          <button
+            type="button"
+            class="mini-btn"
+            {disabled}
+            onclick={onClearInlineTemplate}
+          >
+            Clear inline
+          </button>
+        {/if}
+        {#if node.params.templateFilename}
+          <span class="field-hint filename-wrap">{String(node.params.templateFilename)}</span>
+        {/if}
+      </div>
+      <textarea
+        rows="3"
+        spellcheck="false"
+        class:input-error={templatePreview.kind === 'error' || Boolean(templateUploadError)}
+        {disabled}
+        placeholder="Optional inline PDB ATOM or mmCIF _atom_site template (used when no template port is wired)…"
+        value={templatePdbTextDraft}
+        oninput={(e) => onScheduleTextParam('templatePdbText', e.currentTarget.value)}
+        onblur={onFlushPendingTextCommit}
+      ></textarea>
+      {#if templateUploadError}
+        <span class="field-hint err">{templateUploadError}</span>
+      {:else if templateUploadSummary}
+        <span class="field-hint ok">✓ {templateUploadSummary}</span>
+      {/if}
+      {#if templatePreview.kind === 'error'}
+        <span class="field-hint err" role="alert">{templatePreview.message}</span>
+      {:else if templatePreview.kind === 'pending-port'}
+        <span class="field-hint">Template will be resolved when the upstream structure runs.</span>
+      {:else if templatePreview.kind === 'ready'}
+        <span class="field-hint ok">
+          ✓ {templatePreview.format.toUpperCase()} ({templatePreview.sourceKind}) ·
+          {templatePreview.chainCount} chain{templatePreview.chainCount === 1 ? '' : 's'},
+          {templatePreview.totalResidues} residues
+          {#if templatePreview.matchedResidues !== null && templatePreview.totalQueryResidues !== null}
+            · Matched {templatePreview.matchedResidues}/{templatePreview.totalQueryResidues} ({templatePreview.coveragePct}%)
+          {/if}
+        </span>
+        {#if templatePreview.warnings.length > 0}
+          <span class="field-hint warn">{templatePreview.warnings[0]}</span>
+        {/if}
+      {/if}
+    </div>
+
+    {#if lfTemplateFamily === 'af2-multimer' || lfTemplateFamily === 'af3'}
+      <label class="checkbox-row full">
+        <input
+          type="checkbox"
+          {disabled}
+          checked={node.params.templateSpanChains !== false}
+          onchange={(e) => onSetParam('templateSpanChains', e.currentTarget.checked)}
+        />
+        <span>Preserve inter-chain template geometry (<code>templateSpanChains</code>)</span>
+      </label>
+    {:else if lfTemplateFamily === 'af2-monomer'}
+      <span class="field-hint full">
+        AF2 Monomer Models 1–2 always preserve all pair geometry; cross-chain template masking (<code>templateSpanChains</code>) requires AF2-Multimer or an AF3-family model.
+      </span>
+    {/if}
+  </div>
+</details>
 
 {#if lfMeta.family === 'af3' || lfMeta.family === 'esmfold2'}
   <details class="adv-details full" open={lfHasHoloContext}>
@@ -544,6 +853,100 @@
   }
   .field-hint.warn {
     color: var(--warn-text);
+  }
+  .field-hint.err {
+    color: var(--err-text, var(--err-strong));
+  }
+  .lf-err-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 10.5px;
+    color: var(--err-text, #fecaca);
+    background: var(--err-bg, rgba(185, 28, 28, 0.16));
+    border: 1px solid var(--err-strong, #ef4444);
+    padding: 6px 8px;
+    border-radius: 5px;
+  }
+  .tpl-fields {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .tpl-port-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-size: 10.5px;
+    padding: 6px 8px;
+    border-radius: 5px;
+    background: var(--bg-pill, rgba(59, 130, 246, 0.12));
+    border: 1px solid var(--border-strong);
+    color: var(--text-primary);
+  }
+  .checkbox-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .missing-upload-card {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 9px 10px;
+    border-radius: 6px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-text);
+  }
+  .mu-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .mu-title {
+    font-size: 11.5px;
+    font-weight: 700;
+  }
+  .mu-sha {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.14);
+  }
+  .mu-body {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  .mu-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .mu-clear-btn {
+    padding: 4px 9px;
+    border-radius: 5px;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-strong);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .filename-wrap {
+    overflow-wrap: anywhere;
   }
   .a3m-box {
     display: flex;

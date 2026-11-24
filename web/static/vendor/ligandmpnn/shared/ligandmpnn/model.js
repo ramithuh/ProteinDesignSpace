@@ -1,5 +1,5 @@
 import { parseStructure, ALPHABET } from "./parser.js";
-import { featurize, rawFeatures } from "./features.js";
+import { featurize, rawFeatures } from "./features.js?v=3";
 export function seededRandom(seed = 42) {
   let s = seed >>> 0;
   return () => {

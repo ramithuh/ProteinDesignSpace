@@ -55,7 +55,7 @@
   let runtimeLabel = $derived(manifest?.runtime === 'cpu-ts' ? 'CPU' : 'GPU');
   let activeWeightsMB = $derived.by((): number => {
     if (data.adapterId === 'localfold-af2') {
-      const modelId = String(data.params?.model ?? 'monomer');
+      const modelId = String(data.params?.model ?? 'monomer').trim();
       const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
       return meta.approxMB;
     }
@@ -166,7 +166,7 @@
   let displayTitle = $derived.by((): string => {
     if (data.label) return data.label;
     if (data.adapterId === 'localfold-af2') {
-      const modelId = String(data.params?.model ?? 'monomer');
+      const modelId = String(data.params?.model ?? 'monomer').trim();
       const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
       return meta.shortLabel;
     }

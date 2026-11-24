@@ -1396,4 +1396,22 @@ describe('WorkflowPlan R1–R4 regressions & Q1–Q10 reconciliation', () => {
     const repaired = repairDraftedWorkflowFromBioFeedback(siblingGraph).graph;
     expect(repaired.nodes.find((n) => n.id === 'af3_2')!.params.ligandCcdCodes).toBe('ZN, DHZ');
   });
+
+  it('Tier 5 R2 adversarial (Finding 3): repairDraftedWorkflowFromBioFeedback syncs holo context onto whitespace-padded AF3 sibling models', () => {
+    const paddedSiblingGraph: WorkflowGraph = {
+      id: 'af3-sibling-sync-padded',
+      name: 'AF3 Sibling Padded Model Sync',
+      nodes: [
+        { id: 'seq', adapterId: 'sequence-input', label: 'Seq', params: { sequence: 'MKTAYIAKQRQISFVKSHFSRQ' } },
+        { id: 'af3_1', adapterId: 'localfold-af2', label: 'AF3 1', params: { model: 'af3', ligandCcdCodes: 'ATP' } },
+        { id: 'af3_2', adapterId: 'localfold-af2', label: 'Boltz2', params: { model: ' boltz2 ', msaMode: 'mmseqs2' } },
+      ],
+      edges: [
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'af3_1', toPort: 'sequences' },
+        { fromNode: 'seq', fromPort: 'sequences', toNode: 'af3_2', toPort: 'sequences' },
+      ],
+    };
+    const repaired = repairDraftedWorkflowFromBioFeedback(paddedSiblingGraph).graph;
+    expect(repaired.nodes.find((n) => n.id === 'af3_2')!.params.ligandCcdCodes).toBe('ATP');
+  });
 });

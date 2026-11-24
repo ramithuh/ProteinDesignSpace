@@ -357,7 +357,7 @@ export function resolveNodeFoldLimitOptions(
     return { maxFoldResidues: userOverride, isHostGpu: false };
   }
   if (opts?.localHardwareCaps && node.adapterId === 'localfold-af2') {
-    const modelId = String(node.params?.model ?? 'monomer');
+    const modelId = String(node.params?.model ?? 'monomer').trim();
     return {
       maxFoldResidues: computeSafeBrowserFoldCeiling(modelId, opts.localHardwareCaps),
       isHostGpu: false,
@@ -371,7 +371,7 @@ export function estimateNodeActiveWeightsMB(node: WorkflowNode): number {
   const manifest = ADAPTER_REGISTRY[node.adapterId];
   if (!manifest) return 0;
   if (node.adapterId === 'localfold-af2') {
-    const modelId = String(node.params?.model ?? 'monomer');
+    const modelId = String(node.params?.model ?? 'monomer').trim();
     const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
     return meta.approxMB;
   }

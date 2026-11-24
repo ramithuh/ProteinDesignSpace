@@ -8,6 +8,7 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync, statSync, copyFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
@@ -67,5 +68,32 @@ try {
   }
 }
 
+let buildGitSha = null;
+try {
+  const rawSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout: 2000,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
+  if (/^[0-9a-f]{7,40}$/i.test(rawSha)) {
+    buildGitSha = rawSha.toLowerCase();
+  }
+} catch {
+  const envSha = String(
+    process.env.CF_PAGES_COMMIT_SHA || process.env.GITHUB_SHA || process.env.DENOVO_BUILD_SHA || '',
+  ).trim();
+  if (/^[0-9a-f]{7,40}$/i.test(envSha)) {
+    buildGitSha = envSha.toLowerCase();
+  }
+}
+writeFileSync(
+  resolve(buildDir, '.build-meta.json'),
+  JSON.stringify({ gitSha: buildGitSha, builtAt: new Date().toISOString() }, null, 2) + '\n',
+  'utf8',
+);
+
 const workerKb = (statSync(outWorkerPath).size / 1024).toFixed(1);
-console.log(`[build-cf-worker] Built web/build/_worker.js (${workerKb} KB) + _routes.json + og-default.png`);
+console.log(
+  `[build-cf-worker] Built web/build/_worker.js (${workerKb} KB) + _routes.json + og-default.png + .build-meta.json (${buildGitSha ? buildGitSha.slice(0, 7) : 'no-git'})`,
+);

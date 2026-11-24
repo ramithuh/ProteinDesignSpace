@@ -3,6 +3,8 @@
 Run every WebGPU model in `denovo.run` on a **remote GPU workstation or cluster** (RTX 5090, DGX Spark, HPC node) with **zero Python, zero `uv`/conda, and zero CUDA wheel conflicts**.
 
 > **Do I need this on my own laptop?** No — if you're using Chrome/Edge on a Mac or PC with a GPU, just open [`https://denovo.run`](https://denovo.run) directly in **WebGPU (this computer)** mode. Self-hosting is for offloading heavy jobs (and >512 aa folds) to a **remote GPU**, or using a browser without hardware WebGPU.
+>
+> **Fast-moving repo — pull regularly:** This repository changes quickly (new models, WebGPU kernel speedups, and bug fixes land frequently). When self-hosting, periodically run `git pull && npm --prefix web ci && npm --prefix web run build` and restart `node server/selfhost-server.mjs` so your server stays in sync with [`https://denovo.run`](https://denovo.run) (see [Updating Later](#updating-later) below — your cached model weights are preserved).
 
 ## Prerequisites (on the GPU Machine)
 
@@ -76,13 +78,16 @@ Open the `https://<machine>.<tailnet>.ts.net:8790` URL printed by `tailscale ser
 
 ## Updating Later
 
+Because `ProteinDesignSpace` evolves rapidly, pull and rebuild whenever you want the latest models, kernel optimizations, and bug fixes:
+
 ```bash
 cd ProteinDesignSpace
 git pull
+npm --prefix web ci
 npm --prefix web run build
 ```
 
-Then restart `node server/selfhost-server.mjs` if `server/selfhost-server.mjs` changed (your cached model weights in `~/.cache/denovo-selfhost/profile` are preserved).
+Then **restart `node server/selfhost-server.mjs`** so both the HTTP server and its persistent headless Chromium `/runner` tab load the newly built bundle. Your cached model weights in `DENOVO_DATA_DIR` (default `~/.cache/denovo-selfhost/profile`) are preserved across updates.
 
 ## Troubleshooting
 

@@ -2,6 +2,12 @@
 
 import type { AdapterManifest, AdapterParamOption, CampaignState, WorkflowGraph } from './types';
 import { validateResidueMappingSyntax } from './param-schema';
+import {
+  hasInlineTemplateOrExpectation,
+  isLocalFoldTemplateCapable,
+  LocalFoldTemplateError,
+  parseTemplateStructure,
+} from './localfold-template';
 
 export interface Rfd4BenchmarkMeta {
   id: string;
@@ -2967,6 +2973,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       'In-browser protein structure prediction supporting AlphaFold2 Monomer (models 1–5), AlphaFold2-Multimer v3 (models 1–5), RoseTTAFold3, Boltz-2, OpenBind-0, Protenix-v2, OpenDDE, Mol-1, IntelliFold-2, AlphaFold 3, and ESMFold2 Experimental Fast (300M and 600M).',
     inputs: {
       sequences: { type: 'SequenceSet' },
+      template: { type: 'StructureArtifact', required: false },
     },
     outputs: {
       folds: { type: 'FoldedStructure' },
@@ -3153,11 +3160,73 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         step: 1,
         description: 'Campaign-wide cap on total refolds across multi-backbone designs.',
       },
+      {
+        key: 'templatePdbText',
+        label: 'Template PDB / mmCIF text',
+        kind: 'textarea',
+        tier: 'advanced',
+        defaultValue: '',
+        placeholder: 'ATOM      1  N   ALA A   1 ...',
+        description:
+          'Optional inline PDB or mmCIF structural template (used when no "template" port edge is wired). Supported by AF2 Models 1–2, AF2-Multimer, and AF3-lineage models.',
+      },
+      {
+        key: 'templateFilename',
+        label: 'Template filename',
+        kind: 'text',
+        tier: 'advanced',
+        defaultValue: '',
+        placeholder: 'e.g. template.pdb or template.cif',
+        description: 'Optional display filename for an uploaded inline structural template.',
+      },
+      {
+        key: 'templateSpanChains',
+        label: 'Preserve inter-chain template geometry',
+        kind: 'boolean',
+        tier: 'advanced',
+        defaultValue: true,
+        description:
+          'When a single multi-chain template covers multiple query chains, preserve cross-chain interface distances for AF2-Multimer and AF3-family models.',
+      },
     ],
-    crossValidate: (p) => {
+    crossValidate: (p, ctx) => {
       const errs: string[] = [];
-      const modelId = p.model !== undefined ? String(p.model) : 'monomer';
+      const modelId = (p.model !== undefined ? String(p.model) : 'monomer').trim();
       const foldModel = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId);
+
+      const inlineTplText = typeof p.templatePdbText === 'string' ? p.templatePdbText.trim() : '';
+      const hasTemplatePort = Boolean(ctx?.connectedInputs?.has('template'));
+      const missingTplUpload = Boolean(p.missingTemplateUpload) && !inlineTplText && !hasTemplatePort;
+      const hasAnyTemplate = hasTemplatePort || hasInlineTemplateOrExpectation(p);
+
+      if (hasAnyTemplate && !isLocalFoldTemplateCapable(modelId)) {
+        errs.push(
+          `Structural templates are not supported by "${modelId}" (${foldModel?.shortLabel ?? modelId} is template-free). Switch to AF2 Model 1–2, AF2-Multimer, or an AF3-family model, or remove the template.`,
+        );
+      }
+      if (!hasTemplatePort && inlineTplText.length > 0) {
+        try {
+          parseTemplateStructure(inlineTplText);
+        } catch (err) {
+          if (err instanceof LocalFoldTemplateError) {
+            errs.push(`Invalid inline template structure: ${err.message}`);
+          } else {
+            errs.push(
+              `Invalid inline template structure: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+      }
+      if (missingTplUpload) {
+        const expectedName =
+          typeof p.expectedTemplateFilename === 'string' && p.expectedTemplateFilename.trim()
+            ? p.expectedTemplateFilename.trim()
+            : 'template PDB/mmCIF';
+        errs.push(
+          `Shared inline template (${expectedName}) was omitted for URL size; re-upload the template structure or clear it before running.`,
+        );
+      }
+
       if (foldModel?.family === 'esmfold2') {
         const steps = p.esmfold2Steps;
         if (steps !== undefined && !ESMFOLD2_STEPS.some((n) => steps === n || steps === String(n))) {

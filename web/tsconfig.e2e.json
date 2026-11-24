@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    ".svelte-kit/ambient.d.ts",
+    ".svelte-kit/non-ambient.d.ts",
+    "src/lib/**/*.ts",
+    "tests/e2e-localfold-template/**/*.ts"
+  ],
+  "exclude": ["node_modules/**"]
+}

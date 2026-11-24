@@ -522,6 +522,8 @@
     viewerFocusToken = null;
     if (selectedNodeIds.length >= 2) {
       rightPanelTab = 'peek';
+    } else if (selectedNodeIds.length === 1) {
+      rightPanelTab = isComputeNodeFinished(selectedNodeIds[0]) ? 'peek' : 'params';
     }
   }
 
@@ -1468,20 +1470,23 @@
     canvasFitViewTrigger += 1;
   }
 
+  function isComputeNodeFinished(nodeId: string | null | undefined): boolean {
+    if (!nodeId) return false;
+    const node = graph.nodes.find((n) => n.id === nodeId);
+    if (!node || node.adapterId === 'pdb-input' || node.adapterId === 'sequence-input') {
+      return false;
+    }
+    const st = nodeStates[nodeId]?.status;
+    const outs = outputsByNode[nodeId];
+    return Boolean(outs && Object.keys(outs).length > 0 && (st === 'done' || st === 'cached'));
+  }
+
   function handleSelectNode(nodeId: string) {
     setSingleSelection(nodeId);
     selectedPeekSlotId = null;
     selectedEdgeId = null;
     showSeqParentBackbone = false;
-    const clicked = graph.nodes.find((n) => n.id === nodeId);
-    const hasOutputs = Boolean(
-      nodeId && outputsByNode[nodeId] && Object.keys(outputsByNode[nodeId]).length > 0,
-    );
-    if (clicked?.adapterId === 'designability-scorer' && hasOutputs) {
-      rightPanelTab = 'peek';
-    } else {
-      rightPanelTab = 'params';
-    }
+    rightPanelTab = isComputeNodeFinished(nodeId) ? 'peek' : 'params';
   }
 
   function handleBlockAdded(nodeId: string) {
@@ -2273,6 +2278,17 @@
         bypassCache,
         onNodeOutput: (nodeId, outs) => {
           outputsByNode = { ...outputsByNode, [nodeId]: outs };
+          if (!isCompareMode && selectedNodeId === nodeId && Object.keys(outs).length > 0) {
+            const node = graph.nodes.find((n) => n.id === nodeId);
+            const isInputNode =
+              node?.adapterId === 'pdb-input' || node?.adapterId === 'sequence-input';
+            const activeTag = document.activeElement?.tagName?.toLowerCase();
+            const isEditingField =
+              activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select';
+            if (node && !isInputNode && !isEditingField) {
+              rightPanelTab = 'peek';
+            }
+          }
         },
       });
       flushPendingProgress();
@@ -3068,6 +3084,16 @@
   let selectedNode = $derived(
     selectedNodeId ? (graph.nodes.find((n) => n.id === selectedNodeId) ?? null) : null,
   );
+  let selectedNodeNeedsRun = $derived.by((): boolean => {
+    if (!selectedNode || isCompareMode) return false;
+    if (selectedNode.adapterId === 'pdb-input' || selectedNode.adapterId === 'sequence-input') {
+      return false;
+    }
+    const st = nodeStates[selectedNode.id]?.status;
+    const outs = outputsByNode[selectedNode.id];
+    const hasOutputs = Boolean(outs && Object.keys(outs).length > 0);
+    return !hasOutputs || (st !== 'done' && st !== 'cached');
+  });
   let selectedUpstreamBenchmarkId = $derived.by((): string | null => {
     if (!selectedNode) return null;
     const edge = graph.edges.find(
@@ -3598,19 +3624,6 @@
       selectedCandidateKey: compareSelectedCandidateKey,
       referenceNodeId: activeCompareRefNodeId ?? undefined,
     });
-  });
-
-  // Discoverable 1-click compare CTA when a graph has >= 2 scorers (or >= 2 folds) with outputs
-  let comparableBranchIds = $derived.by((): string[] => {
-    const scorers = graph.nodes
-      .filter((n) => n.adapterId === 'designability-scorer' && outputsByNode[n.id])
-      .map((n) => n.id);
-    if (scorers.length >= 2) return scorers.slice(0, COMPARE_PALETTE.length);
-    const folds = graph.nodes
-      .filter((n) => n.adapterId === 'localfold-af2' && outputsByNode[n.id])
-      .map((n) => n.id);
-    if (folds.length >= 2) return folds.slice(0, COMPARE_PALETTE.length);
-    return [];
   });
 
   let isCanonicalViewerLayout = $derived(
@@ -5081,8 +5094,9 @@
               class="r-tab"
               class:active={rightPanelTab === 'params'}
               onclick={() => (rightPanelTab = 'params')}
+              title="Block parameters"
             >
-              Parameters
+              Params
             </button>
             <button
               type="button"
@@ -5099,19 +5113,23 @@
             </button>
           </div>
           <div class="r-tab-actions">
-            {#if !isCompareMode && comparableBranchIds.length >= 2}
-              <button
-                type="button"
-                class="cmp-launch-btn"
-                title="Compare branches in 3D (or Ctrl/⌘-click / Shift-click blocks on the canvas)"
-                onclick={() => handleSelectNodes(comparableBranchIds)}
-              >
-                Compare branches ({comparableBranchIds.length})
-              </button>
-            {:else if selectedNode && (!isCompareMode || rightPanelTab === 'params')}
+            {#if selectedNode && !selectedNodeNeedsRun && (!isCompareMode || rightPanelTab === 'params')}
               <span class="tab-node-ctx" title={selectedNode.label ?? selectedNode.adapterId}>
                 {isCompareMode ? 'Editing: ' : ''}{selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
               </span>
+            {/if}
+            {#if selectedNode && selectedNodeNeedsRun}
+              {@const runTargetTitle = selectedNode.label ?? ADAPTER_REGISTRY[selectedNode.adapterId]?.shortName ?? selectedNode.adapterId}
+              <button
+                type="button"
+                class="pane-expand-btn run-here-tab-btn"
+                disabled={isRunning || hasBioErrors || validationErrors.length > 0}
+                onclick={() => runWorkflow(false, selectedNode.id)}
+                title={`Run upstream blocks up to ${runTargetTitle} (results stay cached for full runs)`}
+                aria-label={`Run up to ${runTargetTitle}`}
+              >
+                ▶ Run here
+              </button>
             {/if}
             {#if selectedNode && !isCompareMode}
               <ModelCardPopover adapterId={selectedNode.adapterId} params={selectedNode.params} compact />
@@ -6784,23 +6802,6 @@
     color: var(--text-primary);
     border-color: var(--accent);
   }
-  .cmp-launch-btn {
-    border: 1px solid var(--accent);
-    background: var(--bg-pill);
-    color: var(--accent-soft);
-    border-radius: 999px;
-    padding: 2px 9px;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10.5px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-  .cmp-launch-btn:hover {
-    background: var(--accent);
-    color: #fff;
-  }
   .geom-strip {
     display: flex;
     flex-wrap: wrap;
@@ -6857,9 +6858,9 @@
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
-    gap: 4px 8px;
+    gap: 4px 6px;
     min-width: 0;
-    padding: 6px 10px 0;
+    padding: 5px 8px 0;
     border-bottom: 1px solid var(--border);
     background: var(--bg-surface-2);
   }
@@ -6875,22 +6876,40 @@
     align-items: center;
     justify-content: flex-end;
     flex-wrap: wrap;
-    gap: 4px 6px;
+    gap: 4px;
     min-width: 0;
     max-width: 100%;
     padding-bottom: 4px;
+  }
+  .pane-expand-btn.run-here-tab-btn {
+    margin-left: 0;
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    font-weight: 600;
+    padding: 2px 7px;
+    flex-shrink: 0;
+  }
+  .pane-expand-btn.run-here-tab-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 88%, #000);
+    border-color: color-mix(in srgb, var(--accent) 88%, #000);
+    color: #fff;
+  }
+  .pane-expand-btn.run-here-tab-btn:disabled {
+    opacity: 0.48;
+    cursor: not-allowed;
   }
   .r-tab {
     position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     background: transparent;
     border: none;
     border-bottom: 2px solid transparent;
     color: var(--text-muted);
-    padding: 7px 12px 8px;
-    font-size: 12.5px;
+    padding: 7px 8px 8px;
+    font-size: 12px;
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;
