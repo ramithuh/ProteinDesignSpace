@@ -3576,21 +3576,21 @@
           type="button"
           class="hdr-compute-seg"
           class:active={!isRemoteCompute}
-          class:ok={!isRemoteCompute && webgpuSupported && !webgpuIsFallback && !activeGpuWorker}
-          class:warn={!isRemoteCompute && webgpuSupported && webgpuIsFallback && !activeGpuWorker}
-          class:bad={!isRemoteCompute && webgpuSupported === false && !activeGpuWorker}
-          class:gpu={!isRemoteCompute && Boolean(activeGpuWorker)}
+          class:ok={!isRemoteCompute && webgpuSupported && !webgpuIsFallback && !isRunning}
+          class:warn={!isRemoteCompute && webgpuSupported && webgpuIsFallback && !isRunning}
+          class:bad={!isRemoteCompute && webgpuSupported === false && !isRunning}
+          class:gpu={!isRemoteCompute && isRunning}
           aria-pressed={!isRemoteCompute}
           aria-expanded={!isRemoteCompute && sysMenuOpen}
           onclick={() => handleHeaderComputeClick('local')}
-          title="WebGPU (this computer) · click active tab for status & cache"
+          title={activeGpuWorkerLabel
+            ? `WebGPU (this computer) · ${activeGpuWorkerLabel} loaded in VRAM (click to inspect or free)`
+            : 'WebGPU (this computer) · click active tab for status & cache'}
         >
           {#if !isRemoteCompute}
             <span class="status-dot"></span>
           {/if}
-          {#if !isRemoteCompute && activeGpuWorkerLabel}
-            GPU: {activeGpuWorkerLabel}
-          {:else if !isRemoteCompute && webgpuIsFallback}
+          {#if !isRemoteCompute && webgpuIsFallback}
             WebGPU <span class="hdr-compute-sub">(SW)</span>
           {:else}
             WebGPU <span class="hdr-compute-sub">(this computer)</span>
@@ -3601,9 +3601,9 @@
           type="button"
           class="hdr-compute-seg"
           class:active={isRemoteCompute}
-          class:ok={isRemoteCompute && remoteHealth?.ok && !activeGpuWorker}
-          class:bad={isRemoteCompute && remoteHealth?.ok === false && !activeGpuWorker}
-          class:gpu={isRemoteCompute && Boolean(activeGpuWorker)}
+          class:ok={isRemoteCompute && remoteHealth?.ok && !isRunning}
+          class:bad={isRemoteCompute && remoteHealth?.ok === false && !isRunning}
+          class:gpu={isRemoteCompute && isRunning}
           aria-pressed={isRemoteCompute}
           aria-expanded={isRemoteCompute && sysMenuOpen}
           onclick={() => handleHeaderComputeClick('remote')}
@@ -3614,9 +3614,7 @@
           {#if isRemoteCompute}
             <span class="status-dot"></span>
           {/if}
-          {#if isRemoteCompute && activeGpuWorkerLabel}
-            GPU: {activeGpuWorkerLabel}
-          {:else if isRemoteCompute && remoteShortGpu}
+          {#if isRemoteCompute && remoteShortGpu}
             Self-Hosted <span class="hdr-compute-sub">({remoteShortGpu})</span>
           {:else}
             Self-Hosted <span class="hdr-compute-sub">(remote machine)</span>
