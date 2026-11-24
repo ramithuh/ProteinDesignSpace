@@ -19,6 +19,7 @@ import {
 import { makeSequenceKey } from '$lib/engine/collections';
 import { deriveStableItemSeed, planGeneratorDesigns } from '$lib/engine/work-plan';
 import { createWorkerHarness, fnv1a, type WorkerRunContext } from '$lib/kernel';
+import { releaseRfd4GeneratorActivations } from './lifecycle';
 import type {
   ConditionSpecArtifact,
   SequenceCandidate,
@@ -638,14 +639,7 @@ createWorkerHarness({
     }
 
     const releaseGeneratorActivations = () => {
-      try {
-        generator?.releaseActivations?.();
-        generator?.trunk?.engine?.releaseActivations?.();
-        generator?.decoder?.engine?.releaseActivations?.();
-        generator?.encoder?.engine?.releaseActivations?.();
-      } catch {
-        /* ignore */
-      }
+      releaseRfd4GeneratorActivations(generator);
     };
 
     const tokens: string[] = rfd4Mod.UNIFIED_ATOM37_TOKENS ?? [];
