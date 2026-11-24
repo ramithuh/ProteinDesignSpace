@@ -344,9 +344,11 @@ export function buildLigandV2000Sdf(
               x.dist - y.dist ||
               x.bondIdx - y.bondIdx,
           );
-          const target = sorted[0];
-          if (bonds[target.bondIdx][2] === 1 && canAddOrder(parentIdx, 1) && canAddOrder(target.j, 1)) {
-            bonds[target.bondIdx][2] = 2;
+          for (const target of sorted) {
+            if (bonds[target.bondIdx][2] === 1 && canAddOrder(parentIdx, 1) && canAddOrder(target.j, 1)) {
+              bonds[target.bondIdx][2] = 2;
+              break;
+            }
           }
         }
       } else if (bonds[edge.bondIdx][2] === 1 && canAddOrder(parentIdx, 1) && canAddOrder(oIdx, 1)) {

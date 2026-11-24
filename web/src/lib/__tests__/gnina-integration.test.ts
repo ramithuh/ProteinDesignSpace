@@ -1160,6 +1160,26 @@ describe('Issue #93: GNINA raw-PDB bond-order heuristic, valence budgets & donor
     expect(molAce.atoms[2].acceptor).toBe(true);
     expect(molAce.atoms[3].acceptor).toBe(true);
 
+    // Explicit-H carboxylic acid CH3-C(=O)-OH where C-O2(H) = 1.237 Å < C-O1 = 1.259 Å:
+    // O2 already reaches valence 2 via O2-HO2, so C=O1 must still be promoted (avoiding false gem-diol).
+    const explicitHAcidPdb = [
+      formatSynthHetatm(1, 'C1', 'ACD', -1.5, 0.0, 0.0, 'C'),
+      formatSynthHetatm(2, 'C2', 'ACD', 0.0, 0.0, 0.0, 'C'),
+      formatSynthHetatm(3, 'O1', 'ACD', 0.63, 1.09, 0.0, 'O'),
+      formatSynthHetatm(4, 'O2', 'ACD', 0.619, -1.071, 0.0, 'O'),
+      formatSynthHetatm(5, 'HO2', 'ACD', 1.589, -1.071, 0.0, 'H'),
+      'END',
+    ].join('\n');
+    const prepAcid = extractHoloReceptorAndLigands(explicitHAcidPdb, { ligandCode: 'ACD' });
+    const parsedAcid = assertValidSdfValenceBudgets(prepAcid.selectedLigandSdf!);
+    expect(parsedAcid.bondOrderBetween(1, 2)).toBe(2); // C2=O1 promoted
+    expect(parsedAcid.bondOrderBetween(1, 3)).toBe(1); // C2-O2(H) stays single
+    expect(parsedAcid.valences[1]).toBe(4); // C2 valence = 4
+    expect(parsedAcid.valences[2]).toBe(2); // O1 valence = 2
+    expect(parsedAcid.valences[3]).toBe(2); // O2 valence = 2
+    const [molAcid] = gninaParseLigands(prepAcid.selectedLigandSdf!, 'sdf');
+    expect(countPolarHydrogensByEl(molAcid, 'O')).toBe(1);
+
     // Sulfonamide CH3-SO2-NH2: S valence = 6, two S=O order 2, N retains 2 N–H
     const sulfonamidePdb = [
       formatSynthHetatm(1, 'C1', 'SFA', -1.78, 0.0, 0.0, 'C'),
