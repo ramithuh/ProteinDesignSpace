@@ -478,11 +478,14 @@ export async function checkRemoteServerHealth(
       json = null;
     }
     if (!resp.ok || !json || json.service !== 'denovo-selfhost') {
+      const looksHtml = resp.ok && !json && /^\s*<!doctype|^\s*<html/i.test(text);
       return {
         ok: false,
         error:
           (typeof json?.error === 'string' && json.error) ||
-          `HTTP ${resp.status} from ${buildApiUrl(serverUrl, '/api/health')}`,
+          (looksHtml
+            ? 'No self-hosted GPU server at this URL'
+            : `HTTP ${resp.status} from ${buildApiUrl(serverUrl, '/api/health')}`),
       };
     }
     return {

@@ -266,8 +266,12 @@
 
   function shouldAutoProbeRemote(cfg: ComputeBackendConfig): boolean {
     if (cfg.mode === 'local') return false;
-    // Same-origin (blank URL): auto-probe so cookie-authenticated / SSH-tunnel servers connect seamlessly
-    if (!cfg.serverUrl.trim()) return true;
+    // Same-origin (blank URL): only auto-probe when a same-origin self-host server was actually
+    // detected (e.g. http://127.0.0.1:8790 / Tailscale Serve) or a token was entered, so clicking
+    // Self-Hosted on static denovo.run never flashes "Offline: HTTP 200 from /api/health".
+    if (!cfg.serverUrl.trim()) {
+      return Boolean(sameOriginHostDetected?.ok || cfg.apiToken.trim());
+    }
     // Cross-origin custom URL: only auto-probe when a token is already present (e.g. same-tab refresh)
     // so pasting a URL never triggers a premature browser Local Network Access prompt before token entry.
     return Boolean(cfg.apiToken.trim());
@@ -1148,13 +1152,16 @@
     if (shouldAutoProbeRemote(loadedBackend)) {
       void probeRemoteBackend(loadedBackend);
     } else if (
-      loadedBackend.mode === 'local' &&
+      !loadedBackend.serverUrl.trim() &&
       typeof window !== 'undefined' &&
       window.location.protocol.startsWith('http')
     ) {
       void checkRemoteServerHealth('', '', fetch, 1500).then((health) => {
         if (!health.ok) return;
         sameOriginHostDetected = health;
+        if (computeBackend.mode !== 'local' && !computeBackend.serverUrl.trim()) {
+          remoteHealth = health;
+        }
       });
     }
     const { webMcpRegistered } = attachProgrammaticApi(scheduler, handleProgress);

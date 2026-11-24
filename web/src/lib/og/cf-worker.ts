@@ -150,6 +150,21 @@ export default {
       return res;
     }
 
+    // 1b. Unknown /api/* endpoints on public static Cloudflare Pages (e.g. /api/health) -> crisp 404 JSON
+    if (url.pathname.startsWith('/api/')) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'No self-hosted GPU server at this URL' }),
+        {
+          status: 404,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'public, max-age=300',
+            'X-Content-Type-Options': 'nosniff',
+          },
+        },
+      );
+    }
+
     // 2. Shared workflow landing page (`/?g=...` or `/?p=...`) -> inject dynamic OG meta tags
     if (
       (url.pathname === '/' || url.pathname === '/index.html') &&
