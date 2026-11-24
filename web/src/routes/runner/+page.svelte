@@ -90,9 +90,8 @@
       },
       cancel: async (jobId: string) => {
         const ctrl = activeAborts.get(jobId);
-        if (ctrl) {
-          ctrl.abort();
-        }
+        if (!ctrl) return;
+        ctrl.abort();
         await scheduler.releaseActiveGpu();
       },
       releaseGpu: async () => {

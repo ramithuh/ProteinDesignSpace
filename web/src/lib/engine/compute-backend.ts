@@ -97,11 +97,20 @@ export function validateRemoteServerUrl(raw: string): {
 } {
   const trimmed = normalizeServerBaseUrl(raw);
   if (!trimmed) {
-    const pageOrigin =
-      typeof window !== 'undefined' && window.location?.origin
-        ? window.location.origin
-        : 'same-origin';
-    return { ok: true, baseUrl: '', origin: pageOrigin };
+    if (typeof window !== 'undefined' && window.location) {
+      const { protocol, hostname, origin } = window.location;
+      if (protocol === 'http:' && !isLoopbackHostname(hostname)) {
+        return {
+          ok: false,
+          baseUrl: '',
+          origin,
+          error:
+            'Same-origin Self-Hosted server over plain http:// is only allowed on localhost/127.0.0.1. Use https:// (e.g. Tailscale Serve) or SSH port forwarding.',
+        };
+      }
+      return { ok: true, baseUrl: '', origin: origin || 'same-origin' };
+    }
+    return { ok: true, baseUrl: '', origin: 'same-origin' };
   }
   let parsed: URL;
   try {

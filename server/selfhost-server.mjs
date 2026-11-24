@@ -459,20 +459,44 @@ export function createSelfhostServer(options = {}) {
     return { ok: true, error: null, gpu: enrichGpuInfo(h.gpu, hostGpuHw) };
   }
 
-  function isSameOrigin(originHeader, hostHeader) {
+  function extractHostname(hostHeader) {
+    const raw = String(hostHeader || '').trim();
+    if (!raw) return '';
+    if (raw.startsWith('[')) {
+      const end = raw.indexOf(']');
+      return end > 1 ? raw.slice(1, end).toLowerCase() : '';
+    }
+    return raw.replace(/:\d+$/, '').toLowerCase();
+  }
+
+  function isSameOrigin(originHeader, hostHeader, req) {
     const canon = canonicalOrigin(originHeader);
     if (!canon || !hostHeader) return false;
     try {
-      return new URL(canon).host.toLowerCase() === hostHeader.toLowerCase();
+      const parsed = new URL(canon);
+      if (parsed.host.toLowerCase() !== hostHeader.toLowerCase()) return false;
+      const proto = String(req?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+      if ((proto === 'https' || req?.socket?.encrypted) && parsed.protocol !== 'https:') {
+        return false;
+      }
+      // Prevent DNS rebinding on tokenless loopback servers: only literal loopback origins are same-origin
+      if (!apiToken && !isLoopbackHost(parsed.hostname)) {
+        return false;
+      }
+      return true;
     } catch {
       return false;
     }
   }
 
-  /** H1: Server-side Origin admission check (never reflects arbitrary origins). */
+  /** H1: Server-side Origin & loopback-Host admission check (never reflects arbitrary origins). */
   function checkOriginPolicy(req, res) {
     const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
     const hostHeader = typeof req.headers.host === 'string' ? req.headers.host.trim() : '';
+    // Prevent DNS rebinding when running tokenless on loopback: reject non-loopback Host headers
+    if (!apiToken && hostHeader && !isLoopbackHost(extractHostname(hostHeader))) {
+      return { allowed: false, grantedOrigin: null };
+    }
     if (!originHeader) {
       return { allowed: true, grantedOrigin: null };
     }
@@ -480,7 +504,7 @@ export function createSelfhostServer(options = {}) {
     if (!canon) {
       return { allowed: false, grantedOrigin: null };
     }
-    const sameOrig = isSameOrigin(originHeader, hostHeader);
+    const sameOrig = isSameOrigin(originHeader, hostHeader, req);
     const explicitlyAllowed = allowedOriginSet.has(canon);
     if (!sameOrig && !explicitlyAllowed) {
       return { allowed: false, grantedOrigin: null };
@@ -727,9 +751,23 @@ export function createSelfhostServer(options = {}) {
     if (!runnerBridge || runningJob) return;
     try {
       const h = await runnerBridge.getHealth();
-      if (h) observedHealth = h;
-    } catch {
-      /* ignore transient probe errors */
+      if (h) {
+        observedHealth = h;
+      } else {
+        observedHealth = {
+          ready: false,
+          gpu: null,
+          activeAdapter: null,
+          error: 'Host GPU runner health unavailable (runner disconnected).',
+        };
+      }
+    } catch (err) {
+      observedHealth = {
+        ready: false,
+        gpu: null,
+        activeAdapter: null,
+        error: `Host GPU runner unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
   }
 
@@ -763,6 +801,7 @@ export function createSelfhostServer(options = {}) {
 
       const timeoutPromise = new Promise((_, reject) => {
         next.deadlineTimer = setTimeout(() => {
+          next.timedOut = true;
           next.cancelled = true;
           void runnerBridge?.cancel?.(next.jobId).catch(() => {});
           reject(new Error(`Host GPU job exceeded deadline (${Math.round(jobTimeoutMs / 1000)}s).`));
@@ -778,17 +817,23 @@ export function createSelfhostServer(options = {}) {
         timeoutPromise,
       ]);
 
-      if (next.cancelled) {
+      if (next.timedOut) {
+        finalizeJob(next, 'error', {
+          message: `Host GPU job exceeded deadline (${Math.round(jobTimeoutMs / 1000)}s).`,
+        });
+      } else if (next.cancelled) {
         finalizeJob(next, 'error', { message: 'Workflow run cancelled' });
       } else {
         finalizeJob(next, 'result', result);
       }
     } catch (err) {
-      const message = next.cancelled
-        ? 'Workflow run cancelled'
-        : err instanceof Error
-          ? err.message
-          : String(err);
+      const message = next.timedOut
+        ? `Host GPU job exceeded deadline (${Math.round(jobTimeoutMs / 1000)}s).`
+        : next.cancelled
+          ? 'Workflow run cancelled'
+          : err instanceof Error
+            ? err.message
+            : String(err);
       finalizeJob(next, 'error', { message });
     } finally {
       if (next.heartbeat) {
@@ -843,6 +888,15 @@ export function createSelfhostServer(options = {}) {
         gpu: ev.gpu || null,
         activeAdapter: null,
         error: ev.error || null,
+      };
+      return;
+    }
+    if (ev.type === 'runner-error') {
+      observedHealth = {
+        ready: false,
+        gpu: null,
+        activeAdapter: null,
+        error: typeof ev.error === 'string' && ev.error ? ev.error : 'Host GPU runner crashed or closed.',
       };
       return;
     }
@@ -1090,7 +1144,11 @@ export function createSelfhostServer(options = {}) {
         if (req.method === 'POST' && url.pathname === '/api/release-gpu') {
           try {
             await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
-            if (!runningJob && runnerBridge) {
+            if (runningJob) {
+              sendJson(res, 409, { ok: false, error: 'Host GPU is currently busy running a job.' });
+              return;
+            }
+            if (runnerBridge) {
               await runnerBridge.releaseGpu();
               observedHealth = { ...observedHealth, activeAdapter: null };
             }
@@ -1313,17 +1371,41 @@ async function startPlaywrightRunner(localOrigin, { repoRoot, dataDir, disableSa
     console.log(`[denovo-selfhost] Vulkan ICD: ${vulkanIcd}`);
   }
 
-  const context = await chromium.launchPersistentContext(dataDir, {
-    headless: false,
-    chromiumSandbox: !disableSandbox,
-    ...(executablePath ? { executablePath } : {}),
-    args: launchArgs,
-    env: minimalEnv,
-    viewport: { width: 800, height: 600 },
-  });
+  let context;
+  try {
+    context = await chromium.launchPersistentContext(dataDir, {
+      headless: false,
+      chromiumSandbox: !disableSandbox,
+      ...(executablePath ? { executablePath } : {}),
+      args: launchArgs,
+      env: minimalEnv,
+      viewport: { width: 800, height: 600 },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/No usable sandbox|SUID sandbox|AppArmor|zygote/i.test(msg) && !disableSandbox) {
+      throw new Error(
+        `Chromium sandbox failed to start (common on Ubuntu 24.04 AppArmor or containers). ` +
+          `Retry with DENOVO_CHROME_PATH=/usr/bin/google-chrome DENOVO_DISABLE_GPU_SANDBOX=1 ` +
+          `or DENOVO_DISABLE_SANDBOX=1.\nOriginal error: ${msg}`,
+      );
+    }
+    throw err;
+  }
 
   const page = context.pages()[0] || (await context.newPage());
   await page.exposeFunction('__denovoHostEmit', onEmit);
+
+  page.on('crash', () => {
+    console.error('[denovo-selfhost] Host Chromium runner page crashed.');
+    onEmit({ type: 'runner-error', error: 'Host Chromium runner page crashed.' });
+  });
+  page.on('close', () => {
+    onEmit({ type: 'runner-error', error: 'Host Chromium runner page closed.' });
+  });
+  context.on('close', () => {
+    onEmit({ type: 'runner-error', error: 'Host Chromium browser context closed.' });
+  });
 
   page.on('console', (msg) => {
     const t = msg.type();

@@ -1813,6 +1813,15 @@
             class="link-btn"
             onclick={() => {
               const dm = activeStruct.dockingMetrics!;
+              const csvCell = (raw: unknown): string => {
+                let str = String(raw ?? '');
+                if (/^[=+@\t\r]/.test(str) || (/^-/.test(str) && Number.isNaN(Number(str)))) {
+                  str = `'${str}`;
+                }
+                return /[",\r\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+              };
+              const fmtNum = (v: unknown, digits: number): string =>
+                typeof v === 'number' && Number.isFinite(v) ? v.toFixed(digits) : '';
               const hdr = [
                 'rank',
                 'pose_id',
@@ -1835,20 +1844,20 @@
                 ...dm.rows.map((r, idx) =>
                   [
                     r.rank ?? idx + 1,
-                    JSON.stringify(r.poseId),
-                    JSON.stringify(r.ligandCode),
-                    dm.taskMode,
-                    dm.precision,
+                    csvCell(r.poseId),
+                    csvCell(r.ligandCode),
+                    csvCell(dm.taskMode),
+                    csvCell(dm.precision),
                     r.heavyAtoms,
                     r.rotors,
-                    r.cnnScore.toFixed(4),
-                    r.cnnAffinity.toFixed(4),
-                    r.cnnVS.toFixed(4),
-                    r.vinaScore.toFixed(4),
-                    r.rmsdToBest !== undefined ? r.rmsdToBest.toFixed(3) : '',
-                    r.initialCnnScore !== undefined ? r.initialCnnScore.toFixed(4) : '',
-                    r.initialVinaScore !== undefined ? r.initialVinaScore.toFixed(4) : '',
-                    r.poseRmsd !== undefined ? r.poseRmsd.toFixed(3) : '',
+                    fmtNum(r.cnnScore, 4),
+                    fmtNum(r.cnnAffinity, 4),
+                    fmtNum(r.cnnVS, 4),
+                    fmtNum(r.vinaScore, 4),
+                    fmtNum(r.rmsdToBest, 3),
+                    fmtNum(r.initialCnnScore, 4),
+                    fmtNum(r.initialVinaScore, 4),
+                    fmtNum(r.poseRmsd, 3),
                   ].join(','),
                 ),
               ];

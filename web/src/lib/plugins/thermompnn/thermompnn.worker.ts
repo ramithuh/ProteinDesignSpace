@@ -53,9 +53,12 @@ interface ThermoEngine {
 }
 
 function normalizePrecision(raw: unknown): Precision {
-  const val = String(raw ?? 'fp16').trim().toLowerCase();
+  if (raw === undefined || raw === null || String(raw).trim() === '') return 'fp16';
+  const val = String(raw).trim().toLowerCase();
   if (val === 'fp32' || val === 'int8' || val === 'fp16') return val;
-  return 'fp16';
+  throw new Error(
+    `Unsupported ThermoMPNN precision "${String(raw)}". Expected "fp32", "fp16", or "int8".`,
+  );
 }
 
 function normalizeAggregate(raw: unknown): BfactorAggregate {

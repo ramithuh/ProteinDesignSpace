@@ -188,7 +188,7 @@ createWorkerHarness({
     let effectiveContig: string | undefined;
     if (taskMode === 'motif' && upstreamStruct) {
       if (contig) {
-        effectiveContig = contig;
+        effectiveContig = contig.replace(/,/g, '/');
       } else {
         const ch = upstreamStruct.chainIds?.[0] ?? 'A';
         const firstRes = upstreamStruct.sourceResidues?.[0]?.resNum ?? 1;

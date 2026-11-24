@@ -3021,14 +3021,37 @@ export function validateRuntimeNodeInputs(
       );
     }
 
+    const extraPolymerTokens =
+      meta.family === 'af3' || meta.family === 'esmfold2'
+        ? (Array.isArray(node.params.dnaSequences)
+            ? (node.params.dnaSequences as unknown[]).map((s) => String(s ?? ''))
+            : String(node.params.dnaSequences ?? '').split(/[:,;\s]+/)
+          ).reduce((sum, s) => sum + s.replace(/[^A-Za-z]/g, '').length, 0) +
+          (Array.isArray(node.params.rnaSequences)
+            ? (node.params.rnaSequences as unknown[]).map((s) => String(s ?? ''))
+            : String(node.params.rnaSequences ?? '').split(/[:,;\s]+/)
+          ).reduce((sum, s) => sum + s.replace(/[^A-Za-z]/g, '').length, 0) +
+          (Array.isArray(node.params.ligandCcdCodes)
+            ? (node.params.ligandCcdCodes as unknown[]).map((s) => String(s ?? '').trim()).filter(Boolean).length
+            : String(node.params.ligandCcdCodes ?? '')
+                .split(/[,;\s]+/)
+                .map((s) => s.trim())
+                .filter(Boolean).length)
+        : 0;
+
     for (const cand of work.selected) {
       const len = cand.sequence.replace(/[\s/:,]+/g, '').length;
       if (len < 5) {
         throw new Error(`Refusing to fold "${cand.id}": sequence is too short (${len} aa; minimum 5 aa).`);
       }
-      if (len > hardLimit) {
+      const totalTokens = len + extraPolymerTokens;
+      if (totalTokens > hardLimit) {
+        const sizeDesc =
+          extraPolymerTokens > 0
+            ? `${len} aa + ${extraPolymerTokens} nucleic/ligand = ${totalTokens} tokens`
+            : `${len} aa`;
         throw new Error(
-          `Refusing to fold "${cand.id}" (${len} aa) with ${meta.shortLabel}: exceeds ${isHostGpu ? 'host' : 'browser'} WebGPU memory ceiling (${hardLimit} residues). Raise "Max fold len" in the GPU / Compute menu${isHostGpu ? '' : ', switch to Host GPU,'} or crop the target domain before running.`,
+          `Refusing to fold "${cand.id}" (${sizeDesc}) with ${meta.shortLabel}: exceeds ${isHostGpu ? 'host' : 'browser'} WebGPU memory ceiling (${hardLimit} residues). Raise "Max fold len" in the GPU / Compute menu${isHostGpu ? '' : ', switch to Self-Hosted,'} or crop the target domain before running.`,
         );
       }
       if (meta.family === 'esmfold2') esmfold2Chains(cand, hardLimit);

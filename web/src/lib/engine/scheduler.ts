@@ -1198,7 +1198,45 @@ export class ExecutionScheduler {
     });
 
     if (!this.activeGpu) {
-      const worker = await this.spawnWorker(node.adapterId);
+      const worker = await new Promise<Worker>((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(new Error('Workflow run cancelled'));
+          return;
+        }
+        let settled = false;
+        const onAbort = () => {
+          if (settled) return;
+          settled = true;
+          reject(new Error('Workflow run cancelled'));
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        this.spawnWorker(node.adapterId).then(
+          (w) => {
+            signal?.removeEventListener('abort', onAbort);
+            if (settled || signal?.aborted) {
+              try {
+                w.terminate();
+              } catch {
+                /* ignore */
+              }
+              if (!settled) {
+                settled = true;
+                reject(new Error('Workflow run cancelled'));
+              }
+              return;
+            }
+            settled = true;
+            resolve(w);
+          },
+          (err) => {
+            signal?.removeEventListener('abort', onAbort);
+            if (!settled) {
+              settled = true;
+              reject(err);
+            }
+          },
+        );
+      });
       this.activeGpu = { adapterId: node.adapterId, isolatedCheckpoint, worker };
     }
 
@@ -1576,6 +1614,8 @@ export class ExecutionScheduler {
       );
     };
 
+    const nodeProvenanceById: Record<string, string> = {};
+
     try {
       for (const node of order) {
         if (internalAbort.signal.aborted) {
@@ -1597,10 +1637,12 @@ export class ExecutionScheduler {
         const inputs: Record<string, CanonicalArtifact> = {};
         const multiInputs: Record<string, CanonicalArtifact[]> = {};
         const inputIds: Record<string, string | string[]> = {};
+        const upstreamProv: Record<string, string | string[]> = {};
         for (const edge of graph.edges) {
           if (edge.toNode !== node.id) continue;
           const up = outputsByNode[edge.fromNode]?.[edge.fromPort];
           if (up) {
+            const upProv = nodeProvenanceById[edge.fromNode] ?? 'local';
             const isMulti = Boolean(manifest.inputs[edge.toPort]?.multiple);
             if (!isMulti || !inputs[edge.toPort]) {
               inputs[edge.toPort] = up;
@@ -1610,20 +1652,34 @@ export class ExecutionScheduler {
               multiInputs[edge.toPort] = prevList ? [...prevList, up] : [up];
               const prev = inputIds[edge.toPort];
               inputIds[edge.toPort] = Array.isArray(prev) ? [...prev, up.id] : [up.id];
+              const prevP = upstreamProv[edge.toPort];
+              upstreamProv[edge.toPort] = Array.isArray(prevP) ? [...prevP, upProv] : [upProv];
             } else {
               inputIds[edge.toPort] = up.id;
+              upstreamProv[edge.toPort] = upProv;
             }
           }
         }
 
-        // Content-addressed memoization key (canonicalized key order + compute provenance boundary, M6)
-        const execProv = this.executionProvenanceResolver?.(node);
+        // Content-addressed memoization key (canonicalized key order + propagated compute provenance boundary, M6)
+        const ownProv = this.executionProvenanceResolver?.(node) ?? 'local';
+        const hasNonLocalUpstream = Object.values(upstreamProv).some((p) =>
+          Array.isArray(p) ? p.some((x) => x !== 'local') : p !== 'local',
+        );
+        const effectiveProv =
+          ownProv !== 'local' || hasNonLocalUpstream
+            ? hasNonLocalUpstream
+              ? `${ownProv}|${fnv1a(canonicalJsonStringify(upstreamProv))}`
+              : ownProv
+            : 'local';
+        nodeProvenanceById[node.id] = effectiveProv;
+
         const cacheKey = fnv1a(
           canonicalJsonStringify({
             adapter: node.adapterId,
             params: normalizeParamsForComputation(node.adapterId, node.params, this.pluginRegistry),
             inputIds,
-            ...(execProv && execProv !== 'local' ? { backend: execProv } : {}),
+            ...(effectiveProv !== 'local' ? { backend: effectiveProv } : {}),
           }),
         );
 

@@ -221,11 +221,11 @@
               {/if}
               <th scope="col">Pose</th>
               <th scope="col">CNNscore</th>
-              <th scope="col">CNNaffinity (pK)</th>
+              <th scope="col" title="CNNaffinity (pK)">Affinity</th>
               <th scope="col">CNN_VS</th>
-              <th scope="col">Vina (kcal/mol)</th>
+              <th scope="col" title="AutoDock Vina (kcal/mol)">Vina</th>
               {#if dockingMetrics.taskMode === 'dock'}
-                <th scope="col">RMSD (Å)</th>
+                <th scope="col" title="RMSD to top pose (Å)">RMSD (Å)</th>
               {/if}
             </tr>
           </thead>
@@ -435,18 +435,20 @@
     color: var(--text-muted);
   }
   .gnina-table-wrap {
+    max-width: 100%;
     overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
   .gnina-scores {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11px;
+    font-size: 10.5px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
   .gnina-scores th,
   .gnina-scores td {
     text-align: left;
-    padding: 5px 6px;
+    padding: 4px 5px;
     border-bottom: 1px solid var(--border-subtle);
     white-space: nowrap;
   }

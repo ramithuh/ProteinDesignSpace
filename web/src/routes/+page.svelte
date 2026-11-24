@@ -162,6 +162,7 @@
   let computeBackend = $state<ComputeBackendConfig>(defaultComputeBackendConfig());
   let remoteHealth = $state<RemoteServerHealth | null>(null);
   let remoteChecking = $state(false);
+  let remoteProbeSeq = 0;
   let sameOriginHostDetected = $state<RemoteServerHealth | null>(null);
   let acknowledgedRemoteOrigins = $state<Set<string>>(new Set());
   const isRemoteCompute = $derived(computeBackend.mode !== 'local');
@@ -215,6 +216,7 @@
   }
 
   async function probeRemoteBackend(cfg: ComputeBackendConfig = computeBackend) {
+    const seq = ++remoteProbeSeq;
     remoteChecking = true;
     try {
       let activeCfg = cfg;
@@ -222,6 +224,7 @@
       // once for an HttpOnly SameSite=Strict session cookie and purge the raw token from JS memory.
       if (!cfg.serverUrl.trim() && cfg.apiToken.trim()) {
         const authRes = await authenticateRemoteServerSession('', cfg.apiToken);
+        if (seq !== remoteProbeSeq) return;
         if (!authRes.ok) {
           remoteHealth = { ok: false, error: authRes.error || 'Authentication failed' };
           syncSchedulerRemoteExecutor(computeBackend);
@@ -233,10 +236,14 @@
           saveComputeBackendConfig(activeCfg);
         }
       }
-      remoteHealth = await checkRemoteServerHealth(activeCfg.serverUrl, activeCfg.apiToken);
+      const nextHealth = await checkRemoteServerHealth(activeCfg.serverUrl, activeCfg.apiToken);
+      if (seq !== remoteProbeSeq) return;
+      remoteHealth = nextHealth;
       syncSchedulerRemoteExecutor(computeBackend);
     } finally {
-      remoteChecking = false;
+      if (seq === remoteProbeSeq) {
+        remoteChecking = false;
+      }
     }
   }
 
@@ -3709,7 +3716,7 @@
                   Run GPU blocks on your workstation or cluster (SSH / Tailscale):
                   <code>node server/selfhost-server.mjs</code> ·
                   <a
-                    href="https://github.com/ramithuh/ProteinDesignSpace/blob/feat/unifying-engine/server/README.md"
+                    href="https://github.com/ramithuh/ProteinDesignSpace/blob/main/server/README.md"
                     target="_blank"
                     rel="noopener noreferrer"
                   >Self-host guide ↗</a>

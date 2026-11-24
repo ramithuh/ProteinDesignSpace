@@ -266,6 +266,16 @@ describe('Self-hosted WebGPU security hardening (Astra 6.2 audit gates)', () => 
         req.end();
       });
 
+      // Busy /api/release-gpu must return 409 Conflict (never 200 ok while a job holds the GPU)
+      const busyRelease = await rawHttpRequest({
+        port,
+        method: 'POST',
+        path: '/api/release-gpu',
+        headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(busyRelease.status).toBe(409);
+
       // Client B tries to cancel Client A's job with wrong cancelToken -> 403 Forbidden!
       const badCancel = await rawHttpRequest({
         port,
@@ -316,6 +326,29 @@ describe('Self-hosted WebGPU security hardening (Astra 6.2 audit gates)', () => 
       });
       expect(JSON.parse(swHealth.body).ok).toBe(false);
       expect(JSON.parse(swHealth.body).error).toMatch(/software WebGPU/i);
+
+      // Crashed / unreachable runner must clear stale health and immediately return ok: false
+      inst.setRunnerBridge(
+        {
+          ...mockBridge,
+          getHealth: async () => {
+            throw new Error('Target page, context or browser has been closed');
+          },
+        },
+        {
+          ready: true,
+          gpu: { vendor: 'nvidia', architecture: 'blackwell', description: 'nvidia', fallback: false },
+          activeAdapter: null,
+          error: null,
+        },
+      );
+      const crashedHealth = await rawHttpRequest({
+        port,
+        path: '/api/health',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      expect(JSON.parse(crashedHealth.body).ok).toBe(false);
+      expect(JSON.parse(crashedHealth.body).error).toMatch(/unreachable/i);
 
       // HttpOnly SameSite=Strict session cookie auth + logout + rate limiting
       const badAuth = await rawHttpRequest({
@@ -483,5 +516,127 @@ describe('Self-hosted WebGPU security hardening (Astra 6.2 audit gates)', () => 
     } finally {
       Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: origLs });
     }
+  });
+
+  it('blocks loopback DNS rebinding on tokenless servers, enforces nucleic/ligand fold tokens, and isolates downstream cross-backend memo', async () => {
+    const { createSelfhostServer } = await loadSelfhostModule();
+    const { root, buildDir } = makeTempBuildDir();
+    const inst = createSelfhostServer({
+      host: '127.0.0.1',
+      port: 0,
+      buildDir,
+      apiToken: '',
+    });
+    await new Promise<void>((r) => inst.server.listen(0, '127.0.0.1', r));
+    const addr = inst.server.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    try {
+      // Tokenless loopback rejects non-loopback Host header (DNS rebinding defense)
+      const rebind = await rawHttpRequest({
+        port,
+        path: '/api/health',
+        headers: { Host: `evil.example:${port}`, Origin: `http://evil.example:${port}` },
+      });
+      expect(rebind.status).toBe(403);
+
+      // Literal loopback Host + Origin succeeds
+      const localOk = await rawHttpRequest({
+        port,
+        path: '/api/health',
+        headers: { Host: `127.0.0.1:${port}`, Origin: `http://127.0.0.1:${port}` },
+      });
+      expect(localOk.status).toBe(200);
+    } finally {
+      await new Promise<void>((r) => inst.server.close(() => r()));
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+
+    // Protein + DNA total tokens enforced against maxFoldResidues ceiling
+    const scheduler = new ExecutionScheduler({ gpuIdleReleaseMs: 0 });
+    const af3DnaNode: WorkflowNode = {
+      id: 'af3_dna',
+      adapterId: 'localfold-af2',
+      params: { model: 'af3', msaMode: 'single', dnaSequences: 'A'.repeat(100) },
+    };
+    const hybridSeq: SequenceSet = {
+      kind: 'SequenceSet',
+      id: 'prot450',
+      parentStructureId: 'none',
+      sourceModelId: 'sequence-input',
+      candidates: [
+        {
+          id: 'prot_plus_dna',
+          sequence: 'A'.repeat(450),
+          score: null,
+          globalScore: null,
+          sourceModelId: 'sequence-input',
+        },
+      ],
+    };
+    await expect(
+      scheduler.runSingleGpuNode(af3DnaNode, { sequences: hybridSeq }, () => {}, undefined, 512),
+    ).rejects.toThrow(/550 tokens.*512 residues/);
+
+    // Downstream CPU node (sequence-filter / top-k) does not reuse cached output when upstream provenance changes
+    let activeHost = 'remote:https://host-a.example';
+    let remoteScore = 1.0;
+    const sched2 = new ExecutionScheduler({ gpuIdleReleaseMs: 0 });
+    sched2.setExecutionProvenanceResolver((n) => (n.adapterId === 'web-protein-mpnn' ? activeHost : 'local'));
+    sched2.setRemoteGpuExecutor(async () => ({
+      outputs: {
+        sequences: {
+          kind: 'SequenceSet',
+          id: 'same-deterministic-id',
+          parentStructureId: 'none',
+          sourceModelId: 'web-protein-mpnn',
+          candidates: [
+            {
+              id: 'cand_1',
+              sequence: 'ACDEFGHIKLMNPQRSTVWY',
+              score: remoteScore,
+              globalScore: remoteScore,
+              sourceModelId: 'web-protein-mpnn',
+            },
+          ],
+        },
+      },
+      elapsedMs: 5,
+    }));
+
+    const graph = {
+      id: 'prov-test',
+      name: 'Provenance Test',
+      description: '',
+      nodes: [
+        {
+          id: 'pdb1',
+          adapterId: 'pdb-input',
+          params: {
+            pdbText:
+              'ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 20.00           N  \n' +
+              'ATOM      2  CA  ALA A   1       1.458   0.000   0.000  1.00 20.00           C  \n' +
+              'ATOM      3  C   ALA A   1       2.009   1.420   0.000  1.00 20.00           C  \n' +
+              'ATOM      4  O   ALA A   1       1.251   2.390   0.000  1.00 20.00           O  \n' +
+              'END\n',
+          },
+        },
+        { id: 'mpnn1', adapterId: 'web-protein-mpnn', params: { numSamples: 1 } },
+        { id: 'topk1', adapterId: 'top-k-filter', params: { k: 1 } },
+      ],
+      edges: [
+        { fromNode: 'pdb1', fromPort: 'structure', toNode: 'mpnn1', toPort: 'structure' },
+        { fromNode: 'mpnn1', fromPort: 'sequences', toNode: 'topk1', toPort: 'sequences' },
+      ],
+    };
+
+    const runA = await sched2.run(graph, () => {});
+    const seqA = runA.outputsByNode.topk1.sequences as SequenceSet;
+    expect(seqA.candidates[0].score).toBe(1.0);
+
+    activeHost = 'remote:https://host-b.example';
+    remoteScore = 2.0;
+    const runB = await sched2.run(graph, () => {});
+    const seqB = runB.outputsByNode.topk1.sequences as SequenceSet;
+    expect(seqB.candidates[0].score).toBe(2.0);
   });
 });
