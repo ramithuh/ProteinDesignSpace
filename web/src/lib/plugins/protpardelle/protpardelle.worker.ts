@@ -13,10 +13,7 @@ import {
   type WorkerRunContext,
 } from '$lib/kernel';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
-import {
-  planMultiIslandMotifPlacement,
-  type MotifResidueSpec,
-} from '$lib/protein-ops/motif-placement';
+import { planProtpardelleMotifPlacement } from '$lib/protein-ops/motif-placement';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type {
   SequenceCandidate,
@@ -258,50 +255,21 @@ createWorkerHarness({
       if (taskMode === 'partial') {
         sampleLen = tplLen;
       } else {
-        sourceIndices = motifSelection
+        const rawSourceIndices = motifSelection
           ? (ppInputsMod.selectPositions(motifSelection, parsedTemplate) as number[])
-          : Array.from({ length: tplLen }, (_, i) => i);
-        if (sourceIndices.length === 0) {
+          : undefined;
+        if (motifSelection && (!rawSourceIndices || rawSourceIndices.length === 0)) {
           throw new Error(
             `Motif selection "${motifSelection}" matched 0 residues in "${upstreamStruct.label}".`,
           );
         }
-        // Plan physically bounded multi-island motif positions using native spacing + 3D Cα bounds
-        const tplRes = parsedTemplate.residues as
-          | Array<{ chain?: string; resid?: number; icode?: string }>
-          | undefined;
-        const tplCoords = parsedTemplate.coords as Float32Array | undefined;
-        const tplAtomMask = parsedTemplate.atomMask as Float32Array | undefined;
-        const motifSpecs: MotifResidueSpec[] = sourceIndices.map((srcIdx) => {
-          const r = tplRes?.[srcIdx];
-          let caCoord: [number, number, number] | null = null;
-          if (
-            tplCoords &&
-            srcIdx * 111 + 5 < tplCoords.length &&
-            (!tplAtomMask || tplAtomMask[srcIdx * 37 + 1] > 0.5)
-          ) {
-            const x = tplCoords[srcIdx * 111 + 3];
-            const y = tplCoords[srcIdx * 111 + 4];
-            const z = tplCoords[srcIdx * 111 + 5];
-            if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
-              caCoord = [x, y, z];
-            }
-          }
-          return {
-            chain: r?.chain ?? 'A',
-            resNum: typeof r?.resid === 'number' ? r.resid : srcIdx + 1,
-            insCode: r?.icode ?? '',
-            caCoord,
-          };
-        });
-        const placement = planMultiIslandMotifPlacement(motifSpecs, {
+        const plan = planProtpardelleMotifPlacement(parsedTemplate, {
           targetLength: length,
-          minNFlank: 4,
-          minCFlank: 4,
-          allowExpandLength: true,
+          sourceIndices: rawSourceIndices,
         });
-        sampleLen = placement.effectiveLength;
-        targetIndices = placement.targetIndices;
+        sourceIndices = plan.sourceIndices;
+        targetIndices = plan.targetIndices;
+        sampleLen = plan.effectiveLength;
       }
     }
 

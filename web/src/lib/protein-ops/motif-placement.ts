@@ -385,6 +385,104 @@ export function planMultiIslandMotifPlacement(
   };
 }
 
+export interface ProtpardelleParsedTemplateLike {
+  aatype: ArrayLike<number>;
+  residues?: ReadonlyArray<{ chain?: string; resid?: number; icode?: string }>;
+  coords?: ArrayLike<number>;
+  atomMask?: ArrayLike<number>;
+}
+
+export interface ProtpardelleMotifPlanOptions {
+  targetLength: number;
+  sourceIndices?: readonly number[];
+  minNFlank?: number;
+  minCFlank?: number;
+}
+
+export interface ProtpardelleMotifPlan {
+  effectiveLength: number;
+  sourceIndices: number[];
+  targetIndices: number[];
+  motifSpecs: MotifResidueSpec[];
+  placement: MotifPlacementResult;
+}
+
+/**
+ * Validate, deduplicate, and sort ProtPardelle template `sourceIndices` (defaulting to all
+ * template residues when `motifSelection` is empty), extract 3D Cα coordinates from
+ * `parsedTemplate.coords` (`CA` at `srcIdx * 111 + 3..5`), and compute physically bounded
+ * multi-island scaffold positions via `planMultiIslandMotifPlacement`.
+ */
+export function planProtpardelleMotifPlacement(
+  parsedTemplate: ProtpardelleParsedTemplateLike,
+  options: ProtpardelleMotifPlanOptions,
+): ProtpardelleMotifPlan {
+  const tplLen = parsedTemplate.aatype.length;
+  if (tplLen <= 0) {
+    throw new Error('ProtPardelle motif template contains 0 residues.');
+  }
+
+  let sourceIndices: number[];
+  if (options.sourceIndices !== undefined) {
+    for (const idx of options.sourceIndices) {
+      if (!Number.isInteger(idx) || idx < 0 || idx >= tplLen) {
+        throw new Error(
+          `Invalid ProtPardelle motif source index ${String(idx)} (expected integer in [0, ${tplLen})).`,
+        );
+      }
+    }
+    sourceIndices = [...new Set(options.sourceIndices)].sort((a, b) => a - b);
+  } else {
+    sourceIndices = Array.from({ length: tplLen }, (_, i) => i);
+  }
+
+  if (sourceIndices.length === 0) {
+    throw new Error('ProtPardelle motif placement requires at least 1 selected motif residue.');
+  }
+
+  const tplRes = parsedTemplate.residues;
+  const tplCoords = parsedTemplate.coords;
+  const tplAtomMask = parsedTemplate.atomMask;
+
+  const motifSpecs: MotifResidueSpec[] = sourceIndices.map((srcIdx) => {
+    const r = tplRes?.[srcIdx];
+    let caCoord: [number, number, number] | null = null;
+    if (
+      tplCoords &&
+      srcIdx * 111 + 5 < tplCoords.length &&
+      (!tplAtomMask || tplAtomMask[srcIdx * 37 + 1] > 0.5)
+    ) {
+      const x = tplCoords[srcIdx * 111 + 3];
+      const y = tplCoords[srcIdx * 111 + 4];
+      const z = tplCoords[srcIdx * 111 + 5];
+      if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+        caCoord = [x, y, z];
+      }
+    }
+    return {
+      chain: r?.chain ?? 'A',
+      resNum: typeof r?.resid === 'number' ? r.resid : srcIdx + 1,
+      insCode: r?.icode ?? '',
+      caCoord,
+    };
+  });
+
+  const placement = planMultiIslandMotifPlacement(motifSpecs, {
+    targetLength: options.targetLength,
+    minNFlank: options.minNFlank ?? 4,
+    minCFlank: options.minCFlank ?? 4,
+    allowExpandLength: true,
+  });
+
+  return {
+    effectiveLength: placement.effectiveLength,
+    sourceIndices,
+    targetIndices: placement.targetIndices,
+    motifSpecs,
+    placement,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // BoltzGen motif placement & native Cα extraction
 // ---------------------------------------------------------------------------

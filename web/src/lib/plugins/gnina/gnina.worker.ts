@@ -24,6 +24,10 @@ import {
   parsePocketResidueTokensStrict,
 } from '$lib/protein-ops/gnina-prep';
 import { parseStructureText } from '$lib/protein-ops/pdb';
+import {
+  dockPoseWithWorkerFallback,
+  resolveGninaDockWorkers,
+} from './dock-workers';
 import type {
   DockingScoreSummary,
   GninaPoseScoreRow,
@@ -248,6 +252,7 @@ createWorkerHarness({
       ? sortByRaw
       : 'cnnScore') as 'cnnScore' | 'cnnVS' | 'cnnAffinity' | 'vina';
     const seed = Math.max(0, Math.min(999999, Math.round(Number(p.seed ?? 42))));
+    const dockWorkers = resolveGninaDockWorkers(p.workers, exhaustiveness);
     const includeMetals = p.includeMetals !== false;
     const pocketRadius = Math.max(3.0, Math.min(8.0, Number(p.pocketRadius ?? 5.0)));
     const maxPocketResidues = Math.max(4, Math.min(48, Math.round(Number(p.maxPocketResidues ?? 24))));
@@ -452,45 +457,61 @@ createWorkerHarness({
       ctx.progress(
         'dock',
         0.48,
-        `Building Vina pocket grid & docking ${selectedLigandName} (exhaustiveness=${exhaustiveness})...`,
+        `Building Vina pocket grid & docking ${selectedLigandName} (exhaustiveness=${exhaustiveness}, workers=${dockWorkers})...`,
       );
 
-      const dockRes = await activeEngine.dockPose(typedReceptor, dockLigand, {
-        ...(explicitPocketKeys.length > 0
-          ? { pocketResidues: explicitPocketKeys }
-          : { autoboxLigand: autoboxLig }),
-        autoboxAdd,
-        seed,
-        exhaustiveness,
-        numModes,
-        minRmsd: 1.0,
-        cnnScoring: 'rescore',
-        sortBy,
-        workers: 1,
-        signal: ctx.signal,
-        onProgress: (ev: { phase: string; completed: number; total: number }) => {
-          const frac = ev.total > 0 ? ev.completed / ev.total : 0;
-          if (ev.phase === 'grid') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { result: dockRes } = await dockPoseWithWorkerFallback<any>(
+        (workersCount, onDockProgress) =>
+          activeEngine.dockPose(typedReceptor, dockLigand, {
+            ...(explicitPocketKeys.length > 0
+              ? { pocketResidues: explicitPocketKeys }
+              : { autoboxLigand: autoboxLig }),
+            autoboxAdd,
+            seed,
+            exhaustiveness,
+            numModes,
+            minRmsd: 1.0,
+            cnnScoring: 'rescore',
+            sortBy,
+            workers: workersCount,
+            signal: ctx.signal,
+            onProgress: onDockProgress,
+          }),
+        {
+          workers: dockWorkers,
+          signal: ctx.signal,
+          onFallback: () => {
             ctx.progress(
               'dock',
-              0.48 + frac * 0.1,
-              `Building Vina affinity grids (${ev.completed}/${ev.total})...`,
+              0.48,
+              'Nested MC workers unavailable; retrying docking single-threaded (workers=1)...',
             );
-          } else if (ev.phase === 'search') {
-            ctx.progress(
-              'dock',
-              0.58 + frac * 0.22,
-              `MC + BFGS flexible search (${ev.completed}/${ev.total} chains)...`,
-            );
-          } else if (ev.phase === 'rescore') {
-            ctx.progress(
-              'score',
-              0.8 + frac * 0.18,
-              `GNINA 1.3 CNN rescoring (${ev.completed}/${ev.total} poses)...`,
-            );
-          }
+          },
+          onProgress: (ev) => {
+            const frac = ev.total > 0 ? ev.completed / ev.total : 0;
+            if (ev.phase === 'grid') {
+              ctx.progress(
+                'dock',
+                0.48 + frac * 0.1,
+                `Building Vina affinity grids (${ev.completed}/${ev.total})...`,
+              );
+            } else if (ev.phase === 'search') {
+              ctx.progress(
+                'dock',
+                0.58 + frac * 0.22,
+                `MC + BFGS flexible search (${ev.completed}/${ev.total} chains)...`,
+              );
+            } else if (ev.phase === 'rescore') {
+              ctx.progress(
+                'score',
+                0.8 + frac * 0.18,
+                `GNINA 1.3 CNN rescoring (${ev.completed}/${ev.total} poses)...`,
+              );
+            }
+          },
         },
-      });
+      );
 
       if (!dockRes.poses || dockRes.poses.length === 0) {
         throw new Error(`GNINA 1.3 docking produced 0 valid poses for ${selectedLigandName}.`);

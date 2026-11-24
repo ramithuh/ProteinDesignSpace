@@ -159,6 +159,7 @@ const WAVE7A_SPECS = [
       'seed',
       'sortBy',
       'taskMode',
+      'workers',
     ],
   },
   {

@@ -1,5 +1,11 @@
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ADAPTER_REGISTRY } from '$lib/engine/registry';
+import {
+  dockPoseWithWorkerFallback,
+  resolveGninaDockWorkers,
+} from '$lib/plugins/gnina/dock-workers';
 import { filterCatalogCategories } from '$lib/engine/catalog';
 import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
 import { resolveLocalFoldEffectiveConfig } from '$lib/engine/conditioning';
@@ -602,5 +608,210 @@ describe('GNINA 1.3 WebGPU integration', () => {
         (i) => i.nodeId === 'gnina' && i.code === 'gnina-invalid-dock-ccd' && i.severity === 'error',
       ),
     ).toBe(true);
+  });
+
+  it('resolves GNINA MC search workers cleanly for auto, explicit, clamped, and workerless environments', () => {
+    expect(ADAPTER_REGISTRY.gnina.paramSchema?.find((f) => f.key === 'workers')).toMatchObject({
+      key: 'workers',
+      kind: 'integer',
+      tier: 'advanced',
+      modes: ['dock'],
+      defaultValue: 0,
+      min: 0,
+      max: 8,
+      step: 1,
+    });
+
+    // Workerless (Node / restricted environment) always resolves to 1
+    expect(resolveGninaDockWorkers(0, 8, false, 16)).toBe(1);
+    expect(resolveGninaDockWorkers(4, 8, false, 16)).toBe(1);
+
+    // Auto (0, undefined, null, non-finite, <= 0) resolves to min(8, exhaustiveness, hardwareConcurrency)
+    expect(resolveGninaDockWorkers(0, 8, true, 16)).toBe(8);
+    expect(resolveGninaDockWorkers(0, 8, true, 4)).toBe(4);
+    expect(resolveGninaDockWorkers(0, 2, true, 16)).toBe(2);
+    expect(resolveGninaDockWorkers(undefined, 6, true, 12)).toBe(6);
+    expect(resolveGninaDockWorkers(NaN, 5, true, 8)).toBe(5);
+    expect(resolveGninaDockWorkers(-3, 5, true, 8)).toBe(5);
+    expect(resolveGninaDockWorkers(0, 8, true, 0)).toBe(1);
+    expect(resolveGninaDockWorkers(0, 8, true, Number.NaN)).toBe(1);
+
+    // Explicit 1..8 clamped by min(8, exhaustiveness)
+    expect(resolveGninaDockWorkers(1, 8, true, 16)).toBe(1);
+    expect(resolveGninaDockWorkers(4, 8, true, 2)).toBe(4);
+    expect(resolveGninaDockWorkers(6, 3, true, 16)).toBe(3);
+    expect(resolveGninaDockWorkers(12, 8, true, 16)).toBe(8);
+  });
+
+  it('runs real vendor docking.js in Node and falls back cleanly to workers=1 on sync or async Worker failure', async () => {
+    const vendorUrl = (rel: string) =>
+      pathToFileURL(resolve(__dirname, '../../../static/vendor/gnina/shared', rel)).href;
+    const [dockingMod, structMod] = await Promise.all([
+      import(/* @vite-ignore */ vendorUrl('docking.js')),
+      import(/* @vite-ignore */ vendorUrl('structure.js')),
+    ]);
+
+    const prep = extractHoloReceptorAndLigands(MINI_HOLO_PDB, { includeMetals: true });
+    const receptor = structMod.parseReceptor(prep.receptorPdb, 'pdb');
+    const ligand = structMod.parseLigands(prep.selectedLigandSdf!, 'sdf')[0];
+    const autoboxLig = structMod.parseLigands(prep.selectedLigandSdf!, 'sdf')[0];
+
+    const autoNodeWorkers = resolveGninaDockWorkers(0, 2, false);
+    expect(autoNodeWorkers).toBe(1);
+
+    const baseline = await dockingMod.dockPose(receptor, ligand, {
+      autoboxLigand: autoboxLig,
+      autoboxAdd: 4.0,
+      seed: 42,
+      exhaustiveness: 2,
+      numModes: 3,
+      minRmsd: 1.0,
+      cnnScoring: 'none',
+      sortBy: 'vina',
+      steps: 4,
+      workers: autoNodeWorkers,
+    });
+    expect(baseline.poses.length).toBeGreaterThan(0);
+
+    const origWorkerDesc = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+    const restoreWorker = () => {
+      if (origWorkerDesc) {
+        Object.defineProperty(globalThis, 'Worker', origWorkerDesc);
+      } else {
+        Reflect.deleteProperty(globalThis, 'Worker');
+      }
+    };
+
+    try {
+      // 1. Synchronous new Worker(...) throw falls back to workers=1 and matches baseline
+      (globalThis as Record<string, unknown>).Worker = class SyncThrowingWorker {
+        constructor() {
+          throw new Error('Nested workers blocked');
+        }
+      };
+      let syncFallbackCalls = 0;
+      const syncFallbackRes = await dockPoseWithWorkerFallback<{
+        poses: Array<{ vinaScore: number }>;
+      }>(
+        (workersCount, onDockProgress) =>
+          dockingMod.dockPose(receptor, ligand, {
+            autoboxLigand: autoboxLig,
+            autoboxAdd: 4.0,
+            seed: 42,
+            exhaustiveness: 2,
+            numModes: 3,
+            minRmsd: 1.0,
+            cnnScoring: 'none',
+            sortBy: 'vina',
+            steps: 4,
+            workers: workersCount,
+            onProgress: onDockProgress,
+          }),
+        {
+          workers: resolveGninaDockWorkers(2, 2, true, 4),
+          onFallback: () => {
+            syncFallbackCalls += 1;
+          },
+        },
+      );
+      expect(syncFallbackCalls).toBe(1);
+      expect(syncFallbackRes.fellBack).toBe(true);
+      expect(syncFallbackRes.usedWorkers).toBe(1);
+      expect(syncFallbackRes.result.poses.length).toBe(baseline.poses.length);
+      expect(syncFallbackRes.result.poses.map((p: { vinaScore: number }) => p.vinaScore)).toEqual(
+        baseline.poses.map((p: { vinaScore: number }) => p.vinaScore),
+      );
+
+      // 2. Async worker.onerror(new Event('error')) with empty message falls back cleanly
+      (globalThis as Record<string, unknown>).Worker = class AsyncErrorWorker {
+        onerror: ((ev: Event) => void) | null = null;
+        onmessage: ((ev: MessageEvent) => void) | null = null;
+        postMessage() {
+          queueMicrotask(() => {
+            this.onerror?.(new Event('error'));
+          });
+        }
+        terminate() {}
+      };
+      let asyncFallbackCalls = 0;
+      const asyncFallbackRes = await dockPoseWithWorkerFallback<{
+        poses: Array<{ vinaScore: number }>;
+      }>(
+        (workersCount, onDockProgress) =>
+          dockingMod.dockPose(receptor, ligand, {
+            autoboxLigand: autoboxLig,
+            autoboxAdd: 4.0,
+            seed: 42,
+            exhaustiveness: 2,
+            numModes: 3,
+            minRmsd: 1.0,
+            cnnScoring: 'none',
+            sortBy: 'vina',
+            steps: 4,
+            workers: workersCount,
+            onProgress: onDockProgress,
+          }),
+        {
+          workers: resolveGninaDockWorkers(2, 2, true, 4),
+          onFallback: () => {
+            asyncFallbackCalls += 1;
+          },
+        },
+      );
+      expect(asyncFallbackCalls).toBe(1);
+      expect(asyncFallbackRes.fellBack).toBe(true);
+      expect(asyncFallbackRes.usedWorkers).toBe(1);
+      expect(asyncFallbackRes.result.poses.length).toBe(baseline.poses.length);
+      expect(asyncFallbackRes.result.poses.map((p: { vinaScore: number }) => p.vinaScore)).toEqual(
+        baseline.poses.map((p: { vinaScore: number }) => p.vinaScore),
+      );
+    } finally {
+      restoreWorker();
+    }
+
+    // 3. Does NOT retry when signal.aborted is true
+    const abortCtrl = new AbortController();
+    let abortedAttempts = 0;
+    await expect(
+      dockPoseWithWorkerFallback(
+        async (_workersCount, onDockProgress) => {
+          abortedAttempts += 1;
+          onDockProgress({ phase: 'search', completed: 0, total: 2 });
+          abortCtrl.abort();
+          throw new Error('Cancelled during search');
+        },
+        { workers: 2, signal: abortCtrl.signal },
+      ),
+    ).rejects.toThrow('Cancelled during search');
+    expect(abortedAttempts).toBe(1);
+
+    // 4. Does NOT retry when error happens before search starts (e.g. grid / options validation)
+    let preSearchAttempts = 0;
+    await expect(
+      dockPoseWithWorkerFallback(
+        async (_workersCount, onDockProgress) => {
+          preSearchAttempts += 1;
+          onDockProgress({ phase: 'grid', completed: 1, total: 4 });
+          throw new Error('Invalid docking options');
+        },
+        { workers: 2 },
+      ),
+    ).rejects.toThrow('Invalid docking options');
+    expect(preSearchAttempts).toBe(1);
+
+    // 5. Does NOT retry when error happens mid-search after >= 1 chain completed
+    let midSearchAttempts = 0;
+    await expect(
+      dockPoseWithWorkerFallback(
+        async (_workersCount, onDockProgress) => {
+          midSearchAttempts += 1;
+          onDockProgress({ phase: 'search', completed: 0, total: 2 });
+          onDockProgress({ phase: 'search', completed: 1, total: 2 });
+          throw new Error('Chain 2 failed');
+        },
+        { workers: 2 },
+      ),
+    ).rejects.toThrow('Chain 2 failed');
+    expect(midSearchAttempts).toBe(1);
   });
 });
