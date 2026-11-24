@@ -166,6 +166,7 @@ function drawWorkflowNodeCard(canvas: OgCanvas, card: LayoutCard): void {
 export async function renderWorkflowOgPng(
   workflow: DecodedOgWorkflow,
   structure: EdgeStructurePreview | null = null,
+  footerRightOverride?: string,
 ): Promise<Uint8Array> {
   const canvas = new OgCanvas(OG_WIDTH, OG_HEIGHT, '#f8fafc');
   canvas.fillLinearGradientRect(0, 0, OG_WIDTH, OG_HEIGHT, '#f8fafc', '#eef2f9');
@@ -262,8 +263,10 @@ export async function renderWorkflowOgPng(
 
   // Footer strip
   const cleanTitle = workflow.title.replace(/\s+—\s+denovo\.run$/, '');
-  canvas.drawEllipsisText(cleanTitle, 34, OG_HEIGHT - 22, OG_WIDTH - 240, 'med14', hexToRgba('#0f172a'));
-  const blockCountText = `${workflow.nodes.length} block${workflow.nodes.length === 1 ? '' : 's'} · Open in browser →`;
+  canvas.drawEllipsisText(cleanTitle, 34, OG_HEIGHT - 22, OG_WIDTH - 280, 'med14', hexToRgba('#0f172a'));
+  const blockCountText =
+    footerRightOverride ??
+    `${workflow.nodes.length} block${workflow.nodes.length === 1 ? '' : 's'} · Open in browser →`;
   const rightW = canvas.measureText(blockCountText, 'med14');
   canvas.drawText(blockCountText, OG_WIDTH - 34 - rightW, OG_HEIGHT - 22, 'med14', hexToRgba('#2563eb'));
 
@@ -333,51 +336,100 @@ function drawEdges(
   }
 }
 
+// Baked 10x-quantized Streptavidin–Biotin (RCSB 1STP Chain A + BTN) trace for zero-fetch default OG card.
+const HERO_1STP_CA: ReadonlyArray<readonly [number, number, number]> = [
+  [237,49,111],[258,73,91],[287,49,86],[263,20,82],[239,36,57],[265,52,36],[276,31,7],[264,14,-25],
+  [235,-10,-23],[217,-33,-47],[181,-46,-46],[166,-79,-58],[162,-64,-94],[198,-52,-98],[191,-16,-92],
+  [219,5,-77],[214,29,-48],[243,51,-39],[238,70,-6],[255,93,19],[238,97,53],[245,132,67],[250,138,104],
+  [218,159,104],[196,130,92],[198,139,55],[201,113,27],[215,124,-7],[228,102,-36],[220,86,-69],
+  [196,59,-80],[197,37,-112],[169,13,-120],[174,-20,-138],[138,-18,-150],[110,5,-161],[110,38,-180],
+  [144,47,-168],[181,50,-179],[213,61,-162],[214,78,-128],[187,99,-111],[190,123,-81],[175,111,-48],
+  [168,130,-16],[156,115,18],[157,116,56],[166,90,83],[163,87,120],[197,100,131],[193,89,168],
+  [179,54,166],[167,36,197],[194,16,215],[173,-16,219],[186,-30,186],[155,-19,165],[161,-9,129],
+  [165,28,118],[135,43,100],[143,61,67],[128,71,34],[138,86,0],[123,99,-32],[133,99,-69],[115,120,-95],
+  [121,100,-127],[136,128,-148],[173,132,-158],[191,145,-189],[183,114,-209],[146,111,-201],
+  [114,119,-182],[90,92,-172],[67,118,-154],[66,97,-123],[80,96,-87],[88,67,-64],[90,69,-26],
+  [107,41,-6],[98,38,31],[117,12,52],[142,6,79],[180,-1,80],[191,-32,99],[228,-34,108],[250,-64,115],
+  [268,-92,97],[246,-90,67],[232,-54,68],[200,-48,49],[175,-21,40],[139,-34,39],[115,-11,21],
+  [80,-7,6],[75,18,-22],[48,38,-39],[53,47,-76],[30,75,-88],[25,86,-124],[12,120,-134],[-22,111,-148],
+  [-54,128,-161],[-83,129,-135],[-101,102,-153],[-72,78,-147],[-61,88,-112],[-77,56,-98],
+  [-48,37,-115],[-19,61,-109],[0,43,-82],[19,10,-80],[31,-7,-47],[59,-32,-41],[89,-39,-18],
+  [126,-39,-24],[154,-54,-2],[189,-38,-5],[222,-54,6],[258,-43,1],[257,-76,-18],
+];
+const HERO_1STP_BTN: ReadonlyArray<readonly [number, number, number]> = [
+  [91,46,-145],[81,54,-142],[87,35,-151],[103,44,-137],[102,32,-127],[115,30,-120],[116,16,-114],
+  [109,11,-102],[109,21,-87],[103,6,-78],[111,-5,-83],[124,-6,-76],[135,-4,-85],[147,-4,-82],
+  [130,-2,-97],[115,-3,-97],
+];
+
 /** Generate the default static 1200x630 Open Graph PNG for bare https://denovo.run links. */
 export async function renderDefaultOgPng(): Promise<Uint8Array> {
   const demoWorkflow: DecodedOgWorkflow = {
-    title: 'Genie 3 → Cα-ProteinMPNN → AF2 Model 1 → scRMSD / scTM — denovo.run',
-    description: 'Browser-native WebGPU protein design workbench.',
+    title: 'Interactive WebGPU Molecular Design Workspace — denovo.run',
+    description:
+      'Have a molecular design idea you want to quickly prototype in your browser? Interactive browser-native WebGPU workspace for structure, design, folding & docking.',
     nodes: [
       {
         id: 'gen',
-        adapterId: 'genie3',
-        label: 'Genie 3',
+        adapterId: 'rfd4-proteina',
+        label: 'Structure Generation',
         category: 'generation',
-        paramChip: '80 aa · 100 steps',
+        paramChip: 'RFD4 · RFdiffusion · BoltzGen · +',
         params: {},
       },
       {
-        id: 'mpnn',
+        id: 'seq',
         adapterId: 'web-protein-mpnn',
-        label: 'Cα-ProteinMPNN',
+        label: 'Inverse Folding',
         category: 'sequence',
-        paramChip: '8 seqs · T=0.1',
+        paramChip: 'ProteinMPNN · LigandMPNN · +',
         params: {},
       },
       {
         id: 'fold',
         adapterId: 'localfold-af2',
-        label: 'AF2 Model 1',
+        label: 'Structure Prediction',
         category: 'prediction',
-        paramChip: '1 rec · Auto (≤8)',
+        paramChip: 'AF2 · Boltz-2 · RF3 · ESMFold2',
         params: {},
       },
       {
         id: 'score',
         adapterId: 'designability-scorer',
-        label: 'scRMSD / scTM',
+        label: 'Scoring & Docking',
         category: 'evaluation',
-        paramChip: 'scRMSD < 2.0 Å · pLDDT ≥ 70',
+        paramChip: 'scRMSD · GNINA · ΔΔG · ESM-C',
         params: {},
       },
     ],
     edges: [
-      { fromNode: 'gen', fromPort: 'structure', toNode: 'mpnn', toPort: 'structure' },
-      { fromNode: 'mpnn', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
+      { fromNode: 'gen', fromPort: 'structure', toNode: 'seq', toPort: 'structure' },
+      { fromNode: 'seq', fromPort: 'sequences', toNode: 'fold', toPort: 'sequences' },
       { fromNode: 'fold', fromPort: 'folds', toNode: 'score', toPort: 'folds' },
+      { fromNode: 'gen', fromPort: 'structure', toNode: 'score', toPort: 'structure' },
     ],
     structureTarget: null,
   };
-  return renderWorkflowOgPng(demoWorkflow, null);
+
+  const heroStructure: EdgeStructurePreview = {
+    title: '3D Complex · Protein + Ligand',
+    subtitle: 'Streptavidin–Biotin (1STP) · L=121 aa · BTN',
+    chains: [
+      {
+        id: 'A',
+        points: HERO_1STP_CA.map(([x, y, z]) => [x / 10, y / 10, z / 10] as const),
+      },
+    ],
+    ligands: [
+      {
+        name: 'BTN',
+        chain: 'A',
+        atoms: HERO_1STP_BTN.map(([x, y, z]) => [x / 10, y / 10, z / 10] as const),
+      },
+    ],
+    residueCount: HERO_1STP_CA.length,
+    isPlddt: false,
+  };
+
+  return renderWorkflowOgPng(demoWorkflow, heroStructure, '25+ local models →');
 }

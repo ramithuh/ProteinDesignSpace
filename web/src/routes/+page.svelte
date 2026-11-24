@@ -3675,41 +3675,36 @@
           role="dialog"
           aria-label="System & WebGPU status"
         >
-          <div class="pop-row">
-            <span class="pop-k">Browser GPU</span>
-            <span
-              class="pop-v"
-              class:ok-t={webgpuSupported && !webgpuIsFallback}
-              class:warn-t={webgpuSupported && webgpuIsFallback}
-              class:bad-t={webgpuSupported === false}
-            >
-              {webgpuDetail}
-            </span>
-          </div>
-          {#if webgpuAdapterInfo && (webgpuAdapterInfo.vendor || webgpuAdapterInfo.architecture)}
+          {#if !isRemoteCompute}
             <div class="pop-row">
-              <span class="pop-k">Adapter</span>
-              <span class="pop-v">
-                {[webgpuAdapterInfo.vendor, webgpuAdapterInfo.architecture].filter(Boolean).join(' · ')}
+              <span class="pop-k">Browser GPU</span>
+              <span
+                class="pop-v"
+                class:ok-t={webgpuSupported && !webgpuIsFallback}
+                class:warn-t={webgpuSupported && webgpuIsFallback}
+                class:bad-t={webgpuSupported === false}
+              >
+                {webgpuDetail}
               </span>
             </div>
-          {/if}
-          {#if webgpuIsFallback && !isRemoteCompute}
-            <div class="pop-warn-note">
-              Software WebGPU fallback detected. Switch to <b>Self-Hosted (remote machine)</b>,
-              or launch Linux Chrome with <code>--enable-features=Vulkan</code>.
-            </div>
-          {/if}
+            {#if webgpuAdapterInfo && (webgpuAdapterInfo.vendor || webgpuAdapterInfo.architecture)}
+              <div class="pop-row">
+                <span class="pop-k">Adapter</span>
+                <span class="pop-v">
+                  {[webgpuAdapterInfo.vendor, webgpuAdapterInfo.architecture].filter(Boolean).join(' · ')}
+                </span>
+              </div>
+            {/if}
+            {#if webgpuIsFallback}
+              <div class="pop-warn-note">
+                Software WebGPU fallback detected. Switch to <b>Self-Hosted (remote machine)</b>,
+                or launch Linux Chrome with <code>--enable-features=Vulkan</code>.
+              </div>
+            {/if}
 
-          <div class="pop-divider"></div>
+            <div class="pop-divider"></div>
+          {/if}
           <div class="pop-compute-sec">
-            <div class="pop-row">
-              <span class="pop-k">Active backend</span>
-              <span class="pop-mode-hint">
-                {isRemoteCompute ? 'Self-Hosted (remote machine)' : 'WebGPU (this computer)'}
-              </span>
-            </div>
-
             {#if !isRemoteCompute && sameOriginHostDetected?.ok}
               <div class="pop-row">
                 <span class="pop-k" title="Same-origin GPU server detected">
@@ -3730,6 +3725,16 @@
             {/if}
 
             {#if isRemoteCompute}
+              {#if !remoteHealth?.ok}
+                <div class="pop-help-note">
+                  Have a better GPU? Self-host on that machine, and still use the simple canvas.
+                  <a
+                    href="https://github.com/ramithuh/ProteinDesignSpace/blob/main/server/README.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >Self-host guide ↗</a>
+                </div>
+              {/if}
               <label class="pop-field">
                 <span>Host Server URL (blank = same origin)</span>
                 <input
@@ -3794,16 +3799,6 @@
                     }}
                   />
                 </label>
-              {/if}
-              {#if !remoteHealth?.ok}
-                <div class="pop-help-note">
-                  Have a better GPU? Self-host on that machine, and still use the simple canvas.
-                  <a
-                    href="https://github.com/ramithuh/ProteinDesignSpace/blob/main/server/README.md"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >Self-host guide ↗</a>
-                </div>
               {/if}
               <div class="pop-row">
                 <span
@@ -5535,11 +5530,6 @@
     display: flex;
     flex-direction: column;
     gap: 7px;
-  }
-  .pop-mode-hint {
-    font-size: 10px;
-    color: var(--text-muted);
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
   .pop-field {
     display: flex;
