@@ -411,7 +411,7 @@ export function estimateRunRequirements(
   const af2ModelsInGraph = new Set<string>();
   for (const node of graph.nodes) {
     if (node.adapterId === 'localfold-af2') {
-      af2ModelsInGraph.add(String(node.params.model ?? 'monomer'));
+      af2ModelsInGraph.add(String(node.params.model ?? 'monomer').trim());
     }
   }
   const countedAf2Bases = new Set<string>();
@@ -461,7 +461,7 @@ export function estimateRunRequirements(
     const nodeItems = workload.nodeWorkItems.get(node.id) ?? 1;
 
     if (node.adapterId === 'localfold-af2') {
-      const modelId = String(node.params.model ?? 'monomer');
+      const modelId = String(node.params.model ?? 'monomer').trim();
       const meta =
         LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
       const key = `localfold:${meta.id}`;

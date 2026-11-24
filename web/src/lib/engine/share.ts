@@ -166,10 +166,21 @@ async function inflateRaw(bytes: Uint8Array): Promise<string> {
 }
 
 const UPLOAD_META_KEYS = new Set(['missingUpload', 'expectedPdbSha256', 'expectedFilename']);
+const TEMPLATE_UPLOAD_META_KEYS = new Set([
+  'missingTemplateUpload',
+  'expectedTemplateSha256',
+  'expectedTemplateFilename',
+]);
 const PARAM_TYPE_HINTS: Record<string, unknown> = {
   expectedPdbSha256: '',
   expectedFilename: '',
   missingUpload: false,
+  expectedTemplateSha256: '',
+  expectedTemplateFilename: '',
+  missingTemplateUpload: false,
+  templateSpanChains: true,
+  templateFilename: '',
+  templatePdbText: '',
   ...UI_TRACKING_PARAM_HINTS,
 };
 
@@ -225,6 +236,7 @@ function diffParams(
   const diff: Record<string, unknown> = {};
   let strippedPdb = pluginStripped;
   let strippedPdbText: string | null = null;
+  let strippedTemplateText: string | null = null;
   const effectivePdbMode =
     adapterId === 'pdb-input' ? String(effectiveParams.mode ?? defaults.mode ?? 'demo-bundle') : '';
 
@@ -242,6 +254,13 @@ function diffParams(
           strippedPdbText = v;
           continue;
         }
+      }
+    } else if (adapterId === 'localfold-af2' && !plugin?.share.prepareForShare) {
+      if (TEMPLATE_UPLOAD_META_KEYS.has(k)) continue;
+      if (k === 'templatePdbText' && typeof v === 'string' && v.length > 1500 && stripLargePdb) {
+        strippedPdb = true;
+        strippedTemplateText = v;
+        continue;
       }
     } else if (!plugin?.share.prepareForShare && k === 'pdbText' && typeof v === 'string' && v.length > 1500 && stripLargePdb) {
       strippedPdb = true;
@@ -305,6 +324,46 @@ function diffParams(
           if (hasMissingFlag) diff.missingUpload = true;
           diff.expectedPdbSha256 = existingShaRaw;
           if (existingExpName) diff.expectedFilename = existingExpName;
+        }
+      }
+    }
+  }
+
+  if (adapterId === 'localfold-af2' && !plugin?.share.prepareForShare) {
+    const existingShaRaw = String(params.expectedTemplateSha256 ?? '').trim().toLowerCase();
+    const existingExpName = String(params.expectedTemplateFilename ?? '').trim();
+    const curFilename = String(params.templateFilename ?? '').trim();
+
+    if (strippedPdb && stripLargePdb && strippedTemplateText !== null) {
+      if (typeof defaults.templatePdbText === 'string' && defaults.templatePdbText.length > 0) {
+        diff.templatePdbText = '';
+      }
+      const computedSha = computeUploadDigest(strippedTemplateText);
+      const expectedSha = existingShaRaw ? existingShaRaw : computedSha;
+      diff.missingTemplateUpload = true;
+      diff.expectedTemplateSha256 = expectedSha;
+      const expName = existingExpName || curFilename;
+      if (expName) {
+        diff.expectedTemplateFilename = expName;
+      }
+    } else {
+      const rawTpl = typeof params.templatePdbText === 'string' ? params.templatePdbText : '';
+      const hasMissingFlag = Boolean(params.missingTemplateUpload);
+      if (!rawTpl.trim() && (hasMissingFlag || existingShaRaw)) {
+        strippedPdb = true;
+        delete diff.templatePdbText;
+        if (hasMissingFlag) diff.missingTemplateUpload = true;
+        if (existingShaRaw) diff.expectedTemplateSha256 = existingShaRaw;
+        const expName = existingExpName || curFilename;
+        if (expName) diff.expectedTemplateFilename = expName;
+      } else if (rawTpl.trim() && existingShaRaw) {
+        const actualSha = computeUploadDigest(rawTpl);
+        if (!isValidSha256Hex(existingShaRaw) || actualSha !== existingShaRaw) {
+          if (isValidSha256Hex(existingShaRaw) && hasMissingFlag) {
+            diff.missingTemplateUpload = true;
+          }
+          diff.expectedTemplateSha256 = existingShaRaw;
+          if (existingExpName) diff.expectedTemplateFilename = existingExpName;
         }
       }
     }

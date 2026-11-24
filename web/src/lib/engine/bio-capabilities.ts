@@ -5,6 +5,7 @@
 
 import { resolveEffectiveMaxSequences } from './batch-flow';
 import { esmfold2Chains, esmfold2ParamIssue } from './localfold-esmfold2';
+import { parseCandidateProteinChains } from './localfold-msa';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { BENCHMARK_TARGETS, getBenchmarkById, type BenchmarkTargetMeta } from './benchmarks';
 import { planLocalFoldFanout } from './work-plan';
@@ -14,6 +15,17 @@ import {
   parseResidueRangeTokens,
   resolveLocalFoldEffectiveConfig,
 } from './conditioning';
+import {
+  alignQueryToTemplate,
+  assertInlineTemplateIntegrity,
+  getLocalFoldTemplateDialectPolicy,
+  hasInlineTemplateOrExpectation,
+  isLocalFoldTemplateCapable,
+  localFoldTemplateFamily,
+  parseTemplateStructure,
+  resolveLocalFoldTemplateSource,
+  suggestTemplateCapableModel,
+} from './localfold-template';
 import {
   BUFFER_OR_SOLVENT_RESNAMES,
   classifyHetatmCompId,
@@ -385,7 +397,7 @@ export function selectFoldWorkItems(
     });
 
     const plan = planLocalFoldFanout(members, {
-      foldModelId: String(params?.model ?? 'monomer'),
+      foldModelId: String(params?.model ?? 'monomer').trim(),
       baseSeed: Number(params?.seed ?? 0),
       perDesignTopK: maxSequences,
       samplesPerSequence: 1,
@@ -1667,7 +1679,7 @@ function inferNodeOutputProfile(
     };
   } else if (node.adapterId === 'localfold-af2') {
     const seq = upstreamProfileForPort('sequences');
-    const modelId = String(node.params.model ?? 'monomer');
+    const modelId = String(node.params.model ?? 'monomer').trim();
     const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
     const supportsHolo = meta.family === 'af3' || meta.family === 'esmfold2';
     const liveStruct = outputsByNode?.[node.id]?.structure as StructureArtifact | undefined;
@@ -3166,7 +3178,7 @@ export function validateBioCapabilities(
               }
             }
           } else if (src.adapterId === 'localfold-af2') {
-            const modelId = String(src.params.model ?? 'monomer');
+            const modelId = String(src.params.model ?? 'monomer').trim();
             const meta =
               LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
             const supportsHolo = meta.family === 'af3' || meta.family === 'esmfold2';
@@ -3279,7 +3291,7 @@ export function validateBioCapabilities(
     }
 
     if (node.adapterId === 'localfold-af2') {
-      const modelId = String(node.params.model ?? 'monomer');
+      const modelId = String(node.params.model ?? 'monomer').trim();
       const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
       const nodeName = node.label ?? 'LocalFold';
       const modelDisplay = nodeName.toLowerCase().includes(meta.shortLabel.toLowerCase())
@@ -3303,8 +3315,156 @@ export function validateBioCapabilities(
       }
       const edge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'sequences');
       const src = edge ? graph.nodes.find((n) => n.id === edge.fromNode) : null;
-      if (!src) continue;
-      const up = inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode);
+      const up = src ? inferNodeOutputProfile(src, graph, cache, visiting, outputsByNode) : null;
+
+      const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'template');
+      const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
+      const inlineTplText = String(node.params.templatePdbText ?? '').trim();
+      const hasAnyTemplate =
+        Boolean(tplNode) || hasInlineTemplateOrExpectation(node.params);
+
+      if (hasAnyTemplate && !isLocalFoldTemplateCapable(modelId)) {
+        const suggested = suggestTemplateCapableModel(modelId, {
+          isMultimer: Boolean(up && up.stoichiometry === 'multimer'),
+          hasHolo: hasExplicitAf3NonProt,
+        });
+        issues.push({
+          severity: 'error',
+          code: 'localfold-template-unsupported-model',
+          nodeId: node.id,
+          message: `${modelDisplay} is template-free and cannot use structural templates. Switch to ${suggested.label} (or another AF2 Model 1–2 / AF2-Multimer / AF3 model), or remove the template.`,
+          fix: {
+            label: `Switch to ${suggested.label}`,
+            nodeId: node.id,
+            paramsPatch: { model: suggested.modelId },
+            nodeLabel: suggested.label,
+          },
+        });
+      }
+
+      if (tplNode && inlineTplText.length > 0) {
+        issues.push({
+          severity: 'warning',
+          code: 'localfold-template-both-sources',
+          nodeId: node.id,
+          message: `${modelDisplay} has both a connected "template" port (${tplNode.label ?? tplNode.id}) and inline template text. The connected template port takes precedence.`,
+          fix: {
+            label: 'Clear inline template text',
+            nodeId: node.id,
+            paramsPatch: { templatePdbText: '', templateFilename: '' },
+          },
+        });
+      }
+
+      let staticTplText = '';
+      if (tplNode) {
+        const liveTpl = outputsByNode?.[tplNode.id]?.structure as StructureArtifact | undefined;
+        if (liveTpl) {
+          staticTplText = (liveTpl.cifText?.trim() ? liveTpl.cifText : liveTpl.pdbText ?? '').trim();
+        } else if (
+          tplNode.adapterId === 'pdb-input' &&
+          String(tplNode.params.mode ?? 'demo-bundle') !== 'demo-bundle'
+        ) {
+          const rawTpl = String(tplNode.params.pdbText ?? '').trim();
+          const cropSpec = String(tplNode.params.cropSegments ?? '').trim();
+          if (rawTpl) {
+            try {
+              staticTplText = (cropSpec ? cropRawAllAtomStructure(rawTpl, cropSpec).text : rawTpl).trim();
+            } catch {
+              staticTplText = rawTpl;
+            }
+          }
+        }
+      } else if (inlineTplText.length > 0) {
+        staticTplText = inlineTplText;
+      }
+
+      if (staticTplText.length > 0) {
+        try {
+          const policy = getLocalFoldTemplateDialectPolicy(modelId);
+          const parsedTpl = parseTemplateStructure(staticTplText, {
+            altlocFirst: policy.altlocFirst,
+            arginines: localFoldTemplateFamily(modelId) === 'af3',
+          });
+          if (src) {
+            const liveSeqs = outputsByNode?.[src.id]?.sequences as SequenceSet | undefined;
+            let staticCandidates: Array<{
+              sequence: string;
+              chainLengths?: number[];
+              chainIds?: string[];
+            }> = [];
+            if (liveSeqs?.candidates?.length) {
+              staticCandidates = selectFoldWorkItems(liveSeqs, node.params).selected.map((c) => ({
+                sequence: c.sequence,
+                chainLengths: c.chainLengths,
+                chainIds: c.chainIds,
+              }));
+            } else if (src.adapterId === 'sequence-input') {
+              const rawSeq = String(src.params.sequence ?? '').trim();
+              if (rawSeq) {
+                const seqStrings = rawSeq.includes('>')
+                  ? rawSeq
+                      .split(/^>/m)
+                      .filter((b) => b.trim().length > 0)
+                      .map((b) => b.split(/\r?\n/).slice(1).join(''))
+                  : [rawSeq];
+                const staticSeqSet: SequenceSet = {
+                  kind: 'SequenceSet',
+                  id: `${src.id}-static`,
+                  parentStructureId: 'none',
+                  sourceModelId: 'sequence-input',
+                  candidates: seqStrings.map((sequence, idx) => ({
+                    id: `seq_${idx + 1}`,
+                    sequence,
+                    sourceModelId: 'sequence-input',
+                    score: null,
+                    globalScore: null,
+                  })),
+                };
+                staticCandidates = selectFoldWorkItems(staticSeqSet, node.params).selected.map(
+                  (c) => ({
+                    sequence: c.sequence,
+                    chainLengths: c.chainLengths,
+                    chainIds: c.chainIds,
+                  }),
+                );
+              }
+            }
+            for (const cand of staticCandidates) {
+              const parsedCand = parseCandidateProteinChains(cand.sequence, cand.chainLengths);
+              const qChains = parsedCand.chainSeqs
+                .map((s, idx) => ({
+                  chainId:
+                    cand.chainIds?.[idx]?.trim() ||
+                    (idx < 26 ? String.fromCharCode(65 + idx) : `C${idx + 1}`),
+                  sequence: s,
+                }))
+                .filter((c) => c.sequence.length > 0);
+              if (qChains.length === 0) continue;
+              try {
+                alignQueryToTemplate(qChains, parsedTpl);
+              } catch (err) {
+                issues.push({
+                  severity: 'error',
+                  code: 'localfold-template-mismatch',
+                  nodeId: node.id,
+                  message: `${modelDisplay} template alignment failed: ${err instanceof Error ? err.message : String(err)}`,
+                });
+                break;
+              }
+            }
+          }
+        } catch (err) {
+          issues.push({
+            severity: 'error',
+            code: 'localfold-template-invalid',
+            nodeId: node.id,
+            message: `${modelDisplay} template structure is invalid: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+      }
+
+      if (!src || !up) continue;
       const nonProtEntities = new Set<BioEntityKind>([
         ...[...up.entities].filter((e) => e !== 'protein'),
         ...(up.strippedNonProtein ?? []),
@@ -3550,7 +3710,7 @@ export function validateRuntimeNodeInputs(
     if (!seqSet?.candidates?.length) {
       throw new Error('LocalFold requires an upstream SequenceSet with at least one sequence.');
     }
-    const modelId = String(node.params.model ?? 'monomer');
+    const modelId = String(node.params.model ?? 'monomer').trim();
     const meta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
     const defaultHardLimit = meta.family === 'af3' || meta.family === 'esmfold2' ? 512 : 768;
     const nodeLimit = foldLimitOpts?.resolveNodeFoldLimits?.(node) ?? foldLimitOpts;
@@ -3615,6 +3775,45 @@ export function validateRuntimeNodeInputs(
         warnings.push(
           `Folding ${cand.chainLengths.length}-chain complex (${cand.chainLengths.join(' + ')} aa) with AF2 monomer (using unpaired multi-chain A3M); consider AF2-Multimer v3 or Boltz-2 for accurate interface scoring.`,
         );
+      }
+    }
+
+    const hasTemplatePortInput = inputs.template !== undefined && inputs.template !== null;
+    const hasRawTemplateInput =
+      hasTemplatePortInput || hasInlineTemplateOrExpectation(node.params);
+    if (hasRawTemplateInput && !isLocalFoldTemplateCapable(modelId)) {
+      throw new Error(
+        `Refusing to fold with template on "${modelId}" (${meta.shortLabel} is template-free). Switch to AF2 Model 1–2, AF2-Multimer, or an AF3-family model, or remove the template.`,
+      );
+    }
+
+    assertInlineTemplateIntegrity(node.params, hasTemplatePortInput);
+
+    const tplSource = resolveLocalFoldTemplateSource({
+      templateInput: inputs.template as StructureArtifact | undefined,
+      params: node.params,
+    });
+    if (tplSource) {
+      warnings.push(...tplSource.warnings);
+      const policy = getLocalFoldTemplateDialectPolicy(modelId);
+      const parsedTpl = parseTemplateStructure(tplSource.text, {
+        altlocFirst: policy.altlocFirst,
+        arginines: localFoldTemplateFamily(modelId) === 'af3',
+      });
+      for (const cand of work.selected) {
+        const parsedCand = parseCandidateProteinChains(cand.sequence, cand.chainLengths);
+        const queryChains = parsedCand.chainSeqs
+          .map((seq, idx) => ({
+            chainId:
+              cand.chainIds?.[idx]?.trim() ||
+              (idx < 26 ? String.fromCharCode(65 + idx) : `C${idx + 1}`),
+            sequence: seq,
+          }))
+          .filter((c) => c.sequence.length > 0);
+        const alignment = alignQueryToTemplate(queryChains, parsedTpl);
+        for (const w of alignment.warnings) {
+          warnings.push(`[${cand.id}] ${w}`);
+        }
       }
     }
   }

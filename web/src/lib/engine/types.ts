@@ -53,6 +53,12 @@ export interface ArtifactProvenance {
   msaDepth?: number;
   degradedFallback?: string;
   warnings?: string[];
+  templateUsed?: boolean;
+  templateFormat?: 'pdb' | 'mmcif';
+  templateDigest?: string;
+  templateMatchedResidues?: number;
+  templateTotalResidues?: number;
+  templateSpanChains?: boolean;
 }
 
 export interface ResidueTrackArtifact {

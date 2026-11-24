@@ -80,3 +80,4 @@ web/static/vendor/sid-protein/weights/
 !web/static/vendor/gnina/
 web/static/vendor/gnina/weights/
 .upstream-tmp/
+.promo-studio/

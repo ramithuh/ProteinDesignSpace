@@ -14,6 +14,13 @@ import {
 } from '$lib/protein-ops/pdb';
 import { evaluateProteinOnlyStructurePolicy } from '$lib/protein-ops/hetatm-policy';
 import { getBenchmarkById } from './benchmarks';
+import {
+  isLocalFoldTemplateCapable,
+  localFoldTemplateFamily,
+  resolveLocalFoldTemplateSource,
+  type LocalFoldTemplateFamily,
+  type ResolvedLocalFoldTemplateSource,
+} from './localfold-template';
 import type {
   CanonicalConditionIntent,
   ConditionSpecArtifact,
@@ -3240,6 +3247,8 @@ export interface LocalFoldEffectiveConfigInput {
   maxResidueLength?: number;
   /** Optional explicit override for holo context presence (e.g. already-parsed ligands/DNA/RNA). */
   hasHoloContext?: boolean;
+  /** Optional wired template StructureArtifact from `localfold-af2.template` port. */
+  templateInput?: StructureArtifact | null;
 }
 
 export interface LocalFoldEffectiveConfig {
@@ -3260,6 +3269,11 @@ export interface LocalFoldEffectiveConfig {
   requestedEsmfold2Steps: number;
   effectiveEsmfold2Steps: number;
   esmfold2StepsAdjusted: boolean;
+  templateFamily: LocalFoldTemplateFamily;
+  isTemplateCapable: boolean;
+  templateSpanChains: boolean;
+  templateSource: ResolvedLocalFoldTemplateSource | null;
+  templateSourceError?: string;
 }
 
 /**
@@ -3286,7 +3300,7 @@ export function resolveLocalFoldEffectiveConfig(
   input: LocalFoldEffectiveConfigInput,
 ): LocalFoldEffectiveConfig {
   const p = input.params ?? {};
-  const modelKey = String(input.modelKey ?? p.model ?? 'monomer');
+  const modelKey = String(input.modelKey ?? p.model ?? 'monomer').trim();
   const isAf2Mono = LOCALFOLD_AF2_MODELS.has(modelKey);
   const isAf2Multi = LOCALFOLD_AF2_MULTIMER_MODELS.has(modelKey);
   const isAf3 = LOCALFOLD_AF3_MODELS.has(modelKey);
@@ -3355,6 +3369,23 @@ export function resolveLocalFoldEffectiveConfig(
     residueLength: input.maxResidueLength,
   });
 
+  const templateFamily = localFoldTemplateFamily(modelKey);
+  const isTemplateCapable = isLocalFoldTemplateCapable(modelKey);
+  const templateSpanChains =
+    templateFamily === 'af2-multimer' || templateFamily === 'af3'
+      ? p.templateSpanChains !== false
+      : true;
+  let templateSource: ResolvedLocalFoldTemplateSource | null = null;
+  let templateSourceError: string | undefined;
+  try {
+    templateSource = resolveLocalFoldTemplateSource({
+      templateInput: input.templateInput,
+      params: p,
+    });
+  } catch (err) {
+    templateSourceError = err instanceof Error ? err.message : String(err);
+  }
+
   return {
     modelKey,
     isAf2Mono,
@@ -3373,5 +3404,10 @@ export function resolveLocalFoldEffectiveConfig(
     requestedEsmfold2Steps,
     effectiveEsmfold2Steps,
     esmfold2StepsAdjusted: isEsmfold2 && effectiveEsmfold2Steps !== requestedEsmfold2Steps,
+    templateFamily,
+    isTemplateCapable,
+    templateSpanChains,
+    templateSource,
+    ...(templateSourceError !== undefined ? { templateSourceError } : {}),
   };
 }

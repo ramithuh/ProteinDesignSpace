@@ -295,9 +295,7 @@ describe('declarative ParamSchema & modes single source of truth', () => {
       ).toEqual([]);
 
       // Reverse dead-param guard (#19): every declared paramSchema key must actually be read by the worker
-      const DEAD_PARAM_ALLOWLIST: Record<string, ReadonlySet<string>> = {
-        // `rfd4-proteina` reads `mode` / `hotspots` / `motifSpan` / etc. cleanly; only UI-only metadata keys allowed if any
-      };
+      const DEAD_PARAM_ALLOWLIST: Record<string, ReadonlySet<string>> = {};
       const allowedUiOnly = DEAD_PARAM_ALLOWLIST[target.adapterId] ?? new Set<string>();
       const deadDeclared = [...declared].filter((k) => !workerKeys.has(k) && !allowedUiOnly.has(k));
       expect(

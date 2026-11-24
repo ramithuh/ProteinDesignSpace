@@ -364,4 +364,30 @@ describe('estimateRunRequirements (first-run preflight)', () => {
     expect(scorerClampSummary.models.find((m) => m.key === 'dyna1:int8:seq')?.plannedItems).toBe(1);
     expect(scorerClampSummary.totalGpuWorkItems).toBe(3);
   });
+
+  it('Tier 5 R2 adversarial (Finding 3): normalizes whitespace-padded LocalFold model IDs in estimateRunRequirements', () => {
+    const paddedGraph: WorkflowGraph = {
+      id: 'padded-models',
+      name: 'Padded Models',
+      nodes: [
+        { id: 'b', adapterId: 'localfold-af2', params: { model: ' boltz2 ' } },
+        { id: 'b2', adapterId: 'localfold-af2', params: { model: 'boltz2' } },
+        { id: 'm1', adapterId: 'localfold-af2', params: { model: ' monomer ' } },
+        { id: 'm2', adapterId: 'localfold-af2', params: { model: ' monomer-2 ' } },
+      ],
+      edges: [],
+    };
+    const summary = estimateRunRequirements(paddedGraph);
+    expect(summary.models.map((m) => m.key)).toEqual([
+      'localfold:boltz2',
+      'localfold:monomer',
+      'localfold:monomer-2',
+    ]);
+    const boltzItem = summary.models.find((m) => m.key === 'localfold:boltz2')!;
+    expect(boltzItem.approxMB).toBe(364);
+    expect(boltzItem.estimatedVramMB).toBe(1800);
+    expect(boltzItem.plannedItems).toBe(2);
+    // monomer (97) + monomer-2 delta (43) + boltz2 (364)
+    expect(summary.totalDownloadMB).toBe(364 + 97 + 43);
+  });
 });

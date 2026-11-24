@@ -59,6 +59,8 @@ ssh -L 8790:127.0.0.1:8790 user@gpu-node
 
 Open **`http://127.0.0.1:8790`**, switch the top-right toggle to **Self-Hosted (remote machine)**, leave URL blank, paste your token once, and click **Sign in**.
 
+> **Heads up — fast-moving repo:** `denovo.run` ships new models, WebGPU kernel speedups, and fixes frequently. If you self-host, run `git pull && npm --prefix web ci && npm --prefix web run build` and restart `node server/selfhost-server.mjs` regularly to stay in sync with `https://denovo.run` (your cached model weights are preserved).
+
 See [**server/README.md**](server/README.md) for Tailscale HTTPS setup, weight cache directory (`DENOVO_DATA_DIR`), Ubuntu 24.04 AppArmor troubleshooting, and all server environment variables.
 
 ---

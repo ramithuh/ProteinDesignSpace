@@ -55,7 +55,12 @@
   import NumericInput from './NumericInput.svelte';
   import SchemaParamFields from './SchemaParamFields.svelte';
   import SequenceEditor from './SequenceEditor.svelte';
-  import { resolveAutoModelLabelOnChange, type UpstreamLockSummary } from './node-display-helpers';
+  import {
+    buildInspectorTextParamUpdate,
+    resolveAutoModelLabelOnChange,
+    resolveLocalFoldModelMeta,
+    type UpstreamLockSummary,
+  } from './node-display-helpers';
   import type {
     CanonicalArtifact,
     MsaMode,
@@ -305,8 +310,7 @@
 
   let selectedLocalFoldMeta = $derived.by(() => {
     if (node.adapterId !== 'localfold-af2') return null;
-    const modelId = String(node.params?.model ?? 'monomer');
-    return LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId) ?? LOCALFOLD_MODEL_OPTIONS[0];
+    return resolveLocalFoldModelMeta(node.params);
   });
 
   let rfd4NeedsEncoder = $derived.by((): boolean => {
@@ -373,57 +377,60 @@
     titleDraft = node.label ?? '';
   });
 
-  // Debounced textarea drafts for large `pdbText`, `sequence`, and `msaA3mText` inputs (200 ms)
+  // Debounced textarea drafts for large `pdbText`, `templatePdbText`, `sequence`, and `msaA3mText` inputs (200 ms)
   let pdbTextDraft = $state('');
+  let templatePdbTextDraft = $state('');
   let sequenceDraft = $state('');
   let msaA3mDraft = $state('');
   let pendingTextCommit: {
     timer: ReturnType<typeof setTimeout>;
     nodeId: string;
-    key: 'pdbText' | 'sequence' | 'msaA3mText';
+    key: 'pdbText' | 'templatePdbText' | 'sequence' | 'msaA3mText';
     value: string;
     baseParams: Record<string, unknown>;
   } | null = null;
 
   function buildTextParamUpdate(
     baseParams: Record<string, unknown>,
-    key: 'pdbText' | 'sequence' | 'msaA3mText',
+    key: 'pdbText' | 'templatePdbText' | 'sequence' | 'msaA3mText',
     value: string,
   ): Record<string, unknown> {
-    const next: Record<string, unknown> = { ...baseParams, [key]: value };
-    if (key === 'pdbText') {
-      const curFn = String(baseParams.filename ?? '').trim();
-      if (!value.trim() && !baseParams.missingUpload) {
-        next.filename = '';
-      } else if (curFn === 'demo_3helix_53aa.pdb') {
-        next.filename = '';
-      }
-    }
-    return next;
+    return buildInspectorTextParamUpdate(baseParams, key, value);
   }
 
-  function flushPendingTextCommit() {
-    if (!pendingTextCommit) return;
+  function flushPendingTextCommit(): { nodeId: string; params: Record<string, unknown> } | null {
+    if (!pendingTextCommit) return null;
     const pending = pendingTextCommit;
     clearTimeout(pending.timer);
     pendingTextCommit = null;
-    onUpdate(pending.nodeId, buildTextParamUpdate(pending.baseParams, pending.key, pending.value));
+    const nextParams = buildTextParamUpdate(pending.baseParams, pending.key, pending.value);
+    onUpdate(pending.nodeId, nextParams);
+    return { nodeId: pending.nodeId, params: nextParams };
   }
 
-  function scheduleTextParam(key: 'pdbText' | 'sequence' | 'msaA3mText', value: string) {
+  function scheduleTextParam(
+    key: 'pdbText' | 'templatePdbText' | 'sequence' | 'msaA3mText',
+    value: string,
+  ) {
     if (key === 'pdbText') {
       pdbTextDraft = value;
       patchPdbStatus(node.id, { error: null, summary: null });
+    } else if (key === 'templatePdbText') {
+      templatePdbTextDraft = value;
+      patchTemplateStatus(node.id, { error: null, summary: null });
     } else if (key === 'sequence') {
       sequenceDraft = value;
     } else {
       msaA3mDraft = value;
     }
     const targetNodeId = node.id;
-    const baseParams = { ...node.params };
+    let baseParams = { ...node.params };
     if (pendingTextCommit) {
       if (pendingTextCommit.nodeId !== targetNodeId || pendingTextCommit.key !== key) {
-        flushPendingTextCommit();
+        const flushed = flushPendingTextCommit();
+        if (flushed && flushed.nodeId === targetNodeId) {
+          baseParams = { ...flushed.params };
+        }
       } else {
         clearTimeout(pendingTextCommit.timer);
         pendingTextCommit = null;
@@ -445,6 +452,10 @@
       onUpdate(targetNodeId, buildTextParamUpdate(baseParams, key, value));
       return;
     }
+    if (key === 'templatePdbText' && value.length <= 8000) {
+      onUpdate(targetNodeId, buildTextParamUpdate(baseParams, key, value));
+      return;
+    }
     const timer = setTimeout(() => {
       if (pendingTextCommit?.timer === timer) {
         pendingTextCommit = null;
@@ -457,10 +468,18 @@
   $effect(() => {
     const id = node.id;
     const extPdb = String(node.params.pdbText ?? '');
+    const extTplPdb = String(node.params.templatePdbText ?? '');
     const extSeq = String(node.params.sequence ?? '');
     const extA3m = String(node.params.msaA3mText ?? '');
     if (!pendingTextCommit || pendingTextCommit.nodeId !== id || pendingTextCommit.key !== 'pdbText') {
       pdbTextDraft = extPdb;
+    }
+    if (
+      !pendingTextCommit ||
+      pendingTextCommit.nodeId !== id ||
+      pendingTextCommit.key !== 'templatePdbText'
+    ) {
+      templatePdbTextDraft = extTplPdb;
     }
     if (!pendingTextCommit || pendingTextCommit.nodeId !== id || pendingTextCommit.key !== 'sequence') {
       sequenceDraft = extSeq;
@@ -486,9 +505,10 @@
     const input = ev.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
-    flushPendingTextCommit();
+    const flushed = flushPendingTextCommit();
     const targetNodeId = node.id;
-    const baseParams = { ...node.params };
+    const baseParams =
+      flushed && flushed.nodeId === targetNodeId ? { ...flushed.params } : { ...node.params };
     try {
       const text = await file.text();
       msaA3mDraft = text;
@@ -550,7 +570,9 @@
   });
 
   function setParam(key: string, value: unknown) {
-    const next: Record<string, unknown> = { ...node.params, [key]: value };
+    const flushed = flushPendingTextCommit();
+    const baseParams = flushed && flushed.nodeId === node.id ? flushed.params : node.params;
+    const next: Record<string, unknown> = { ...baseParams, [key]: value };
     if (BENCHMARK_SYNC_ADAPTER_IDS.has(node.adapterId)) {
       if (key === 'length') {
         next.userEditedLength = true;
@@ -785,13 +807,112 @@
     onUpdate(node.id, next);
   }
 
+  interface TemplateUploadStatus {
+    error: string | null;
+    summary: string | null;
+  }
+  let templateStatusByNode = $state<Record<string, TemplateUploadStatus>>({});
+  let curTemplateStatus = $derived<TemplateUploadStatus>(
+    templateStatusByNode[node.id] ?? { error: null, summary: null },
+  );
+
+  function patchTemplateStatus(targetNodeId: string, patch: Partial<TemplateUploadStatus>) {
+    const prev = templateStatusByNode[targetNodeId] ?? { error: null, summary: null };
+    templateStatusByNode = {
+      ...templateStatusByNode,
+      [targetNodeId]: { ...prev, ...patch },
+    };
+  }
+
+  function clearTemplateMissingExpectation() {
+    const flushed = flushPendingTextCommit();
+    const targetNodeId = node.id;
+    const baseParams =
+      flushed && flushed.nodeId === targetNodeId ? flushed.params : node.params;
+    const next: Record<string, unknown> = { ...baseParams };
+    delete next.missingTemplateUpload;
+    delete next.expectedTemplateSha256;
+    delete next.expectedTemplateFilename;
+    if (!String(next.templatePdbText ?? '').trim()) {
+      delete next.templatePdbText;
+      delete next.templateFilename;
+    }
+    patchTemplateStatus(targetNodeId, { error: null, summary: 'Cleared expected template digest.' });
+    onUpdate(targetNodeId, next);
+  }
+
+  function clearInlineTemplate() {
+    const flushed = flushPendingTextCommit();
+    const targetNodeId = node.id;
+    const baseParams =
+      flushed && flushed.nodeId === targetNodeId ? flushed.params : node.params;
+    const next: Record<string, unknown> = { ...baseParams };
+    delete next.templatePdbText;
+    delete next.templateFilename;
+    delete next.missingTemplateUpload;
+    delete next.expectedTemplateSha256;
+    delete next.expectedTemplateFilename;
+    templatePdbTextDraft = '';
+    patchTemplateStatus(targetNodeId, { error: null, summary: null });
+    onUpdate(targetNodeId, next);
+  }
+
+  async function handleTemplateFileUpload(ev: Event) {
+    const input = ev.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    const flushed = flushPendingTextCommit();
+    const targetNodeId = node.id;
+    const baseParams =
+      flushed && flushed.nodeId === targetNodeId ? { ...flushed.params } : { ...node.params };
+    const expectedShaRaw = String(baseParams.expectedTemplateSha256 ?? '')
+      .trim()
+      .toLowerCase();
+    try {
+      const text = await file.text();
+      const nextParams: Record<string, unknown> = {
+        ...baseParams,
+        templateFilename: file.name,
+        templatePdbText: text,
+      };
+      if (expectedShaRaw && isValidSha256Hex(expectedShaRaw)) {
+        const actualSha = computeUploadDigest(text);
+        if (actualSha === expectedShaRaw) {
+          delete nextParams.missingTemplateUpload;
+          delete nextParams.expectedTemplateSha256;
+          delete nextParams.expectedTemplateFilename;
+          patchTemplateStatus(targetNodeId, {
+            error: null,
+            summary: `Verified ${file.name} (SHA-256 ${actualSha.slice(0, 12)}…)`,
+          });
+        } else {
+          nextParams.missingTemplateUpload = true;
+          patchTemplateStatus(targetNodeId, {
+            error: `Digest mismatch: uploaded ${file.name} (${actualSha.slice(0, 12)}…) does not match expected ${expectedShaRaw.slice(0, 12)}…. Re-upload the matching file or click Clear expectation.`,
+            summary: null,
+          });
+        }
+      } else {
+        delete nextParams.missingTemplateUpload;
+        delete nextParams.expectedTemplateSha256;
+        delete nextParams.expectedTemplateFilename;
+        patchTemplateStatus(targetNodeId, { error: null, summary: `Loaded ${file.name}` });
+      }
+      templatePdbTextDraft = text;
+      onUpdate(targetNodeId, nextParams);
+    } finally {
+      input.value = '';
+    }
+  }
+
   async function handleFileUpload(ev: Event) {
     const input = ev.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
-    flushPendingTextCommit();
+    const flushed = flushPendingTextCommit();
     const targetNodeId = node.id;
-    const baseParams = { ...node.params };
+    const baseParams =
+      flushed && flushed.nodeId === targetNodeId ? { ...flushed.params } : { ...node.params };
     const prevLabel = node.label;
     const prevFilename = String(baseParams.filename ?? '');
     const expectedShaRaw = String(
@@ -2341,6 +2462,11 @@
         {msaA3mDraft}
         {lfMultiDesignInfo}
         {upstreamSequences}
+        hasTemplatePort={hasStructureInput}
+        upstreamTemplate={hasStructureInput ? upstreamStructure : null}
+        {templatePdbTextDraft}
+        templateUploadError={curTemplateStatus.error}
+        templateUploadSummary={curTemplateStatus.summary}
         {flowInfo}
         maxTotalFoldsSpec={MAX_TOTAL_FOLDS_SPEC}
         {onUpdate}
@@ -2349,6 +2475,9 @@
         onScheduleTextParam={(key, value) => scheduleTextParam(key, value)}
         onFlushPendingTextCommit={flushPendingTextCommit}
         onA3mFileUpload={handleA3mFileUpload}
+        onTemplateFileUpload={handleTemplateFileUpload}
+        onClearInlineTemplate={clearInlineTemplate}
+        onClearTemplateMissingExpectation={clearTemplateMissingExpectation}
       />
 
     {:else if node.adapterId === 'designability-scorer'}

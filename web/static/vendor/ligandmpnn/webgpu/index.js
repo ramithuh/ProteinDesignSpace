@@ -1,8 +1,8 @@
 import { fetchWeights } from "../shared/ligandmpnn/weights.js";
-import { makeEngine } from "../shared/ligandmpnn/model.js";
+import { makeEngine } from "../shared/ligandmpnn/model.js?v=3";
 import { GpuOps } from "./ligandmpnn/ops.js?v=2";
 export { GpuOps };
-export { LigandModel } from "../shared/ligandmpnn/model.js";
+export { LigandModel } from "../shared/ligandmpnn/model.js?v=3";
 export * from "./ligandmpnn/shaders.js";
 export async function requestWebGpuDevice({ useF16 = true } = {}) {
   if (!globalThis.navigator?.gpu)

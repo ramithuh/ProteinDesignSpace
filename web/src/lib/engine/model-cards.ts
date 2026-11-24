@@ -1558,8 +1558,9 @@ export function getLegacyModelCardForAdapter(
   };
 
   if (adapterId === 'localfold-af2' && typeof params?.model === 'string') {
-    const opt = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === params.model);
-    const meta = LOCALFOLD_CHECKPOINT_META[params.model];
+    const modelId = params.model.trim();
+    const opt = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId);
+    const meta = LOCALFOLD_CHECKPOINT_META[modelId];
     if (opt) {
       resolved.displayName = `LocalFold · ${opt.shortLabel}`;
       resolved.license = `Beer-Ware (runtime) · ${opt.license} (${opt.shortLabel} weights)`;

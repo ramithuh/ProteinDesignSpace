@@ -109,10 +109,11 @@ export function sanitizeParamsOnModeSwitch(
     val !== null && typeof val === 'object' ? structuredClone(val) : val;
 
   if (adapterId === 'localfold-af2') {
-    const prevModelId = String(prev.model ?? 'monomer');
+    const prevModelId = String(prev.model ?? 'monomer').trim();
+    const normalizedNextMode = nextMode.trim();
     const prevMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === prevModelId);
-    const nextMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === nextMode);
-    next.model = nextMode;
+    const nextMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === normalizedNextMode);
+    next.model = normalizedNextMode;
 
     if (nextMeta?.family === 'esmfold2') {
       next.msaMode = 'single';
@@ -124,7 +125,7 @@ export function sanitizeParamsOnModeSwitch(
 
     delete next.esmfold2Steps;
     const nextMaxRec =
-      nextMeta && (nextMode === 'mol1' || nextMeta.family === 'af2-multimer') ? 20 : 10;
+      nextMeta && (normalizedNextMode === 'mol1' || nextMeta.family === 'af2-multimer') ? 20 : 10;
     const curRec = Number(next.recycles ?? 1);
     if (Number.isFinite(curRec) && curRec > nextMaxRec) {
       next.recycles = nextMaxRec;
@@ -693,16 +694,20 @@ export function proposeConnectionsForNode(
     const toManifest = lookupManifest(toNode.adapterId);
     if (!fromManifest || !toManifest) return undefined;
 
-    for (const fromPort of Object.keys(fromManifest.outputs)) {
-      for (const [toPort, inSpec] of Object.entries(toManifest.inputs)) {
-        if (!allowOptional && inSpec.required === false) continue;
-        if (occupiedTargets.has(`${toId}:${toPort}`)) continue;
-        const trialGraph: WorkflowGraph = {
-          ...graphWithNode,
-          edges: [...graphWithNode.edges, ...proposed],
-        };
-        if (validateConnection(trialGraph, fromId, fromPort, toId, toPort).valid) {
-          return { fromNode: fromId, fromPort, toNode: toId, toPort };
+    const passes = allowOptional ? [true, false] : [true];
+    for (const requiredOnly of passes) {
+      for (const fromPort of Object.keys(fromManifest.outputs)) {
+        for (const [toPort, inSpec] of Object.entries(toManifest.inputs)) {
+          if (requiredOnly && inSpec.required === false) continue;
+          if (!allowOptional && inSpec.required === false) continue;
+          if (occupiedTargets.has(`${toId}:${toPort}`)) continue;
+          const trialGraph: WorkflowGraph = {
+            ...graphWithNode,
+            edges: [...graphWithNode.edges, ...proposed],
+          };
+          if (validateConnection(trialGraph, fromId, fromPort, toId, toPort).valid) {
+            return { fromNode: fromId, fromPort, toNode: toId, toPort };
+          }
         }
       }
     }

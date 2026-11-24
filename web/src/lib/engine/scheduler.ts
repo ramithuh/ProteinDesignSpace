@@ -1171,7 +1171,9 @@ export class ExecutionScheduler {
     const isolatedCheckpoint = plugin?.execution.getWorkerIsolationKey
       ? plugin.execution.getWorkerIsolationKey(node.params)
       : node.adapterId === 'localfold-af2'
-        ? LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === node.params.model && m.family === 'esmfold2')?.id
+        ? LOCALFOLD_MODEL_OPTIONS.find(
+            (m) => m.id === String(node.params.model ?? '').trim() && m.family === 'esmfold2',
+          )?.id
         : undefined;
     if (this.activeGpu && (this.activeGpu.adapterId !== node.adapterId ||
         this.activeGpu.isolatedCheckpoint !== isolatedCheckpoint)) {

@@ -232,7 +232,7 @@ export interface BlockGraphNodeSpec {
   params?: Record<string, unknown>;
 }
 
-export type BlockGraphEdgePair = [string, string];
+export type BlockGraphEdgePair = [string, string] | [string, string, string?, string?];
 
 export interface BlockGraphEditOp {
   action: 'add_node' | 'add_edge' | 'remove_node' | 'update_params';
@@ -241,6 +241,8 @@ export interface BlockGraphEditOp {
   label?: string | null;
   fromId?: string | null;
   toId?: string | null;
+  fromPort?: string | null;
+  toPort?: string | null;
   params?: Record<string, unknown> | null;
 }
 
@@ -1010,16 +1012,16 @@ function matchesTargetSelector(node: WorkflowNode, rawToken: string): boolean {
     return node.adapterId === 'designability-scorer';
   }
   if (tok === 'af2' || tok === 'alphafold2') {
-    return node.adapterId === 'localfold-af2' && String(node.params.model ?? 'monomer').startsWith('monomer');
+    return node.adapterId === 'localfold-af2' && String(node.params.model ?? 'monomer').trim().startsWith('monomer');
   }
   if (tok === 'rf3' || tok === 'rosettafold3') {
-    return node.adapterId === 'localfold-af2' && String(node.params.model ?? '') === 'rosettafold3';
+    return node.adapterId === 'localfold-af2' && String(node.params.model ?? '').trim() === 'rosettafold3';
   }
   if (tok === 'boltz-2' || tok === 'boltz2') {
-    return node.adapterId === 'localfold-af2' && String(node.params.model ?? '') === 'boltz2';
+    return node.adapterId === 'localfold-af2' && String(node.params.model ?? '').trim() === 'boltz2';
   }
   if (FOLD_ORACLE_SET.has(tok)) {
-    return node.adapterId === 'localfold-af2' && String(node.params.model ?? 'monomer') === tok;
+    return node.adapterId === 'localfold-af2' && String(node.params.model ?? 'monomer').trim() === tok;
   }
   return false;
 }
@@ -1760,8 +1762,16 @@ function resolveBlockEdgePorts(
     } else {
       preferredPairs.push(['sequences', 'sequences'], ['structure', 'structure']);
     }
+  } else if (toNode.adapterId === 'localfold-af2') {
+    const hasSeqAlready = existingEdges.some(
+      (e) => e.toNode === toNode.id && e.toPort === 'sequences',
+    );
+    if (hasSeqAlready) {
+      preferredPairs.push(['structure', 'template'], ['sequences', 'sequences']);
+    } else {
+      preferredPairs.push(['sequences', 'sequences'], ['structure', 'template']);
+    }
   } else if (
-    toNode.adapterId === 'localfold-af2' ||
     toNode.adapterId === 'evodiff' ||
     toNode.adapterId === 'foldflow2'
   ) {
@@ -1783,6 +1793,94 @@ function resolveBlockEdgePorts(
     }
   }
   return null;
+}
+
+interface PlannedEdgeRequest {
+  fromId: string;
+  toId: string;
+  fromPort?: string | null;
+  toPort?: string | null;
+}
+
+function normalizePlannedEdgeRequest(raw: unknown): PlannedEdgeRequest | null {
+  if (Array.isArray(raw)) {
+    const fromId = typeof raw[0] === 'string' ? raw[0] : '';
+    const toId = typeof raw[1] === 'string' ? raw[1] : '';
+    if (!fromId || !toId) return null;
+    const fromPort = typeof raw[2] === 'string' && raw[2].trim() ? raw[2].trim() : null;
+    const toPort = typeof raw[3] === 'string' && raw[3].trim() ? raw[3].trim() : null;
+    return { fromId, toId, fromPort, toPort };
+  }
+  if (raw && typeof raw === 'object') {
+    const r = raw as Record<string, unknown>;
+    const fromId = typeof r.fromId === 'string' ? r.fromId : typeof r.fromNode === 'string' ? r.fromNode : '';
+    const toId = typeof r.toId === 'string' ? r.toId : typeof r.toNode === 'string' ? r.toNode : '';
+    if (!fromId || !toId) return null;
+    const fromPort = typeof r.fromPort === 'string' && r.fromPort.trim() ? r.fromPort.trim() : null;
+    const toPort = typeof r.toPort === 'string' && r.toPort.trim() ? r.toPort.trim() : null;
+    return { fromId, toId, fromPort, toPort };
+  }
+  return null;
+}
+
+function plannedEdgePriority(req: PlannedEdgeRequest, nodeById: Map<string, WorkflowNode>): number {
+  if (req.fromPort || req.toPort) return 0;
+  const fn = nodeById.get(req.fromId);
+  const tn = nodeById.get(req.toId);
+  if (tn?.adapterId !== 'localfold-af2') return 1;
+  const fnManifest = fn ? resolvePlannerManifest(fn.adapterId) : undefined;
+  if (!fn || !fnManifest) return 1;
+  const hasSeq = 'sequences' in fnManifest.outputs;
+  const hasStruct = 'structure' in fnManifest.outputs;
+  if (hasSeq && !hasStruct) return 1; // pure sequence sources (sequence-input, mpnn, evodiff, etc.)
+  if (fn.adapterId !== 'pdb-input' && hasSeq && hasStruct) return 2; // design generators / folding outputs
+  if (fn.adapterId === 'pdb-input') return 3; // pdb-input (single-edge still takes sequences; multi-edge takes template)
+  return 4; // structure-only sources
+}
+
+function orderPlannedEdges(
+  requests: PlannedEdgeRequest[],
+  nodeById: Map<string, WorkflowNode>,
+): PlannedEdgeRequest[] {
+  return [...requests].sort(
+    (a, b) => plannedEdgePriority(a, nodeById) - plannedEdgePriority(b, nodeById),
+  );
+}
+
+function resolvePlannedEdgePorts(
+  fromNode: WorkflowNode,
+  toNode: WorkflowNode,
+  existingEdges: WorkflowEdge[],
+  allNodes: WorkflowNode[],
+  hint?: { fromPort?: string | null; toPort?: string | null },
+): { fromPort: string; toPort: string } | null {
+  const fromPortHint = hint?.fromPort?.trim() || '';
+  const toPortHint = hint?.toPort?.trim() || '';
+  if (fromPortHint || toPortHint) {
+    const fromAdapter = resolvePlannerManifest(fromNode.adapterId);
+    const toAdapter = resolvePlannerManifest(toNode.adapterId);
+    if (fromAdapter && toAdapter) {
+      const tmpGraph: WorkflowGraph = { id: 'tmp', name: 'tmp', nodes: allNodes, edges: existingEdges };
+      if (fromPortHint && toPortHint) {
+        if (validateConnection(tmpGraph, fromNode.id, fromPortHint, toNode.id, toPortHint).valid) {
+          return { fromPort: fromPortHint, toPort: toPortHint };
+        }
+      } else if (toPortHint) {
+        for (const fp of Object.keys(fromAdapter.outputs)) {
+          if (validateConnection(tmpGraph, fromNode.id, fp, toNode.id, toPortHint).valid) {
+            return { fromPort: fp, toPort: toPortHint };
+          }
+        }
+      } else if (fromPortHint) {
+        for (const tp of Object.keys(toAdapter.inputs)) {
+          if (validateConnection(tmpGraph, fromNode.id, fromPortHint, toNode.id, tp).valid) {
+            return { fromPort: fromPortHint, toPort: tp };
+          }
+        }
+      }
+    }
+  }
+  return resolveBlockEdgePorts(fromNode, toNode, existingEdges, allNodes);
 }
 
 const BLOCK_FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -2257,7 +2355,7 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
   const af3BySeqSource = new Map<string, WorkflowNode[]>();
   for (const node of cloned.nodes) {
     if (node.adapterId !== 'localfold-af2') continue;
-    const modelId = String(node.params.model ?? 'monomer');
+    const modelId = String(node.params.model ?? 'monomer').trim();
     if (!PASS2_AF3_MODELS.has(modelId)) continue;
     const seqEdge = cloned.edges.find((e) => e.toNode === node.id && e.toPort === 'sequences');
     if (!seqEdge) continue;
@@ -2271,7 +2369,7 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
       siblings
         .map((n) =>
           resolveLocalFoldEffectiveConfig({
-            modelKey: String(n.params.model ?? 'af3'),
+            modelKey: String(n.params.model ?? 'af3').trim(),
             params: n.params,
           }).ligandCcdCodes.join(', '),
         )
@@ -2280,7 +2378,7 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
     const sharedRna = siblings.map((n) => String(n.params.rnaSequences ?? '').trim()).find(Boolean) ?? '';
     for (const n of siblings) {
       const nodeCfg = resolveLocalFoldEffectiveConfig({
-        modelKey: String(n.params.model ?? 'af3'),
+        modelKey: String(n.params.model ?? 'af3').trim(),
         params: n.params,
       });
       if (sharedLig && nodeCfg.ligandCcdCodes.length === 0) {
@@ -2460,6 +2558,43 @@ function compileBlockGraphPlan(
     >();
     const explicitlyPatchedNodeKeys = new Map<string, Set<string>>();
 
+    const pendingAddEdges: PlannedEdgeRequest[] = [];
+    const resolveReqEndpoints = (req: PlannedEdgeRequest) => ({
+      fromId: idRemap.get(req.fromId) ?? req.fromId,
+      toId: idRemap.get(req.toId) ?? req.toId,
+    });
+    const flushPendingAddEdges = (filterFn?: (req: PlannedEdgeRequest) => boolean) => {
+      if (pendingAddEdges.length === 0) return;
+      const toFlush: PlannedEdgeRequest[] = [];
+      const toKeep: PlannedEdgeRequest[] = [];
+      for (const req of pendingAddEdges) {
+        if (!filterFn || filterFn(req)) {
+          toFlush.push(req);
+        } else {
+          toKeep.push(req);
+        }
+      }
+      pendingAddEdges.length = 0;
+      pendingAddEdges.push(...toKeep);
+      if (toFlush.length === 0) return;
+      const nodeById = new Map(nodes.map((n) => [n.id, n]));
+      for (const req of orderPlannedEdges(toFlush, nodeById)) {
+        const { fromId, toId } = resolveReqEndpoints(req);
+        const fromNode = nodeById.get(fromId);
+        const toNode = nodeById.get(toId);
+        if (!fromNode || !toNode || fromNode.id === toNode.id) continue;
+        const resolved = resolvePlannedEdgePorts(fromNode, toNode, edges, nodes, req);
+        if (resolved) {
+          edges.push({
+            fromNode: fromNode.id,
+            fromPort: resolved.fromPort,
+            toNode: toNode.id,
+            toPort: resolved.toPort,
+          });
+        }
+      }
+    };
+
     for (const op of (plan.editOps ?? []).slice(0, MAX_BLOCK_GRAPH_EDIT_OPS)) {
       if (op.action === 'add_node') {
         const adapterId = op.adapter ?? '';
@@ -2483,18 +2618,16 @@ function compileBlockGraphPlan(
         addedNodeIds.push(finalId);
         addedNodeIdSet.add(finalId);
       } else if (op.action === 'add_edge') {
-        const fromId = idRemap.get(op.fromId ?? '') ?? op.fromId ?? '';
-        const toId = idRemap.get(op.toId ?? '') ?? op.toId ?? '';
-        const fromNode = nodes.find((n) => n.id === fromId);
-        const toNode = nodes.find((n) => n.id === toId);
-        if (!fromNode || !toNode) continue;
-        const resolved = resolveBlockEdgePorts(fromNode, toNode, edges, nodes);
-        if (resolved) {
-          edges.push({
-            fromNode: fromNode.id,
-            fromPort: resolved.fromPort,
-            toNode: toNode.id,
-            toPort: resolved.toPort,
+        const rawFromId = op.fromId ?? '';
+        const rawToId = op.toId ?? '';
+        const fromId = idRemap.get(rawFromId) ?? rawFromId;
+        const toId = idRemap.get(rawToId) ?? rawToId;
+        if (fromId && toId) {
+          pendingAddEdges.push({
+            fromId,
+            toId,
+            fromPort: op.fromPort ?? null,
+            toPort: op.toPort ?? null,
           });
         }
       } else if (op.action === 'remove_node') {
@@ -2502,6 +2635,21 @@ function compileBlockGraphPlan(
         const idx = nodes.findIndex((n) => n.id === targetId);
         if (idx === -1) continue;
         const removed = nodes[idx];
+        if (removed.adapterId === 'top-k-filter') {
+          const nodeById = new Map(nodes.map((n) => [n.id, n]));
+          flushPendingAddEdges((req) => {
+            const { fromId, toId } = resolveReqEndpoints(req);
+            if (fromId === targetId || toId === targetId) return true;
+            return nodeById.get(toId)?.adapterId !== 'localfold-af2';
+          });
+        }
+        // Drop any remaining pending edges referencing the removed node
+        for (let pi = pendingAddEdges.length - 1; pi >= 0; pi--) {
+          const { fromId, toId } = resolveReqEndpoints(pendingAddEdges[pi]);
+          if (fromId === targetId || toId === targetId) {
+            pendingAddEdges.splice(pi, 1);
+          }
+        }
         const inc = edges.filter((e) => e.toNode === targetId);
         const out = edges.filter((e) => e.fromNode === targetId);
         nodes.splice(idx, 1);
@@ -2634,6 +2782,7 @@ function compileBlockGraphPlan(
         target.params = merged;
       }
     }
+    flushPendingAddEdges();
 
     // Clear stale residue/coordinate conditioning on pre-existing downstream generators
     // whose upstream pdb-input switched structure or benchmark in editOps.
@@ -2824,11 +2973,14 @@ function compileBlockGraphPlan(
 
   const edges: WorkflowEdge[] = [];
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
-  for (const [fromId, toId] of (plan.edges ?? []).slice(0, MAX_BLOCK_GRAPH_EDGES)) {
-    const fn = nodeById.get(fromId);
-    const tn = nodeById.get(toId);
-    if (!fn || !tn || fromId === toId) continue;
-    const resolved = resolveBlockEdgePorts(fn, tn, edges, nodes);
+  const normalizedPlanEdges = rawEdges
+    .map((e) => normalizePlannedEdgeRequest(e))
+    .filter((e): e is PlannedEdgeRequest => e !== null);
+  for (const req of orderPlannedEdges(normalizedPlanEdges, nodeById)) {
+    const fn = nodeById.get(req.fromId);
+    const tn = nodeById.get(req.toId);
+    if (!fn || !tn || req.fromId === req.toId) continue;
+    const resolved = resolvePlannedEdgePorts(fn, tn, edges, nodes, req);
     if (resolved) {
       edges.push({
         fromNode: fn.id,
@@ -4204,20 +4356,20 @@ function resolveCanvasNodesForKeyword(
     addMatch('designability-scorer', (n) => n.adapterId === 'designability-scorer');
   }
   if (/\b(?:rf3|rosettafold[\s-]*3|rosettafold3)\b/i.test(clause)) {
-    addMatch('rosettafold3', (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? '') === 'rosettafold3');
+    addMatch('rosettafold3', (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? '').trim() === 'rosettafold3');
   }
   if (/\b(?:boltz[\s-]*2|boltz2)\b/i.test(clause)) {
-    addMatch('boltz2', (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? '') === 'boltz2');
+    addMatch('boltz2', (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? '').trim() === 'boltz2');
   }
   if (/\b(?:protenix[\s-]*v?2|protenix2|protenix)\b/i.test(clause)) {
-    addMatch('protenix2', (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? '') === 'protenix2');
+    addMatch('protenix2', (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? '').trim() === 'protenix2');
   }
   if (/\b(?:af2[\s-]*multimer|alphafold2?[\s-]*multimer|multimer)\b/i.test(clause)) {
-    addMatch('multimer', (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? '') === 'multimer');
+    addMatch('multimer', (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? '').trim() === 'multimer');
   } else if (/\b(?:af2|alphafold2|alphafold)\b/i.test(clause)) {
     addMatch(
       'af2',
-      (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? 'monomer').startsWith('monomer'),
+      (n) => n.adapterId === 'localfold-af2' && String(n.params.model ?? 'monomer').trim().startsWith('monomer'),
     );
   }
   return { nodeIds, adapterIds };

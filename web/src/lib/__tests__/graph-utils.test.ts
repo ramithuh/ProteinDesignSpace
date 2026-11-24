@@ -11,6 +11,7 @@ import {
   autoLayoutGraph,
   defaultParamsForAdapter,
   insertBlockSmart,
+  sanitizeParamsOnModeSwitch,
   snapNodePositionToPorts,
   validateConnection,
   validateGraph,
@@ -462,5 +463,23 @@ describe('engine/registry & engine/graph-utils', () => {
     // Dragging far away (>18px) does not fight the user
     const free = snapNodePositionToPorts(rScore.graph, rScore.nodeId, { x: 960, y: scorePos.y + 60 }, 18);
     expect(free).toEqual({ x: 960, y: scorePos.y + 60 });
+  });
+
+  it('Tier 5 R2 adversarial (Finding 3): sanitizeParamsOnModeSwitch trims whitespace-padded LocalFold prev.model and nextMode', () => {
+    const cleaned = sanitizeParamsOnModeSwitch(
+      'localfold-af2',
+      { model: ' multimer ', tolerance: 0.5 },
+      'monomer',
+    );
+    expect(cleaned).toEqual({ model: 'monomer' });
+
+    const trimmedTarget = sanitizeParamsOnModeSwitch(
+      'localfold-af2',
+      { model: ' monomer ', msaMode: 'mmseqs2', diffusionSteps: 25 },
+      ' ef2-fast-300m ',
+    );
+    expect(trimmedTarget.model).toBe('ef2-fast-300m');
+    expect(trimmedTarget.msaMode).toBe('single');
+    expect(trimmedTarget.diffusionSteps).toBeUndefined();
   });
 });

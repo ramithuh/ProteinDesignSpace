@@ -58,7 +58,9 @@ describe('Genie 3 WebGPU integration', () => {
 
     // Verify RFD4 & LocalFold workers also carry Wave-2 VRAM cleanup & fail-fast / transferables
     const rfd4WorkerSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/rfd4-proteina/rfd4.worker.ts'), 'utf8');
-    expect(rfd4WorkerSrc).toContain('releaseActivations');
+    const rfd4LifecycleSrc = readFileSync(resolve(process.cwd(), 'src/lib/plugins/rfd4-proteina/lifecycle.ts'), 'utf8');
+    expect(rfd4WorkerSrc).toContain('releaseRfd4GeneratorActivations');
+    expect(rfd4LifecycleSrc).toContain('releaseActivations');
     expect(rfd4WorkerSrc).toContain('collectOwnedTransferables');
     const rfdFailFastIdx = rfd4WorkerSrc.indexOf('requires a wired structure input');
     const rfdEnsureIdx = rfd4WorkerSrc.indexOf('await ensureLoaded(');
