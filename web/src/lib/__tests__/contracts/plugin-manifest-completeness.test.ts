@@ -10,6 +10,7 @@ const EXPECTED_ADAPTER_IDS = [
   'genie3',
   'protpardelle',
   'rfdiffusion',
+  'rfd3',
   'boltzgen',
   'evodiff',
   'la-proteina',
@@ -32,11 +33,11 @@ const EXPECTED_ADAPTER_IDS = [
   'structure-compare',
 ] as const;
 
-describe('Phase 0 contract: plugin manifest & model-card completeness (26 adapters)', () => {
-  it('registers all 26 baseline adapters with valid manifests and default params', () => {
+describe('Phase 0 contract: plugin manifest & model-card completeness (27 adapters)', () => {
+  it('registers all 27 baseline adapters with valid manifests and default params', () => {
     const keys = Object.keys(ADAPTER_REGISTRY).sort();
     expect(keys).toEqual([...EXPECTED_ADAPTER_IDS].sort());
-    expect(keys).toHaveLength(26);
+    expect(keys).toHaveLength(27);
 
     let cpuCount = 0;
     let ortCount = 0;
@@ -65,14 +66,14 @@ describe('Phase 0 contract: plugin manifest & model-card completeness (26 adapte
 
     expect(cpuCount).toBe(5);
     expect(ortCount).toBe(1);
-    expect(wgslCount).toBe(20);
+    expect(wgslCount).toBe(21);
   });
 
-  it('provides model cards for all 21 ML adapters and none for the 5 pure CPU utilities', () => {
+  it('provides model cards for all 22 ML adapters and none for the 5 pure CPU utilities', () => {
     const mlAdapters = EXPECTED_ADAPTER_IDS.filter((id) => ADAPTER_REGISTRY[id].runtime !== 'cpu-ts');
     const cpuAdapters = EXPECTED_ADAPTER_IDS.filter((id) => ADAPTER_REGISTRY[id].runtime === 'cpu-ts');
 
-    expect(mlAdapters).toHaveLength(21);
+    expect(mlAdapters).toHaveLength(22);
     expect(cpuAdapters).toHaveLength(5);
 
     for (const id of mlAdapters) {

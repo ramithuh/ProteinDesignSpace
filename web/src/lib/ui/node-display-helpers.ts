@@ -252,6 +252,38 @@ export function formatNodeParamSummary(
       }
       return `${len} aa · ${steps} steps · ${prec}${nTag}`;
     }
+    case 'rfd3': {
+      const mode = String(p.mode ?? 'unconditional').trim().toLowerCase();
+      const len = num(p.length, 80);
+      const steps = num(p.steps, 50);
+      const prec = String(p.precision ?? 'fp16').trim().toUpperCase();
+      const n = num(p.numDesigns, 1);
+      const nTag = n > 1 ? ` · ×${n}` : '';
+      const lig = String(p.ligand ?? '').trim();
+      const ligTag = lig ? ` + ${lig}` : '';
+      if (mode === 'binder') {
+        const hotCount = String(p.hotspots ?? '').split(/[,\s;]+/).filter(Boolean).length;
+        const hotTag = hotCount > 0 ? ` · ${hotCount} hot` : '';
+        return `Binder · ${len} aa${hotTag}${ligTag} · ${steps} steps${nTag}`;
+      }
+      if (mode === 'motif') {
+        const unidx = String(p.unindex ?? '').trim();
+        const contig = String(p.contig ?? '').trim();
+        if (unidx) return `Unindexed (${unidx}) · ${len} aa${ligTag} · ${steps} steps${nTag}`;
+        return `Motif${contig ? ` (${contig})` : ` · ${len} aa`}${ligTag} · ${steps} steps${nTag}`;
+      }
+      if (mode === 'partial') {
+        return `Partial (σ=${num(p.partialT, 5.0)})${ligTag} · ${steps} steps${nTag}`;
+      }
+      const sym = String(p.symmetry ?? 'none').trim().toUpperCase();
+      if (sym && sym !== 'NONE') {
+        return `${sym} · ${len} aa/u · ${steps} steps · ${prec}${nTag}`;
+      }
+      if (p.cyclic) {
+        return `Cyclic · ${len} aa · ${steps} steps · ${prec}${nTag}`;
+      }
+      return `${len} aa · ${steps} steps · ${prec}${nTag}`;
+    }
     case 'frameflow': {
       const len = num(p.length, 80);
       const steps = num(p.steps, 100);
@@ -642,6 +674,34 @@ export function computeUpstreamLockSummary(
           ? Math.max(copies * 8, Math.round(rawLen / copies) * copies)
           : copies * 24;
       const unitLen = Math.floor(effLen / copies);
+      symmetryLabel = sym;
+      tiedPositionGroupCount = unitLen;
+      const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      designingChains = Array.from({ length: copies }, (_, idx) => alphabet[idx] ?? `C${idx}`);
+      for (const ch of designingChains) {
+        chainRoles[ch] = 'scaffold';
+        chainLengths[ch] = unitLen;
+      }
+    } else {
+      return null;
+    }
+  } else if (sourceNode.adapterId === 'rfd3') {
+    const rp = sourceNode.params ?? {};
+    const mode = String(rp.mode ?? 'unconditional').trim().toLowerCase();
+    const sym = String(rp.symmetry ?? 'none').trim().toUpperCase();
+    const len = Number(rp.length ?? 80);
+    if (mode === 'binder') {
+      lockedChains = ['B'];
+      designingChains = ['A'];
+      chainRoles = { A: 'binder', B: 'target' };
+      if (Number.isFinite(len) && len > 0) chainLengths.A = len;
+    } else if (mode === 'motif') {
+      hasFixedMotif = true;
+      designingChains = ['A'];
+      chainRoles = { A: 'scaffold' };
+    } else if (mode === 'unconditional' && sym && sym !== 'NONE' && /^C\d+$/.test(sym)) {
+      const copies = Math.max(2, Number(sym.slice(1)));
+      const unitLen = Number.isFinite(len) && len > 0 ? Math.round(len) : 48;
       symmetryLabel = sym;
       tiedPositionGroupCount = unitLen;
       const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';

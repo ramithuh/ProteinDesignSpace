@@ -16,6 +16,7 @@ const IMMUTABLE_SHORT_CODES: Record<string, string> = {
   genie3: 'g',
   protpardelle: 'pp',
   rfdiffusion: 'd',
+  rfd3: 'r3',
   boltzgen: 'b',
   evodiff: 'e',
   'la-proteina': 'lp',

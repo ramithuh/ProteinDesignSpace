@@ -34,6 +34,7 @@ export const SEQUENCE_CAPPED_ADAPTERS = new Set(['localfold-af2', 'esmc', 'dyna1
 const MULTI_DESIGN_GENERATORS = new Set([
   'genie3',
   'rfd4-proteina',
+  'rfd3',
   'protpardelle',
   'rfdiffusion',
   'boltzgen',

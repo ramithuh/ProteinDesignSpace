@@ -85,6 +85,7 @@ function readClampedInt(value: unknown, fallback: number, min: number, max: numb
 const MULTI_DESIGN_GENERATORS = new Set([
   'genie3',
   'rfd4-proteina',
+  'rfd3',
   'protpardelle',
   'rfdiffusion',
   'boltzgen',
@@ -713,6 +714,7 @@ export function estimateRunRequirements(
       const approxMB = manifest.precisionWeightsMB[resolvedPrec] ?? manifest.approxWeightsMB;
       const FP16_VRAM_MB: Record<string, number> = {
         rfdiffusion: 650,
+        rfd3: 1400,
         boltzgen: 2200,
         'la-proteina': 1200,
         proteina: 900,
@@ -722,10 +724,15 @@ export function estimateRunRequirements(
         foldflow2: 2400,
         evodiff: 380,
       };
+      const INT8_VRAM_MB: Record<string, number> = {
+        rfd3: 1100,
+      };
       const estimatedVramMB =
         resolvedPrec === 'fp16' && Object.hasOwn(FP16_VRAM_MB, node.adapterId)
           ? FP16_VRAM_MB[node.adapterId]
-          : manifest.estimatedVramMB;
+          : resolvedPrec === 'int8' && Object.hasOwn(INT8_VRAM_MB, node.adapterId)
+            ? INT8_VRAM_MB[node.adapterId]
+            : manifest.estimatedVramMB;
       const key = `${manifest.id}:${resolvedPrec}`;
       if (!byKey.has(key)) {
         byKey.set(key, {

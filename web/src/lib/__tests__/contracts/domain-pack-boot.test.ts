@@ -38,13 +38,13 @@ describe('Phase 2 contract: @domain/protein-biopolymer DomainPack & live 26-plug
     }
 
     const plugins = defaultPluginRegistry.listPlugins();
-    expect(plugins).toHaveLength(26);
+    expect(plugins).toHaveLength(27);
     expect(plugins.map((p) => p.id).sort()).toEqual(Object.keys(ADAPTER_REGISTRY).sort());
 
-    // Short codes are bijective across all 26 plugins
+    // Short codes are bijective across all 27 plugins
     const { adapterToShort, shortToAdapter } = defaultPluginRegistry.getShortCodeMaps();
-    expect(Object.keys(adapterToShort)).toHaveLength(26);
-    expect(Object.keys(shortToAdapter)).toHaveLength(26);
+    expect(Object.keys(adapterToShort)).toHaveLength(27);
+    expect(Object.keys(shortToAdapter)).toHaveLength(27);
 
     // LocalFold ESMFold2 worker isolation hook works without scheduler hardcoding
     const lf = defaultPluginRegistry.getPlugin('localfold-af2')!;
@@ -70,6 +70,7 @@ describe('Phase 2 contract: @domain/protein-biopolymer DomainPack & live 26-plug
       'ligandmpnn',
       'proteina',
       'protpardelle',
+      'rfd3',
       'rfdiffusion',
       'sid-protein',
     ]);
@@ -78,13 +79,13 @@ describe('Phase 2 contract: @domain/protein-biopolymer DomainPack & live 26-plug
     }
   });
 
-  it('aggregates all 17 CacheStorage names, 4 prefixes, and 16 OPFS weight dirs from static plugin policies', () => {
+  it('aggregates all 18 CacheStorage names, 4 prefixes, and 17 OPFS weight dirs from static plugin policies', () => {
     const ns = aggregatePluginCachePolicies(defaultPluginRegistry);
-    expect(ns.cacheStorageNames.size).toBe(17);
+    expect(ns.cacheStorageNames.size).toBe(18);
     expect(ns.cacheStoragePrefixes).toEqual(
       expect.arrayContaining(['denovo-run', 'localfold-', 'rfd4p-', 'genie3-weights-']),
     );
-    expect(ns.opfsDirs).toHaveLength(16);
+    expect(ns.opfsDirs).toHaveLength(17);
   });
 
   it('formats protein KPI badges & preflight summaries cleanly via DomainPack', () => {
@@ -192,7 +193,7 @@ describe('Phase 2 contract: @domain/protein-biopolymer DomainPack & live 26-plug
       extraPlugins: [admetPlugin],
     });
 
-    expect(multiDomainReg.listPlugins()).toHaveLength(27);
+    expect(multiDomainReg.listPlugins()).toHaveLength(28);
     expect(multiDomainReg.resolveShortCode('ac')).toBe('admet-chemprop');
     expect(multiDomainReg.portTypes.has('PropertyTable')).toBe(true);
     expect(multiDomainReg.portTypes.has('StructureArtifact')).toBe(true);

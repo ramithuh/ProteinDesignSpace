@@ -1,5 +1,5 @@
-// Layer 3 Model Plugins Barrel — Single Registration Entrypoint (ALL 26 ADAPTERS NATIVE!).
-// Adding model #27 = 1 cohesive folder under `src/lib/plugins/<id>/` + 1 entry in `NATIVE_PLUGINS`.
+// Layer 3 Model Plugins Barrel — Single Registration Entrypoint (ALL 27 ADAPTERS NATIVE!).
+// Adding model #28 = 1 cohesive folder under `src/lib/plugins/<id>/` + 1 entry in `NATIVE_PLUGINS`.
 
 import { PluginRegistry, setActivePluginRegistry, type DomainPack, type ModelPlugin } from '$lib/kernel';
 import { proteinBiopolymerDomainPack } from '$lib/domains/protein-biopolymer';
@@ -24,6 +24,7 @@ import { frameflowPlugin } from './frameflow';
 import { foldflow2Plugin } from './foldflow2';
 import { protpardellePlugin } from './protpardelle';
 import { rfdiffusionPlugin } from './rfdiffusion';
+import { rfd3Plugin } from './rfd3';
 import { boltzgenPlugin } from './boltzgen';
 import { ligandmpnnPlugin } from './ligandmpnn';
 import { lasermpnnPlugin } from './lasermpnn';
@@ -43,7 +44,7 @@ import { genie3Plugin } from './genie3';
 import { localfoldAf2Plugin } from './localfold-af2';
 
 /**
- * All 26 native Layer 3 ModelPlugins (zero legacy-bridged adapters remain!).
+ * All 27 native Layer 3 ModelPlugins (zero legacy-bridged adapters remain!).
  */
 export const NATIVE_PLUGINS: readonly ModelPlugin[] = [
   // 5 cpu-ts utilities
@@ -54,9 +55,10 @@ export const NATIVE_PLUGINS: readonly ModelPlugin[] = [
   designabilityScorerPlugin,
   // 1 ort-webgpu
   webProteinMpnnPlugin,
-  // 13 wgsl-custom generators & inverse-folders
+  // 14 wgsl-custom generators & inverse-folders
   protpardellePlugin,
   rfdiffusionPlugin,
+  rfd3Plugin,
   boltzgenPlugin,
   laProteinaPlugin,
   proteinaPlugin,

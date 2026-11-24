@@ -39,6 +39,7 @@ export const ALLOWED_GPU_ADAPTER_IDS = new Set([
   'antifold-esmif1',
   'protpardelle',
   'rfdiffusion',
+  'rfd3',
   'boltzgen',
   'evodiff',
   'la-proteina',

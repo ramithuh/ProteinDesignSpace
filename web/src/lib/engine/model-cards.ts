@@ -52,6 +52,7 @@ export const HOSTED_PORT_CARD_IDS = [
   'esmc-webgpu',
   'protpardelle-webgpu',
   'rfdiffusion-webgpu',
+  'rfd3-webgpu',
   'boltzgen-webgpu',
   'evodiff-webgpu',
   'dyna1-webgpu',
@@ -962,6 +963,73 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     limitations: [
       'Uses the Base_ckpt.pt backbone checkpoint; pair with ProteinMPNN / SolubleMPNN downstream for sequence design.',
       'Symmetry modes require total residue length divisible by the point-group copy count (auto-rounded in the worker).',
+    ],
+  },
+
+  'rfd3-webgpu': {
+    id: 'rfd3-webgpu',
+    adapterId: 'rfd3',
+    displayName: 'RFdiffusion3 (All-Atom)',
+    status: 'live',
+    activePrecisionId: 'fp16',
+    precisions: [
+      {
+        id: 'fp16',
+        label: 'FP16 (Recommended)',
+        quantizationDetail:
+          'Packed 2×F16 linear matrices decoded on the fly in WGSL with F32 accumulation; F32 norms, embeddings & Fourier parameters (14 shards, 336.89 MB; 168.04M params, 807 tensors)',
+        approxSizeMB: 337,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU all-atom coordinate maxAbsDiff / RMSE / cosineSim vs PyTorch FP32 (and matching FP16)',
+          value: '4.53e-3 Å maxAbsDiff · 1.41e-3 Å RMSE · 0.99999978 min cosSim vs FP32 (2.74e-5 Å vs quantized PyTorch)',
+          maxAbsDiff: '4.531860e-3 Å (vs FP32) · 2.741814e-5 Å (vs FP16 PyTorch)',
+          scope: '14 conditioned modes (monomer, atomic motif, unindexed, binder, ligand/ATP, DNA, RNA, cyclic, H-bond, partial, Cn symmetry); 64 aa × 50 steps in 5.59 s (~99 ms/step, 1.45 GB peak buffers)',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+        latencyHint: '~99 ms/step on GB10 (64 aa, 50 steps in 5.6 s)',
+      },
+      {
+        id: 'int8',
+        label: 'INT8 (Compact / Experimental)',
+        quantizationDetail:
+          'Packed 4×I8 linear matrices + per-output-row F32 scales; F32 norms & embeddings (7 shards, 170.39 MB; 168.04M params)',
+        approxSizeMB: 170,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU all-atom coordinate maxAbsDiff vs PyTorch FP32 (and matching INT8 PyTorch)',
+          value: '4.49e-1 Å maxAbsDiff · 1.24e-1 Å RMSE · 0.99860 min cosSim vs FP32 (1.75e-4 Å vs quantized PyTorch)',
+          maxAbsDiff: '4.487474e-1 Å (vs FP32) · 1.749992e-4 Å (vs INT8 PyTorch)',
+          scope: '64 aa × 50 steps in 5.54 s (~101 ms/step, 1.28 GB peak buffers); kernels match quantized PyTorch',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+        caveat:
+          'Experimental: INT8 kernels agree closely with quantized PyTorch, but weight quantization noticeably alters coordinates and predicted sequences compared to FP16/FP32. Use FP16 for best stereochemistry.',
+      },
+      {
+        id: 'fp32',
+        label: 'FP32 (Reference)',
+        quantizationDetail:
+          'Reference F32 tensors (29 shards, 672.28 MB; 806 sharded tensors + 1 manifest constant); exact PyTorch FP32 parity baseline',
+        approxSizeMB: 672,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU all-atom coordinate maxAbsDiff / RMSE / cosineSim vs PyTorch FP32',
+          value: '1.91e-5 Å maxAbsDiff · 6.27e-6 Å RMSE · 0.99999999999569 min cosSim across all 14 conditioned tasks',
+          maxAbsDiff: '1.907349e-5 Å',
+          scope: 'Full 14-case conditioned denoiser matrix + shared-draw trajectories on hardware WebGPU',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 (Dawn Vulkan)',
+        },
+      },
+    ],
+    upstreamRepo: 'https://github.com/RosettaCommons/foundry',
+    upstreamCommit: 'a13b299a05897b951ea28b65e977eebb984380bc',
+    weightsRepo: 'https://huggingface.co/ramithuh/rfd3-webgpu',
+    weightsRevision: 'd318c4b6acb601f56b85b1a3e8fb565682cd7360',
+    license: 'BSD-3-Clause (RosettaCommons Foundry / Baker Lab, IPD) · Apache-2.0 (kernel utilities)',
+    citation:
+      'Butcher et al. (2025) De novo design of all-atom biomolecular interactions with RFdiffusion3 (Baker Lab / RosettaCommons Foundry).',
+    limitations: [
+      'Dense all-atom pair activations scale quadratically with atom count (14 atoms/residue); browser runs are bounded by maxStorageBufferBindingSize (recommended ≤120–160 aa depending on GPU).',
+      'FP16 (~337 MB) is recommended as default; INT8 (~170 MB) is experimental and alters coordinates/sequences due to quantization.',
+      'Small-molecule conditioning uses explicit 3D ligand coordinates (or built-in reference conformers for ATP, ZN, DNA/RNA); raw 2D SMILES are not converted in-browser.',
     ],
   },
 

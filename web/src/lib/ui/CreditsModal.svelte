@@ -131,6 +131,15 @@
       linkLabel: 'WaymentSteeleLab/Dyna-1',
     },
     {
+      name: 'RFdiffusion3 (Foundry)',
+      role: 'All-Atom Biomolecular Diffusion & Co-Design',
+      detail:
+        '168M-parameter all-atom diffusion model (Butcher et al., Baker Lab / RosettaCommons Foundry) for monomers, atomic/tip-atom motifs, PPI binders, small-molecule/nucleic-acid pockets, cyclic peptides, and Cn symmetry in native WebGPU.',
+      license: 'BSD-3-Clause (Foundry / Baker Lab) · Apache-2.0 (kernel utilities)',
+      url: 'https://github.com/RosettaCommons/foundry',
+      linkLabel: 'RosettaCommons/foundry',
+    },
+    {
       name: 'RFdiffusion (Base)',
       role: 'SE(3) Rigid-Frame Backbone Diffusion',
       detail:

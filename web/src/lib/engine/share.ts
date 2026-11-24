@@ -37,6 +37,7 @@ const ADAPTER_TO_SHORT: Record<string, string> = {
   genie3: 'g',
   protpardelle: 'pp',
   rfdiffusion: 'd',
+  rfd3: 'r3',
   boltzgen: 'b',
   evodiff: 'e',
   'la-proteina': 'lp',

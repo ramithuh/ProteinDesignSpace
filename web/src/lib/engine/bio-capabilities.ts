@@ -1446,6 +1446,79 @@ function inferNodeOutputProfile(
       estimatedTokens,
       ...(hasLockedTarget ? { hasLockedTarget: true } : {}),
     };
+  } else if (node.adapterId === 'rfd3') {
+    const mode = String(node.params.mode ?? 'unconditional').trim().toLowerCase();
+    const contig = String(node.params.contig ?? '').trim();
+    const unindex = String(node.params.unindex ?? '').trim();
+    const ligandParam = String(node.params.ligand ?? '').trim();
+    const sym = String(node.params.symmetry ?? 'none').trim().toUpperCase();
+    const tpl = upstreamProfileForPort('structure');
+    const defaultLen = getSchemaDefaultLength('rfd3', 80);
+    const rawLen = Number(node.params.length ?? defaultLen);
+    const baseLen = Number.isFinite(rawLen) && rawLen > 0 ? rawLen : defaultLen;
+
+    const entities = new Set<BioEntityKind>(['protein']);
+    if (mode !== 'unconditional') {
+      if (ligandParam) entities.add('ligand');
+      if (tpl) {
+        if (tpl.entities.has('ligand')) entities.add('ligand');
+        if (tpl.entities.has('dna')) entities.add('dna');
+        if (tpl.entities.has('rna')) entities.add('rna');
+      }
+    }
+
+    let chainCount = 1;
+    let estimatedTokens = baseLen;
+    let hasLockedTarget = false;
+
+    if (mode === 'unconditional' && sym && sym !== 'NONE') {
+      const m = /^C(\d+)$/.exec(sym);
+      const copies = m ? Math.max(2, Number(m[1])) : 2;
+      chainCount = copies;
+      // RFD3 symmetry length is per asymmetric unit
+      estimatedTokens = baseLen * copies;
+    } else if (mode === 'binder') {
+      hasLockedTarget = true;
+      if (contig) {
+        const metrics = estimateContigProteinMetrics({
+          contig,
+          motifSpan: '',
+          unindexedMotif: false,
+          length: baseLen,
+        });
+        chainCount = Math.max(2, metrics.proteinChains);
+        estimatedTokens = metrics.proteinTokens;
+      } else {
+        chainCount = Math.max(2, (tpl?.chainCount ?? 1) + 1);
+        estimatedTokens = baseLen + (tpl?.estimatedTokens ?? 0);
+      }
+    } else if (mode === 'partial') {
+      chainCount = tpl?.chainCount ?? 1;
+      estimatedTokens = tpl?.estimatedTokens ?? baseLen;
+    } else if (mode === 'motif') {
+      if (contig) {
+        const metrics = estimateContigProteinMetrics({
+          contig,
+          motifSpan: '',
+          unindexedMotif: false,
+          length: baseLen,
+        });
+        chainCount = metrics.proteinChains;
+        estimatedTokens = metrics.proteinTokens;
+      } else if (unindex) {
+        const unidxSpans = parseResidueRangeTokens(unindex);
+        const unidxRes = unidxSpans.reduce((s, r) => s + Math.max(1, r.end - r.start + 1), 0);
+        estimatedTokens = baseLen + unidxRes;
+      }
+    }
+
+    profile = {
+      entities,
+      stoichiometry: chainCount > 1 ? 'multimer' : 'monomer',
+      chainCount,
+      estimatedTokens,
+      ...(hasLockedTarget ? { hasLockedTarget: true } : {}),
+    };
   } else if (node.adapterId === 'protpardelle') {
     const taskMode = String(node.params.taskMode ?? 'unconditional');
     const tpl = upstreamProfileForPort('structure');
@@ -1887,6 +1960,7 @@ function sanitizeHoloLigandHint(
 const STRUCTURE_ORIGIN_ADAPTERS = new Set([
   'pdb-input',
   'rfd4-proteina',
+  'rfd3',
   'genie3',
   'rfdiffusion',
   'protpardelle',
@@ -2326,15 +2400,16 @@ export function validateBioCapabilities(
     }
 
     // #63: Generic wired-template unconditional guard covering all multi-mode template generators
-    // (`rfd4-proteina`, `genie3`, `protpardelle`, `boltzgen`, `rfdiffusion`).
+    // (`rfd4-proteina`, `rfd3`, `genie3`, `protpardelle`, `boltzgen`, `rfdiffusion`).
     if (
       node.adapterId === 'rfd4-proteina' ||
+      node.adapterId === 'rfd3' ||
       node.adapterId === 'genie3' ||
       node.adapterId === 'protpardelle' ||
       node.adapterId === 'boltzgen' ||
       node.adapterId === 'rfdiffusion'
     ) {
-      const modeKey = node.adapterId === 'rfd4-proteina' ? 'mode' : 'taskMode';
+      const modeKey = node.adapterId === 'rfd4-proteina' || node.adapterId === 'rfd3' ? 'mode' : 'taskMode';
       const activeMode = String(node.params[modeKey] ?? 'unconditional').trim().toLowerCase();
       const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
       const hasYaml =
@@ -2357,6 +2432,24 @@ export function validateBioCapabilities(
           availableTasks = 'Motif, Binder, or Partial Diffusion';
           targetMode = 'partial';
           fixLabel = 'Switch to Partial Diffusion';
+        } else if (node.adapterId === 'rfd3') {
+          code = 'rfd3-unused-template';
+          availableTasks = 'Motif / All-Atom Scaffolding, Binder, or Partial Diffusion';
+          const preferBinder =
+            String(node.params.hotspots ?? '').trim().length > 0 ||
+            tplBench?.category === 'binder';
+          const preferMotif =
+            String(node.params.contig ?? '').trim().length > 0 ||
+            String(node.params.unindex ?? '').trim().length > 0 ||
+            String(node.params.ligand ?? '').trim().length > 0 ||
+            tplBench?.category === 'motif' ||
+            tplBench?.category === 'enzyme-ligand';
+          targetMode = preferBinder ? 'binder' : preferMotif ? 'motif' : 'partial';
+          fixLabel = preferBinder
+            ? 'Switch to Binder Design'
+            : preferMotif
+              ? 'Switch to Motif / All-Atom Scaffolding'
+              : 'Switch to Partial Diffusion';
         } else if (node.adapterId === 'protpardelle') {
           code = 'protpardelle-unused-template';
           availableTasks = 'Motif Scaffolding or Partial Diffusion';
@@ -2569,6 +2662,7 @@ export function validateBioCapabilities(
             src.adapterId === 'pdb-input' ? String(src.params.pdbId ?? '').trim().toUpperCase() : '';
           const isDeNovoGenerator =
             src.adapterId === 'rfd4-proteina' ||
+            src.adapterId === 'rfd3' ||
             src.adapterId === 'protpardelle' ||
             src.adapterId === 'rfdiffusion' ||
             src.adapterId === 'boltzgen' ||
@@ -3560,6 +3654,16 @@ export function validateRuntimeNodeInputs(
     ) {
       throw new Error(
         `RFD4-Proteina (${mode} mode) requires a wired structure input (e.g. from PDB Input).`,
+      );
+    }
+  }
+
+  if (node.adapterId === 'rfd3') {
+    const mode = String(node.params.mode ?? 'unconditional').trim().toLowerCase();
+    const tpl = inputs.structure as StructureArtifact | undefined;
+    if ((mode === 'motif' || mode === 'binder' || mode === 'partial') && !tpl?.cifText && !tpl?.pdbText) {
+      throw new Error(
+        `RFdiffusion3 (${mode} mode) requires a wired structure input (e.g. from PDB Input).`,
       );
     }
   }

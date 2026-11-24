@@ -207,7 +207,6 @@ describe('M2: Planner validation, bio-capabilities & scheduler integration', () 
       'Chai-1',
       'RFdiffusion1',
       'RFdiffusion2',
-      'RFdiffusion3',
       'ESM3',
     ]);
   });

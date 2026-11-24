@@ -31,6 +31,8 @@ for (const req of [
   'vendor/localfold/web/esmfold2-model.js',
   'vendor/localfold/webgpu/esmfold2/fold.js',
   'vendor/rfd4-proteina/webgpu/index.js',
+  'vendor/rfd3/webgpu/index.js',
+  'vendor/rfd3/fixtures/architecture.json',
   'vendor/genie3/webgpu/index.js',
   'vendor/protpardelle/webgpu/index.js',
   'vendor/esmc/webgpu/index.js',

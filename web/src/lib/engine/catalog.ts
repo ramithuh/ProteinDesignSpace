@@ -62,6 +62,7 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
     title: 'Structure Generation',
     ids: [
       'rfd4-proteina',
+      'rfd3',
       'la-proteina',
       'proteina',
       'sid-protein',
@@ -87,6 +88,7 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   'pdb-input': 'Fetch by PDB ID or AlphaFold DB (UniProt), upload/paste PDB & mmCIF, or 3-helix demo',
   'sequence-input': 'Paste amino acid sequences (plain text or FASTA)',
   'rfd4-proteina': 'All-atom backbone and sequence co-design',
+  rfd3: 'All-atom biomolecular diffusion (168M) for monomers, atomic/tip-atom motifs, binders, ligands, cyclic peptides & Cn symmetry',
   'la-proteina': 'All-atom latent diffusion (LD1–LD7 + AE1/AE3) for de novo co-design & motif scaffolding',
   proteina: 'Scalable 200M transformer flow matching for de novo Cα backbones',
   'sid-protein': 'Distilled 16-step Proteina sampler for rapid Cα backbone generation',
@@ -279,6 +281,89 @@ function buildSubGroupsForAdapter(adapterId: string): {
     return {
       subCountLabel: `${items.length} variants`,
       subGroups: [{ title: 'Model Variants', items }],
+    };
+  }
+
+  if (adapterId === 'rfd3') {
+    const items: CatalogSubItem[] = [
+      {
+        key: 'rfd3-unconditional',
+        label: 'RFdiffusion3 · Unconditional All-Atom',
+        subtitle: 'De novo all-atom monomer & sequence co-design (Recommended default · ~337 MB)',
+        meta: '~337 MB · BSD-3-Clause',
+        insert: {
+          adapterId: 'rfd3',
+          params: { mode: 'unconditional', precision: 'fp16' },
+          label: 'RFdiffusion3',
+        },
+        searchBlob:
+          'rfd3 rfdiffusion3 rfdiffusion all-atom unconditional de novo monomer baker foundry co-design'.toLowerCase(),
+      },
+      {
+        key: 'rfd3-motif',
+        label: 'RFdiffusion3 · Atomic / Tip-Atom Motif & Enzyme',
+        subtitle: 'Indexed or unindexed all-atom motif scaffolding with ligand & H-bond conditioning',
+        meta: '~337 MB · BSD-3-Clause',
+        insert: {
+          adapterId: 'rfd3',
+          params: { mode: 'motif', precision: 'fp16' },
+          label: 'RFdiffusion3 (Motif)',
+        },
+        searchBlob:
+          'rfd3 rfdiffusion3 motif scaffolding enzyme active site tip-atom unindexed ligand hbond all-atom baker'.toLowerCase(),
+      },
+      {
+        key: 'rfd3-binder',
+        label: 'RFdiffusion3 · PPI Binder (Hotspots)',
+        subtitle: 'All-atom de novo binder design against a connected target structure and hotspots',
+        meta: '~337 MB · BSD-3-Clause',
+        insert: {
+          adapterId: 'rfd3',
+          params: { mode: 'binder', precision: 'fp16' },
+          label: 'RFdiffusion3 (Binder)',
+        },
+        searchBlob: 'rfd3 rfdiffusion3 binder ppi hotspots target all-atom baker'.toLowerCase(),
+      },
+      {
+        key: 'rfd3-partial',
+        label: 'RFdiffusion3 · Partial Diffusion',
+        subtitle: 'Refine or diversify a connected input structure from noise level partialT',
+        meta: '~337 MB · BSD-3-Clause',
+        insert: {
+          adapterId: 'rfd3',
+          params: { mode: 'partial', partialT: 5.0, precision: 'fp16' },
+          label: 'RFdiffusion3 (Partial)',
+        },
+        searchBlob: 'rfd3 rfdiffusion3 partial diffusion refine diversify all-atom baker'.toLowerCase(),
+      },
+      {
+        key: 'rfd3-cyclic',
+        label: 'RFdiffusion3 · Cyclic Peptide',
+        subtitle: 'Head-to-tail de novo cyclic peptide co-design (16–40 aa)',
+        meta: '~337 MB · BSD-3-Clause',
+        insert: {
+          adapterId: 'rfd3',
+          params: { mode: 'unconditional', cyclic: true, length: 16, precision: 'fp16' },
+          label: 'RFdiffusion3 (Cyclic)',
+        },
+        searchBlob: 'rfd3 rfdiffusion3 cyclic peptide macrocycle head-to-tail all-atom baker'.toLowerCase(),
+      },
+      {
+        key: 'rfd3-symmetry',
+        label: 'RFdiffusion3 · Symmetric Oligomer (C3)',
+        subtitle: 'All-atom Cn cyclic symmetric assembly generation (C2–C6)',
+        meta: '~337 MB · BSD-3-Clause',
+        insert: {
+          adapterId: 'rfd3',
+          params: { mode: 'unconditional', symmetry: 'C3', length: 48, precision: 'fp16' },
+          label: 'RFdiffusion3 (C3)',
+        },
+        searchBlob: 'rfd3 rfdiffusion3 symmetry cyclic oligomer c2 c3 c4 c6 all-atom baker'.toLowerCase(),
+      },
+    ];
+    return {
+      subCountLabel: `${items.length} modes`,
+      subGroups: [{ title: 'Design Modes', items }],
     };
   }
 
@@ -777,6 +862,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
   })(),
   (() => {
     const rfd4 = ADAPTER_REGISTRY['rfd4-proteina'];
+    const rfd3 = ADAPTER_REGISTRY.rfd3;
     const lap = ADAPTER_REGISTRY['la-proteina'];
     const pro = ADAPTER_REGISTRY.proteina;
     const sid = ADAPTER_REGISTRY['sid-protein'];
@@ -795,6 +881,14 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         meta: `~${rfd4.approxWeightsMB} MB`,
         insert: { adapterId: 'rfd4-proteina' },
         searchBlob: `${rfd4.id} ${rfd4.shortName} ${rfd4.displayName} ${CONCISE_BLOCK_ROLES['rfd4-proteina']} rfdiffusion4 rfd4 proteina generate de novo backbone co-design`.toLowerCase(),
+      },
+      {
+        key: 'rfd3',
+        label: rfd3.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.rfd3,
+        meta: `~${rfd3.approxWeightsMB} MB · BSD-3-Clause`,
+        insert: { adapterId: 'rfd3', label: 'RFdiffusion3' },
+        searchBlob: `${rfd3.id} ${rfd3.shortName} ${rfd3.displayName} ${CONCISE_BLOCK_ROLES.rfd3} rfd3 rfdiffusion3 all-atom enzyme ligand motif binder cyclic symmetry unindexed tip-atom partial baker foundry hbond dna rna`.toLowerCase(),
       },
       {
         key: 'la-proteina',
@@ -887,7 +981,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
       id: 'generation',
       title: 'Structure Generation',
       stage: 'generate',
-      subtitle: 'RFD4-Proteina, La-Proteina, Proteina, SiD-Protein, Genie 2/3, RFdiffusion, FrameFlow, FoldFlow 2, BoltzGen-1 & ProtPardelle-1c',
+      subtitle: 'RFD4-Proteina, RFdiffusion3, La-Proteina, Proteina, SiD-Protein, Genie 2/3, RFdiffusion, FrameFlow, FoldFlow 2, BoltzGen-1 & ProtPardelle-1c',
       countLabel: `${items.length}`,
       subGroups,
       identityBlob,

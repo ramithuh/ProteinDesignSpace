@@ -1397,6 +1397,7 @@ function applyEditCurrentPlan(
           'lasermpnn',
           'antifold-esmif1',
           'rfd4-proteina',
+          'rfd3',
           'sequence-input',
           'genie3',
         ];
@@ -1435,6 +1436,7 @@ function applyEditCurrentPlan(
         const structPriority = [
           'pdb-input',
           'rfd4-proteina',
+          'rfd3',
           'genie3',
           'boltzgen',
           'protpardelle',
@@ -1605,7 +1607,7 @@ function applyEditCurrentPlan(
     } else if (op.action === 'add_gnina') {
       let target = resolveNode(op.attachToNodeId);
       if (!target || !hasOutputPort(target, 'structure')) {
-        for (const aid of ['localfold-af2', 'pdb-input', 'lasermpnn', 'rfd4-proteina', 'protpardelle']) {
+        for (const aid of ['localfold-af2', 'pdb-input', 'lasermpnn', 'rfd4-proteina', 'rfd3', 'protpardelle']) {
           const matches = nodes.filter((n) => n.adapterId === aid && hasOutputPort(n, 'structure'));
           if (matches.length > 0) {
             target = matches[matches.length - 1];
@@ -1823,6 +1825,8 @@ const SUPPORTED_BLOCK_NAMES: ReadonlySet<string> = (() => {
     'protpardelle',
     'protpardelle1c',
     'rfdiffusion',
+    'rfdiffusion3',
+    'rfd3',
     'genie2',
     'genie3',
     'rfd4',

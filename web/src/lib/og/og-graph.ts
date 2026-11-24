@@ -43,6 +43,7 @@ const SHORT_TO_ADAPTER: Record<string, string> = {
   g: 'genie3',
   pp: 'protpardelle',
   d: 'rfdiffusion',
+  r3: 'rfd3',
   b: 'boltzgen',
   e: 'evodiff',
   lp: 'la-proteina',
@@ -72,6 +73,7 @@ const ADAPTER_META: Record<string, AdapterMeta> = {
   genie3: { shortName: 'Genie 3', category: 'generation' },
   protpardelle: { shortName: 'Protpardelle', category: 'generation' },
   rfdiffusion: { shortName: 'RFdiffusion', category: 'generation' },
+  rfd3: { shortName: 'RFdiffusion3', category: 'generation' },
   boltzgen: { shortName: 'BoltzGen', category: 'generation' },
   evodiff: { shortName: 'EvoDiff', category: 'generation' },
   'la-proteina': { shortName: 'La-Proteina', category: 'generation' },
@@ -265,6 +267,7 @@ function formatCompactParamChip(adapterId: string, params: Record<string, unknow
     case 'genie3':
     case 'rfd4-proteina':
     case 'rfdiffusion':
+    case 'rfd3':
     case 'protpardelle':
     case 'boltzgen':
     case 'frameflow':

@@ -9,6 +9,7 @@ const EXPECTED_VENDOR_CACHE_NAMES = [
   'thermompnn-v1',
   'protpardelle-v1',
   'rfdiffusion-v1',
+  'rfd3-v1',
   'boltzgen-v1',
   'evodiff-v1',
   'la-proteina-v1',
@@ -35,6 +36,7 @@ const EXPECTED_OPFS_WEIGHT_DIRS = [
   'thermompnn-v1',
   'protpardelle-v1',
   'rfdiffusion-v1',
+  'rfd3-v1',
   'boltzgen-v1',
   'evodiff-v1',
   'la-proteina-v1',
@@ -62,8 +64,8 @@ describe('Phase 0 contract: golden CacheStorage & OPFS weight namespaces', () =>
       expect(src, `Missing OPFS weight dir "${dir}"`).toContain(`'${dir}'`);
     }
 
-    expect(EXPECTED_VENDOR_CACHE_NAMES).toHaveLength(17);
+    expect(EXPECTED_VENDOR_CACHE_NAMES).toHaveLength(18);
     expect(EXPECTED_VENDOR_CACHE_PREFIXES).toHaveLength(4);
-    expect(EXPECTED_OPFS_WEIGHT_DIRS).toHaveLength(16);
+    expect(EXPECTED_OPFS_WEIGHT_DIRS).toHaveLength(17);
   });
 });

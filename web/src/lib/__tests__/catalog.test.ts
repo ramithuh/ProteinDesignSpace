@@ -60,9 +60,10 @@ describe('engine/catalog & biologist terminology', () => {
     const groupedIds = CATALOG_STAGE_GROUPS.flatMap((g) => g.ids);
     expect(new Set(groupedIds)).toEqual(new Set(Object.keys(ADAPTER_REGISTRY)));
     expect(CATALOG_ITEMS).toHaveLength(Object.keys(ADAPTER_REGISTRY).length);
-    expect(CATALOG_ITEMS).toHaveLength(26);
+    expect(CATALOG_ITEMS).toHaveLength(27);
     expect(ADAPTER_REGISTRY['structure-compare']).toBeDefined();
     expect(ADAPTER_REGISTRY.rfdiffusion).toBeDefined();
+    expect(ADAPTER_REGISTRY.rfd3).toBeDefined();
     expect(ADAPTER_REGISTRY.boltzgen).toBeDefined();
     expect(ADAPTER_REGISTRY.evodiff).toBeDefined();
     expect(ADAPTER_REGISTRY['la-proteina']).toBeDefined();

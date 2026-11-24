@@ -156,7 +156,7 @@ describe('Phase 4 contract: PlannerCatalogIndex & Plugin #27 auto-discovery', ()
     setActivePluginRegistry(reg);
 
     const idx = buildPlannerCatalogIndex(reg);
-    expect(idx.plugins).toHaveLength(28);
+    expect(idx.plugins).toHaveLength(29);
     expect(idx.getGeneratorIds()).toContain('superdiff-27');
     expect(idx.findByKeyword('superdiff').map((p) => p.id)).toContain('superdiff-27');
     expect(idx.isSupportedBlockName('SuperDiff-27')).toBe(true);
