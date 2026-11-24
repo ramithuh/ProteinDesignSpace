@@ -11,6 +11,7 @@ import {
   buildGenie2OptionalMotifs,
   computeGeometricMinGap,
   planMultiIslandMotifPlacement,
+  planProtpardelleMotifPlacement,
   resolveRfdiffusionMotifContig,
   type MotifResidueSpec,
 } from '$lib/protein-ops/motif-placement';
@@ -388,7 +389,7 @@ describe('P0-7: BoltzGen motif placement, 1BCF length adherence, nativeMotifCoor
 
 describe('P0-7: ProtPardelle multi-island placement parity with vendored parseStructure', () => {
   it.each(SIX_MOTIF_IDS)(
-    'places %s cleanly using vendored ProtPardelle parseStructure + selectPositions without gap collapse',
+    'places %s cleanly using vendored ProtPardelle parseStructure + selectPositions + planProtpardelleMotifPlacement without gap collapse',
     (pdbId) => {
       const f = MOTIF_FIXTURES[pdbId];
       const parsedTemplate = protpardelleParseStructure(f.pdbText, {
@@ -398,49 +399,157 @@ describe('P0-7: ProtPardelle multi-island placement parity with vendored parseSt
       const sourceIndices = protpardelleSelectPositions(f.motifSpec, parsedTemplate) as number[];
       expect(sourceIndices).toHaveLength(f.expectedResidues);
 
-      const tplRes = parsedTemplate.residues as Array<{ chain?: string; resid?: number; icode?: string }>;
-      const tplCoords = parsedTemplate.coords as Float32Array;
-      const tplAtomMask = parsedTemplate.atomMask as Float32Array;
-
-      const motifSpecs: MotifResidueSpec[] = sourceIndices.map((srcIdx) => {
-        const r = tplRes[srcIdx];
-        const caCoord: [number, number, number] | null =
-          tplAtomMask[srcIdx * 37 + 1] > 0.5
-            ? [tplCoords[srcIdx * 111 + 3], tplCoords[srcIdx * 111 + 4], tplCoords[srcIdx * 111 + 5]]
-            : null;
-        return {
-          chain: r.chain ?? 'A',
-          resNum: r.resid ?? srcIdx + 1,
-          insCode: r.icode ?? '',
-          caCoord,
-        };
-      });
-
-      const placement = planMultiIslandMotifPlacement(motifSpecs, {
+      const plan = planProtpardelleMotifPlacement(parsedTemplate, {
         targetLength: f.targetLength,
-        minNFlank: 4,
-        minCFlank: 4,
-        allowExpandLength: true,
+        sourceIndices,
       });
 
-      expect(placement.effectiveLength).toBe(f.targetLength);
-      expect(placement.targetIndices).toHaveLength(f.expectedResidues);
-      expect(placement.islands).toHaveLength(f.expectedIslands);
-      for (let i = 1; i < placement.targetIndices.length; i++) {
-        expect(placement.targetIndices[i]).toBeGreaterThan(placement.targetIndices[i - 1]);
+      expect(plan.effectiveLength).toBe(f.targetLength);
+      expect(plan.sourceIndices).toHaveLength(f.expectedResidues);
+      expect(plan.targetIndices).toHaveLength(f.expectedResidues);
+      expect(plan.placement.islands).toHaveLength(f.expectedIslands);
+      for (let i = 1; i < plan.targetIndices.length; i++) {
+        expect(plan.targetIndices[i]).toBeGreaterThan(plan.targetIndices[i - 1]);
       }
-      expect(placement.targetIndices[placement.targetIndices.length - 1]).toBeLessThan(
-        placement.effectiveLength,
+      expect(plan.targetIndices[plan.targetIndices.length - 1]).toBeLessThan(
+        plan.effectiveLength,
       );
-      for (let g = 0; g < placement.interIslandGaps.length; g++) {
-        expect(placement.interIslandGaps[g]).toBeGreaterThanOrEqual(
-          placement.minInterIslandGaps[g],
+      for (let g = 0; g < plan.placement.interIslandGaps.length; g++) {
+        expect(plan.placement.interIslandGaps[g]).toBeGreaterThanOrEqual(
+          plan.placement.minInterIslandGaps[g],
         );
+        expect(plan.placement.interIslandGaps[g]).toBeGreaterThanOrEqual(4);
       }
     },
   );
 
-  it('removes legacy delta <= 65 collapse heuristic from both boltzgen.worker.ts and protpardelle.worker.ts', () => {
+  it('places 5YUI multi-segment motif (A93-97, A118-120, A198-200) cleanly on both cropped and full A1-210 templates', () => {
+    const f5yui = MOTIF_FIXTURES['5YUI'];
+    const parsedCropped = protpardelleParseStructure(f5yui.pdbText, {
+      format: 'pdb',
+      chainResidueGap: 200,
+    });
+    const croppedSrc = protpardelleSelectPositions(
+      'A93-97, A118-120, A198-200',
+      parsedCropped,
+    ) as number[];
+    const croppedPlan = planProtpardelleMotifPlacement(parsedCropped, {
+      targetLength: 75,
+      sourceIndices: croppedSrc,
+    });
+
+    expect(croppedPlan.effectiveLength).toBe(75);
+    expect(croppedPlan.placement.islands).toHaveLength(3);
+    expect(croppedPlan.placement.minInterIslandGaps).toEqual([5, 6]);
+    expect(croppedPlan.placement.interIslandGaps).toEqual([10, 30]);
+    expect(croppedPlan.targetIndices).toHaveLength(11);
+
+    // Full/uncropped 5YUI chain (A1..210) with matching coordinates at A93-97, A118-120, A198-200
+    const full5yuiPdb = buildSyntheticMotifPdb([
+      { chain: 'A', startRes: 1, endRes: 92, origin: [-200, 0, 0], step: [3.8, 0, 0] },
+      { chain: 'A', startRes: 93, endRes: 97, origin: [0, 0, 0], step: [1.5, 0, 0] },
+      { chain: 'A', startRes: 98, endRes: 117, origin: [20, 0, 0], step: [3.8, 0, 0] },
+      { chain: 'A', startRes: 118, endRes: 120, origin: [6, 9.0, 0], step: [1.5, 0, 0] },
+      { chain: 'A', startRes: 121, endRes: 197, origin: [50, 20, 0], step: [3.8, 0, 0] },
+      { chain: 'A', startRes: 198, endRes: 200, origin: [9.0, 9.0, 11.93], step: [1.5, 0, 0] },
+      { chain: 'A', startRes: 201, endRes: 210, origin: [100, 30, 0], step: [3.8, 0, 0] },
+    ]);
+    const parsedFull = protpardelleParseStructure(full5yuiPdb, {
+      format: 'pdb',
+      chainResidueGap: 200,
+    });
+    expect(parsedFull.aatype.length).toBe(210);
+    const fullSrc = protpardelleSelectPositions(
+      'A93-97, A118-120, A198-200',
+      parsedFull,
+    ) as number[];
+    const fullPlan = planProtpardelleMotifPlacement(parsedFull, {
+      targetLength: 75,
+      sourceIndices: fullSrc,
+    });
+
+    expect(fullPlan.effectiveLength).toBe(75);
+    expect(fullPlan.placement.islands).toHaveLength(3);
+    expect(fullPlan.placement.minInterIslandGaps).toEqual([5, 6]);
+    expect(fullPlan.placement.interIslandGaps).toEqual([10, 30]);
+    expect(fullPlan.targetIndices).toEqual(croppedPlan.targetIndices);
+  });
+
+  it('defaults to all template residues when motifSelection is empty (sourceIndices omitted) on cropped 5YUI without gap collapse', () => {
+    const f5yui = MOTIF_FIXTURES['5YUI'];
+    const parsedCropped = protpardelleParseStructure(f5yui.pdbText, {
+      format: 'pdb',
+      chainResidueGap: 200,
+    });
+    const canonicalSrc = protpardelleSelectPositions(
+      'A93-97, A118-120, A198-200',
+      parsedCropped,
+    ) as number[];
+    const explicitPlan = planProtpardelleMotifPlacement(parsedCropped, {
+      targetLength: 75,
+      sourceIndices: canonicalSrc,
+    });
+    const emptySelPlan = planProtpardelleMotifPlacement(parsedCropped, {
+      targetLength: 75,
+    });
+
+    expect(emptySelPlan.sourceIndices).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(emptySelPlan.effectiveLength).toBe(75);
+    expect(emptySelPlan.placement.islands).toHaveLength(3);
+    expect(emptySelPlan.placement.minInterIslandGaps).toEqual([5, 6]);
+    expect(emptySelPlan.placement.interIslandGaps).toEqual([10, 30]);
+    expect(emptySelPlan.targetIndices).toEqual(explicitPlan.targetIndices);
+  });
+
+  it('expands targetLength when minimal flanks + 3D geometric gaps exceed requested length on 5YUI', () => {
+    const f5yui = MOTIF_FIXTURES['5YUI'];
+    const parsedCropped = protpardelleParseStructure(f5yui.pdbText, {
+      format: 'pdb',
+      chainResidueGap: 200,
+    });
+    const expanded = planProtpardelleMotifPlacement(parsedCropped, {
+      targetLength: 20,
+    });
+    // 11 motif + (5 + 6) geometric min gaps + (4 + 4) min flanks = 30
+    expect(expanded.effectiveLength).toBe(30);
+    expect(expanded.placement.interIslandGaps).toEqual([5, 6]);
+    expect(expanded.placement.nFlank).toBe(4);
+    expect(expanded.placement.cFlank).toBe(4);
+    expect(expanded.targetIndices[expanded.targetIndices.length - 1]).toBeLessThan(30);
+  });
+
+  it('deduplicates and sorts out-of-order/overlapping motifSelection indices cleanly', () => {
+    const f5yui = MOTIF_FIXTURES['5YUI'];
+    const parsedCropped = protpardelleParseStructure(f5yui.pdbText, {
+      format: 'pdb',
+      chainResidueGap: 200,
+    });
+    const canonicalSrc = protpardelleSelectPositions(
+      'A93-97, A118-120, A198-200',
+      parsedCropped,
+    ) as number[];
+    const canonicalPlan = planProtpardelleMotifPlacement(parsedCropped, {
+      targetLength: 75,
+      sourceIndices: canonicalSrc,
+    });
+
+    const messySrc = protpardelleSelectPositions(
+      'A198-200, A93-97, A95-97, A118-120',
+      parsedCropped,
+    ) as number[];
+    expect(messySrc.length).toBeGreaterThan(11);
+
+    const normalizedPlan = planProtpardelleMotifPlacement(parsedCropped, {
+      targetLength: 75,
+      sourceIndices: messySrc,
+    });
+    expect(normalizedPlan.sourceIndices).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(normalizedPlan.targetIndices).toEqual(canonicalPlan.targetIndices);
+    expect(normalizedPlan.placement.interIslandGaps).toEqual([10, 30]);
+    expect(normalizedPlan.effectiveLength).toBe(75);
+  });
+
+  it('delegates ProtPardelle worker placement to planProtpardelleMotifPlacement and removes legacy delta <= 65 heuristic', () => {
     const bgSrc = readFileSync(
       resolve(__dirname, '../plugins/boltzgen/boltzgen.worker.ts'),
       'utf-8',
@@ -451,6 +560,7 @@ describe('P0-7: ProtPardelle multi-island placement parity with vendored parseSt
     );
     expect(bgSrc).not.toMatch(/delta\s*<=\s*65/);
     expect(ppSrc).not.toMatch(/delta\s*<=\s*65/);
+    expect(ppSrc).toContain('planProtpardelleMotifPlacement');
   });
 });
 

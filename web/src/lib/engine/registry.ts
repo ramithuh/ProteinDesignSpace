@@ -3323,6 +3323,20 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         description: 'Deterministic PRNG seed for reproducible Monte Carlo docking trajectories.',
       },
       {
+        key: 'workers',
+        label: 'MC Search Workers',
+        kind: 'integer',
+        tier: 'advanced',
+        modes: ['dock'],
+        defaultValue: 0,
+        min: 0,
+        max: 8,
+        step: 1,
+        upstreamDefaultHint: '0 = Auto (up to 8 CPU workers)',
+        description:
+          'Web Workers used for parallel Monte Carlo + BFGS search chains (0 = auto up to min(8, CPU cores, exhaustiveness); 1 = single-threaded). Automatically falls back to 1 if nested Workers are blocked.',
+      },
+      {
         key: 'includeMetals',
         label: 'Keep Metal Cofactors in Receptor',
         kind: 'boolean',
