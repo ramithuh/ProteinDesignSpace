@@ -11,6 +11,7 @@ All neural inference executes locally in sequential, VRAM-isolated Dedicated Web
 | Stage | Model | Capabilities | Weights / Port | Upstream License |
 | --- | --- | --- | --- | --- |
 | **Generation** | **RFD4-Proteina** | All-atom sequence-structure co-design, motif, binder, partial diffusion | [`sokrypton/rfd4-proteina-webgpu`](https://github.com/sokrypton/rfd4-proteina-webgpu) · [`nvidia/RFD4-Proteina`](https://huggingface.co/nvidia/RFD4-Proteina) | NVIDIA Open / MIT |
+| **Generation** | **RFdiffusion3 (All-Atom)** | All-atom monomer, atomic/tip-atom motif, binder, ligand/DNA/RNA, H-bond, cyclic, partial & Cn symmetry co-design | [`ramithuh/rfd3-webgpu`](https://huggingface.co/ramithuh/rfd3-webgpu) | BSD-3-Clause / Apache-2.0 |
 | **Generation** | **La-Proteina (LD1 + AE1)** | All-atom latent diffusion (LD1) + atom37/sequence decoder (AE1) | [`ramithuh/la-proteina-webgpu`](https://huggingface.co/ramithuh/la-proteina-webgpu) | Apache-2.0 / NVIDIA Open |
 | **Generation** | **Proteina v1.2 (200M)** | Scalable 200M pair-biased transformer flow matching (Cα backbones) | [`ramithuh/proteina-webgpu`](https://huggingface.co/ramithuh/proteina-webgpu) | NVIDIA Research (NC) |
 | **Generation** | **SiD-Protein (16-Step)** | Score-identity distilled 200M Proteina generator (16-step Cα sampling) | [`ramithuh/sid-protein-webgpu`](https://huggingface.co/ramithuh/sid-protein-webgpu) | SiD-Protein / Proteina |
@@ -43,6 +44,7 @@ All neural inference executes locally in sequential, VRAM-isolated Dedicated Web
 
 ### Generative, Inverse-Folding, Folding & Property Models
 - **RFD4-Proteina** — Baker Lab / Institute for Protein Design & NVIDIA · [`nvidia/RFD4-Proteina`](https://huggingface.co/nvidia/RFD4-Proteina)
+- **RFdiffusion3** — Butcher et al. (2025), *De novo design of all-atom biomolecular interactions with RFdiffusion3* (Baker Lab / Institute for Protein Design) · [`RosettaCommons/foundry`](https://github.com/RosettaCommons/foundry)
 - **RFdiffusion** — Watson et al. (2023), *De novo design of protein structure and function with RFdiffusion*, Nature 620, 1089–1100 · [`RosettaCommons/RFdiffusion`](https://github.com/RosettaCommons/RFdiffusion)
 - **La-Proteina & Proteina** — Geffner et al. (2025), *Proteina: Scaling Flow-based Protein Structure Generative Models* & *La-Proteina: Atomistic Protein Generation via Partially Latent Flow Matching* · [`NVIDIA-BioNeMo/la-proteina`](https://github.com/NVIDIA-BioNeMo/la-proteina) · [`NVIDIA-BioNeMo/proteina`](https://github.com/NVIDIA-BioNeMo/proteina)
 - **SiD-Protein (SPID)** — Xie et al. (2025), *SPID: Distilled Protein Backbone Generation*, arXiv:2510.03095 · [`LY-Xie/SiD_Protein`](https://github.com/LY-Xie/SiD_Protein)
