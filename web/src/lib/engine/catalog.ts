@@ -7,6 +7,7 @@ import {
   MPNN_VARIANT_OPTIONS,
 } from './registry';
 import { BENCHMARK_TARGETS } from './benchmarks';
+import { DEFAULT_ALPHAFOLD_DB_UNIPROT_ID, QUICK_ALPHAFOLD_DB_EXAMPLES } from '$lib/protein-ops/alphafold-db';
 import { PORT_COLORS } from './graph-utils';
 
 export interface CatalogInsertRequest {
@@ -83,7 +84,7 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
 ];
 
 export const CONCISE_BLOCK_ROLES: Record<string, string> = {
-  'pdb-input': 'Fetch by PDB ID, upload/paste PDB & mmCIF, or 3-helix demo',
+  'pdb-input': 'Fetch by PDB ID or AlphaFold DB (UniProt), upload/paste PDB & mmCIF, or 3-helix demo',
   'sequence-input': 'Paste amino acid sequences (plain text or FASTA)',
   'rfd4-proteina': 'All-atom backbone and sequence co-design',
   'la-proteina': 'All-atom latent diffusion (LD1 + AE1) co-designing structure and sequence',
@@ -693,6 +694,25 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         subtitle: CONCISE_BLOCK_ROLES['pdb-input'],
         insert: { adapterId: 'pdb-input' },
         searchBlob: `${pdb.id} ${pdb.shortName} ${pdb.displayName} ${CONCISE_BLOCK_ROLES['pdb-input']} pdb mmcif structure upload template input`.toLowerCase(),
+      },
+      {
+        key: 'alphafold-db',
+        label: 'AlphaFold DB',
+        subtitle: 'Fetch a public predicted structure from EMBL-EBI AlphaFold DB by UniProt accession',
+        meta: 'Public · CC-BY-4.0',
+        badge: 'UniProt',
+        insert: {
+          adapterId: 'pdb-input',
+          params: {
+            mode: 'alphafold-db',
+            uniprotId: DEFAULT_ALPHAFOLD_DB_UNIPROT_ID,
+            filename: `AF-${DEFAULT_ALPHAFOLD_DB_UNIPROT_ID}-F1.cif`,
+            pdbText: '',
+          },
+          label: `AFDB: ${QUICK_ALPHAFOLD_DB_EXAMPLES[0].name} (${DEFAULT_ALPHAFOLD_DB_UNIPROT_ID})`,
+        },
+        searchBlob:
+          'alphafold db afdb uniprot ebi deepmind predicted structure plddt p69905 p04637 q9nzq7 p00698 cc-by-4.0 input'.toLowerCase(),
       },
       {
         key: 'sequence-input',

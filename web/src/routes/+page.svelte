@@ -10,6 +10,7 @@
     type ActiveRunState,
   } from '$lib/engine/scheduler';
   import { clearRcsbCache, isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
+  import { clearAlphaFoldDbCache, normalizeUniProtId } from '$lib/protein-ops/alphafold-db';
   import { ADAPTER_REGISTRY, WORKFLOW_PRESETS } from '$lib/engine/registry';
   import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
   import { autoLayoutGraph, defaultParamsForAdapter, insertBlockSmart, validateGraph } from '$lib/engine/graph-utils';
@@ -1971,18 +1972,27 @@
         continue;
       }
 
-      // pdb-input (sync parse for demo/custom/cached, async RCSB fetch for pdb-id)
+      // pdb-input (sync parse for demo/custom/cached, async RCSB / AlphaFold DB fetch)
       inFlightInputSigs.set(node.id, sig);
       const mode = String(nodeSnap.params.mode ?? 'demo-bundle');
-      const needsFetch =
+      const needsRcsbFetch =
         mode === 'pdb-id' &&
         !(
           String(nodeSnap.params.pdbText ?? '').trim().length > 0 &&
           normalizePdbId(String(nodeSnap.params.fetchedPdbId ?? '')) ===
             normalizePdbId(String(nodeSnap.params.pdbId ?? ''))
         );
-      if (needsFetch) {
-        const normId = normalizePdbId(String(nodeSnap.params.pdbId ?? ''));
+      const needsAfdbFetch =
+        mode === 'alphafold-db' &&
+        !(
+          String(nodeSnap.params.pdbText ?? '').trim().length > 0 &&
+          normalizeUniProtId(String(nodeSnap.params.fetchedUniProtId ?? '')) ===
+            normalizeUniProtId(String(nodeSnap.params.uniprotId ?? ''))
+        );
+      if (needsRcsbFetch || needsAfdbFetch) {
+        const fetchDetail = needsAfdbFetch
+          ? `Fetching ${normalizeUniProtId(String(nodeSnap.params.uniprotId ?? ''))} from AlphaFold DB...`
+          : `Fetching ${normalizePdbId(String(nodeSnap.params.pdbId ?? ''))} from RCSB PDB...`;
         nodeStates = {
           ...nodeStates,
           [node.id]: {
@@ -1990,7 +2000,7 @@
             status: 'loading',
             phase: 'fetch',
             progress: 0.25,
-            detail: `Fetching ${normId} from RCSB PDB...`,
+            detail: fetchDetail,
           },
         };
       }
@@ -2322,6 +2332,7 @@
       await scheduler.releaseActiveGpu();
       scheduler.clearMemo();
       clearRcsbCache();
+    clearAlphaFoldDbCache();
       await clearAllModelCaches({ preserveCheckpoints: true });
       await refreshCacheStats();
       activeGpuWorker = null;

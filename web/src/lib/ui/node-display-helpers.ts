@@ -125,6 +125,10 @@ export function formatNodeParamSummary(
         const id = String(p.pdbId ?? '').trim().toUpperCase();
         return id ? `RCSB ${id}${cropTag}` : 'Fetch by PDB ID';
       }
+      if (p.mode === 'alphafold-db') {
+        const id = String(p.uniprotId ?? '').trim().toUpperCase();
+        return id ? `AFDB ${id}${cropTag}` : 'AlphaFold DB (UniProt)';
+      }
       if (p.mode === 'custom') {
         const rawFn = String(p.filename ?? '').trim();
         const fname = rawFn && rawFn !== 'demo_3helix_53aa.pdb' ? rawFn : '';

@@ -20,6 +20,7 @@
     validatePdbId,
     validateSequenceText,
     validateStructureText,
+    validateUniProtId,
     type NumericFieldSpec,
   } from '$lib/engine/param-validation';
   import {
@@ -27,6 +28,11 @@
     fetchStructureByPdbId,
     normalizePdbId,
   } from '$lib/protein-ops/rcsb';
+  import {
+    QUICK_ALPHAFOLD_DB_EXAMPLES,
+    fetchStructureByUniProtId,
+    normalizeUniProtId,
+  } from '$lib/protein-ops/alphafold-db';
   import { parseStructureText, type ParsedStructure } from '$lib/protein-ops/pdb';
   import { resolveMotifSourceResidues, type SelectedMotifSourceResidue } from '$lib/engine/conditioning';
   import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
@@ -485,10 +491,12 @@
     if (!raw) return true;
     if (
       raw === 'PDB Input' ||
+      raw === 'AlphaFold DB' ||
       raw === 'Load Structure (PDB / mmCIF)' ||
       raw === 'Demo 3-Helix (53 aa)' ||
       /^PDB:\s/i.test(raw) ||
       /^RCSB\s+[A-Z0-9]{4}$/i.test(raw) ||
+      /^AFDB(?::|\s)/i.test(raw) ||
       /^Custom:\s/i.test(raw)
     ) {
       return true;
@@ -694,6 +702,61 @@
     }
   }
 
+  async function handleFetchUniProtId(overrideId?: string) {
+    const rawId = overrideId ?? String(node.params.uniprotId ?? '');
+    const normId = normalizeUniProtId(rawId);
+    const check = validateUniProtId(normId);
+    const targetNodeId = node.id;
+    if (check.status === 'error') {
+      patchPdbStatus(targetNodeId, { error: check.message ?? 'Invalid UniProt accession' });
+      return;
+    }
+    const baseParams = { ...node.params };
+    const prevNormId = normalizeUniProtId(String(baseParams.uniprotId ?? ''));
+    const shouldClearCrop = overrideId !== undefined || normId !== prevNormId;
+    const prevLabel = node.label;
+    const prevFilename = String(baseParams.filename ?? '');
+    patchPdbStatus(targetNodeId, { busy: true, error: null, summary: null });
+    try {
+      const res = await fetchStructureByUniProtId(normId);
+      if (isAutoPdbLabel(prevLabel, prevFilename)) {
+        const quickEx = QUICK_ALPHAFOLD_DB_EXAMPLES.find((ex) => ex.id === res.uniprotId);
+        const displayName = quickEx?.name || res.gene;
+        onUpdateLabel?.(
+          targetNodeId,
+          displayName ? `AFDB: ${displayName} (${res.uniprotId})` : `AFDB ${res.uniprotId}`,
+        );
+      }
+      onUpdate(targetNodeId, {
+        ...baseParams,
+        mode: 'alphafold-db',
+        uniprotId: res.uniprotId,
+        fetchedUniProtId: res.uniprotId,
+        fetchedPdbId: '',
+        benchmarkId: '',
+        filename: res.filename,
+        pdbText: res.text,
+        ...(shouldClearCrop ? { cropSegments: '' } : {}),
+      });
+      const extras = [
+        res.meanPlddt !== undefined ? `pLDDT ${res.meanPlddt.toFixed(1)}` : '',
+        res.gene ? res.gene : '',
+        res.organism ? res.organism : '',
+      ].filter(Boolean);
+      patchPdbStatus(targetNodeId, {
+        summary:
+          `Loaded ${res.entryId}${res.version ? ` v${res.version}` : ''} · ${res.nResidues} aa` +
+          (extras.length > 0 ? ` · ${extras.join(' · ')}` : ''),
+      });
+    } catch (err) {
+      patchPdbStatus(targetNodeId, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      patchPdbStatus(targetNodeId, { busy: false });
+    }
+  }
+
   function clearMissingUploadExpectation() {
     flushPendingTextCommit();
     const next: Record<string, unknown> = { ...node.params };
@@ -809,6 +872,17 @@
                   node.id,
                   validatePdbId(norm).status === 'ok' ? `RCSB ${norm}` : 'PDB Input',
                 );
+              } else if (nextMode === 'alphafold-db') {
+                const norm = normalizeUniProtId(String(node.params.uniprotId ?? ''));
+                const quickEx = QUICK_ALPHAFOLD_DB_EXAMPLES.find((ex) => ex.id === norm);
+                onUpdateLabel?.(
+                  node.id,
+                  validateUniProtId(norm).status === 'ok'
+                    ? quickEx
+                      ? `AFDB: ${quickEx.name} (${norm})`
+                      : `AFDB ${norm}`
+                    : 'AlphaFold DB',
+                );
               } else if (nextMode === 'custom') {
                 const keepFn = prevMode === 'custom' && Boolean(customFn);
                 onUpdateLabel?.(node.id, keepFn ? `PDB: ${customFn}` : 'PDB Input');
@@ -822,6 +896,7 @@
               nextParams.filename = 'demo_3helix_53aa.pdb';
               nextParams.pdbText = '';
               nextParams.fetchedPdbId = '';
+              nextParams.fetchedUniProtId = '';
               nextParams.benchmarkId = '';
               nextParams.cropSegments = '';
               nextParams.missingUpload = false;
@@ -831,6 +906,18 @@
                 nextParams.filename = '';
                 nextParams.pdbText = '';
                 nextParams.fetchedPdbId = '';
+                nextParams.fetchedUniProtId = '';
+                nextParams.benchmarkId = '';
+                nextParams.cropSegments = '';
+                nextParams.missingUpload = false;
+                pdbTextDraft = '';
+              }
+            } else if (nextMode === 'alphafold-db') {
+              if (prevMode !== 'alphafold-db') {
+                nextParams.filename = '';
+                nextParams.pdbText = '';
+                nextParams.fetchedPdbId = '';
+                nextParams.fetchedUniProtId = '';
                 nextParams.benchmarkId = '';
                 nextParams.cropSegments = '';
                 nextParams.missingUpload = false;
@@ -840,9 +927,10 @@
               if (prevMode !== 'custom') {
                 nextParams.filename = '';
                 nextParams.fetchedPdbId = '';
+                nextParams.fetchedUniProtId = '';
                 nextParams.benchmarkId = '';
                 nextParams.cropSegments = '';
-                if (prevMode === 'pdb-id') {
+                if (prevMode === 'pdb-id' || prevMode === 'alphafold-db') {
                   nextParams.pdbText = '';
                   pdbTextDraft = '';
                 }
@@ -855,6 +943,7 @@
         >
           <option value="demo-bundle">Built-in 53 aa 3-helix bundle demo</option>
           <option value="pdb-id">Fetch from RCSB PDB ID (e.g. 1PRW, 5O45)</option>
+          <option value="alphafold-db">Fetch from AlphaFold DB (UniProt ID, e.g. P69905)</option>
           <option value="custom">Upload or paste PDB / mmCIF</option>
         </select>
       </label>
@@ -1008,6 +1097,109 @@
             <span class="field-hint">Enter a 4-character PDB ID to auto-preview in 3D.</span>
           {/if}
         </div>
+      {:else if node.params.mode === 'alphafold-db'}
+        {@const uniprotVal = String(node.params.uniprotId ?? '')}
+        {@const normUniProt = normalizeUniProtId(uniprotVal)}
+        {@const uniCheck = validateUniProtId(uniprotVal)}
+        {@const isAutoFetching = nodeState?.status === 'loading'}
+        {@const isBusy = curPdbStatus.busy || isAutoFetching}
+        {@const isAlreadyLoaded =
+          uniCheck.status === 'ok' &&
+          (Boolean(liveStructure) ||
+            (normalizeUniProtId(String(node.params.fetchedUniProtId ?? '')) === normUniProt &&
+              String(node.params.pdbText ?? '').trim().length > 0))}
+        <div class="full pdb-fetch-wrap">
+          <span class="field-lbl">UniProt Accession (AlphaFold DB)</span>
+          <div class="pdb-fetch-row">
+            <input
+              type="text"
+              class:input-error={uniprotVal.trim().length > 0 && uniCheck.status === 'error'}
+              disabled={disabled || isBusy}
+              placeholder="e.g. P69905, P04637, Q9NZQ7"
+              maxlength="80"
+              value={uniprotVal}
+              oninput={(e) => {
+                const rawNext = e.currentTarget.value;
+                const norm = normalizeUniProtId(rawNext);
+                const nextVal = rawNext.includes('alphafold.ebi.ac.uk') || /^AF-/i.test(rawNext.trim())
+                  ? norm
+                  : rawNext.toUpperCase();
+                patchPdbStatus(node.id, { error: null, summary: null });
+                if (isAutoPdbLabel(node.label, String(node.params.filename ?? ''))) {
+                  const quickEx = QUICK_ALPHAFOLD_DB_EXAMPLES.find((ex) => ex.id === norm);
+                  onUpdateLabel?.(
+                    node.id,
+                    validateUniProtId(norm).status === 'ok'
+                      ? quickEx
+                        ? `AFDB: ${quickEx.name} (${norm})`
+                        : `AFDB ${norm}`
+                      : 'AlphaFold DB',
+                  );
+                }
+                const fetchedNorm = normalizeUniProtId(String(node.params.fetchedUniProtId ?? ''));
+                onUpdate(node.id, {
+                  ...node.params,
+                  uniprotId: nextVal,
+                  benchmarkId: '',
+                  cropSegments: '',
+                  ...(norm !== fetchedNorm ? { filename: '' } : {}),
+                });
+              }}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' && uniCheck.status === 'ok' && !disabled && !isBusy) {
+                  e.preventDefault();
+                  void handleFetchUniProtId();
+                }
+              }}
+            />
+            <button
+              type="button"
+              class="fetch-btn"
+              disabled={disabled || isBusy || uniCheck.status === 'error'}
+              onclick={() => void handleFetchUniProtId()}
+            >
+              {isBusy ? 'Fetching…' : isAlreadyLoaded ? '↻ Refetch' : '↓ Fetch'}
+            </button>
+          </div>
+          <div class="quick-chips">
+            <span class="quick-lbl">Examples:</span>
+            {#each QUICK_ALPHAFOLD_DB_EXAMPLES as ex (ex.id)}
+              <button
+                type="button"
+                class="quick-chip"
+                disabled={disabled || isBusy}
+                onclick={() => void handleFetchUniProtId(ex.id)}
+                title={`Fetch ${ex.id} (${ex.name}, ${ex.organism}, ${ex.length} aa) from AlphaFold DB`}
+              >
+                {ex.id} · {ex.name}
+              </button>
+            {/each}
+          </div>
+          {#if curPdbStatus.error}
+            <span class="field-hint err">{curPdbStatus.error}</span>
+          {:else if nodeState?.status === 'error' && nodeState.error}
+            <span class="field-hint err">{nodeState.error}</span>
+          {:else if isBusy}
+            <span class="field-hint">Fetching {normUniProt || 'structure'} from EMBL-EBI AlphaFold DB…</span>
+          {:else if curPdbStatus.summary}
+            <span class="field-hint ok">✓ {curPdbStatus.summary}</span>
+          {:else if liveStructure}
+            <span class="field-hint ok">
+              ✓ Loaded {liveStructure.label} · pLDDT in B-factors (previewed in 3D)
+            </span>
+          {:else if isAlreadyLoaded}
+            <span class="field-hint ok">✓ Ready ({String(node.params.filename || `AF-${normUniProt}-F1.cif`)} loaded)</span>
+          {:else if uniCheck.status === 'error'}
+            <span class="field-hint" class:err={uniprotVal.trim().length > 0}>{uniCheck.message}</span>
+          {:else}
+            <span class="field-hint">Public EMBL-EBI AlphaFold DB (CC-BY-4.0) — enter a UniProt ID or paste an AlphaFold DB URL.</span>
+          {/if}
+          {#if uniCheck.status === 'ok'}
+            <span class="field-hint">
+              Public CC-BY-4.0 · <a href={`https://alphafold.ebi.ac.uk/entry/${encodeURIComponent(normUniProt)}`} target="_blank" rel="noopener noreferrer">View {normUniProt} on AlphaFold DB ↗</a>
+            </span>
+          {/if}
+        </div>
       {:else if node.params.mode === 'custom'}
         {@const pdbCheck = validateStructureText(pdbTextDraft)}
         {@const expectedFilename = String(
@@ -1093,7 +1285,7 @@
         </label>
       {/if}
 
-      {#if node.params.mode === 'pdb-id' || node.params.mode === 'custom'}
+      {#if node.params.mode === 'pdb-id' || node.params.mode === 'alphafold-db' || node.params.mode === 'custom'}
         {@const cropVal = String(node.params.cropSegments ?? '')}
         {@const droppedCropLigands = (() => {
           const trimCrop = cropVal.trim();

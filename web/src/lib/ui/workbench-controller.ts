@@ -10,6 +10,7 @@ import {
 } from '$lib/engine/benchmark-sync';
 import { computeUploadDigest } from '$lib/engine/param-validation';
 import { isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
+import { isValidUniProtId, normalizeUniProtId } from '$lib/protein-ops/alphafold-db';
 import type { WorkflowGraph, WorkflowNode } from '$lib/engine/types';
 
 export function buildNodePreviewSignature(
@@ -26,6 +27,14 @@ export function buildNodePreviewSignature(
       const txt = String(p.pdbText ?? '');
       const hasCached = txt.trim().length > 0 && cachedFor === normId;
       return `pdb-id|${normId}|${hasCached ? computeUploadDigest(txt).slice(0, 16) : 0}|${String(p.benchmarkId ?? '')}|${crop}`;
+    }
+    if (mode === 'alphafold-db') {
+      const normUniProt = normalizeUniProtId(String(p.uniprotId ?? ''));
+      if (!isValidUniProtId(normUniProt)) return null;
+      const cachedFor = normalizeUniProtId(String(p.fetchedUniProtId ?? ''));
+      const txt = String(p.pdbText ?? '');
+      const hasCached = txt.trim().length > 0 && cachedFor === normUniProt;
+      return `alphafold-db|${normUniProt}|${hasCached ? computeUploadDigest(txt).slice(0, 16) : 0}|${crop}`;
     }
     if (mode === 'custom') {
       const txt = String(p.pdbText ?? '').trim();

@@ -15,6 +15,7 @@ import {
   type ParsedStructure,
 } from '$lib/protein-ops/pdb';
 import { normalizePdbId } from '$lib/protein-ops/rcsb';
+import { normalizeUniProtId } from '$lib/protein-ops/alphafold-db';
 import { evaluateProteinOnlyStructurePolicy } from '$lib/protein-ops/hetatm-policy';
 import {
   extractHoloReceptorAndLigands,
@@ -532,6 +533,14 @@ function tryMaterializeLocalPdbInput(node: WorkflowNode): StructureArtifact | nu
     rawText = cachedText;
     const rawFn = String(node.params.filename ?? '').trim();
     filename = rawFn && rawFn !== 'demo_3helix_53aa.pdb' ? rawFn : `${normId}.cif`;
+  } else if (mode === 'alphafold-db') {
+    const normUniProt = normalizeUniProtId(String(node.params.uniprotId ?? ''));
+    const fetchedFor = normalizeUniProtId(String(node.params.fetchedUniProtId ?? ''));
+    const cachedText = String(node.params.pdbText ?? '').trim();
+    if (!normUniProt || !cachedText || (fetchedFor && fetchedFor !== normUniProt)) return null;
+    rawText = cachedText;
+    const rawFn = String(node.params.filename ?? '').trim();
+    filename = rawFn && rawFn !== 'demo_3helix_53aa.pdb' ? rawFn : `AF-${normUniProt}-F1.cif`;
   } else {
     return null;
   }

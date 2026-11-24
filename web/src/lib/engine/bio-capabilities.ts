@@ -1050,7 +1050,7 @@ function inferNodeOutputProfile(
 
   if (node.adapterId === 'pdb-input') {
     const mode = String(node.params.mode ?? 'demo-bundle');
-    const isNaturalPdb = mode === 'custom' || mode === 'pdb-id';
+    const isNaturalPdb = mode === 'custom' || mode === 'pdb-id' || mode === 'alphafold-db';
     const pdbText = String(node.params.pdbText ?? '').trim();
     const cropSpec = mode === 'demo-bundle' ? '' : String(node.params.cropSegments ?? '').trim();
     const benchId = String(node.params.benchmarkId ?? '').trim();
@@ -1084,7 +1084,7 @@ function inferNodeOutputProfile(
         isCaOnly: coverage.isCaOnly,
         ...(isNaturalPdb ? { fromNaturalProtein: true } : {}),
       };
-    } else if ((mode === 'custom' || mode === 'pdb-id') && pdbText.length > 0) {
+    } else if ((mode === 'custom' || mode === 'pdb-id' || mode === 'alphafold-db') && pdbText.length > 0) {
       try {
         const summary = getCachedStructureBioSummary(pdbText, cropSpec);
         const entities = new Set<BioEntityKind>();
@@ -2687,6 +2687,10 @@ export function validateBioCapabilities(
                 ligandNames = cropHints.ligandNames;
                 knownApo = true;
               }
+            } else if (srcMode === 'alphafold-db') {
+              // AlphaFold DB entries are predicted apo protein monomers (no organic small-molecule ligands)
+              ligandNames = [];
+              knownApo = true;
             } else if (srcMode === 'pdb-id') {
               const srcBenchId = String(src.params.benchmarkId ?? '').trim();
               const srcBench = srcBenchId ? getBenchmarkById(srcBenchId) : undefined;

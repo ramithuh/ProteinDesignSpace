@@ -68,7 +68,7 @@ export const pdbInputPlugin: ModelPlugin = {
   cachePolicy: {},
   share: {
     shortCode: 'p',
-    stripOnShareKeys: ['fetchedPdbId'],
+    stripOnShareKeys: ['fetchedPdbId', 'fetchedUniProtId'],
     prepareForShare: (params, { stripLargeUploads }) => {
       const mode = String(params.mode ?? 'demo-bundle');
       const next: Record<string, unknown> = {};
@@ -76,8 +76,8 @@ export const pdbInputPlugin: ModelPlugin = {
       let strippedPdbText: string | null = null;
 
       for (const [k, v] of Object.entries(params)) {
-        if (k === 'fetchedPdbId') continue;
-        if (mode === 'pdb-id' || mode === 'demo-bundle') {
+        if (k === 'fetchedPdbId' || k === 'fetchedUniProtId') continue;
+        if (mode === 'pdb-id' || mode === 'alphafold-db' || mode === 'demo-bundle') {
           if (k === 'pdbText' || UPLOAD_META_KEYS.has(k)) continue;
         } else if (mode === 'custom') {
           if (UPLOAD_META_KEYS.has(k)) continue;
@@ -152,8 +152,9 @@ export const pdbInputPlugin: ModelPlugin = {
     sanitizeOnImport: (params) => {
       const next = { ...params };
       delete next.fetchedPdbId;
+      delete next.fetchedUniProtId;
       const mode = String(next.mode ?? 'demo-bundle');
-      if (mode === 'pdb-id' || mode === 'demo-bundle') {
+      if (mode === 'pdb-id' || mode === 'alphafold-db' || mode === 'demo-bundle') {
         if ('pdbText' in next) {
           next.pdbText = '';
         }
@@ -198,13 +199,14 @@ export const pdbInputPlugin: ModelPlugin = {
   },
   catalog: {
     categoryId: 'source',
-    conciseRole: 'Fetch by PDB ID, upload/paste PDB & mmCIF, or 3-helix demo',
-    searchKeywords: ['pdb', 'mmcif', 'rcsb', 'structure', 'upload', 'template', 'input'],
+    conciseRole: 'Fetch by PDB ID or AlphaFold DB (UniProt), upload/paste PDB & mmCIF, or 3-helix demo',
+    searchKeywords: ['pdb', 'mmcif', 'rcsb', 'alphafold', 'afdb', 'uniprot', 'structure', 'upload', 'template', 'input'],
   },
   display: {
     formatCanvasSummary: (params) => {
       const mode = String(params.mode ?? 'demo-bundle');
       if (mode === 'pdb-id' && params.pdbId) return `PDB ${String(params.pdbId).toUpperCase()}`;
+      if (mode === 'alphafold-db' && params.uniprotId) return `AFDB ${String(params.uniprotId).toUpperCase()}`;
       if (mode === 'custom' && params.filename) return String(params.filename);
       return 'PDB Input';
     },

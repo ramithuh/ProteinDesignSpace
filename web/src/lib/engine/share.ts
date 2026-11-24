@@ -231,8 +231,8 @@ function diffParams(
     if (FORBIDDEN_KEYS.has(k)) continue;
     if (stripKeySet?.has(k)) continue;
     if (adapterId === 'pdb-input' && !plugin?.share.prepareForShare) {
-      if (k === 'fetchedPdbId') continue;
-      if (effectivePdbMode === 'pdb-id' || effectivePdbMode === 'demo-bundle') {
+      if (k === 'fetchedPdbId' || k === 'fetchedUniProtId') continue;
+      if (effectivePdbMode === 'pdb-id' || effectivePdbMode === 'alphafold-db' || effectivePdbMode === 'demo-bundle') {
         if (k === 'pdbText' || UPLOAD_META_KEYS.has(k)) continue;
       } else if (effectivePdbMode === 'custom') {
         if (UPLOAD_META_KEYS.has(k)) continue;
@@ -513,8 +513,9 @@ export function normalizeWorkflowGraph(
       // Security: discard externally supplied fetch provenance / cached coordinates for accession-based
       // PDB inputs so an imported recipe cannot spoof an RCSB accession with arbitrary coordinates.
       delete mergedParams.fetchedPdbId;
+      delete mergedParams.fetchedUniProtId;
       const mode = String(mergedParams.mode ?? 'demo-bundle');
-      if (mode === 'pdb-id' || mode === 'demo-bundle') {
+      if (mode === 'pdb-id' || mode === 'alphafold-db' || mode === 'demo-bundle') {
         if ('pdbText' in mergedParams) {
           mergedParams.pdbText = '';
         }

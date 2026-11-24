@@ -3,6 +3,7 @@
 
 import type { WorkflowNode } from './types';
 import { isValidPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
+import { isValidUniProtId, normalizeUniProtId } from '$lib/protein-ops/alphafold-db';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import { ADAPTER_REGISTRY } from './registry';
 import {
@@ -538,6 +539,21 @@ export function validatePdbId(raw: string): ValidationFeedback {
   return { status: 'ok', message: `RCSB PDB: ${norm}` };
 }
 
+/** Validate a UniProt accession (e.g. P69905, P04637, Q9NZQ7) for AlphaFold DB fetch. */
+export function validateUniProtId(raw: string): ValidationFeedback {
+  const norm = normalizeUniProtId(raw);
+  if (!norm) {
+    return { status: 'error', message: 'Enter a UniProt accession (e.g. P69905, P04637, Q9NZQ7).' };
+  }
+  if (!isValidUniProtId(norm)) {
+    return {
+      status: 'error',
+      message: `"${norm}" is not a valid UniProt accession (expected e.g. P69905 or Q9NZQ7).`,
+    };
+  }
+  return { status: 'ok', message: `AlphaFold DB: ${norm}` };
+}
+
 /** Structure text check for custom PDB / mmCIF paste (enforces >=3 Cα residues unless non-protein context). */
 export function validateStructureText(raw: string): ValidationFeedback {
   const trimmed = raw.trim();
@@ -706,6 +722,11 @@ export function validateNodeParams(
       }
     } else if (mode === 'pdb-id') {
       const check = validatePdbId(String(p.pdbId ?? ''));
+      if (check.status === 'error') {
+        errs.push(`"${label}": ${check.message}`);
+      }
+    } else if (mode === 'alphafold-db') {
+      const check = validateUniProtId(String(p.uniprotId ?? ''));
       if (check.status === 'error') {
         errs.push(`"${label}": ${check.message}`);
       }

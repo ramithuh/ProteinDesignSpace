@@ -7,6 +7,7 @@ import {
   parseStructureText,
 } from '$lib/protein-ops/pdb';
 import { fetchStructureByPdbId, normalizePdbId } from '$lib/protein-ops/rcsb';
+import { fetchStructureByUniProtId, normalizeUniProtId } from '$lib/protein-ops/alphafold-db';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { fnv1a } from '$lib/kernel/hash-utils';
 import type {
@@ -48,6 +49,29 @@ export async function materializePdbInputNode(
         detail: `Fetching ${normId} from RCSB PDB...`,
       });
       const fetched = await fetchStructureByPdbId(normId);
+      rawText = fetched.text;
+      filename = fetched.filename;
+    }
+  } else if (mode === 'alphafold-db') {
+    const normUniProt = normalizeUniProtId(String(node.params.uniprotId ?? ''));
+    if (!normUniProt) {
+      throw new Error('AlphaFold DB input is missing a UniProt accession (e.g. P69905, P04637).');
+    }
+    const cachedText = String(node.params.pdbText ?? '').trim();
+    const fetchedFor = normalizeUniProtId(String(node.params.fetchedUniProtId ?? ''));
+    if (cachedText.length > 0 && fetchedFor === normUniProt) {
+      rawText = cachedText;
+      const rawFn = String(node.params.filename ?? '').trim();
+      filename = rawFn && rawFn !== 'demo_3helix_53aa.pdb' ? rawFn : `AF-${normUniProt}-F1.cif`;
+    } else {
+      onProgress?.({
+        nodeId: node.id,
+        status: 'loading',
+        phase: 'fetch',
+        progress: 0.2,
+        detail: `Fetching ${normUniProt} from AlphaFold DB...`,
+      });
+      const fetched = await fetchStructureByUniProtId(normUniProt);
       rawText = fetched.text;
       filename = fetched.filename;
     }

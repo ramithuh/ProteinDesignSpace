@@ -152,6 +152,12 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         requiredInputs: [],
       },
       {
+        id: 'alphafold-db',
+        label: 'Fetch from AlphaFold DB (UniProt ID)',
+        description: 'Download a public predicted structure directly from EMBL-EBI AlphaFold DB by UniProt accession (CC-BY-4.0).',
+        requiredInputs: [],
+      },
+      {
         id: 'custom',
         label: 'Upload or paste PDB / mmCIF',
         description: 'Load a local PDB or mmCIF coordinate file or paste ATOM records.',
@@ -168,6 +174,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         options: [
           { value: 'demo-bundle', label: 'Built-in 53 aa 3-helix bundle demo' },
           { value: 'pdb-id', label: 'Fetch from RCSB PDB ID (e.g. 1PRW, 5O45)' },
+          { value: 'alphafold-db', label: 'Fetch from AlphaFold DB (UniProt ID, e.g. P69905)' },
           { value: 'custom', label: 'Upload or paste PDB / mmCIF' },
         ],
       },
@@ -180,6 +187,16 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         placeholder: 'e.g. 1PRW, 5O45, 4JHW',
         modes: ['pdb-id'],
         description: '4-character RCSB PDB identifier to fetch and preview.',
+      },
+      {
+        key: 'uniprotId',
+        label: 'UniProt Accession',
+        kind: 'text',
+        tier: 'primary',
+        defaultValue: '',
+        placeholder: 'e.g. P69905, P04637, Q9NZQ7',
+        modes: ['alphafold-db'],
+        description: 'UniProt accession to fetch from the public AlphaFold Protein Structure Database (CC-BY-4.0).',
       },
       {
         key: 'pdbText',
@@ -200,7 +217,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         allowBareChain: true,
         defaultValue: '',
         placeholder: 'e.g. A163-181, A17-132',
-        modes: ['pdb-id', 'custom'],
+        modes: ['pdb-id', 'alphafold-db', 'custom'],
         description: 'Extract exact chains or residue spans while preserving original PDB residue numbers.',
       },
       {
@@ -209,7 +226,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'text',
         tier: 'advanced',
         defaultValue: 'demo_3helix_53aa.pdb',
-        modes: ['pdb-id', 'custom'],
+        modes: ['pdb-id', 'alphafold-db', 'custom'],
         description: 'Display filename for the loaded structure.',
       },
       {
@@ -229,6 +246,15 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         defaultValue: '',
         modes: ['pdb-id'],
         description: 'RCSB ID matching the currently cached structure text.',
+      },
+      {
+        key: 'fetchedUniProtId',
+        label: 'Cached Fetched UniProt ID',
+        kind: 'text',
+        tier: 'advanced',
+        defaultValue: '',
+        modes: ['alphafold-db'],
+        description: 'UniProt accession matching the currently cached AlphaFold DB structure text.',
       },
     ],
   },
