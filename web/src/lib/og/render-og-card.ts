@@ -166,32 +166,23 @@ function drawWorkflowNodeCard(canvas: OgCanvas, card: LayoutCard): void {
 export async function renderWorkflowOgPng(
   workflow: DecodedOgWorkflow,
   structure: EdgeStructurePreview | null = null,
-  footerRightOverride?: string,
 ): Promise<Uint8Array> {
   const canvas = new OgCanvas(OG_WIDTH, OG_HEIGHT, '#f8fafc');
   canvas.fillLinearGradientRect(0, 0, OG_WIDTH, OG_HEIGHT, '#f8fafc', '#eef2f9');
-  canvas.drawDotGrid(0, 82, OG_WIDTH, OG_HEIGHT - 134, 24, '#cbd5e1', 0.55);
+  canvas.drawDotGrid(0, 76, OG_WIDTH, OG_HEIGHT - 76, 24, '#cbd5e1', 0.55);
 
-  // Header bar
-  canvas.fillRoundedRect(0, 0, OG_WIDTH, 82, 0, hexToRgba('#ffffff', 246));
-  canvas.fillRoundedRect(0, 81, OG_WIDTH, 1, 0, hexToRgba('#e2e8f0'));
+  // Clean minimal header bar (brand mark only — leaves top-right clear for platform card overlays)
+  canvas.fillRoundedRect(0, 0, OG_WIDTH, 76, 0, hexToRgba('#ffffff', 246));
+  canvas.fillRoundedRect(0, 75, OG_WIDTH, 1, 0, hexToRgba('#e2e8f0'));
 
-  canvas.drawBrandLogo(32, 20, 42);
-  canvas.drawText('denovo', 86, 51, 'bold28', hexToRgba('#2563eb'));
+  canvas.drawBrandLogo(32, 17, 42);
+  canvas.drawText('denovo', 86, 48, 'bold28', hexToRgba('#2563eb'));
   const wDenovo = canvas.measureText('denovo', 'bold28');
-  canvas.drawText('.run', 86 + wDenovo, 51, 'bold28', hexToRgba('#0f172a'));
+  canvas.drawText('.run', 86 + wDenovo, 48, 'bold28', hexToRgba('#0f172a'));
 
-  // Right-aligned header pill
-  const pillText = 'Browser-Native WebGPU · 100% Local';
-  const pillW = canvas.measureText(pillText, 'med14') + 30;
-  const pillX = OG_WIDTH - 32 - pillW;
-  canvas.fillRoundedRect(pillX, 24, pillW, 34, 17, hexToRgba('#eff6ff'));
-  canvas.strokeRoundedRect(pillX, 24, pillW, 34, 17, 1.2, hexToRgba('#bfdbfe'));
-  canvas.drawText(pillText, pillX + 15, 46, 'med14', hexToRgba('#1d4ed8'));
-
-  // Main body area: y = 96..568 (height 472)
-  const bodyY = 98;
-  const bodyH = 468;
+  // Main body area fills cleanly to bottom margin (social platforms render title/description below)
+  const bodyY = 96;
+  const bodyH = OG_HEIGHT - bodyY - 28;
 
   if (structure) {
     const isSingle = workflow.nodes.length <= 1;
@@ -260,15 +251,6 @@ export async function renderWorkflowOgPng(
       drawWorkflowNodeCard(canvas, card);
     }
   }
-
-  // Footer strip
-  const cleanTitle = workflow.title.replace(/\s+—\s+denovo\.run$/, '');
-  canvas.drawEllipsisText(cleanTitle, 34, OG_HEIGHT - 22, OG_WIDTH - 280, 'med14', hexToRgba('#0f172a'));
-  const blockCountText =
-    footerRightOverride ??
-    `${workflow.nodes.length} block${workflow.nodes.length === 1 ? '' : 's'} · Open in browser →`;
-  const rightW = canvas.measureText(blockCountText, 'med14');
-  canvas.drawText(blockCountText, OG_WIDTH - 34 - rightW, OG_HEIGHT - 22, 'med14', hexToRgba('#2563eb'));
 
   return canvas.encodePng();
 }
@@ -431,5 +413,5 @@ export async function renderDefaultOgPng(): Promise<Uint8Array> {
     isPlddt: false,
   };
 
-  return renderWorkflowOgPng(demoWorkflow, heroStructure, '25+ local models →');
+  return renderWorkflowOgPng(demoWorkflow, heroStructure);
 }
