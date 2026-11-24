@@ -1,6 +1,6 @@
 import { getBenchmarkById } from '$lib/engine/benchmarks';
 import { parseFixedPositionsAndChains } from '$lib/engine/mpnn-spec';
-import { LOCALFOLD_MODEL_OPTIONS, RFD4_BENCHMARK_OPTIONS } from '$lib/engine/registry';
+import { LOCALFOLD_MODEL_OPTIONS, MPNN_VARIANT_OPTIONS, RFD4_BENCHMARK_OPTIONS } from '$lib/engine/registry';
 import { validateSequenceText } from '$lib/engine/param-validation';
 import type {
   CanonicalArtifact,
@@ -748,4 +748,108 @@ export function computeUpstreamLockSummary(
     detailText,
     locksAllDesignChainsWarning,
   };
+}
+
+const LOCALFOLD_MODEL_ALIAS_RE =
+  /^(?:localfold|esmfold\s*2(?:\s+(?:experimental\s+)?fast)?(?:\s+(?:300m|600m))?|ef2(?:\s+fast)?(?:\s+(?:300m|600m))?|(?:af2|alphafold\s*2)(?:\s*-?\s*multimer(?:\s+v3)?)?(?:\s*(?:·|-)?\s*(?:model\s*)?[1-5])?|af3|alphafold\s*3|rf3|rosettafold\s*3|boltz-?2|protenix(?:\s*-?v?2)?|openbind(?:\s*-?0)?|openfold\s*3|opendde|mol-?1|intellifold(?:\s*-?2)?)$/i;
+
+const MPNN_VARIANT_ALIAS_RE =
+  /^(?:proteinmpnn|solublempnn|(?:c[αa]|ca)[\s-]*(?:protein)?mpnn)$/i;
+
+const ANTIFOLD_VARIANT_LABELS: Record<string, string> = {
+  antifold: 'AntiFold',
+  esmif1: 'ESM-IF1',
+};
+
+const ANTIFOLD_VARIANT_ALIAS_RE =
+  /^(?:antifold(?:\s*\/\s*esm-?if1)?|esm-?if1|antifold\s*\(antibody\s+cdrs\)|esm-?if1\s*\(general\s+inverse\s+folding\))$/i;
+
+function isKnownLocalFoldModelName(text: string): boolean {
+  const norm = text.trim();
+  if (!norm) return false;
+  const lower = norm.toLowerCase();
+  if (LOCALFOLD_MODEL_ALIAS_RE.test(norm)) return true;
+  return LOCALFOLD_MODEL_OPTIONS.some(
+    (m) =>
+      m.shortLabel.toLowerCase() === lower ||
+      m.label.toLowerCase() === lower ||
+      m.id.toLowerCase() === lower,
+  );
+}
+
+function splitAutoLabelSuffix(raw: string): { base: string; parenContent: string | null; suffix: string } {
+  const hashMatch = raw.match(/^(.*?)\s+(#\d+)$/);
+  if (hashMatch) {
+    return { base: hashMatch[1].trim(), parenContent: null, suffix: ` ${hashMatch[2]}` };
+  }
+  const parenMatch = raw.match(/^(.*?)\s*\(([^()]+)\)$/);
+  if (parenMatch) {
+    const inner = parenMatch[2].trim();
+    return { base: parenMatch[1].trim(), parenContent: inner, suffix: ` (${inner})` };
+  }
+  return { base: raw, parenContent: null, suffix: '' };
+}
+
+/**
+ * Compute an updated card title when the user switches a multi-model block's model/variant
+ * dropdown (`localfold-af2`, `web-protein-mpnn`, `antifold-esmif1`).
+ *
+ * Updates whenever the existing label is empty or matches a known default/model name or
+ * common alias (preserving non-model suffixes like `(MPNN)` or `#2`), while leaving
+ * genuinely custom user-entered titles untouched.
+ */
+export function resolveAutoModelLabelOnChange(
+  adapterId: string,
+  currentLabel: string | undefined,
+  nextModelValue: string,
+): string | null {
+  const raw = (currentLabel ?? '').trim();
+
+  if (adapterId === 'localfold-af2') {
+    const nextMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === nextModelValue);
+    if (!nextMeta) return null;
+    if (!raw || /^localfold$/i.test(raw)) return nextMeta.shortLabel;
+    if (isKnownLocalFoldModelName(raw)) return nextMeta.shortLabel;
+    const { base, parenContent, suffix } = splitAutoLabelSuffix(raw);
+    if (isKnownLocalFoldModelName(base)) {
+      const keepSuffix = parenContent && isKnownLocalFoldModelName(parenContent) ? '' : suffix;
+      return `${nextMeta.shortLabel}${keepSuffix}`;
+    }
+    return null;
+  }
+
+  if (adapterId === 'web-protein-mpnn') {
+    const nextMeta = MPNN_VARIANT_OPTIONS.find((v) => v.family === nextModelValue);
+    if (!nextMeta) return null;
+    const isKnownMpnn = (text: string): boolean => {
+      const lower = text.trim().toLowerCase();
+      if (!lower) return false;
+      if (MPNN_VARIANT_ALIAS_RE.test(text.trim())) return true;
+      return MPNN_VARIANT_OPTIONS.some(
+        (v) => v.shortLabel.toLowerCase() === lower || v.label.toLowerCase() === lower,
+      );
+    };
+    if (!raw || isKnownMpnn(raw)) return nextMeta.shortLabel;
+    const { base, parenContent, suffix } = splitAutoLabelSuffix(raw);
+    if (isKnownMpnn(base)) {
+      const keepSuffix = parenContent && isKnownMpnn(parenContent) ? '' : suffix;
+      return `${nextMeta.shortLabel}${keepSuffix}`;
+    }
+    return null;
+  }
+
+  if (adapterId === 'antifold-esmif1') {
+    const nextShort = ANTIFOLD_VARIANT_LABELS[nextModelValue];
+    if (!nextShort) return null;
+    const isKnownAntiFold = (text: string): boolean => ANTIFOLD_VARIANT_ALIAS_RE.test(text.trim());
+    if (!raw || isKnownAntiFold(raw)) return nextShort;
+    const { base, parenContent, suffix } = splitAutoLabelSuffix(raw);
+    if (isKnownAntiFold(base)) {
+      const keepSuffix = parenContent && isKnownAntiFold(parenContent) ? '' : suffix;
+      return `${nextShort}${keepSuffix}`;
+    }
+    return null;
+  }
+
+  return null;
 }

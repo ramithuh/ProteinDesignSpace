@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'svelte/compiler';
 import { describe, expect, it } from 'vitest';
+import { resolveAutoModelLabelOnChange } from '$lib/ui/node-display-helpers';
 import { validateNodeParams, validateStructureText, validateTiedPositions } from '$lib/engine/param-validation';
 import { formatCandidateSequence, resolveActiveRowChainLengths, resolveFoldIpsae } from '$lib/engine/peek';
 import { defaultParamsForAdapter } from '$lib/engine/graph-utils';
@@ -275,5 +276,39 @@ describe('M3 UI & QA regressions (Svelte 5 AST parse, pure validation, and sourc
     const studioSrc = readSrc('src/lib/ui/NodeStudioPopover.svelte');
     expect(studioSrc).toContain('Copy failed');
     expect(studioSrc).toContain('onActiveBrushChange?.(activeBrush)');
+  });
+
+  it('auto-updates card title when switching multi-model dropdowns while preserving suffixes and custom labels', () => {
+    // LocalFold aliases & exact labels
+    expect(resolveAutoModelLabelOnChange('localfold-af2', 'ESMFold2 300M', 'ef2-fast-600m')).toBe(
+      'EF2 Fast 600M',
+    );
+    expect(resolveAutoModelLabelOnChange('localfold-af2', 'EF2 Fast 300M', 'boltz2')).toBe('Boltz-2');
+    expect(resolveAutoModelLabelOnChange('localfold-af2', 'LocalFold (AF2)', 'protenix2')).toBe(
+      'Protenix-v2',
+    );
+    expect(resolveAutoModelLabelOnChange('localfold-af2', 'AF2 Model 1 (MPNN)', 'boltz2')).toBe(
+      'Boltz-2 (MPNN)',
+    );
+    expect(resolveAutoModelLabelOnChange('localfold-af2', 'ESMFold2 300M #2', 'ef2-fast-600m')).toBe(
+      'EF2 Fast 600M #2',
+    );
+    expect(resolveAutoModelLabelOnChange('localfold-af2', 'Catalytic Pocket Refold', 'boltz2')).toBeNull();
+
+    // ProteinMPNN variants
+    expect(resolveAutoModelLabelOnChange('web-protein-mpnn', 'SolubleMPNN', 'ca')).toBe(
+      'Cα-ProteinMPNN',
+    );
+    expect(resolveAutoModelLabelOnChange('web-protein-mpnn', 'Cα-MPNN (Branch 1)', 'proteinmpnn')).toBe(
+      'ProteinMPNN (Branch 1)',
+    );
+    expect(resolveAutoModelLabelOnChange('web-protein-mpnn', 'Core Packer', 'ca')).toBeNull();
+
+    // AntiFold / ESM-IF1 variants
+    expect(resolveAutoModelLabelOnChange('antifold-esmif1', 'AntiFold / ESM-IF1', 'esmif1')).toBe(
+      'ESM-IF1',
+    );
+    expect(resolveAutoModelLabelOnChange('antifold-esmif1', 'ESM-IF1', 'antifold')).toBe('AntiFold');
+    expect(resolveAutoModelLabelOnChange('antifold-esmif1', 'CDR Loop Designer', 'esmif1')).toBeNull();
   });
 });

@@ -43,7 +43,7 @@
   import NumericInput from './NumericInput.svelte';
   import SchemaParamFields from './SchemaParamFields.svelte';
   import SequenceEditor from './SequenceEditor.svelte';
-  import type { UpstreamLockSummary } from './node-display-helpers';
+  import { resolveAutoModelLabelOnChange, type UpstreamLockSummary } from './node-display-helpers';
   import type {
     CanonicalArtifact,
     MsaMode,
@@ -480,15 +480,6 @@
     }
   }
 
-  function isAutoMpnnLabel(label: string | undefined): boolean {
-    const raw = (label ?? '').trim();
-    if (!raw) return true;
-    return (
-      raw === 'ProteinMPNN' ||
-      MPNN_VARIANT_OPTIONS.some((v) => v.shortLabel === raw || v.label === raw)
-    );
-  }
-
   function isAutoPdbLabel(label: string | undefined, prevFilename?: string): boolean {
     const raw = (label ?? '').trim();
     if (!raw) return true;
@@ -562,6 +553,16 @@
         ].includes(key)
       ) {
         next.userEditedTask = true;
+      }
+    }
+    if (node.adapterId === 'antifold-esmif1' && key === 'variant') {
+      const nextLabel = resolveAutoModelLabelOnChange(
+        'antifold-esmif1',
+        node.label,
+        String(value ?? ''),
+      );
+      if (nextLabel) {
+        onUpdateLabel?.(node.id, nextLabel);
       }
     }
     onUpdate(node.id, next);
@@ -1946,9 +1947,13 @@
           value={mpnnFamily}
           onchange={(e) => {
             const nextFamily = e.currentTarget.value;
-            if (isAutoMpnnLabel(node.label)) {
-              const meta = MPNN_VARIANT_OPTIONS.find((v) => v.family === nextFamily);
-              if (meta) onUpdateLabel?.(node.id, meta.shortLabel);
+            const nextLabel = resolveAutoModelLabelOnChange(
+              'web-protein-mpnn',
+              node.label,
+              nextFamily,
+            );
+            if (nextLabel) {
+              onUpdateLabel?.(node.id, nextLabel);
             }
             const validList = MPNN_CHECKPOINTS_BY_FAMILY[nextFamily] ?? MPNN_CHECKPOINTS_BY_FAMILY.solublempnn;
             const reconciledModel = validList.some((c) => c.value === mpnnModelName)

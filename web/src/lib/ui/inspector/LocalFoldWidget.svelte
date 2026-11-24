@@ -2,6 +2,7 @@
   import { ESMFOLD2_STEPS, LOCALFOLD_MODEL_OPTIONS } from '$lib/engine/registry';
   import { sanitizeParamsOnModeSwitch } from '$lib/engine/graph-utils';
   import { NUMERIC_SPECS, type NumericFieldSpec } from '$lib/engine/param-validation';
+  import { resolveAutoModelLabelOnChange } from '../node-display-helpers';
   import NumericInput from '../NumericInput.svelte';
   import type { MsaMode, SequenceSet, WorkflowNode } from '$lib/engine/types';
 
@@ -92,22 +93,6 @@
     return { seqCount, queryLength };
   }
 
-  function isAutoLocalFoldLabel(label: string | undefined): { auto: boolean; suffix: string } {
-    const raw = (label ?? '').trim();
-    if (!raw || raw === 'LocalFold') return { auto: true, suffix: '' };
-    const parenMatch = raw.match(/^(.*?)\s*(\((?:MPNN|Native|AF2|RF3)\))$/);
-    const base = parenMatch ? parenMatch[1].trim() : raw;
-    const suffix = parenMatch ? ` ${parenMatch[2]}` : '';
-    if (
-      base === 'LocalFold' ||
-      /^LocalFold\s*\([^)]+\)$/i.test(raw) ||
-      LOCALFOLD_MODEL_OPTIONS.some((m) => m.shortLabel === base || m.label === base)
-    ) {
-      return { auto: true, suffix: /^LocalFold\s*\(/i.test(raw) && !parenMatch ? '' : suffix };
-    }
-    return { auto: false, suffix: '' };
-  }
-
   let lfModelId = $derived(String(node.params.model ?? 'monomer'));
   let lfMeta = $derived(selectedLocalFoldMeta ?? LOCALFOLD_MODEL_OPTIONS[0]);
   let lfMsaMode = $derived(String(node.params.msaMode ?? 'single') as MsaMode);
@@ -140,10 +125,9 @@
     value={lfModelId}
     onchange={(e) => {
       const nextModel = e.currentTarget.value;
-      const nextMeta = LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === nextModel);
-      const autoInfo = isAutoLocalFoldLabel(node.label);
-      if (autoInfo.auto && nextMeta) {
-        onUpdateLabel?.(node.id, `${nextMeta.shortLabel}${autoInfo.suffix}`);
+      const nextLabel = resolveAutoModelLabelOnChange('localfold-af2', node.label, nextModel);
+      if (nextLabel) {
+        onUpdateLabel?.(node.id, nextLabel);
       }
       const sanitized = sanitizeParamsOnModeSwitch('localfold-af2', node.params, nextModel);
       onUpdate(node.id, sanitized);
