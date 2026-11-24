@@ -2,17 +2,10 @@
 
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from '$lib/engine/registry';
 import { getLegacyModelCardForAdapter } from '$lib/engine/model-cards';
-import { computeUploadDigest, isValidSha256Hex } from '$lib/engine/param-validation';
 import { PROTEIN_DOMAIN_ID } from '$lib/domains/protein-biopolymer';
 import type { KernelAdapterManifest, KernelModelCardSpec, ModelPlugin } from '$lib/kernel';
 
 const manifest = ADAPTER_REGISTRY['localfold-af2'] as unknown as KernelAdapterManifest;
-const TEMPLATE_UPLOAD_META_KEYS = new Set([
-  'missingTemplateUpload',
-  'expectedTemplateSha256',
-  'expectedTemplateFilename',
-]);
-const INLINE_TEMPLATE_SHARE_LIMIT = 1500;
 
 function numOr(val: unknown, fallback: number): number {
   if (val === undefined || val === null || typeof val === 'boolean') return fallback;
@@ -39,116 +32,6 @@ export const localfoldAf2Plugin: ModelPlugin = {
   share: {
     shortCode: 'f',
     yamlKeyAliases: { model: 'foldModel' },
-    prepareForShare: (params, { stripLargeUploads }) => {
-      const next: Record<string, unknown> = {};
-      let stripped = false;
-      let strippedTemplateText: string | null = null;
-
-      for (const [k, v] of Object.entries(params)) {
-        if (TEMPLATE_UPLOAD_META_KEYS.has(k)) continue;
-        if (
-          k === 'templatePdbText' &&
-          typeof v === 'string' &&
-          v.length > INLINE_TEMPLATE_SHARE_LIMIT &&
-          stripLargeUploads
-        ) {
-          stripped = true;
-          strippedTemplateText = v;
-          continue;
-        }
-        next[k] = v;
-      }
-
-      const existingShaRaw = String(params.expectedTemplateSha256 ?? '').trim().toLowerCase();
-      const existingExpName = String(params.expectedTemplateFilename ?? '').trim();
-      const curFilename = String(params.templateFilename ?? '').trim();
-      let uploadDigest: string | undefined;
-      let expectedFilename: string | undefined;
-
-      if (stripped && stripLargeUploads && strippedTemplateText !== null) {
-        delete next.templatePdbText;
-        const computedSha = computeUploadDigest(strippedTemplateText);
-        const expectedSha = existingShaRaw ? existingShaRaw : computedSha;
-        next.missingTemplateUpload = true;
-        next.expectedTemplateSha256 = expectedSha;
-        uploadDigest = expectedSha;
-        const expName = existingExpName || curFilename;
-        if (expName) {
-          next.expectedTemplateFilename = expName;
-          expectedFilename = expName;
-        }
-      } else {
-        const rawTpl = typeof params.templatePdbText === 'string' ? params.templatePdbText : '';
-        const hasMissingFlag = Boolean(params.missingTemplateUpload);
-        if (!rawTpl.trim() && (hasMissingFlag || existingShaRaw)) {
-          stripped = true;
-          delete next.templatePdbText;
-          if (hasMissingFlag) next.missingTemplateUpload = true;
-          if (existingShaRaw) {
-            next.expectedTemplateSha256 = existingShaRaw;
-            uploadDigest = existingShaRaw;
-          }
-          const expName = existingExpName || curFilename;
-          if (expName) {
-            next.expectedTemplateFilename = expName;
-            expectedFilename = expName;
-          }
-        } else if (rawTpl.trim() && existingShaRaw) {
-          const actualSha = computeUploadDigest(rawTpl);
-          if (!isValidSha256Hex(existingShaRaw) || actualSha !== existingShaRaw) {
-            if (hasMissingFlag) next.missingTemplateUpload = true;
-            next.expectedTemplateSha256 = existingShaRaw;
-            uploadDigest = existingShaRaw;
-            if (existingExpName) {
-              next.expectedTemplateFilename = existingExpName;
-              expectedFilename = existingExpName;
-            }
-          }
-        }
-      }
-
-      return {
-        params: next,
-        stripped,
-        ...(uploadDigest ? { uploadDigest } : {}),
-        ...(expectedFilename ? { expectedFilename } : {}),
-      };
-    },
-    restoreOmittedInlineAsset: (prevParams, nextParams) => {
-      if (String(nextParams.templatePdbText ?? '').trim()) return null;
-      const prevTplText = prevParams.templatePdbText;
-      if (typeof prevTplText !== 'string' || prevTplText.length <= INLINE_TEMPLATE_SHARE_LIMIT) {
-        return null;
-      }
-      const hasMissingMarker =
-        Boolean(nextParams.missingTemplateUpload) ||
-        Boolean(String(nextParams.expectedTemplateSha256 ?? '').trim());
-      if (!hasMissingMarker) return null;
-
-      const expectedSha = String(nextParams.expectedTemplateSha256 ?? '')
-        .trim()
-        .toLowerCase();
-      if (expectedSha) {
-        if (!isValidSha256Hex(expectedSha)) return null;
-        if (computeUploadDigest(prevTplText) !== expectedSha) return null;
-      }
-
-      const restored: Record<string, unknown> = {
-        ...nextParams,
-        templatePdbText: prevTplText,
-      };
-      const restoredFilename =
-        String(nextParams.templateFilename ?? '').trim() ||
-        String(nextParams.expectedTemplateFilename ?? '').trim() ||
-        String(prevParams.templateFilename ?? '').trim();
-      if (restoredFilename) {
-        restored.templateFilename = restoredFilename;
-      }
-      delete restored.missingTemplateUpload;
-      delete restored.expectedTemplateSha256;
-      delete restored.expectedTemplateFilename;
-      return restored;
-    },
   },
   catalog: {
     categoryId: 'fold',
