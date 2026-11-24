@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { ADAPTER_REGISTRY } from '$lib/engine/registry';
 import { filterCatalogCategories } from '$lib/engine/catalog';
 import { validateBioCapabilities } from '$lib/engine/bio-capabilities';
@@ -602,5 +604,655 @@ describe('GNINA 1.3 WebGPU integration', () => {
         (i) => i.nodeId === 'gnina' && i.code === 'gnina-invalid-dock-ccd' && i.severity === 'error',
       ),
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #93: Raw-PDB bond-order perception, valence budgets & donor retention
+// ---------------------------------------------------------------------------
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let gninaParseLigands: (text: string, format?: string) => any[];
+
+beforeAll(async () => {
+  const url = pathToFileURL(
+    resolve(__dirname, '../../../static/vendor/gnina/shared/structure.js'),
+  ).href;
+  const mod = await import(/* @vite-ignore */ url);
+  gninaParseLigands = mod.parseLigands;
+});
+
+interface ParsedSdfV2000 {
+  atoms: Array<{ idx: number; element: string; charge: number }>;
+  bonds: Array<{ a: number; b: number; order: number }>;
+  valences: number[];
+  bondOrderBetween: (i0: number, j0: number) => number | undefined;
+}
+
+function parseSdfV2000(sdf: string): ParsedSdfV2000 {
+  const lines = sdf.split(/\r?\n/);
+  const counts = lines[3];
+  const nAtoms = parseInt(counts.slice(0, 3).trim(), 10);
+  const nBonds = parseInt(counts.slice(3, 6).trim(), 10);
+  const atoms: Array<{ idx: number; element: string; charge: number }> = [];
+  for (let i = 0; i < nAtoms; i++) {
+    const line = lines[4 + i];
+    const element = line.slice(31, 34).trim();
+    atoms.push({ idx: i, element, charge: 0 });
+  }
+  const bonds: Array<{ a: number; b: number; order: number }> = [];
+  const valences = new Array<number>(nAtoms).fill(0);
+  for (let i = 0; i < nBonds; i++) {
+    const line = lines[4 + nAtoms + i];
+    const a = parseInt(line.slice(0, 3).trim(), 10) - 1;
+    const b = parseInt(line.slice(3, 6).trim(), 10) - 1;
+    const order = parseInt(line.slice(6, 9).trim(), 10);
+    bonds.push({ a, b, order });
+    const v = order === 4 ? 1.5 : order;
+    valences[a] += v;
+    valences[b] += v;
+  }
+  for (let i = 4 + nAtoms + nBonds; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('M  CHG')) {
+      const count = parseInt(line.slice(6, 9).trim(), 10);
+      for (let k = 0; k < count; k++) {
+        const idx1 = parseInt(line.slice(9 + k * 8, 13 + k * 8).trim(), 10) - 1;
+        const chg = parseInt(line.slice(13 + k * 8, 17 + k * 8).trim(), 10);
+        if (atoms[idx1]) atoms[idx1].charge = chg;
+      }
+    }
+  }
+  const bondOrderBetween = (i0: number, j0: number): number | undefined =>
+    bonds.find((b) => (b.a === i0 && b.b === j0) || (b.a === j0 && b.b === i0))?.order;
+  return { atoms, bonds, valences, bondOrderBetween };
+}
+
+function assertValidSdfValenceBudgets(sdf: string): ParsedSdfV2000 {
+  const parsed = parseSdfV2000(sdf);
+  for (let i = 0; i < parsed.atoms.length; i++) {
+    const { element, charge } = parsed.atoms[i];
+    const v = parsed.valences[i];
+    if (element === 'C') expect(v).toBeLessThanOrEqual(Math.max(1, 4 - Math.abs(charge)) + 1e-6);
+    else if (element === 'N') expect(v).toBeLessThanOrEqual(Math.max(1, 3 + charge) + 1e-6);
+    else if (element === 'O') expect(v).toBeLessThanOrEqual(Math.max(0, 2 + charge) + 1e-6);
+    else if (element === 'S') expect(v).toBeLessThanOrEqual(Math.max(2, 6 - Math.abs(charge)) + 1e-6);
+    else if (element === 'P') expect(v).toBeLessThanOrEqual(Math.max(3, 5 - Math.abs(charge)) + 1e-6);
+  }
+  return parsed;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function countPolarHydrogensForAtom(mol: any, atomIdx: number): number {
+  let n = 0;
+  for (let i = 0; i < mol.centerAtoms.length; i++) {
+    if (mol.centerAtoms[i].el === 'H' && mol.centerParents[i] === atomIdx) n++;
+  }
+  return n;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function countPolarHydrogensByEl(mol: any, el: string): number {
+  let n = 0;
+  for (let i = 0; i < mol.centerAtoms.length; i++) {
+    if (mol.centerAtoms[i].el === 'H' && mol.atoms[mol.centerParents[i]]?.el === el) n++;
+  }
+  return n;
+}
+
+function stripConectRecords(pdbText: string): string {
+  return pdbText
+    .split(/\r?\n/)
+    .filter((l) => !l.startsWith('CONECT'))
+    .join('\n');
+}
+
+function formatSynthHetatm(
+  serial: number,
+  name: string,
+  resName: string,
+  x: number,
+  y: number,
+  z: number,
+  el: string,
+  charge = '',
+): string {
+  const ser = String(serial).padStart(5, ' ');
+  const nm = name.length < 4 ? ` ${name.padEnd(3, ' ')}` : name.slice(0, 4);
+  const res = resName.padStart(3, ' ').slice(0, 3);
+  const c = (v: number) => v.toFixed(3).padStart(8, ' ');
+  const elem = el.padStart(2, ' ');
+  const chg = charge.padEnd(2, ' ').slice(0, 2);
+  return `HETATM${ser} ${nm} ${res} A   1    ${c(x)}${c(y)}${c(z)}  1.00 20.00          ${elem}${chg}`;
+}
+
+// Verbatim official RCSB HETATM + CONECT records for 1STP (BTN, 16 heavy atoms)
+const RCSB_1STP_BTN_PDB = [
+  'HETATM  903  C11 BTN A 300       9.051   4.576 -14.459  1.00 21.57           C  ',
+  'HETATM  904  O11 BTN A 300       8.147   5.373 -14.172  1.00 21.65           O  ',
+  'HETATM  905  O12 BTN A 300       8.697   3.498 -15.132  1.00 22.67           O  ',
+  'HETATM  906  C10 BTN A 300      10.321   4.413 -13.702  1.00 20.77           C  ',
+  'HETATM  907  C9  BTN A 300      10.215   3.247 -12.658  1.00 20.09           C  ',
+  'HETATM  908  C8  BTN A 300      11.487   2.972 -11.964  1.00 19.24           C  ',
+  'HETATM  909  C7  BTN A 300      11.627   1.558 -11.402  1.00 18.33           C  ',
+  'HETATM  910  C2  BTN A 300      10.923   1.086 -10.195  1.00 17.74           C  ',
+  'HETATM  911  S1  BTN A 300      10.884   2.103  -8.662  1.00 16.59           S  ',
+  'HETATM  912  C6  BTN A 300      10.299   0.620  -7.760  1.00 17.06           C  ',
+  'HETATM  913  C5  BTN A 300      11.142  -0.543  -8.274  1.00 17.47           C  ',
+  'HETATM  914  N1  BTN A 300      12.443  -0.631  -7.613  1.00 17.73           N  ',
+  'HETATM  915  C3  BTN A 300      13.467  -0.443  -8.453  1.00 17.95           C  ',
+  'HETATM  916  O3  BTN A 300      14.692  -0.446  -8.205  1.00 17.93           O  ',
+  'HETATM  917  N2  BTN A 300      12.974  -0.237  -9.695  1.00 17.92           N  ',
+  'HETATM  918  C4  BTN A 300      11.513  -0.265  -9.727  1.00 17.65           C  ',
+  'CONECT  903  904  905  906                                                      ',
+  'CONECT  904  903                                                                ',
+  'CONECT  905  903                                                                ',
+  'CONECT  906  903  907                                                           ',
+  'CONECT  907  906  908                                                           ',
+  'CONECT  908  907  909                                                           ',
+  'CONECT  909  908  910                                                           ',
+  'CONECT  910  909  911  918                                                      ',
+  'CONECT  911  910  912                                                           ',
+  'CONECT  912  911  913                                                           ',
+  'CONECT  913  912  914  918                                                      ',
+  'CONECT  914  913  915                                                           ',
+  'CONECT  915  914  916  917                                                      ',
+  'CONECT  916  915                                                                ',
+  'CONECT  917  915  918                                                           ',
+  'CONECT  918  910  913  917                                                      ',
+  'END',
+].join('\n');
+
+// Verbatim official RCSB HETATM + CONECT records for 1RX2 (FOL, 32 heavy atoms)
+const RCSB_1RX2_FOL_PDB = [
+  'HETATM 1271  N1  FOL A 161      30.407  41.127  12.334  1.00  8.73           N  ',
+  'HETATM 1272  C2  FOL A 161      31.183  39.960  12.347  1.00  9.79           C  ',
+  'HETATM 1273  NA2 FOL A 161      30.747  38.763  12.656  1.00 15.94           N  ',
+  'HETATM 1274  N3  FOL A 161      32.605  40.091  12.045  1.00  9.96           N  ',
+  'HETATM 1275  C4  FOL A 161      33.168  41.270  11.746  1.00 13.25           C  ',
+  'HETATM 1276  O4  FOL A 161      34.374  41.337  11.542  1.00 12.23           O  ',
+  'HETATM 1277  C4A FOL A 161      32.264  42.476  11.702  1.00 11.59           C  ',
+  'HETATM 1278  N5  FOL A 161      32.764  43.661  11.235  1.00 16.95           N  ',
+  'HETATM 1279  C6  FOL A 161      31.895  44.651  11.140  1.00 12.00           C  ',
+  'HETATM 1280  C7  FOL A 161      30.608  44.333  11.572  1.00 17.89           C  ',
+  'HETATM 1281  N8  FOL A 161      30.128  43.253  12.021  1.00 13.00           N  ',
+  'HETATM 1282  C8A FOL A 161      30.979  42.320  12.033  1.00 10.23           C  ',
+  'HETATM 1283  C9  FOL A 161      32.328  46.002  10.646  1.00 12.36           C  ',
+  'HETATM 1284  N10 FOL A 161      33.705  45.982  10.049  1.00  5.22           N  ',
+  'HETATM 1285  C11 FOL A 161      34.306  44.202   6.323  1.00 14.57           C  ',
+  'HETATM 1286  C12 FOL A 161      35.321  44.853   7.040  1.00 17.61           C  ',
+  'HETATM 1287  C13 FOL A 161      35.083  45.433   8.285  1.00 18.37           C  ',
+  'HETATM 1288  C14 FOL A 161      33.813  45.401   8.851  1.00  4.90           C  ',
+  'HETATM 1289  C15 FOL A 161      32.788  44.778   8.245  1.00  5.27           C  ',
+  'HETATM 1290  C16 FOL A 161      33.054  44.162   6.947  1.00  9.61           C  ',
+  'HETATM 1291  C   FOL A 161      34.568  43.576   5.020  1.00 24.98           C  ',
+  'HETATM 1292  O   FOL A 161      35.643  43.806   4.468  1.00 23.33           O  ',
+  'HETATM 1293  N   FOL A 161      33.743  42.614   4.530  1.00 24.29           N  ',
+  'HETATM 1294  CA  FOL A 161      33.724  41.900   3.170  1.00 27.12           C  ',
+  'HETATM 1295  CB  FOL A 161      34.090  40.359   3.384  1.00 33.48           C  ',
+  'HETATM 1296  CG  FOL A 161      35.338  39.693   2.575  1.00 51.31           C  ',
+  'HETATM 1297  CD  FOL A 161      35.035  38.179   2.282  1.00 73.27           C  ',
+  'HETATM 1298  OE1 FOL A 161      33.833  38.054   1.926  1.00 81.18           O  ',
+  'HETATM 1299  OE2 FOL A 161      35.859  37.227   2.389  1.00 81.20           O  ',
+  'HETATM 1300  CT  FOL A 161      32.282  41.861   2.758  1.00 19.52           C  ',
+  'HETATM 1301  O1  FOL A 161      31.411  41.707   3.598  1.00 18.61           O  ',
+  'HETATM 1302  O2  FOL A 161      32.016  41.926   1.554  1.00 17.81           O  ',
+  'CONECT 1271 1272 1282                                                           ',
+  'CONECT 1272 1271 1273 1274                                                      ',
+  'CONECT 1273 1272                                                                ',
+  'CONECT 1274 1272 1275                                                           ',
+  'CONECT 1275 1274 1276 1277                                                      ',
+  'CONECT 1276 1275                                                                ',
+  'CONECT 1277 1275 1278 1282                                                      ',
+  'CONECT 1278 1277 1279                                                           ',
+  'CONECT 1279 1278 1280 1283                                                      ',
+  'CONECT 1280 1279 1281                                                           ',
+  'CONECT 1281 1280 1282                                                           ',
+  'CONECT 1282 1271 1277 1281                                                      ',
+  'CONECT 1283 1279 1284                                                           ',
+  'CONECT 1284 1283 1288                                                           ',
+  'CONECT 1285 1286 1290 1291                                                      ',
+  'CONECT 1286 1285 1287                                                           ',
+  'CONECT 1287 1286 1288                                                           ',
+  'CONECT 1288 1284 1287 1289                                                      ',
+  'CONECT 1289 1288 1290                                                           ',
+  'CONECT 1290 1285 1289                                                           ',
+  'CONECT 1291 1285 1292 1293                                                      ',
+  'CONECT 1292 1291                                                                ',
+  'CONECT 1293 1291 1294                                                           ',
+  'CONECT 1294 1293 1295 1300                                                      ',
+  'CONECT 1295 1294 1296                                                           ',
+  'CONECT 1296 1295 1297                                                           ',
+  'CONECT 1297 1296 1298 1299                                                      ',
+  'CONECT 1298 1297                                                                ',
+  'CONECT 1299 1297                                                                ',
+  'CONECT 1300 1294 1301 1302                                                      ',
+  'CONECT 1301 1300                                                                ',
+  'CONECT 1302 1300                                                                ',
+  'END',
+].join('\n');
+
+// Verbatim official RCSB HETATM + CONECT records for 1HSG (MK1, 45 heavy atoms)
+const RCSB_1HSG_MK1_PDB = [
+  'HETATM 1517  N1  MK1 B 902       9.280  23.763   3.004  1.00 28.25           N  ',
+  'HETATM 1518  C1  MK1 B 902       9.498  23.983   4.459  1.00 30.30           C  ',
+  'HETATM 1519  C2  MK1 B 902      10.591  24.905   4.962  1.00 27.27           C  ',
+  'HETATM 1520  C3  MK1 B 902      10.591  24.864   6.466  1.00 28.85           C  ',
+  'HETATM 1521  O1  MK1 B 902      10.937  23.849   7.057  1.00 29.59           O  ',
+  'HETATM 1522  N2  MK1 B 902      10.193  25.953   7.094  1.00 22.29           N  ',
+  'HETATM 1523  C4  MK1 B 902      10.145  26.250   8.490  1.00 23.47           C  ',
+  'HETATM 1524  C5  MK1 B 902       9.379  27.577   8.641  1.00 27.66           C  ',
+  'HETATM 1525  C6  MK1 B 902      11.398  26.347   9.074  1.00 21.71           C  ',
+  'HETATM 1526  C7  MK1 B 902       9.364  25.283   9.268  1.00 22.75           C  ',
+  'HETATM 1527  N3  MK1 B 902      11.819  24.282   4.355  1.00 28.91           N  ',
+  'HETATM 1528  C8  MK1 B 902      11.753  23.776   2.961  1.00 26.24           C  ',
+  'HETATM 1529  C9  MK1 B 902      10.440  23.182   2.493  1.00 27.47           C  ',
+  'HETATM 1530  C10 MK1 B 902      13.083  24.963   4.552  1.00 20.86           C  ',
+  'HETATM 1531  C11 MK1 B 902      14.203  24.064   5.078  1.00 21.68           C  ',
+  'HETATM 1532  O2  MK1 B 902      15.242  24.884   4.634  1.00 15.87           O  ',
+  'HETATM 1533  C12 MK1 B 902      14.440  23.761   6.569  1.00 21.49           C  ',
+  'HETATM 1534  C13 MK1 B 902      15.573  22.821   7.005  1.00 26.89           C  ',
+  'HETATM 1535  C14 MK1 B 902      15.644  22.664   8.534  1.00 28.67           C  ',
+  'HETATM 1536  C15 MK1 B 902      16.733  21.750   8.961  1.00 26.89           C  ',
+  'HETATM 1537  C16 MK1 B 902      18.058  21.916   8.553  1.00 29.22           C  ',
+  'HETATM 1538  C17 MK1 B 902      19.037  21.016   8.947  1.00 29.22           C  ',
+  'HETATM 1539  C18 MK1 B 902      18.673  19.939   9.758  1.00 30.97           C  ',
+  'HETATM 1540  C19 MK1 B 902      17.347  19.773  10.176  1.00 29.25           C  ',
+  'HETATM 1541  C20 MK1 B 902      16.374  20.687   9.772  1.00 29.96           C  ',
+  'HETATM 1542  C21 MK1 B 902      15.447  21.440   6.373  1.00 29.35           C  ',
+  'HETATM 1543  O3  MK1 B 902      14.367  20.831   6.397  1.00 32.66           O  ',
+  'HETATM 1544  N4  MK1 B 902      16.583  20.913   5.924  1.00 31.19           N  ',
+  'HETATM 1545  C22 MK1 B 902      16.692  19.500   5.604  1.00 29.22           C  ',
+  'HETATM 1546  C23 MK1 B 902      18.067  18.945   5.936  1.00 28.82           C  ',
+  'HETATM 1547  O4  MK1 B 902      19.061  19.938   5.729  1.00 28.32           O  ',
+  'HETATM 1548  C24 MK1 B 902      18.226  17.726   5.057  1.00 32.05           C  ',
+  'HETATM 1549  C25 MK1 B 902      17.476  17.904   3.760  1.00 31.29           C  ',
+  'HETATM 1550  C26 MK1 B 902      17.500  17.363   2.496  1.00 32.00           C  ',
+  'HETATM 1551  C27 MK1 B 902      16.613  17.872   1.541  1.00 28.00           C  ',
+  'HETATM 1552  C28 MK1 B 902      15.722  18.906   1.865  1.00 29.01           C  ',
+  'HETATM 1553  C29 MK1 B 902      15.683  19.479   3.129  1.00 27.70           C  ',
+  'HETATM 1554  C30 MK1 B 902      16.504  19.061   4.128  1.00 31.86           C  ',
+  'HETATM 1555  C31 MK1 B 902       8.033  23.100   2.604  1.00 36.25           C  ',
+  'HETATM 1556  C32 MK1 B 902       6.666  23.739   2.876  1.00 42.75           C  ',
+  'HETATM 1557  C33 MK1 B 902       6.158  24.808   2.124  1.00 47.41           C  ',
+  'HETATM 1558  N5  MK1 B 902       4.911  25.430   2.300  1.00 51.38           N  ',
+  'HETATM 1559  C34 MK1 B 902       4.207  24.839   3.348  1.00 50.60           C  ',
+  'HETATM 1560  C35 MK1 B 902       4.654  23.774   4.136  1.00 49.34           C  ',
+  'HETATM 1561  C36 MK1 B 902       5.905  23.211   3.897  1.00 44.71           C  ',
+  'CONECT 1517 1518 1529 1555                                                      ',
+  'CONECT 1518 1517 1519                                                           ',
+  'CONECT 1519 1518 1520 1527                                                      ',
+  'CONECT 1520 1519 1521 1522                                                      ',
+  'CONECT 1521 1520                                                                ',
+  'CONECT 1522 1520 1523                                                           ',
+  'CONECT 1523 1522 1524 1525 1526                                                 ',
+  'CONECT 1524 1523                                                                ',
+  'CONECT 1525 1523                                                                ',
+  'CONECT 1526 1523                                                                ',
+  'CONECT 1527 1519 1528 1530                                                      ',
+  'CONECT 1528 1527 1529                                                           ',
+  'CONECT 1529 1517 1528                                                           ',
+  'CONECT 1530 1527 1531                                                           ',
+  'CONECT 1531 1530 1532 1533                                                      ',
+  'CONECT 1532 1531                                                                ',
+  'CONECT 1533 1531 1534                                                           ',
+  'CONECT 1534 1533 1535 1542                                                      ',
+  'CONECT 1535 1534 1536                                                           ',
+  'CONECT 1536 1535 1537 1541                                                      ',
+  'CONECT 1537 1536 1538                                                           ',
+  'CONECT 1538 1537 1539                                                           ',
+  'CONECT 1539 1538 1540                                                           ',
+  'CONECT 1540 1539 1541                                                           ',
+  'CONECT 1541 1536 1540                                                           ',
+  'CONECT 1542 1534 1543 1544                                                      ',
+  'CONECT 1543 1542                                                                ',
+  'CONECT 1544 1542 1545                                                           ',
+  'CONECT 1545 1544 1546 1554                                                      ',
+  'CONECT 1546 1545 1547 1548                                                      ',
+  'CONECT 1547 1546                                                                ',
+  'CONECT 1548 1546 1549                                                           ',
+  'CONECT 1549 1548 1550 1554                                                      ',
+  'CONECT 1550 1549 1551                                                           ',
+  'CONECT 1551 1550 1552                                                           ',
+  'CONECT 1552 1551 1553                                                           ',
+  'CONECT 1553 1552 1554                                                           ',
+  'CONECT 1554 1545 1549 1553                                                      ',
+  'CONECT 1555 1517 1556                                                           ',
+  'CONECT 1556 1555 1557 1561                                                      ',
+  'CONECT 1557 1556 1558                                                           ',
+  'CONECT 1558 1557 1559                                                           ',
+  'CONECT 1559 1558 1560                                                           ',
+  'CONECT 1560 1559 1561                                                           ',
+  'CONECT 1561 1556 1560                                                           ',
+  'END',
+].join('\n');
+
+describe('Issue #93: GNINA raw-PDB bond-order heuristic, valence budgets & donor retention', () => {
+  it('1STP/BTN: enforces ureido C3 valence=4 and retains both N1/N2 N–H donors (with and without CONECT)', () => {
+    for (const pdb of [RCSB_1STP_BTN_PDB, stripConectRecords(RCSB_1STP_BTN_PDB)]) {
+      const prep = extractHoloReceptorAndLigands(pdb, { ligandCode: 'BTN' });
+      expect(prep.selectedLigand?.heavyAtomCount).toBe(16);
+      const sdf = prep.selectedLigandSdf!;
+      const parsed = assertValidSdfValenceBudgets(sdf);
+      // C11 (idx 0) = 4, N1 (idx 11) = 2, C3 (idx 12) = 4, N2 (idx 14) = 2
+      expect(parsed.valences[0]).toBe(4);
+      expect(parsed.valences[11]).toBe(2);
+      expect(parsed.valences[12]).toBe(4);
+      expect(parsed.valences[14]).toBe(2);
+      expect(parsed.bondOrderBetween(12, 13)).toBe(2); // C3=O3
+      expect(parsed.bondOrderBetween(11, 12)).toBe(1); // N1-C3
+      expect(parsed.bondOrderBetween(12, 14)).toBe(1); // C3-N2
+
+      const [mol] = gninaParseLigands(sdf, 'sdf');
+      const donorNs = mol.atoms.filter((a: { el: string; donor: boolean }) => a.el === 'N' && a.donor);
+      expect(donorNs.map((a: { index: number }) => a.index)).toEqual([11, 14]);
+      expect(countPolarHydrogensByEl(mol, 'N')).toBe(2);
+      expect(countPolarHydrogensByEl(mol, 'O')).toBe(1);
+      expect(mol.atoms.filter((a: { el: string; channel: number }) => a.el === 'C' && (a.channel === 16 || a.channel === 17))).toHaveLength(0);
+      expect(mol.rotors).toBe(5);
+    }
+  });
+
+  it('1RX2/FOL: avoids hypervalent C4/C8A/C14/amide C, keeps C2–NA2 single (2 H), and detects 1.461 Å benzene aromaticity', () => {
+    for (const pdb of [RCSB_1RX2_FOL_PDB, stripConectRecords(RCSB_1RX2_FOL_PDB)]) {
+      const prep = extractHoloReceptorAndLigands(pdb, { ligandCode: 'FOL' });
+      expect(prep.selectedLigand?.heavyAtomCount).toBe(32);
+      const sdf = prep.selectedLigandSdf!;
+      const parsed = assertValidSdfValenceBudgets(sdf);
+      // C2 (idx 1) - NA2 (idx 2) must stay single bond despite 1.311 Å length
+      expect(parsed.bondOrderBetween(1, 2)).toBe(1);
+      // Amide C (idx 20) - N (idx 22) must stay single bond
+      expect(parsed.bondOrderBetween(20, 22)).toBe(1);
+      // Both pyrazine (C4A..C8A) and benzene (C11..C16, max 1.461 Å) are marked order 4
+      const aromaticBonds = parsed.bonds.filter((b) => b.order === 4);
+      expect(aromaticBonds).toHaveLength(12);
+
+      const [mol] = gninaParseLigands(sdf, 'sdf');
+      // N1 (0), NA2 (2), N3 (3: C2-N3 is 1.460 Å in 1RX2 raw X-ray vs 1.30 Å in FOL_ideal), N10 (13), amide N (22)
+      const donorNs = mol.atoms.filter((a: { el: string; donor: boolean }) => a.el === 'N' && a.donor);
+      expect(donorNs.map((a: { index: number }) => a.index)).toEqual([0, 2, 3, 13, 22]);
+      expect(countPolarHydrogensForAtom(mol, 2)).toBe(2); // NA2 -NH2
+      expect(countPolarHydrogensForAtom(mol, 0)).toBe(1); // N1
+      expect(countPolarHydrogensForAtom(mol, 13)).toBe(1); // N10
+      expect(countPolarHydrogensForAtom(mol, 22)).toBe(1); // amide N
+      expect(countPolarHydrogensByEl(mol, 'N')).toBe(6);
+      const aromCarbons = mol.atoms.filter(
+        (a: { el: string; channel: number }) => a.el === 'C' && (a.channel === 16 || a.channel === 17),
+      );
+      expect(aromCarbons).toHaveLength(10); // 4 pyrazine C + 6 benzene C
+    }
+  });
+
+  it('1HSG/MK1: preserves amide C3–N2 & C21–N4 single bonds, N2/N4 donors, and phenyl + pyridine aromaticity', () => {
+    for (const pdb of [RCSB_1HSG_MK1_PDB, stripConectRecords(RCSB_1HSG_MK1_PDB)]) {
+      const prep = extractHoloReceptorAndLigands(pdb, { ligandCode: 'MK1' });
+      expect(prep.selectedLigand?.heavyAtomCount).toBe(45);
+      const sdf = prep.selectedLigandSdf!;
+      const parsed = assertValidSdfValenceBudgets(sdf);
+      // C3 (idx 3) - N2 (idx 5) and C21 (idx 25) - N4 (idx 27) stay order 1
+      expect(parsed.bondOrderBetween(3, 5)).toBe(1);
+      expect(parsed.bondOrderBetween(25, 27)).toBe(1);
+
+      const [mol] = gninaParseLigands(sdf, 'sdf');
+      const donorNs = mol.atoms.filter((a: { el: string; donor: boolean }) => a.el === 'N' && a.donor);
+      expect(donorNs.map((a: { index: number }) => a.index)).toEqual([5, 27]);
+      expect(countPolarHydrogensByEl(mol, 'N')).toBe(2);
+      expect(countPolarHydrogensByEl(mol, 'O')).toBe(2);
+      const aromCarbons = mol.atoms.filter(
+        (a: { el: string; channel: number }) => a.el === 'C' && (a.channel === 16 || a.channel === 17),
+      );
+      expect(aromCarbons).toHaveLength(11); // 6 phenyl + 5 pyridine
+    }
+  });
+
+  it('distorted X-ray planar 6-ring (1.48 Å) is aromatic while 1.52 Å planar and 1.47 Å non-planar rings stay non-aromatic', () => {
+    // 1) Planar 6-ring with 1.48 Å bonds (within 1.49 Å ceiling)
+    const planar148 = [
+      [0.0, 0.0, 0.0],
+      [1.39, 0.0, 0.0],
+      [2.085, 1.204, 0.0],
+      [1.39, 2.408, 0.0],
+      [0.0, 2.408, 0.0],
+      // Midpoint y = 1.204, x = -sqrt(1.48^2 - 1.204^2) = -0.8607 -> edges (4,5) & (5,0) = 1.480 Å
+      [-0.86, 1.204, 0.0],
+    ];
+    const dist148Pdb = [
+      ...planar148.map(([x, y, z], i) => formatSynthHetatm(i + 1, `C${i + 1}`, 'AR6', x, y, z, 'C')),
+      'END',
+    ].join('\n');
+    const prep148 = extractHoloReceptorAndLigands(dist148Pdb, { ligandCode: 'AR6' });
+    const parsed148 = assertValidSdfValenceBudgets(prep148.selectedLigandSdf!);
+    expect(parsed148.bonds.filter((b) => b.order === 4)).toHaveLength(6);
+    const [mol148] = gninaParseLigands(prep148.selectedLigandSdf!, 'sdf');
+    expect(mol148.atoms.filter((a: { el: string; channel: number }) => a.el === 'C' && a.channel === 16)).toHaveLength(6);
+
+    // 2) Planar cyclohexane (1.52 Å bonds) -> NOT aromatic
+    const r152 = 1.52;
+    const planar152Pdb = [
+      ...Array.from({ length: 6 }, (_, k) => {
+        const ang = (k * Math.PI) / 3;
+        return formatSynthHetatm(k + 1, `C${k + 1}`, 'CY6', r152 * Math.cos(ang), r152 * Math.sin(ang), 0, 'C');
+      }),
+      'END',
+    ].join('\n');
+    const prep152 = extractHoloReceptorAndLigands(planar152Pdb, { ligandCode: 'CY6' });
+    const parsed152 = assertValidSdfValenceBudgets(prep152.selectedLigandSdf!);
+    expect(parsed152.bonds.filter((b) => b.order === 4)).toHaveLength(0);
+
+    // 3) Non-planar puckered 6-ring with <= 1.47 Å bonds (dPlane > 0.18 Å) -> NOT aromatic
+    const puckeredCoords: Array<[number, number, number]> = [
+      [1.39, 0.0, 0.0],
+      [0.695, 1.204, 0.0],
+      [-0.695, 1.204, 0.0],
+      [-1.39, 0.0, 0.42],
+      [-0.695, -1.204, 0.0],
+      [0.695, -1.204, 0.0],
+    ];
+    const puckeredPdb = [
+      ...puckeredCoords.map(([x, y, z], i) => formatSynthHetatm(i + 1, `C${i + 1}`, 'PUK', x, y, z, 'C')),
+      'END',
+    ].join('\n');
+    const prepPuk = extractHoloReceptorAndLigands(puckeredPdb, { ligandCode: 'PUK' });
+    const parsedPuk = assertValidSdfValenceBudgets(prepPuk.selectedLigandSdf!);
+    expect(parsedPuk.bonds.filter((b) => b.order === 4)).toHaveLength(0);
+  });
+
+  it('2-pyridone (1.45 Å planar ring with exocyclic C=O) is NOT falsely aromatized', () => {
+    const r = 1.45;
+    const coords: Array<[number, number, number]> = Array.from({ length: 6 }, (_, k) => {
+      const ang = (k * Math.PI) / 3;
+      return [r * Math.cos(ang), r * Math.sin(ang), 0];
+    });
+    const pyridonePdb = [
+      formatSynthHetatm(1, 'N1', 'PYD', coords[0][0], coords[0][1], 0, 'N'),
+      formatSynthHetatm(2, 'C2', 'PYD', coords[1][0], coords[1][1], 0, 'C'),
+      formatSynthHetatm(3, 'C3', 'PYD', coords[2][0], coords[2][1], 0, 'C'),
+      formatSynthHetatm(4, 'C4', 'PYD', coords[3][0], coords[3][1], 0, 'C'),
+      formatSynthHetatm(5, 'C5', 'PYD', coords[4][0], coords[4][1], 0, 'C'),
+      formatSynthHetatm(6, 'C6', 'PYD', coords[5][0], coords[5][1], 0, 'C'),
+      // Exocyclic C2=O2 at 1.23 Å radially outward from C2 (60 deg)
+      formatSynthHetatm(7, 'O2', 'PYD', (r + 1.23) * Math.cos(Math.PI / 3), (r + 1.23) * Math.sin(Math.PI / 3), 0, 'O'),
+      'END',
+    ].join('\n');
+    const prep = extractHoloReceptorAndLigands(pyridonePdb, { ligandCode: 'PYD' });
+    const parsed = assertValidSdfValenceBudgets(prep.selectedLigandSdf!);
+    expect(parsed.bondOrderBetween(1, 6)).toBe(2); // C2=O2
+    expect(parsed.bonds.filter((b) => b.order === 4)).toHaveLength(0);
+  });
+
+  it('perceives true imine (C=N, 1.28 Å), true nitrile (C#N, 1.16 Å), and protects formamide C–N', () => {
+    // 1) True terminal imine R2C=NH: C(CH3)2=NH with C=N = 1.28 Å
+    const iminePdb = [
+      formatSynthHetatm(1, 'C1', 'IMN', 0.0, 0.0, 0.0, 'C'),
+      formatSynthHetatm(2, 'C2', 'IMN', -0.75, 1.3, 0.0, 'C'),
+      formatSynthHetatm(3, 'C3', 'IMN', -0.75, -1.3, 0.0, 'C'),
+      formatSynthHetatm(4, 'N1', 'IMN', 1.28, 0.0, 0.0, 'N'),
+      'END',
+    ].join('\n');
+    const prepImn = extractHoloReceptorAndLigands(iminePdb, { ligandCode: 'IMN' });
+    const parsedImn = assertValidSdfValenceBudgets(prepImn.selectedLigandSdf!);
+    expect(parsedImn.bondOrderBetween(0, 3)).toBe(2);
+    const [molImn] = gninaParseLigands(prepImn.selectedLigandSdf!, 'sdf');
+    expect(molImn.atoms[3].donor).toBe(true); // =NH has 1 H
+    expect(countPolarHydrogensForAtom(molImn, 3)).toBe(1);
+
+    // Internal imine R2C=N-CH3 (1.28 Å): 0 N–H donors
+    const intIminePdb = [
+      formatSynthHetatm(1, 'C1', 'IMI', 0.0, 0.0, 0.0, 'C'),
+      formatSynthHetatm(2, 'C2', 'IMI', -0.75, 1.3, 0.0, 'C'),
+      formatSynthHetatm(3, 'C3', 'IMI', -0.75, -1.3, 0.0, 'C'),
+      formatSynthHetatm(4, 'N1', 'IMI', 1.28, 0.0, 0.0, 'N'),
+      formatSynthHetatm(5, 'C4', 'IMI', 2.0, 1.25, 0.0, 'C'),
+      'END',
+    ].join('\n');
+    const prepIntImn = extractHoloReceptorAndLigands(intIminePdb, { ligandCode: 'IMI' });
+    const parsedIntImn = assertValidSdfValenceBudgets(prepIntImn.selectedLigandSdf!);
+    expect(parsedIntImn.bondOrderBetween(0, 3)).toBe(2);
+    const [molIntImn] = gninaParseLigands(prepIntImn.selectedLigandSdf!, 'sdf');
+    expect(countPolarHydrogensByEl(molIntImn, 'N')).toBe(0);
+
+    // 2) True nitrile CH3-C#N (1.16 Å)
+    const nitrilePdb = [
+      formatSynthHetatm(1, 'C1', 'NIT', -1.46, 0.0, 0.0, 'C'),
+      formatSynthHetatm(2, 'C2', 'NIT', 0.0, 0.0, 0.0, 'C'),
+      formatSynthHetatm(3, 'N1', 'NIT', 1.16, 0.0, 0.0, 'N'),
+      'END',
+    ].join('\n');
+    const prepNit = extractHoloReceptorAndLigands(nitrilePdb, { ligandCode: 'NIT' });
+    const parsedNit = assertValidSdfValenceBudgets(prepNit.selectedLigandSdf!);
+    expect(parsedNit.bondOrderBetween(1, 2)).toBe(3);
+    const [molNit] = gninaParseLigands(prepNit.selectedLigandSdf!, 'sdf');
+    expect(countPolarHydrogensByEl(molNit, 'N')).toBe(0);
+    expect(molNit.atoms[2].acceptor).toBe(true);
+
+    // 3) Formamide H-C(=O)-NH-CH3 (implicit H on C, C=O 1.23 Å, C-N 1.34 Å) -> C-N stays order 1
+    const formamidePdb = [
+      formatSynthHetatm(1, 'C1', 'FRM', 0.0, 0.0, 0.0, 'C'),
+      formatSynthHetatm(2, 'O1', 'FRM', 0.0, 1.23, 0.0, 'O'),
+      formatSynthHetatm(3, 'N1', 'FRM', 1.16, -0.67, 0.0, 'N'),
+      formatSynthHetatm(4, 'C2', 'FRM', 2.42, 0.05, 0.0, 'C'),
+      'END',
+    ].join('\n');
+    const prepFrm = extractHoloReceptorAndLigands(formamidePdb, { ligandCode: 'FRM' });
+    const parsedFrm = assertValidSdfValenceBudgets(prepFrm.selectedLigandSdf!);
+    expect(parsedFrm.bondOrderBetween(0, 1)).toBe(2); // C=O
+    expect(parsedFrm.bondOrderBetween(0, 2)).toBe(1); // C-N protected
+    const [molFrm] = gninaParseLigands(prepFrm.selectedLigandSdf!, 'sdf');
+    expect(countPolarHydrogensByEl(molFrm, 'N')).toBe(1);
+  });
+
+  it('prioritizes neutral O over shorter -1-charged O in carboxylates and handles sulfonamides cleanly', () => {
+    // Acetate where O2 (charge 1-) is 1.24 Å and O1 (charge 0) is 1.26 Å
+    const carboxylatePdb = [
+      formatSynthHetatm(1, 'C1', 'CBN', -1.5, 0.0, 0.0, 'C'),
+      formatSynthHetatm(2, 'C2', 'CBN', 0.0, 0.0, 0.0, 'C'),
+      formatSynthHetatm(3, 'O1', 'CBN', 0.63, 1.09, 0.0, 'O'),
+      formatSynthHetatm(4, 'O2', 'CBN', 0.62, -1.07, 0.0, 'O', '1-'),
+      'END',
+    ].join('\n');
+    const prepAce = extractHoloReceptorAndLigands(carboxylatePdb, { ligandCode: 'CBN' });
+    const parsedAce = assertValidSdfValenceBudgets(prepAce.selectedLigandSdf!);
+    expect(parsedAce.atoms[3].charge).toBe(-1);
+    expect(parsedAce.bondOrderBetween(1, 2)).toBe(2); // C2=O1 (neutral)
+    expect(parsedAce.bondOrderBetween(1, 3)).toBe(1); // C2-O2(-)
+    const [molAce] = gninaParseLigands(prepAce.selectedLigandSdf!, 'sdf');
+    expect(countPolarHydrogensByEl(molAce, 'O')).toBe(0);
+    expect(molAce.atoms[2].acceptor).toBe(true);
+    expect(molAce.atoms[3].acceptor).toBe(true);
+
+    // Explicit-H carboxylic acid CH3-C(=O)-OH where C-O2(H) = 1.237 Å < C-O1 = 1.259 Å:
+    // O2 already reaches valence 2 via O2-HO2, so C=O1 must still be promoted (avoiding false gem-diol).
+    const explicitHAcidPdb = [
+      formatSynthHetatm(1, 'C1', 'ACD', -1.5, 0.0, 0.0, 'C'),
+      formatSynthHetatm(2, 'C2', 'ACD', 0.0, 0.0, 0.0, 'C'),
+      formatSynthHetatm(3, 'O1', 'ACD', 0.63, 1.09, 0.0, 'O'),
+      formatSynthHetatm(4, 'O2', 'ACD', 0.619, -1.071, 0.0, 'O'),
+      formatSynthHetatm(5, 'HO2', 'ACD', 1.589, -1.071, 0.0, 'H'),
+      'END',
+    ].join('\n');
+    const prepAcid = extractHoloReceptorAndLigands(explicitHAcidPdb, { ligandCode: 'ACD' });
+    const parsedAcid = assertValidSdfValenceBudgets(prepAcid.selectedLigandSdf!);
+    expect(parsedAcid.bondOrderBetween(1, 2)).toBe(2); // C2=O1 promoted
+    expect(parsedAcid.bondOrderBetween(1, 3)).toBe(1); // C2-O2(H) stays single
+    expect(parsedAcid.valences[1]).toBe(4); // C2 valence = 4
+    expect(parsedAcid.valences[2]).toBe(2); // O1 valence = 2
+    expect(parsedAcid.valences[3]).toBe(2); // O2 valence = 2
+    const [molAcid] = gninaParseLigands(prepAcid.selectedLigandSdf!, 'sdf');
+    expect(countPolarHydrogensByEl(molAcid, 'O')).toBe(1);
+
+    // Sulfonamide CH3-SO2-NH2: S valence = 6, two S=O order 2, N retains 2 N–H
+    const sulfonamidePdb = [
+      formatSynthHetatm(1, 'C1', 'SFA', -1.78, 0.0, 0.0, 'C'),
+      formatSynthHetatm(2, 'S1', 'SFA', 0.0, 0.0, 0.0, 'S'),
+      formatSynthHetatm(3, 'O1', 'SFA', 0.5, 1.35, 0.0, 'O'),
+      formatSynthHetatm(4, 'O2', 'SFA', 0.5, -1.35, 0.0, 'O'),
+      formatSynthHetatm(5, 'N1', 'SFA', 0.9, 0.0, 1.38, 'N'),
+      'END',
+    ].join('\n');
+    const prepSfa = extractHoloReceptorAndLigands(sulfonamidePdb, { ligandCode: 'SFA' });
+    const parsedSfa = assertValidSdfValenceBudgets(prepSfa.selectedLigandSdf!);
+    expect(parsedSfa.valences[1]).toBe(6);
+    expect(parsedSfa.bondOrderBetween(1, 2)).toBe(2);
+    expect(parsedSfa.bondOrderBetween(1, 3)).toBe(2);
+    expect(parsedSfa.bondOrderBetween(1, 4)).toBe(1);
+    const [molSfa] = gninaParseLigands(prepSfa.selectedLigandSdf!, 'sdf');
+    expect(countPolarHydrogensForAtom(molSfa, 4)).toBe(2);
+  });
+
+  it('multi-N resonance: protects 2-aminopyrimidine -NH2 and neutral guanidine while allowing 1+ guanidinium', () => {
+    // 2-aminopyrimidine with 1.31 Å exocyclic C2-NH2
+    const r = 1.38;
+    const ringCoords: Array<[number, number, number]> = Array.from({ length: 6 }, (_, k) => {
+      const ang = (k * Math.PI) / 3;
+      return [r * Math.cos(ang), r * Math.sin(ang), 0];
+    });
+    const aminoPyrimPdb = [
+      formatSynthHetatm(1, 'N1', '2AP', ringCoords[0][0], ringCoords[0][1], 0, 'N'),
+      formatSynthHetatm(2, 'C2', '2AP', ringCoords[1][0], ringCoords[1][1], 0, 'C'),
+      formatSynthHetatm(3, 'N3', '2AP', ringCoords[2][0], ringCoords[2][1], 0, 'N'),
+      formatSynthHetatm(4, 'C4', '2AP', ringCoords[3][0], ringCoords[3][1], 0, 'C'),
+      formatSynthHetatm(5, 'C5', '2AP', ringCoords[4][0], ringCoords[4][1], 0, 'C'),
+      formatSynthHetatm(6, 'C6', '2AP', ringCoords[5][0], ringCoords[5][1], 0, 'C'),
+      formatSynthHetatm(7, 'NA2', '2AP', (r + 1.31) * Math.cos(Math.PI / 3), (r + 1.31) * Math.sin(Math.PI / 3), 0, 'N'),
+      'END',
+    ].join('\n');
+    const prep2ap = extractHoloReceptorAndLigands(aminoPyrimPdb, { ligandCode: '2AP' });
+    const parsed2ap = assertValidSdfValenceBudgets(prep2ap.selectedLigandSdf!);
+    expect(parsed2ap.bondOrderBetween(1, 6)).toBe(1); // C2-NA2 stays order 1
+    expect(parsed2ap.valences[1]).toBe(4);
+    const [mol2ap] = gninaParseLigands(prep2ap.selectedLigandSdf!, 'sdf');
+    expect(countPolarHydrogensForAtom(mol2ap, 6)).toBe(2);
+
+    // Neutral guanidine vs protonated 1+ guanidinium (all C-N = 1.33 Å)
+    const guanNeutralPdb = [
+      formatSynthHetatm(1, 'C1', 'GUD', 0.0, 0.0, 0.0, 'C'),
+      formatSynthHetatm(2, 'N1', 'GUD', 1.33, 0.0, 0.0, 'N'),
+      formatSynthHetatm(3, 'N2', 'GUD', -0.665, 1.152, 0.0, 'N'),
+      formatSynthHetatm(4, 'N3', 'GUD', -0.665, -1.152, 0.0, 'N'),
+      'END',
+    ].join('\n');
+    const prepGuaN = extractHoloReceptorAndLigands(guanNeutralPdb, { ligandCode: 'GUD' });
+    const parsedGuaN = assertValidSdfValenceBudgets(prepGuaN.selectedLigandSdf!);
+    expect(parsedGuaN.valences[0]).toBeLessThanOrEqual(4);
+    const [molGuaN] = gninaParseLigands(prepGuaN.selectedLigandSdf!, 'sdf');
+    expect(countPolarHydrogensForAtom(molGuaN, 1)).toBe(2);
+
+    const guanPosPdb = [
+      formatSynthHetatm(1, 'C1', 'GUP', 0.0, 0.0, 0.0, 'C'),
+      formatSynthHetatm(2, 'N1', 'GUP', 1.33, 0.0, 0.0, 'N', '1+'),
+      formatSynthHetatm(3, 'N2', 'GUP', -0.665, 1.152, 0.0, 'N'),
+      formatSynthHetatm(4, 'N3', 'GUP', -0.665, -1.152, 0.0, 'N'),
+      'END',
+    ].join('\n');
+    const prepGuaP = extractHoloReceptorAndLigands(guanPosPdb, { ligandCode: 'GUP' });
+    const parsedGuaP = assertValidSdfValenceBudgets(prepGuaP.selectedLigandSdf!);
+    expect(parsedGuaP.bondOrderBetween(0, 1)).toBe(2); // C1=N1(+)
+    expect(parsedGuaP.valences[0]).toBe(4);
+    expect(parsedGuaP.valences[1]).toBe(2);
+    const [molGuaP] = gninaParseLigands(prepGuaP.selectedLigandSdf!, 'sdf');
+    // N1(+) has target 3 + 1 = 4, valence = 2 => 2 N-H hydrogens (=NH2+)
+    expect(countPolarHydrogensForAtom(molGuaP, 1)).toBe(2);
+    expect(countPolarHydrogensForAtom(molGuaP, 2)).toBe(2);
+    expect(countPolarHydrogensForAtom(molGuaP, 3)).toBe(2);
   });
 });
