@@ -29,7 +29,6 @@
     parseRecipeToGraph,
     serializeWorkflowJson,
   } from '$lib/engine/share';
-  import { renderClientSocialCardPng, type SocialCardMode } from '$lib/ui/social-card';
   import {
     clearAllModelCaches,
     createIndexedDbCheckpointStore,
@@ -340,16 +339,6 @@
     copied: boolean;
     error: string | null;
   } | null>(null);
-  let molViewerRef: { capturePngDataUrl(): Promise<string | null> } | null = $state(null);
-  let socialCardMode = $state<SocialCardMode>('both');
-  let socialCardState = $state<{
-    dataUrl: string;
-    blob: Blob | null;
-    has3d: boolean;
-    loading: boolean;
-    copied: boolean;
-  }>({ dataUrl: '', blob: null, has3d: false, loading: false, copied: false });
-  let cachedShareStructurePng: string | null = null;
   let sysWrapEl: HTMLDivElement | null = $state(null);
   let moreWrapEl: HTMLDivElement | null = $state(null);
   let shareWrapEl: HTMLDivElement | null = $state(null);
@@ -2381,72 +2370,6 @@
     }
   }
 
-  async function buildSocialPreviewCard(mode: SocialCardMode, captureFresh3d = false) {
-    socialCardMode = mode;
-    socialCardState = { ...socialCardState, loading: true, copied: false };
-    try {
-      if (captureFresh3d) {
-        cachedShareStructurePng = (await molViewerRef?.capturePngDataUrl?.()) ?? null;
-      }
-      const has3d = Boolean(cachedShareStructurePng);
-      const effectiveMode: SocialCardMode = !has3d && mode !== 'canvas' ? 'canvas' : mode;
-      const plainGraph = $state.snapshot(graph) as WorkflowGraph;
-      const plainOutputs = $state.snapshot(outputsByNode) as Record<string, Record<string, CanonicalArtifact>>;
-      const structLabel =
-        viewerLabel ||
-        plainGraph.nodes.find((n) => n.id === selectedNodeId)?.label ||
-        plainGraph.nodes[0]?.label ||
-        'Structure';
-      const rgVal = viewerStructureMeta?.geometry?.rg;
-      const structMeta = viewerStructureMeta?.length
-        ? `L=${viewerStructureMeta.length} aa${typeof rgVal === 'number' ? ` · Rg ${rgVal.toFixed(1)} Å` : ''}`
-        : '';
-      const { dataUrl, blob } = await renderClientSocialCardPng({
-        graph: plainGraph,
-        outputsByNode: plainOutputs,
-        structurePngDataUrl: cachedShareStructurePng,
-        structureLabel: structLabel,
-        structureMeta: structMeta,
-        mode: effectiveMode,
-        theme,
-      });
-      socialCardState = { dataUrl, blob, has3d, loading: false, copied: false };
-    } catch {
-      socialCardState = { ...socialCardState, loading: false };
-    }
-  }
-
-  async function copySocialCardImage() {
-    if (!socialCardState.blob) return;
-    try {
-      if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
-        throw new Error('Image clipboard unsupported');
-      }
-      await navigator.clipboard.write([
-        new ClipboardItem({ 'image/png': socialCardState.blob }),
-      ]);
-      socialCardState = { ...socialCardState, copied: true };
-      showToastMessage('Copied 1200×630 preview card to clipboard');
-    } catch {
-      downloadSocialCardImage();
-      showToastMessage('Downloaded 1200×630 preview PNG (clipboard image copy unavailable)');
-    }
-  }
-
-  function downloadSocialCardImage() {
-    if (!socialCardState.dataUrl) return;
-    const baseName = (graph.name || 'denovo-workflow')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '')
-      .slice(0, 42);
-    const a = document.createElement('a');
-    a.href = socialCardState.dataUrl;
-    a.download = `${baseName || 'denovo-workflow'}-preview.png`;
-    a.click();
-    showToastMessage('Saved 1200×630 social preview PNG', 2400, 'ok');
-  }
-
   async function openSharePopover() {
     sysMenuOpen = false;
     moreMenuOpen = false;
@@ -2463,7 +2386,6 @@
       const cleanQuery = `?${hash.replace(/^[#?]/, '')}`;
       window.history.replaceState(null, '', `${window.location.pathname}${cleanQuery}`);
       sharePopoverState = { url, mode, strippedPdb, copied: false, error: null };
-      void buildSocialPreviewCard(socialCardMode, true);
     } catch (err) {
       sharePopoverState = {
         url: '',
@@ -4056,69 +3978,6 @@
           {:else}
             <p class="share-pop-note">Generating compact workflow link…</p>
           {/if}
-          <div class="share-card-section">
-            <div class="share-card-head">
-              <span class="share-card-lbl">Social preview card (1200×630)</span>
-              <div class="share-card-tabs" role="group" aria-label="Preview card content">
-                <button
-                  type="button"
-                  class="share-card-tab"
-                  class:active={socialCardMode === 'both'}
-                  disabled={!socialCardState.has3d}
-                  onclick={() => void buildSocialPreviewCard('both', false)}
-                  title={socialCardState.has3d ? 'Include live 3D structure and workflow canvas' : 'Load or run a 3D structure to enable 3D composite'}
-                >
-                  Both
-                </button>
-                <button
-                  type="button"
-                  class="share-card-tab"
-                  class:active={socialCardMode === 'canvas' || !socialCardState.has3d}
-                  onclick={() => void buildSocialPreviewCard('canvas', false)}
-                >
-                  Canvas
-                </button>
-                <button
-                  type="button"
-                  class="share-card-tab"
-                  class:active={socialCardMode === 'structure' && socialCardState.has3d}
-                  disabled={!socialCardState.has3d}
-                  onclick={() => void buildSocialPreviewCard('structure', false)}
-                  title={socialCardState.has3d ? 'Show final 3D structure full-bleed' : 'Load or run a 3D structure first'}
-                >
-                  3D
-                </button>
-              </div>
-            </div>
-            {#if socialCardState.dataUrl}
-              <div class="share-card-preview-wrap">
-                <img
-                  class="share-card-img"
-                  src={socialCardState.dataUrl}
-                  alt="Social media workflow preview card"
-                />
-              </div>
-              <div class="share-card-actions">
-                <button
-                  type="button"
-                  class="share-card-btn primary"
-                  class:copied={socialCardState.copied}
-                  onclick={() => void copySocialCardImage()}
-                >
-                  {socialCardState.copied ? '✓ Image Copied' : 'Copy Image'}
-                </button>
-                <button
-                  type="button"
-                  class="share-card-btn"
-                  onclick={downloadSocialCardImage}
-                >
-                  Download PNG
-                </button>
-              </div>
-            {:else if socialCardState.loading}
-              <div class="share-card-loading">Rendering 1200×630 preview…</div>
-            {/if}
-          </div>
           <div class="share-pop-foot">
             <button
               type="button"
@@ -4790,7 +4649,6 @@
 
         <div class="viewer-stage">
           <MolSuperposeViewer
-            bind:this={molViewerRef}
             designedPdb={isCompareMode || isMultiDesignAll3d
               ? null
               : studioInputViewerActive
@@ -5518,7 +5376,7 @@
   }
 
   .share-pop {
-    width: 356px;
+    width: 310px;
     padding: 12px;
     display: flex;
     flex-direction: column;
@@ -5592,95 +5450,6 @@
   .share-pop-copy.copied {
     background: #10b981;
     border-color: #10b981;
-  }
-  .share-card-section {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding-top: 6px;
-    border-top: 1px solid var(--border-subtle, var(--border-strong));
-  }
-  .share-card-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-  }
-  .share-card-lbl {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-secondary);
-  }
-  .share-card-tabs {
-    display: inline-flex;
-    background: var(--bg-canvas, rgba(148, 163, 184, 0.1));
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    padding: 1px;
-    gap: 2px;
-  }
-  .share-card-tab {
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 10.5px;
-    font-weight: 600;
-    padding: 2px 7px;
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .share-card-tab.active {
-    background: var(--accent);
-    color: #ffffff;
-  }
-  .share-card-tab:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-  .share-card-preview-wrap {
-    width: 100%;
-    aspect-ratio: 1200 / 630;
-    border-radius: 8px;
-    overflow: hidden;
-    border: 1px solid var(--border-strong);
-    background: var(--bg-canvas);
-  }
-  .share-card-img {
-    width: 100%;
-    height: 100%;
-    display: block;
-    object-fit: cover;
-  }
-  .share-card-actions {
-    display: flex;
-    gap: 6px;
-  }
-  .share-card-btn {
-    flex: 1;
-    height: 28px;
-    border-radius: 6px;
-    border: 1px solid var(--border-strong);
-    background: var(--bg-canvas, var(--bg-surface));
-    color: var(--text-primary);
-    font-size: 11.5px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .share-card-btn.primary {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-  }
-  .share-card-btn.primary.copied {
-    border-color: #10b981;
-    background: #10b981;
-    color: #ffffff;
-  }
-  .share-card-loading {
-    font-size: 11px;
-    color: var(--text-muted);
-    padding: 16px 0;
-    text-align: center;
   }
   .share-pop-foot {
     display: flex;
