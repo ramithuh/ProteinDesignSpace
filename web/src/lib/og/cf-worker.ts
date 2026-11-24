@@ -1,9 +1,13 @@
 import { decodeOgWorkflowFromQuery } from './og-graph';
 import { fetchEdgeStructurePreview } from './edge-structure';
+import { handleFeedbackRequest, type CfKvNamespace } from './feedback-api';
 import { OG_HEIGHT, OG_WIDTH, renderDefaultOgPng, renderWorkflowOgPng } from './render-og-card';
 
 export interface CfPagesEnv {
   ASSETS: { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
+  FEEDBACK_KV?: CfKvNamespace;
+  FEEDBACK_ADMIN_TOKEN?: string;
+  FEEDBACK_WEBHOOK_URL?: string;
 }
 
 function escapeHtmlAttr(str: string): string {
@@ -150,7 +154,12 @@ export default {
       return res;
     }
 
-    // 1b. Unknown /api/* endpoints on public static Cloudflare Pages (e.g. /api/health) -> crisp 404 JSON
+    // 1b. Same-origin Cloudflare KV feedback endpoint (`POST /api/feedback`, optional admin `GET`)
+    if (url.pathname === '/api/feedback') {
+      return handleFeedbackRequest(request, env, ctx);
+    }
+
+    // 1c. Unknown /api/* endpoints on public static Cloudflare Pages (e.g. /api/health) -> crisp 404 JSON
     if (url.pathname.startsWith('/api/')) {
       return new Response(
         JSON.stringify({ ok: false, error: 'No self-hosted GPU server at this URL' }),

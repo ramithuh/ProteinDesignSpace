@@ -476,7 +476,7 @@
     if (typeof document === 'undefined') return false;
     return Boolean(
       document.querySelector(
-        '.onb-backdrop, .fr-backdrop, .cr-backdrop, .gal-backdrop, .mc-backdrop, .pw-coach, .modal-backdrop, .expand-backdrop, .expanded-pane, .drawer-backdrop',
+        '.onb-backdrop, .fr-backdrop, .cr-backdrop, .gal-backdrop, .mc-backdrop, .pw-coach, .modal-backdrop, .expand-backdrop, .expanded-pane, .drawer-backdrop, .feedback-pop',
       ),
     );
   }

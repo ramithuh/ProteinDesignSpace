@@ -1,6 +1,59 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig, type Plugin } from 'vite';
 import { resolve } from 'node:path';
+import { createMemoryFeedbackKv, handleFeedbackRequest } from './src/lib/og/feedback-api';
+
+/**
+ * Local `vite dev` middleware for `/api/feedback` backed by an in-memory KV store
+ * so the Feedback popover works end-to-end during local development without wrangler.
+ */
+function devFeedbackApiPlugin(): Plugin {
+  const devKv = createMemoryFeedbackKv();
+  return {
+    name: 'dev-feedback-api',
+    configureServer(server) {
+      server.middlewares.use('/api/feedback', (req, res) => {
+        void (async () => {
+          const chunks: Buffer[] = [];
+          for await (const chunk of req) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          }
+          const bodyBuf = Buffer.concat(chunks);
+          const host = req.headers.host || 'localhost:5173';
+          const rawProto = req.headers['x-forwarded-proto'];
+          const proto =
+            (Array.isArray(rawProto) ? rawProto[0] : rawProto)?.split(',')[0]?.trim() || 'http';
+          const url = `${proto}://${host}${req.originalUrl || '/api/feedback'}`;
+          const headers = new Headers();
+          for (const [k, v] of Object.entries(req.headers)) {
+            if (typeof v === 'string') headers.set(k, v);
+            else if (Array.isArray(v)) headers.set(k, v.join(', '));
+          }
+          const method = req.method || 'GET';
+          const webReq = new Request(url, {
+            method,
+            headers,
+            ...(method !== 'GET' && method !== 'HEAD' ? { body: bodyBuf } : {}),
+          });
+          const webRes = await handleFeedbackRequest(webReq, {
+            FEEDBACK_KV: devKv,
+            FEEDBACK_ADMIN_TOKEN: process.env.FEEDBACK_ADMIN_TOKEN,
+          });
+          if (method === 'POST' && webRes.status === 201) {
+            console.log(`[dev-feedback] Stored feedback (${devKv.entries.size} in dev memory KV)`);
+          }
+          res.statusCode = webRes.status;
+          webRes.headers.forEach((val, key) => res.setHeader(key, val));
+          res.end(Buffer.from(await webRes.arrayBuffer()));
+        })().catch((err) => {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ ok: false, error: String(err) }));
+        });
+      });
+    },
+  };
+}
 
 /**
  * mpnn.worker.ts loads first-party same-origin ONNX Runtime Web WASM binaries from
@@ -22,7 +75,7 @@ function stripUnusedOrtWasm(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [sveltekit(), stripUnusedOrtWasm()],
+  plugins: [devFeedbackApiPlugin(), sveltekit(), stripUnusedOrtWasm()],
   resolve: {
     alias: [
       // proteinmpnn-web ships TS source in GitHub installs (prepack only runs on publish).

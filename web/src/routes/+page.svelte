@@ -60,6 +60,8 @@
   import ArtifactPeekPanel from '$lib/ui/ArtifactPeekPanel.svelte';
   import ComparePeekPanel, { type CompareBranchMeta } from '$lib/ui/ComparePeekPanel.svelte';
   import CreditsModal from '$lib/ui/CreditsModal.svelte';
+  import FeedbackPopover from '$lib/ui/FeedbackPopover.svelte';
+  import type { FeedbackCategory } from '$lib/og/feedback-api';
   import ExamplesGalleryModal from '$lib/ui/ExamplesGalleryModal.svelte';
   import PaperWalkthroughOverlay from '$lib/ui/PaperWalkthroughOverlay.svelte';
   import FirstRunModal from '$lib/ui/FirstRunModal.svelte';
@@ -280,6 +282,7 @@
   function handleHeaderComputeClick(target: 'local' | 'remote') {
     moreMenuOpen = false;
     shareMenuOpen = false;
+    closeFeedbackPopover();
     const current: 'local' | 'remote' = computeBackend.mode === 'local' ? 'local' : 'remote';
     const switching = target !== current;
     const canSwitch = !isRunning && !activeRunState.leaseHeld;
@@ -336,6 +339,14 @@
   let sysPopAlignLeft = $state(false);
   let moreMenuOpen = $state(false);
   let shareMenuOpen = $state(false);
+  let feedbackMenuOpen = $state(false);
+  let feedbackCategory = $state<FeedbackCategory>('idea');
+  let feedbackMessage = $state('');
+  let feedbackContact = $state('');
+  let feedbackIncludeContext = $state(true);
+  let feedbackIncludeWorkflowUrl = $state(false);
+  let feedbackIncludeErrorSnippet = $state(true);
+  let feedbackSubmittedPendingReset = $state(false);
   let sharePopoverState = $state<{
     url: string;
     mode: string;
@@ -346,6 +357,7 @@
   let sysWrapEl: HTMLDivElement | null = $state(null);
   let moreWrapEl: HTMLDivElement | null = $state(null);
   let shareWrapEl: HTMLDivElement | null = $state(null);
+  let feedbackWrapEl: HTMLDivElement | null = $state(null);
   let brandBtnEl: HTMLButtonElement | null = $state(null);
   let cacheClearBtnEl: HTMLButtonElement | null = $state(null);
   let brandClearConfirmPending = $state(false);
@@ -782,6 +794,7 @@
     sysMenuOpen = false;
     moreMenuOpen = false;
     shareMenuOpen = false;
+    closeFeedbackPopover();
     sharePopoverState = null;
     showRecipe = false;
     expandedPane = 'none';
@@ -829,6 +842,9 @@
     }
     if (shareMenuOpen && !shareWrapEl?.contains(target)) {
       shareMenuOpen = false;
+    }
+    if (feedbackMenuOpen && !feedbackWrapEl?.contains(target)) {
+      closeFeedbackPopover();
     }
   }
 
@@ -895,11 +911,12 @@
         studioActiveBrush = null;
         return;
       }
-      if (sysMenuOpen || moreMenuOpen || shareMenuOpen) {
+      if (sysMenuOpen || moreMenuOpen || shareMenuOpen || feedbackMenuOpen) {
         ev.preventDefault();
         sysMenuOpen = false;
         moreMenuOpen = false;
         shareMenuOpen = false;
+        closeFeedbackPopover();
         cancelCacheClearConfirm();
         return;
       }
@@ -2380,6 +2397,7 @@
   async function openSharePopover() {
     sysMenuOpen = false;
     moreMenuOpen = false;
+    closeFeedbackPopover();
     if (shareMenuOpen) {
       shareMenuOpen = false;
       return;
@@ -2436,6 +2454,78 @@
 
   async function copyQuickShareLink() {
     await openSharePopover();
+  }
+
+  const feedbackBlocksSummary = $derived(
+    graph.nodes.map((n) => `${n.label} (${n.adapterId})`).join(' -> '),
+  );
+
+  function closeFeedbackPopover() {
+    feedbackMenuOpen = false;
+    if (feedbackSubmittedPendingReset) {
+      feedbackMessage = '';
+      feedbackSubmittedPendingReset = false;
+    }
+  }
+
+  function openFeedbackPopover(opts?: { category?: FeedbackCategory; includeError?: boolean }) {
+    sysMenuOpen = false;
+    moreMenuOpen = false;
+    shareMenuOpen = false;
+    if (opts?.category) {
+      feedbackCategory = opts.category;
+      if (opts.includeError !== undefined) {
+        feedbackIncludeErrorSnippet = opts.includeError;
+      }
+      feedbackMenuOpen = true;
+      return;
+    }
+    if (feedbackMenuOpen) {
+      closeFeedbackPopover();
+    } else {
+      feedbackMenuOpen = true;
+    }
+  }
+
+  async function getFeedbackWorkflowUrl(): Promise<string | null> {
+    if (graph.nodes.length === 0) return null;
+    try {
+      const plain = $state.snapshot(graph) as WorkflowGraph;
+      const { hash } = await encodeGraphToHash(plain);
+      return buildShareableWorkflowUrl(window.location.origin, window.location.pathname, hash);
+    } catch {
+      return null;
+    }
+  }
+
+  function buildFeedbackGitHubUrl(opts: {
+    category: FeedbackCategory;
+    message: string;
+    errorSnippet?: string | null;
+  }): string {
+    const blocks = feedbackBlocksSummary;
+    const prefix =
+      opts.category === 'bug' ? 'Bug' : opts.category === 'idea' ? 'Feature / Model request' : 'Feedback';
+    const firstLine = opts.message.split('\n')[0]?.trim() || opts.errorSnippet?.split('\n')[0]?.trim() || '';
+    const title = firstLine
+      ? `${prefix}: ${firstLine.slice(0, 72)}`
+      : `${prefix}: ${graph.name || 'denovo.run'}`;
+    const lines = [
+      '### Notes',
+      opts.message || (opts.errorSnippet ? 'Hit an error while running the workflow:' : 'Describe your feedback or idea:'),
+      '',
+      ...(opts.errorSnippet ? ['### Pipeline Error', '```', opts.errorSnippet.slice(0, 800), '```', ''] : []),
+      '### Environment',
+      `- **Workflow blocks**: ${blocks || 'None'}`,
+      `- **WebGPU**: ${webgpuDetail || 'unknown'}`,
+      `- **Browser**: ${typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown'}`,
+      `- **Page**: ${typeof window !== 'undefined' ? window.location.origin : 'https://denovo.run'}`,
+    ];
+    const params = new URLSearchParams({
+      title,
+      body: lines.join('\n').slice(0, 1800),
+    });
+    return `https://github.com/ramithuh/ProteinDesignSpace/issues/new?${params.toString()}`;
   }
 
   function buildBugReportUrl(errorText?: string | null): string {
@@ -3582,6 +3672,7 @@
         sysMenuOpen = false;
         moreMenuOpen = false;
         shareMenuOpen = false;
+        closeFeedbackPopover();
         showExamplesGallery = true;
       }}
       title="Browse Examples & Starter Pipelines"
@@ -3997,6 +4088,53 @@
       {/if}
     </div>
 
+    <!-- Feedback Popover (Cloudflare KV backed) -->
+    <div class="pop-wrap" bind:this={feedbackWrapEl}>
+      <button
+        type="button"
+        class="hdr-feedback-btn"
+        class:active={feedbackMenuOpen}
+        aria-expanded={feedbackMenuOpen}
+        aria-label="Send feedback"
+        title="Send feedback, model requests, or bug notes"
+        onclick={() => openFeedbackPopover()}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+        <span class="hdr-feedback-label">Feedback</span>
+      </button>
+
+      {#if feedbackMenuOpen}
+        <FeedbackPopover
+          category={feedbackCategory}
+          message={feedbackMessage}
+          contact={feedbackContact}
+          includeContext={feedbackIncludeContext}
+          includeWorkflowUrl={feedbackIncludeWorkflowUrl}
+          includeErrorSnippet={feedbackIncludeErrorSnippet}
+          blocksSummary={feedbackBlocksSummary}
+          presetOrGraphId={activePaperInsight?.id || activePreset?.id || graph.id || 'custom'}
+          webgpuSummary={webgpuDetail}
+          computeMode={computeBackend.mode === 'local' ? 'local' : 'remote'}
+          {theme}
+          errorText={runError}
+          getShareableWorkflowUrl={graph.nodes.length > 0 ? getFeedbackWorkflowUrl : undefined}
+          buildGitHubIssueUrl={buildFeedbackGitHubUrl}
+          onCategoryChange={(c) => (feedbackCategory = c)}
+          onMessageChange={(m) => (feedbackMessage = m)}
+          onContactChange={(c) => (feedbackContact = c)}
+          onIncludeContextChange={(v) => (feedbackIncludeContext = v)}
+          onIncludeWorkflowUrlChange={(v) => (feedbackIncludeWorkflowUrl = v)}
+          onIncludeErrorSnippetChange={(v) => (feedbackIncludeErrorSnippet = v)}
+          onSubmitted={() => {
+            feedbackSubmittedPendingReset = true;
+          }}
+          onClose={closeFeedbackPopover}
+        />
+      {/if}
+    </div>
+
     <!-- GitHub Repository Link -->
     <a
       class="hdr-gh-btn"
@@ -4070,6 +4208,7 @@
         onclick={() => {
           sysMenuOpen = false;
           shareMenuOpen = false;
+          closeFeedbackPopover();
           moreMenuOpen = !moreMenuOpen;
         }}
       >
@@ -4130,6 +4269,14 @@
           >
             <span>Credits &amp; Licenses</span>
           </button>
+          <button
+            type="button"
+            class="menu-item"
+            role="menuitem"
+            onclick={() => openFeedbackPopover({ category: runError ? 'bug' : 'idea', includeError: Boolean(runError) })}
+          >
+            <span>{runError ? 'Report a bug' : 'Send Feedback'}</span>
+          </button>
           <a
             class="menu-item menu-link"
             role="menuitem"
@@ -4140,7 +4287,7 @@
               moreMenuOpen = false;
             }}
           >
-            <span>Report a bug</span>
+            <span>GitHub Issues ↗</span>
           </a>
           <div class="menu-sep"></div>
           <button
@@ -4336,15 +4483,14 @@
           <div class="error-banner-text">
             <b>Pipeline error:</b> {runError}
           </div>
-          <a
+          <button
+            type="button"
             class="error-report-btn"
-            href={buildBugReportUrl(runError)}
-            target="_blank"
-            rel="noopener noreferrer"
-            title="Open a pre-filled GitHub issue with this error and workflow summary"
+            onclick={() => openFeedbackPopover({ category: 'bug', includeError: true })}
+            title="Send a bug note with this error attached (or open a GitHub issue)"
           >
-            Report bug
-          </a>
+            Report / Feedback
+          </button>
         </div>
       {/if}
 
@@ -5355,6 +5501,38 @@
     border-color: var(--accent);
   }
 
+  .hdr-feedback-btn {
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    height: 30px;
+    padding: 0 9px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .hdr-feedback-btn:hover,
+  .hdr-feedback-btn.active {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+    border-color: var(--accent);
+  }
+  @media (max-width: 1180px) {
+    .hdr-feedback-label {
+      display: none;
+    }
+    .hdr-feedback-btn {
+      padding: 0;
+      width: 30px;
+      justify-content: center;
+    }
+  }
+
   .hdr-gh-btn {
     background: var(--bg-surface);
     color: var(--text-secondary);
@@ -5521,11 +5699,14 @@
     padding: 4px 10px;
     border-radius: 5px;
     border: 1px solid currentColor;
+    background: transparent;
     color: inherit;
+    font-family: inherit;
     font-size: 11.5px;
     font-weight: 600;
     text-decoration: none;
     white-space: nowrap;
+    cursor: pointer;
     opacity: 0.9;
   }
   .error-report-btn:hover {
