@@ -5091,8 +5091,9 @@
               class="r-tab"
               class:active={rightPanelTab === 'params'}
               onclick={() => (rightPanelTab = 'params')}
+              title="Block parameters"
             >
-              Parameters
+              Params
             </button>
             <button
               type="button"
@@ -5133,7 +5134,7 @@
                 title={`Run upstream blocks up to ${runTargetTitle} (results stay cached for full runs)`}
                 aria-label={`Run up to ${runTargetTitle}`}
               >
-                ▶ Run to here
+                ▶ Run here
               </button>
             {/if}
             {#if selectedNode && !isCompareMode}
@@ -6880,9 +6881,9 @@
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
-    gap: 4px 8px;
+    gap: 4px 6px;
     min-width: 0;
-    padding: 6px 10px 0;
+    padding: 5px 8px 0;
     border-bottom: 1px solid var(--border);
     background: var(--bg-surface-2);
   }
@@ -6898,7 +6899,7 @@
     align-items: center;
     justify-content: flex-end;
     flex-wrap: wrap;
-    gap: 4px 6px;
+    gap: 4px;
     min-width: 0;
     max-width: 100%;
     padding-bottom: 4px;
@@ -6909,7 +6910,7 @@
     color: #fff;
     border-color: var(--accent);
     font-weight: 600;
-    padding: 2px 9px;
+    padding: 2px 7px;
     flex-shrink: 0;
   }
   .pane-expand-btn.run-here-tab-btn:hover:not(:disabled) {
@@ -6925,13 +6926,13 @@
     position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     background: transparent;
     border: none;
     border-bottom: 2px solid transparent;
     color: var(--text-muted);
-    padding: 7px 12px 8px;
-    font-size: 12.5px;
+    padding: 7px 8px 8px;
+    font-size: 12px;
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;
