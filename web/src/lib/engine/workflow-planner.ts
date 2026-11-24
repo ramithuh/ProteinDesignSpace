@@ -4665,6 +4665,24 @@ function reconcileBlockGraphPlan(
           if (bp.motifSpan) gen.params.motifSpan = bp.motifSpan;
           else delete gen.params.motifSpan;
         }
+        const curMotifAtoms = String(gen.params.motifAtoms ?? '').trim();
+        if (curMotifAtoms && curMotifAtoms.includes(':')) {
+          const atomLhs = curMotifAtoms
+            .split(/[;\n]+/)
+            .map((part) => {
+              const idx = part.lastIndexOf(':');
+              return idx > 0 ? part.slice(0, idx).trim() : '';
+            })
+            .filter(Boolean)
+            .join(', ');
+          if (
+            atomLhs &&
+            (!hasExplicitPromptResidues || isResidueSpecDisjointFromBenchmark(atomLhs, bm))
+          ) {
+            if (bp.motifAtoms) gen.params.motifAtoms = bp.motifAtoms;
+            else delete gen.params.motifAtoms;
+          }
+        }
         const curHotspots = String(gen.params.hotspots ?? '').trim();
         if (
           curHotspots &&

@@ -80,6 +80,88 @@ const SESSION_COOKIE_NAME = 'denovo_session';
 const SESSION_COOKIE_MAX_AGE_SEC = 30 * 24 * 60 * 60;
 const AUTH_RATE_LIMIT_WINDOW_MS = 60_000;
 const AUTH_RATE_LIMIT_MAX_FAILURES = 10;
+const BUILD_META_FILENAME = '.build-meta.json';
+const GIT_SHA_RE = /^[0-9a-f]{7,40}$/i;
+
+function normalizeGitSha(raw) {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim().toLowerCase();
+  return GIT_SHA_RE.test(trimmed) ? trimmed : null;
+}
+
+function gitShasMatch(a, b) {
+  if (!a || !b) return false;
+  return a === b || a.startsWith(b) || b.startsWith(a);
+}
+
+function readGitHeadSha(repoRoot) {
+  if (!repoRoot) return null;
+  try {
+    const out = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 1500,
+      maxBuffer: 16 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return normalizeGitSha(out);
+  } catch {
+    return null;
+  }
+}
+
+function readRecordedBuildSha(buildDir) {
+  if (!buildDir) return null;
+  try {
+    const metaPath = path.join(buildDir, BUILD_META_FILENAME);
+    if (!fs.existsSync(metaPath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    return normalizeGitSha(parsed?.gitSha ?? parsed?.buildSha ?? null);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Inspect whether `web/build` lags the repository's current `HEAD` commit (R4).
+ * Handles non-git deployments (tarballs/containers without `.git`) gracefully without throwing.
+ */
+export function inspectBuildFreshness(options = {}) {
+  const repoRoot = options.repoRoot ? path.resolve(options.repoRoot) : DEFAULT_REPO_ROOT;
+  const buildDir = options.buildDir ? path.resolve(options.buildDir) : DEFAULT_BUILD_DIR;
+  const headSha =
+    options.headSha !== undefined ? normalizeGitSha(options.headSha) : readGitHeadSha(repoRoot);
+  const buildSha =
+    options.buildSha !== undefined ? normalizeGitSha(options.buildSha) : readRecordedBuildSha(buildDir);
+
+  let buildInsideRepo = false;
+  try {
+    const realRepo = fs.existsSync(repoRoot) ? fs.realpathSync(repoRoot) : repoRoot;
+    const realBuild = fs.existsSync(buildDir) ? fs.realpathSync(buildDir) : buildDir;
+    const rel = path.relative(realRepo, realBuild);
+    buildInsideRepo = Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
+  } catch {
+    buildInsideRepo = false;
+  }
+
+  const hasBuiltIndex = fs.existsSync(path.join(buildDir, 'index.html'));
+  const staleBuild =
+    headSha !== null &&
+    (buildSha !== null ? !gitShasMatch(buildSha, headSha) : buildInsideRepo && hasBuiltIndex);
+
+  const warning = staleBuild
+    ? buildSha
+      ? `Stale web/build detected: built from ${buildSha.slice(0, 7)} while git HEAD is ${headSha.slice(0, 7)}. Run "npm --prefix web run build" so host GPU workers run current code.`
+      : `web/build is missing ${BUILD_META_FILENAME} while git HEAD is ${headSha.slice(0, 7)}. Run "npm --prefix web run build" to stamp and refresh host GPU workers.`
+    : null;
+
+  return {
+    buildSha,
+    headSha,
+    staleBuild,
+    ...(warning ? { warning } : {}),
+  };
+}
 
 function parseFiniteInt(raw, fallback, min, max) {
   if (raw === undefined || raw === null || raw === '') return fallback;
@@ -427,6 +509,29 @@ export function createSelfhostServer(options = {}) {
     3_600_000,
   );
   const hostGpuHw = options.hostGpuHw !== undefined ? options.hostGpuHw : detectHostGpuHardware();
+  const headShaOverride = options.headSha;
+  const buildShaOverride = options.buildSha;
+
+  let cachedHeadSha = null;
+  let cachedHeadShaAt = 0;
+  function getBuildFreshness() {
+    const now = Date.now();
+    if (headShaOverride === undefined && (cachedHeadShaAt === 0 || now - cachedHeadShaAt > 5_000)) {
+      cachedHeadSha = readGitHeadSha(repoRoot);
+      cachedHeadShaAt = now;
+    }
+    return inspectBuildFreshness({
+      repoRoot,
+      buildDir: realBuildDir,
+      headSha: headShaOverride !== undefined ? headShaOverride : cachedHeadSha,
+      ...(buildShaOverride !== undefined ? { buildSha: buildShaOverride } : {}),
+    });
+  }
+
+  const startupFreshness = getBuildFreshness();
+  if (startupFreshness.staleBuild && startupFreshness.warning && !options.silent) {
+    console.warn(`[denovo-selfhost] WARNING: ${startupFreshness.warning}`);
+  }
 
   // Runner bridge (replaced by real Playwright page in CLI mode or mock bridge in integration tests)
   let runnerBridge = options.runnerBridge ?? null;
@@ -927,6 +1032,9 @@ export function createSelfhostServer(options = {}) {
     if (decoded.includes('\0')) return { error: 400 };
     const cleanPath = decoded === '/' || decoded === '' ? '/index.html' : decoded;
     const relRequested = cleanPath.replace(/^\/+/, '');
+    if (relRequested.split('/').some((seg) => seg.startsWith('.'))) {
+      return { error: 404 };
+    }
 
     const candidates = [
       path.resolve(realBuildDir, relRequested),
@@ -1107,6 +1215,7 @@ export function createSelfhostServer(options = {}) {
         if (req.method === 'GET' && url.pathname === '/api/health') {
           await refreshObservedHealth();
           const admission = evaluateAdmission(observedHealth);
+          const freshness = getBuildFreshness();
           // M1: Never leak runningJobId in shared /api/health
           sendJson(res, 200, {
             ok: admission.ok,
@@ -1119,6 +1228,9 @@ export function createSelfhostServer(options = {}) {
             maxFoldResidues,
             authRequired: Boolean(apiToken),
             authenticatedBy: authMethod,
+            buildSha: freshness.buildSha,
+            headSha: freshness.headSha,
+            staleBuild: freshness.staleBuild,
             ...(admission.error ? { error: admission.error } : {}),
           });
           return;

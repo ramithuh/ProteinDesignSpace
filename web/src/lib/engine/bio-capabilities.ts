@@ -9,10 +9,12 @@ import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
 import { BENCHMARK_TARGETS, getBenchmarkById, type BenchmarkTargetMeta } from './benchmarks';
 import { planLocalFoldFanout } from './work-plan';
 import {
+  extractRfd4TemplateContext,
   isBareLengthContig,
   isCrystallizationBuffer,
   parseResidueRangeTokens,
   resolveLocalFoldEffectiveConfig,
+  validateRfd4InputsAgainstTemplate,
 } from './conditioning';
 import {
   BUFFER_OR_SOLVENT_RESNAMES,
@@ -42,6 +44,7 @@ import type {
   BioEntityKind,
   CanonicalArtifact,
   CollectionKind,
+  ConditionSpecArtifact,
   ExcludedCandidateRecord,
   FoldedCandidate,
   RepresentativeSelection,
@@ -882,6 +885,63 @@ function residueSpansOverlapAny(
     }
   }
   return false;
+}
+
+function formatSimpleResidueSpan(s: SimpleResidueSpan): string {
+  return s.start === s.end ? `${s.chain}${s.start}` : `${s.chain}${s.start}-${s.end}`;
+}
+
+/**
+ * Check every span in `targetSpans` whose chain is covered by `refSpans` against the merged
+ * union of `refSpans` on that chain (#97). Returns formatted uncovered span labels (e.g. `["A128"]`).
+ */
+function findUncoveredSpansOnCoveredChains(
+  targetSpans: readonly SimpleResidueSpan[],
+  refSpans: readonly SimpleResidueSpan[],
+): string[] {
+  if (targetSpans.length === 0 || refSpans.length === 0) return [];
+  const byChain = new Map<string, Array<{ start: number; end: number }>>();
+  for (const r of refSpans) {
+    const ch = r.chain.toUpperCase();
+    let list = byChain.get(ch);
+    if (!list) {
+      list = [];
+      byChain.set(ch, list);
+    }
+    list.push({ start: Math.min(r.start, r.end), end: Math.max(r.start, r.end) });
+  }
+  for (const [ch, list] of byChain.entries()) {
+    list.sort((a, b) => a.start - b.start || a.end - b.end);
+    const merged: Array<{ start: number; end: number }> = [];
+    for (const seg of list) {
+      const prev = merged[merged.length - 1];
+      if (!prev) {
+        merged.push({ ...seg });
+      } else if (!Number.isFinite(prev.end) || seg.start <= prev.end + 1) {
+        prev.end = Math.max(prev.end, seg.end);
+      } else {
+        merged.push({ ...seg });
+      }
+    }
+    byChain.set(ch, merged);
+  }
+
+  const uncovered: string[] = [];
+  const seen = new Set<string>();
+  for (const t of targetSpans) {
+    const ch = t.chain.toUpperCase();
+    const mergedRef = byChain.get(ch);
+    if (!mergedRef) continue;
+    const isCovered = mergedRef.some((r) => r.start <= t.start && t.end <= r.end);
+    if (!isCovered) {
+      const label = formatSimpleResidueSpan({ chain: ch, start: t.start, end: t.end });
+      if (!seen.has(label)) {
+        seen.add(label);
+        uncovered.push(label);
+      }
+    }
+  }
+  return uncovered;
 }
 
 const SOLVENT_WATER_RESNAMES = new Set(['HOH', 'WAT', 'DOD', 'H2O', 'TIP', 'TIP3']);
@@ -2523,38 +2583,117 @@ export function validateBioCapabilities(
       if (motifSpans.length > 0) {
         const rawContig = String(node.params.contig ?? '').trim();
         const contigSpans = rawContig ? parseContigTemplateSpans(rawContig) : [];
-        if (contigSpans.length > 0 && !residueSpansOverlapAny(motifSpans, contigSpans)) {
-          issues.push({
-            severity: 'warning',
-            code: 'motif-span-disjoint-from-contig',
-            nodeId: node.id,
-            message: `${node.label ?? node.adapterId} motifSpan "${rawMotif}" does not overlap any template residue in contig "${rawContig}". Check for a residue-numbering typo or stale motif span.`,
-          });
+        if (contigSpans.length > 0) {
+          const completelyDisjoint = !residueSpansOverlapAny(motifSpans, contigSpans);
+          const uncoveredInContig = completelyDisjoint
+            ? []
+            : findUncoveredSpansOnCoveredChains(motifSpans, contigSpans);
+          if (completelyDisjoint || uncoveredInContig.length > 0) {
+            issues.push({
+              severity: 'warning',
+              code: 'motif-span-disjoint-from-contig',
+              nodeId: node.id,
+              message: completelyDisjoint
+                ? `${node.label ?? node.adapterId} motifSpan "${rawMotif}" does not overlap any template residue in contig "${rawContig}". Check for a residue-numbering typo or stale motif span.`
+                : `${node.label ?? node.adapterId} motifSpan "${rawMotif}" includes residue(s) ${uncoveredInContig.join(', ')} not covered by contig "${rawContig}".`,
+            });
+          }
         }
         const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
         const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
-        if (tplNode?.adapterId === 'pdb-input') {
+        if (
+          tplNode?.adapterId === 'pdb-input' &&
+          String(tplNode.params.mode ?? 'demo-bundle') !== 'demo-bundle'
+        ) {
           const cropSpec = String(tplNode.params.cropSegments ?? '').trim();
           const cropSpans = cropSpec ? parseProteinCropSpans(cropSpec) : [];
-          if (cropSpans.length > 0 && !residueSpansOverlapAny(motifSpans, cropSpans)) {
-            const benchId = String(tplNode.params.benchmarkId ?? '').trim();
-            const bench = benchId ? getBenchmarkById(benchId) : undefined;
-            const fixMotif = bench?.conditionParams.motifSpan;
-            issues.push({
-              severity: 'warning',
-              code: 'motif-span-disjoint-from-crop',
-              nodeId: node.id,
-              message: `${node.label ?? node.adapterId} ${motifParamKey} "${rawMotif}" is completely disjoint from upstream cropSegments "${cropSpec}" — 0 motif residues will match.`,
-              ...(fixMotif
-                ? {
-                    fix: {
-                      label: `Use ${bench!.shortLabel} motif (${fixMotif})`,
-                      nodeId: node.id,
-                      paramsPatch: { [motifParamKey]: fixMotif },
-                    },
-                  }
-                : {}),
-            });
+          if (cropSpans.length > 0) {
+            const completelyDisjoint = !residueSpansOverlapAny(motifSpans, cropSpans);
+            const uncoveredInCrop = completelyDisjoint
+              ? []
+              : findUncoveredSpansOnCoveredChains(motifSpans, cropSpans);
+            if (completelyDisjoint || uncoveredInCrop.length > 0) {
+              const benchId = String(tplNode.params.benchmarkId ?? '').trim();
+              const bench = benchId ? getBenchmarkById(benchId) : undefined;
+              const fixMotif = bench?.conditionParams.motifSpan;
+              issues.push({
+                severity: 'warning',
+                code: 'motif-span-disjoint-from-crop',
+                nodeId: node.id,
+                message: completelyDisjoint
+                  ? `${node.label ?? node.adapterId} ${motifParamKey} "${rawMotif}" is completely disjoint from upstream cropSegments "${cropSpec}" — 0 motif residues will match.`
+                  : `${node.label ?? node.adapterId} ${motifParamKey} "${rawMotif}" includes residue(s) ${uncoveredInCrop.join(', ')} outside upstream cropSegments "${cropSpec}".`,
+                ...(fixMotif
+                  ? {
+                      fix: {
+                        label: `Use ${bench!.shortLabel} motif (${fixMotif})`,
+                        nodeId: node.id,
+                        paramsPatch: { [motifParamKey]: fixMotif },
+                      },
+                    }
+                  : {}),
+              });
+            }
+          }
+        }
+      }
+      // Also check explicit preserved contig polymer spans against upstream cropSegments (#97)
+      const rawMotifContig = String(node.params.contig ?? '').trim();
+      const preservedContigSpans = rawMotifContig ? parseContigTemplateSpans(rawMotifContig) : [];
+      if (preservedContigSpans.length > 0) {
+        const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
+        const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
+        if (
+          tplNode?.adapterId === 'pdb-input' &&
+          String(tplNode.params.mode ?? 'demo-bundle') !== 'demo-bundle'
+        ) {
+          const cropSpec = String(tplNode.params.cropSegments ?? '').trim();
+          const cropSpans = cropSpec ? parseProteinCropSpans(cropSpec) : [];
+          if (cropSpans.length > 0) {
+            const liveTpl = outputsByNode?.[tplNode.id]?.structure as StructureArtifact | undefined;
+            const rawTplText =
+              liveTpl?.cifText ||
+              liveTpl?.pdbText ||
+              String(tplNode.params.pdbText ?? '').trim();
+            let filteredContigSpans = preservedContigSpans;
+            if (rawTplText) {
+              try {
+                const ctx = extractRfd4TemplateContext(rawTplText);
+                if (ctx.ligands.length > 0) {
+                  filteredContigSpans = preservedContigSpans.filter(
+                    (s) =>
+                      !ctx.ligands.some(
+                        (l) =>
+                          (l.authChain.toUpperCase() === s.chain ||
+                            l.labelChain.toUpperCase() === s.chain) &&
+                          l.resId >= s.start &&
+                          l.resId <= s.end,
+                      ),
+                  );
+                }
+              } catch {
+                /* ignore unparseable stub */
+              }
+            }
+            const completelyDisjoint =
+              filteredContigSpans.length > 0 &&
+              !residueSpansOverlapAny(filteredContigSpans, cropSpans);
+            const uncoveredContig = completelyDisjoint
+              ? []
+              : findUncoveredSpansOnCoveredChains(filteredContigSpans, cropSpans);
+            if (
+              (completelyDisjoint || uncoveredContig.length > 0) &&
+              !issues.some((i) => i.code === 'motif-span-disjoint-from-crop' && i.nodeId === node.id)
+            ) {
+              issues.push({
+                severity: 'warning',
+                code: 'motif-span-disjoint-from-crop',
+                nodeId: node.id,
+                message: completelyDisjoint
+                  ? `${node.label ?? node.adapterId} contig "${rawMotifContig}" preserved spans are completely disjoint from upstream cropSegments "${cropSpec}".`
+                  : `${node.label ?? node.adapterId} contig "${rawMotifContig}" includes preserved residue(s) ${uncoveredContig.join(', ')} outside upstream cropSegments "${cropSpec}".`,
+              });
+            }
           }
         }
       }
@@ -3646,16 +3785,20 @@ export function validateRuntimeNodeInputs(
 
   if (node.adapterId === 'rfd4-proteina') {
     const mode = String(node.params.mode ?? 'unconditional');
-    const tpl = inputs.structure as StructureArtifact | undefined;
+    const tpl = (inputs.structure ?? inputs.template) as StructureArtifact | undefined;
+    const condArtifact = inputs.condition as ConditionSpecArtifact | undefined;
     if (
       (mode === 'motif' || mode === 'binder' || mode === 'partial' || mode === 'inverse-folding') &&
       !tpl?.cifText &&
-      !tpl?.pdbText
+      !tpl?.pdbText &&
+      !condArtifact?.inputCif &&
+      !condArtifact?.cifUrl
     ) {
       throw new Error(
         `RFD4-Proteina (${mode} mode) requires a wired structure input (e.g. from PDB Input).`,
       );
     }
+    validateRfd4InputsAgainstTemplate(node.params, tpl, condArtifact, node.label);
   }
 
   if (node.adapterId === 'rfd3') {
