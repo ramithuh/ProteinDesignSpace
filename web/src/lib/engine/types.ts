@@ -225,6 +225,7 @@ export interface BioCompatibilityFix {
   nodeId: string;
   paramsPatch: Record<string, unknown>;
   nodeLabel?: string;
+  computeBackendPatch?: { maxFoldResidues?: number | null };
 }
 
 export interface BioCompatibilityIssue {

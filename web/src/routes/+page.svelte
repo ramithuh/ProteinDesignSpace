@@ -105,10 +105,12 @@
     formatWebGpuAdapterSummary,
     requestResilientWebGpuAdapter,
     type WebGpuAdapterInfoSnapshot,
+    type WebGpuHardwareCapabilities,
   } from '$lib/engine/webgpu-device';
   import {
     authenticateRemoteServerSession,
     checkRemoteServerHealth,
+    computeSafeBrowserFoldCeiling,
     DEFAULT_HOST_MAX_FOLD_RESIDUES,
     defaultComputeBackendConfig,
     formatHostGpuDetail,
@@ -158,6 +160,7 @@
   let webgpuDetail = $state<string>('checking…');
   let webgpuIsFallback = $state<boolean>(false);
   let webgpuAdapterInfo = $state<WebGpuAdapterInfoSnapshot | null>(null);
+  let webgpuHardwareCaps = $state<WebGpuHardwareCapabilities | null>(null);
   let webMcpReady = $state(false);
   let activeGpuWorker = $state<string | null>(null);
   let activeGpuWorkerLabel = $derived(
@@ -171,6 +174,8 @@
   let sameOriginHostDetected = $state<RemoteServerHealth | null>(null);
   let acknowledgedRemoteOrigins = $state<Set<string>>(new Set());
   const isRemoteCompute = $derived(computeBackend.mode !== 'local');
+  const browserAutoAf3Ceiling = $derived(computeSafeBrowserFoldCeiling('af3', webgpuHardwareCaps));
+  const browserAutoAf2Ceiling = $derived(computeSafeBrowserFoldCeiling('monomer', webgpuHardwareCaps));
   const remoteShortGpu = $derived(
     remoteHealth?.ok
       ? (remoteHealth.gpu?.shortName?.trim() || remoteHealth.gpu?.name?.trim() || '')
@@ -180,12 +185,14 @@
   function buildFoldLimitOpts(
     cfg: ComputeBackendConfig = computeBackend,
     health: RemoteServerHealth | null = remoteHealth,
+    hardwareCaps: WebGpuHardwareCapabilities | null = webgpuHardwareCaps,
   ): BioFoldLimitOptions {
     return {
       resolveNodeFoldLimits: (node) =>
         resolveNodeFoldLimitOptions(node, cfg, health, {
           localWebGpuAvailable: webgpuSupported !== false,
           localWebGpuFallback: webgpuIsFallback,
+          localHardwareCaps: hardwareCaps,
         }),
     };
   }
@@ -194,6 +201,7 @@
     const localOpts = {
       localWebGpuAvailable: webgpuSupported !== false,
       localWebGpuFallback: webgpuIsFallback,
+      localHardwareCaps: webgpuHardwareCaps,
     };
     scheduler.setFoldLimitResolver((node) =>
       resolveNodeFoldLimitOptions(node, cfg, remoteHealth, localOpts),
@@ -1137,11 +1145,13 @@
       webgpuSupported = false;
       webgpuIsFallback = false;
       webgpuAdapterInfo = null;
+      webgpuHardwareCaps = null;
       webgpuDetail = 'needs HTTPS/localhost';
     } else if (!('gpu' in navigator) || !navigator.gpu) {
       webgpuSupported = false;
       webgpuIsFallback = false;
       webgpuAdapterInfo = null;
+      webgpuHardwareCaps = null;
       webgpuDetail = 'unavailable in browser';
     } else {
       try {
@@ -1153,11 +1163,13 @@
         webgpuSupported = true;
         webgpuIsFallback = res.isSoftwareFallback;
         webgpuAdapterInfo = res.info;
+        webgpuHardwareCaps = res.hardwareCapabilities;
         webgpuDetail = formatWebGpuAdapterSummary(res.info, res.hasF16);
       } catch {
         webgpuSupported = false;
         webgpuIsFallback = false;
         webgpuAdapterInfo = null;
+        webgpuHardwareCaps = null;
         webgpuDetail = 'no GPU adapter';
       }
     }
@@ -1869,7 +1881,7 @@
   let inputPreviewErrors = $derived(Object.values(inputPreviewErrorsByNode));
   let validationErrors = $derived([...graphValidationErrors, ...inputPreviewErrors]);
   let bioFoldLimitOpts = $derived.by(() =>
-    buildFoldLimitOpts(computeBackend, remoteHealth),
+    buildFoldLimitOpts(computeBackend, remoteHealth, webgpuHardwareCaps),
   );
   let previewChecks = $derived(
     computePreviewChecks(
@@ -2074,9 +2086,41 @@
     }
   });
 
+  function resolveRunErrorFoldCeilingRecovery(
+    errMsg: string,
+    cfg: ComputeBackendConfig,
+    remote: boolean,
+    autoAf3Ceiling: number,
+  ): { nextTier: number | null } | null {
+    if (!/Max fold len|WebGPU memory ceiling|maxStorageBufferBindingSize/i.test(errMsg)) {
+      return null;
+    }
+    if (remote || /maxStorageBufferBindingSize/i.test(errMsg)) {
+      return { nextTier: null };
+    }
+    const match = errMsg.match(/\((\d+)\s+residues\)/i);
+    const parsedLimit = match ? Number(match[1]) : NaN;
+    const currentLimit =
+      Number.isFinite(parsedLimit) && parsedLimit > 0
+        ? parsedLimit
+        : (cfg.maxFoldResidues ?? autoAf3Ceiling);
+    const tiers = [768, 1024, 1536, 2048, 3072, 4096] as const;
+    const nextTier = tiers.find((t) => t > currentLimit) ?? null;
+    return { nextTier };
+  }
+
   function applyBioCompatibilityFix(fix: NonNullable<BioCompatibilityIssue['fix']>) {
     if (isRunning) return;
+    if (fix.computeBackendPatch) {
+      updateComputeBackend(fix.computeBackendPatch);
+    }
     const { nodeId, paramsPatch, nodeLabel } = fix;
+    const hasGraphEdit =
+      (paramsPatch && Object.keys(paramsPatch).length > 0) || Boolean(nodeLabel);
+    if (!hasGraphEdit) {
+      runError = null;
+      return;
+    }
     const prevSnapshot = $state.snapshot(graph) as WorkflowGraph;
     pushGraphUndo(prevSnapshot);
     clearStaleUrlHash();
@@ -3960,7 +4004,9 @@
               >
                 <option value="auto">
                   {!isRemoteCompute
-                    ? 'Auto (512 / 768)'
+                    ? browserAutoAf3Ceiling === browserAutoAf2Ceiling
+                      ? `Auto (${browserAutoAf3Ceiling} aa)`
+                      : `Auto (${browserAutoAf3Ceiling} / ${browserAutoAf2Ceiling})`
                     : `Auto (Host ${remoteHealth?.maxFoldResidues ?? DEFAULT_HOST_MAX_FOLD_RESIDUES})`}
                 </option>
                 <option value="512">512 aa</option>
@@ -4480,18 +4526,56 @@
       {/if}
 
       {#if runError && !previewChecks.hideRunError}
+        {@const foldCeilingRecovery = resolveRunErrorFoldCeilingRecovery(
+          runError,
+          computeBackend,
+          isRemoteCompute,
+          browserAutoAf3Ceiling,
+        )}
         <div class="error-banner error-banner-row" role="alert">
           <div class="error-banner-text">
             <b>Pipeline error:</b> {runError}
           </div>
-          <button
-            type="button"
-            class="error-report-btn"
-            onclick={() => openFeedbackPopover({ category: 'bug', includeError: true })}
-            title="Send a bug note with this error attached (or open a GitHub issue)"
-          >
-            Report / Feedback
-          </button>
+          <div class="error-banner-actions">
+            {#if foldCeilingRecovery?.nextTier}
+              <button
+                type="button"
+                class="error-action-btn"
+                disabled={isRunning || activeRunState.leaseHeld}
+                onclick={() => {
+                  updateComputeBackend({ maxFoldResidues: foldCeilingRecovery.nextTier! });
+                  runError = null;
+                }}
+                title="Raise Max fold len in Compute settings and clear this error"
+              >
+                Raise Max fold len to {foldCeilingRecovery.nextTier} aa
+              </button>
+            {/if}
+            {#if foldCeilingRecovery}
+              <button
+                type="button"
+                class="error-report-btn"
+                onclick={() => {
+                  if (sysWrapEl) {
+                    const rect = sysWrapEl.getBoundingClientRect();
+                    sysPopAlignLeft = rect.right < 320;
+                  }
+                  sysMenuOpen = true;
+                }}
+                title="Open Compute & GPU settings"
+              >
+                Open Compute
+              </button>
+            {/if}
+            <button
+              type="button"
+              class="error-report-btn"
+              onclick={() => openFeedbackPopover({ category: 'bug', includeError: true })}
+              title="Send a bug note with this error attached (or open a GitHub issue)"
+            >
+              Report / Feedback
+            </button>
+          </div>
         </div>
       {/if}
 
@@ -5699,6 +5783,33 @@
   .error-banner-text {
     flex: 1;
     min-width: 0;
+  }
+  .error-banner-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .error-action-btn {
+    flex-shrink: 0;
+    padding: 4px 10px;
+    border-radius: 5px;
+    border: 1px solid currentColor;
+    background: rgba(239, 68, 68, 0.16);
+    color: inherit;
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .error-action-btn:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.28);
+  }
+  .error-action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .error-report-btn {
     flex-shrink: 0;

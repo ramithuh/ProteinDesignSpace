@@ -2306,7 +2306,7 @@ export function repairDraftedWorkflowFromBioFeedback(graph: WorkflowGraph): {
       const node = nodeById.get(targetId);
       if (!node) continue;
 
-      if (issue.fix) {
+      if (issue.fix && issue.fix.paramsPatch && Object.keys(issue.fix.paramsPatch).length > 0) {
         Object.assign(node.params, issue.fix.paramsPatch);
         if (issue.fix.nodeLabel) {
           node.label = issue.fix.nodeLabel;

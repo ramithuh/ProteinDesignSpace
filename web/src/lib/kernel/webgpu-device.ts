@@ -10,11 +10,28 @@ export interface WebGpuAdapterInfoSnapshot {
   isFallbackAdapter: boolean;
 }
 
+export interface WebGpuAdapterLimitsSnapshot {
+  maxStorageBufferBindingSize: number;
+  maxBufferSize: number;
+  maxComputeWorkgroupStorageSize: number;
+  maxComputeInvocationsPerWorkgroup: number;
+  maxComputeWorkgroupSizeX: number;
+}
+
+export interface WebGpuHardwareCapabilities {
+  isSoftwareFallback: boolean;
+  limits: WebGpuAdapterLimitsSnapshot | null;
+  deviceMemoryGiB: number | null;
+  estimatedMemoryBudgetBytes: number | null;
+}
+
 export interface ResilientAdapterResult {
   adapter: GPUAdapter;
   info: WebGpuAdapterInfoSnapshot;
   isSoftwareFallback: boolean;
   hasF16: boolean;
+  limits: WebGpuAdapterLimitsSnapshot | null;
+  hardwareCapabilities: WebGpuHardwareCapabilities;
 }
 
 export interface ResilientDeviceResult extends ResilientAdapterResult {
@@ -111,6 +128,58 @@ export function estimateSafeBrowserMemoryBudgetBytes(
   return null;
 }
 
+export function extractAdapterLimits(
+  adapter: GPUAdapter | null | undefined,
+): WebGpuAdapterLimitsSnapshot | null {
+  const raw = (adapter as unknown as { limits?: Record<string, unknown> } | null | undefined)?.limits;
+  if (!raw || typeof raw !== 'object') return null;
+  const numOr = (value: unknown, fallback: number): number => {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  };
+  const maxStorageBufferBindingSize = numOr(raw.maxStorageBufferBindingSize, 0);
+  const maxBufferSize = numOr(raw.maxBufferSize, 0);
+  if (maxStorageBufferBindingSize <= 0 && maxBufferSize <= 0) return null;
+  return {
+    maxStorageBufferBindingSize,
+    maxBufferSize,
+    maxComputeWorkgroupStorageSize: numOr(raw.maxComputeWorkgroupStorageSize, 0),
+    maxComputeInvocationsPerWorkgroup: numOr(raw.maxComputeInvocationsPerWorkgroup, 0),
+    maxComputeWorkgroupSizeX: numOr(raw.maxComputeWorkgroupSizeX, 0),
+  };
+}
+
+export function probeBrowserHardwareCapabilities(
+  res:
+    | (Pick<ResilientAdapterResult, 'isSoftwareFallback'> & {
+        limits?: WebGpuAdapterLimitsSnapshot | null;
+        adapter?: GPUAdapter | null;
+      })
+    | null
+    | undefined,
+  navOverride?: { deviceMemory?: number; userAgent?: string; hardwareConcurrency?: number } | null,
+): WebGpuHardwareCapabilities {
+  const nav =
+    navOverride !== undefined
+      ? navOverride
+      : typeof navigator === 'object' && navigator !== null
+        ? (navigator as Navigator & { deviceMemory?: number })
+        : null;
+  const rawDeviceMem = nav?.deviceMemory;
+  const deviceMemoryGiB =
+    typeof rawDeviceMem === 'number' && Number.isFinite(rawDeviceMem) && rawDeviceMem > 0
+      ? rawDeviceMem
+      : null;
+  const estimatedMemoryBudgetBytes = estimateSafeBrowserMemoryBudgetBytes(navOverride);
+  const limits = res?.limits ?? extractAdapterLimits(res?.adapter);
+  return {
+    isSoftwareFallback: Boolean(res?.isSoftwareFallback),
+    limits,
+    deviceMemoryGiB,
+    estimatedMemoryBudgetBytes,
+  };
+}
+
 export async function requestResilientWebGpuAdapter(opts?: {
   retries?: number;
   retryDelayMs?: number;
@@ -143,11 +212,20 @@ export async function requestResilientWebGpuAdapter(opts?: {
     throw new Error('Hardware WebGPU adapter required; software fallback rejected.');
   }
 
+  const limits = extractAdapterLimits(adapter);
+  const hardwareCapabilities = probeBrowserHardwareCapabilities({
+    isSoftwareFallback,
+    limits,
+    adapter,
+  });
+
   return {
     adapter,
     info,
     isSoftwareFallback,
     hasF16: adapter.features.has('shader-f16'),
+    limits,
+    hardwareCapabilities,
   };
 }
 
