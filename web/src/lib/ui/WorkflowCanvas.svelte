@@ -1538,26 +1538,27 @@
   }
   .canvas-action-dock {
     position: absolute;
-    bottom: calc(54px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
     left: 50%;
     transform: translate(-50%, 0);
     z-index: 25;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 4px;
-    padding: 5px 6px;
+    gap: 3px;
+    padding: 4px 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
     -webkit-backdrop-filter: blur(14px);
     backdrop-filter: blur(14px);
     border: 1px solid var(--border-strong);
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24), var(--node-shadow);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18), var(--node-shadow);
     white-space: nowrap;
     box-sizing: border-box;
     transition:
       bottom 360ms cubic-bezier(0.22, 1, 0.36, 1),
       transform 360ms cubic-bezier(0.22, 1, 0.36, 1),
+      padding 220ms ease,
       border-radius 240ms cubic-bezier(0.22, 1, 0.36, 1),
       border-color 200ms ease,
       box-shadow 240ms ease;
@@ -1565,6 +1566,20 @@
   .canvas-action-dock.is-centered {
     bottom: 50%;
     transform: translate(-50%, 50%);
+    gap: 4px;
+    padding: 5px 6px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24), var(--node-shadow);
+  }
+  .canvas-action-dock.is-centered .add-block-btn {
+    padding: 7px 15px;
+    font-size: 13.5px;
+  }
+  .canvas-action-dock.is-centered .dock-ai-btn {
+    padding: 7px 14px;
+    font-size: 13.5px;
+  }
+  .canvas-action-dock.is-centered .dock-divider {
+    height: 20px;
   }
   .canvas-action-dock.planner-active {
     z-index: 32;
@@ -1584,7 +1599,7 @@
   }
   .dock-divider {
     width: 1px;
-    height: 20px;
+    height: 16px;
     background: var(--border-strong);
     opacity: 0.7;
     flex-shrink: 0;
@@ -1592,13 +1607,13 @@
   .add-block-btn {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     background: var(--bg-pill);
     color: var(--text-primary);
     border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border-strong));
     border-radius: 999px;
-    padding: 7px 15px;
-    font-size: 13.5px;
+    padding: 5px 12px;
+    font-size: 12.5px;
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
@@ -1615,13 +1630,13 @@
   .dock-ai-btn {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     background: transparent;
     color: var(--text-primary);
     border: 1px solid transparent;
     border-radius: 999px;
-    padding: 7px 14px;
-    font-size: 13.5px;
+    padding: 5px 11px;
+    font-size: 12.5px;
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
@@ -1638,7 +1653,7 @@
   }
   .ai-sparkle {
     color: var(--accent-bright);
-    font-size: 14px;
+    font-size: 13px;
     line-height: 1;
   }
   .ai-label-short {
@@ -1651,8 +1666,8 @@
     color: var(--text-secondary);
     border: 1px solid transparent;
     border-radius: 999px;
-    padding: 7px 13px;
-    font-size: 13px;
+    padding: 5px 10px;
+    font-size: 12px;
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;
@@ -1665,12 +1680,43 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+  @media (max-width: 1024px) {
+    .canvas-action-dock:not(.is-centered) {
+      bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+      gap: 2px;
+      padding: 3px 4px;
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.16), var(--node-shadow);
+    }
+    .canvas-action-dock:not(.is-centered) .add-block-btn,
+    .canvas-action-dock:not(.is-centered) .dock-ai-btn {
+      padding: 4px 9px;
+      font-size: 11.5px;
+      gap: 4px;
+    }
+    .canvas-action-dock:not(.is-centered) .dock-tool-btn {
+      padding: 4px 8px;
+      font-size: 11.5px;
+    }
+    .canvas-action-dock:not(.is-centered) .dock-divider {
+      height: 14px;
+    }
+    .canvas-action-dock:not(.is-centered) .plus {
+      font-size: 13px;
+    }
+    .canvas-action-dock:not(.is-centered) .ai-sparkle {
+      font-size: 11.5px;
+    }
+    .canvas-action-dock:not(.is-centered) .kbd-hint,
+    .canvas-action-dock:not(.is-centered) .ai-kbd {
+      display: none;
+    }
+  }
   @media (max-width: 640px), (hover: none) {
     .canvas-action-dock {
-      bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+      bottom: calc(10px + env(safe-area-inset-bottom, 0px));
     }
     .canvas-action-dock.planner-active {
-      bottom: calc(34px + env(safe-area-inset-bottom, 0px));
+      bottom: calc(14px + env(safe-area-inset-bottom, 0px));
       width: calc(100% - 16px);
       border-radius: 22px;
     }
@@ -1683,12 +1729,12 @@
       display: none;
     }
     .add-block-btn {
-      padding: 6px 12px;
-      font-size: 12.5px;
+      padding: 4px 9px;
+      font-size: 11.5px;
     }
     .dock-ai-btn {
-      padding: 6px 11px;
-      font-size: 12.5px;
+      padding: 4px 8px;
+      font-size: 11.5px;
     }
     .ai-label-full {
       display: none;
@@ -1697,8 +1743,8 @@
       display: inline;
     }
     .dock-tool-btn {
-      padding: 6px 10px;
-      font-size: 12px;
+      padding: 4px 8px;
+      font-size: 11px;
     }
   }
   .plus {
