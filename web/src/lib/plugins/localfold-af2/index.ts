@@ -29,7 +29,7 @@ export const localfoldAf2Plugin: ModelPlugin = {
     runtime: 'wgsl-custom',
     fallback: { kind: 'none', reason: 'Requires WebGPU (or Host GPU server)' },
     createWorker: async () => new (await import('./localfold.worker?worker')).default(),
-    vramLeaseMode: 'exclusive',
+    vramLeaseMode: 'shared-if-fits',
     getWorkerIsolationKey: (params) => {
       const modelId = String(params.model ?? '').trim();
       return LOCALFOLD_MODEL_OPTIONS.find((m) => m.id === modelId && m.family === 'esmfold2')?.id;

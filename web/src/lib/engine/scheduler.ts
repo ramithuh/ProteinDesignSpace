@@ -1047,7 +1047,7 @@ export class ExecutionScheduler {
       });
 
       if (!settled && this.activeGpu === slot) {
-        await this.releaseActiveGpuInternal('Workflow run cancelled');
+        await this.releaseActiveGpuInternal('Workflow run cancelled', 500);
       }
     })();
 
@@ -1060,7 +1060,7 @@ export class ExecutionScheduler {
     return tracked;
   }
 
-  private async releaseActiveGpuInternal(abortMessage?: string): Promise<void> {
+  private async releaseActiveGpuInternal(abortMessage?: string, disposeTimeoutMs = 2000): Promise<void> {
     this.clearGpuIdleTimer();
     const slot = this.activeGpu;
     if (!slot) {
@@ -1096,7 +1096,7 @@ export class ExecutionScheduler {
           }
           resolve();
         };
-        const timer = setTimeout(finish, 500);
+        const timer = setTimeout(finish, disposeTimeoutMs);
         const onMsg = (ev: MessageEvent) => {
           if (ev.data?.id === id && ev.data?.type === 'disposed') {
             finish();
@@ -1248,95 +1248,105 @@ export class ExecutionScheduler {
     const supportsCooperativeAbort = Boolean(plugin?.execution.supportsCooperativeAbort);
     const abortGraceMs = Math.max(1500, plugin?.execution.abortGraceMs ?? 1500);
 
-    return await new Promise((resolve, reject) => {
-      let settled = false;
-      const cleanup = () => {
-        worker.removeEventListener('message', onMessage);
-        worker.removeEventListener('error', onError);
-        signal?.removeEventListener('abort', onAbortSignal);
-        if (slot.abortActive === abort) {
-          slot.abortActive = undefined;
-        }
-      };
-      const abort = (err: Error) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(err);
-      };
-      const onAbortSignal = () => {
-        if (supportsCooperativeAbort) {
-          void this.requestCooperativeAbort(slot, abortGraceMs);
-        } else {
-          void this.releaseActiveGpuInternal('Workflow run cancelled');
-        }
-        abort(new Error('Workflow run cancelled'));
-      };
-      const onMessage = (ev: MessageEvent) => {
-        const m = ev.data;
-        if (m?.id !== id) return;
-        if (m.type === 'progress') {
-          onProgress({
-            nodeId: node.id,
-            status: m.phase === 'weights' || m.phase === 'init' ? 'loading' : 'running',
-            phase: m.phase,
-            progress: m.progress,
-            detail: m.detail,
-          });
-        } else if (m.type === 'result') {
+    try {
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          worker.removeEventListener('message', onMessage);
+          worker.removeEventListener('error', onError);
+          signal?.removeEventListener('abort', onAbortSignal);
+          if (slot.abortActive === abort) {
+            slot.abortActive = undefined;
+          }
+        };
+        const abort = (err: Error) => {
           if (settled) return;
           settled = true;
           cleanup();
-          resolve({ outputs: m.outputs, elapsedMs: m.elapsedMs ?? 0 });
-        } else if (m.type === 'error') {
+          reject(err);
+        };
+        const onAbortSignal = () => {
+          if (supportsCooperativeAbort) {
+            void this.requestCooperativeAbort(slot, abortGraceMs);
+          } else {
+            void this.releaseActiveGpuInternal('Workflow run cancelled');
+          }
+          abort(new Error('Workflow run cancelled'));
+        };
+        const onMessage = (ev: MessageEvent) => {
+          const m = ev.data;
+          if (m?.id !== id) return;
+          if (m.type === 'progress') {
+            onProgress({
+              nodeId: node.id,
+              status: m.phase === 'weights' || m.phase === 'init' ? 'loading' : 'running',
+              phase: m.phase,
+              progress: m.progress,
+              detail: m.detail,
+            });
+          } else if (m.type === 'result') {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve({ outputs: m.outputs, elapsedMs: m.elapsedMs ?? 0 });
+          } else if (m.type === 'error') {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(new Error(m.message || `Worker ${node.adapterId} failed`));
+          }
+        };
+        const onError = (err: ErrorEvent) => {
           if (settled) return;
           settled = true;
           cleanup();
-          reject(new Error(m.message || `Worker ${node.adapterId} failed`));
-        }
-      };
-      const onError = (err: ErrorEvent) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        if (this.activeGpu === slot) {
-          this.activeGpu = null;
+          if (this.activeGpu === slot) {
+            this.activeGpu = null;
+          }
+          try {
+            worker.terminate();
+          } catch {
+            /* ignore */
+          }
+          reject(new Error(err.message || `Worker ${node.adapterId} crashed`));
+        };
+
+        slot.abortActive = abort;
+        worker.addEventListener('message', onMessage);
+        worker.addEventListener('error', onError);
+        if (signal) {
+          if (signal.aborted) {
+            onAbortSignal();
+            return;
+          }
+          signal.addEventListener('abort', onAbortSignal, { once: true });
         }
         try {
-          worker.terminate();
-        } catch {
-          /* ignore */
+          // Plain-object clone strips any reactive Proxy (e.g. Svelte 5 $state) before postMessage.
+          const plainParams = JSON.parse(JSON.stringify(node.params ?? {}));
+          const resolvedLimit = explicitMaxFoldResidues ?? this.foldLimitResolver?.(node)?.maxFoldResidues ?? undefined;
+          worker.postMessage({
+            id,
+            type: 'run',
+            params: plainParams,
+            inputs,
+            ...(typeof resolvedLimit === 'number' && Number.isFinite(resolvedLimit)
+              ? { maxFoldResidues: Math.round(resolvedLimit) }
+              : {}),
+          });
+        } catch (err) {
+          abort(err instanceof Error ? err : new Error(String(err)));
         }
-        reject(new Error(err.message || `Worker ${node.adapterId} crashed`));
-      };
-
-      slot.abortActive = abort;
-      worker.addEventListener('message', onMessage);
-      worker.addEventListener('error', onError);
-      if (signal) {
-        if (signal.aborted) {
-          onAbortSignal();
-          return;
-        }
-        signal.addEventListener('abort', onAbortSignal, { once: true });
+      });
+    } finally {
+      if (
+        !signal?.aborted &&
+        plugin?.execution.vramLeaseMode === 'exclusive' &&
+        this.activeGpu === slot
+      ) {
+        await this.releaseActiveGpuInternal();
       }
-      try {
-        // Plain-object clone strips any reactive Proxy (e.g. Svelte 5 $state) before postMessage.
-        const plainParams = JSON.parse(JSON.stringify(node.params ?? {}));
-        const resolvedLimit = explicitMaxFoldResidues ?? this.foldLimitResolver?.(node)?.maxFoldResidues ?? undefined;
-        worker.postMessage({
-          id,
-          type: 'run',
-          params: plainParams,
-          inputs,
-          ...(typeof resolvedLimit === 'number' && Number.isFinite(resolvedLimit)
-            ? { maxFoldResidues: Math.round(resolvedLimit) }
-            : {}),
-        });
-      } catch (err) {
-        abort(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
+    }
   }
 
   private runCpuNode(

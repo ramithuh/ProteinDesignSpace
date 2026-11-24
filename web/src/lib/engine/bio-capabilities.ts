@@ -2189,6 +2189,35 @@ export function extractUpstreamHoloHints(
         } else if (mode === 'unconditional') {
           skipUpstreamEdges = true;
         }
+      } else if (n.adapterId === 'rfd3') {
+        const mode = String(n.params.mode ?? 'unconditional').trim().toLowerCase();
+        if (mode === 'unconditional') {
+          skipUpstreamEdges = true;
+        } else {
+          const liveStruct = outputsByNode?.[n.id]?.structure as StructureArtifact | undefined;
+          const liveBenchId =
+            liveStruct?.benchmarkId || String(n.params.autoSeededBenchmarkId ?? '').trim();
+          const liveBench = liveBenchId ? getBenchmarkById(liveBenchId) : undefined;
+          const livePdbId =
+            liveBench?.pdbId ||
+            (/\b([0-9][A-Za-z0-9]{3})\b/.exec(liveStruct?.label ?? '')?.[1]?.toUpperCase() ?? '');
+          const filterOpts = { pdbId: livePdbId || undefined, benchmarkId: liveBench?.id };
+
+          const rawLigand = String(n.params.ligand ?? '').trim();
+          if (rawLigand) {
+            const explicitLigs = rawLigand
+              .split(/[,\s;]+/)
+              .map((tok) => (tok.includes(':') ? tok.split(':').pop() ?? '' : tok))
+              .filter(Boolean);
+            addFilteredLigands(explicitLigs, filterOpts);
+          }
+          if (liveStruct && liveStruct.kind === 'StructureArtifact') {
+            addFilteredLigands(liveStruct.diagnostics?.ligandNames, filterOpts);
+            const liveText = liveStruct.cifText || liveStruct.pdbText || '';
+            const liveDnas = liveText ? extractNucleicAcidSequencesFromStructureText(liveText) : [];
+            for (const seq of liveDnas) dnas.add(seq);
+          }
+        }
       }
     }
 
@@ -2574,17 +2603,30 @@ export function validateBioCapabilities(
     // with its own contig residue spans or upstream PDB Input's cropSegments (catches AI hallucinations & typos).
     const isMotifNode =
       (node.adapterId === 'rfd4-proteina' && String(node.params.mode ?? 'unconditional') === 'motif') ||
+      (node.adapterId === 'rfd3' &&
+        String(node.params.mode ?? 'unconditional').trim().toLowerCase() === 'motif') ||
       (node.adapterId === 'genie3' && String(node.params.taskMode ?? 'unconditional') === 'motif') ||
       (node.adapterId === 'protpardelle' && String(node.params.taskMode ?? 'unconditional') === 'motif') ||
       (node.adapterId === 'rfdiffusion' &&
         String(node.params.taskMode ?? node.params.mode ?? 'unconditional') === 'motif');
     if (isMotifNode) {
-      const motifParamKey = node.adapterId === 'protpardelle' ? 'motifSelection' : 'motifSpan';
+      const hasRfd3MotifSpan =
+        node.adapterId === 'rfd3' && Boolean(String(node.params.motifSpan ?? '').trim());
+      const motifParamKey =
+        node.adapterId === 'protpardelle'
+          ? 'motifSelection'
+          : node.adapterId === 'rfd3' && !hasRfd3MotifSpan
+            ? 'unindex'
+            : 'motifSpan';
       const rawMotif = String(
         node.adapterId === 'protpardelle'
           ? (node.params.motifSelection ?? node.params.motifSpan ?? '')
-          : (node.params.motifSpan ?? ''),
+          : node.adapterId === 'rfd3'
+            ? (node.params.unindex ?? node.params.motifSpan ?? '')
+            : (node.params.motifSpan ?? ''),
       ).trim();
+      const rawContig = String(node.params.contig ?? '').trim();
+      const contigSpans = rawContig ? parseContigTemplateSpans(rawContig) : [];
       const motifSpans = rawMotif
         ? parseResidueRangeTokens(rawMotif).map((s) => ({
             chain: s.chain.toUpperCase(),
@@ -2593,8 +2635,6 @@ export function validateBioCapabilities(
           }))
         : [];
       if (motifSpans.length > 0) {
-        const rawContig = String(node.params.contig ?? '').trim();
-        const contigSpans = rawContig ? parseContigTemplateSpans(rawContig) : [];
         if (contigSpans.length > 0) {
           const completelyDisjoint = !residueSpansOverlapAny(motifSpans, contigSpans);
           const uncoveredInContig = completelyDisjoint
@@ -2606,8 +2646,8 @@ export function validateBioCapabilities(
               code: 'motif-span-disjoint-from-contig',
               nodeId: node.id,
               message: completelyDisjoint
-                ? `${node.label ?? node.adapterId} motifSpan "${rawMotif}" does not overlap any template residue in contig "${rawContig}". Check for a residue-numbering typo or stale motif span.`
-                : `${node.label ?? node.adapterId} motifSpan "${rawMotif}" includes residue(s) ${uncoveredInContig.join(', ')} not covered by contig "${rawContig}".`,
+                ? `${node.label ?? node.adapterId} ${motifParamKey} "${rawMotif}" does not overlap any template residue in contig "${rawContig}". Check for a residue-numbering typo or stale motif span.`
+                : `${node.label ?? node.adapterId} ${motifParamKey} "${rawMotif}" includes residue(s) ${uncoveredInContig.join(', ')} not covered by contig "${rawContig}".`,
             });
           }
         }
@@ -2708,6 +2748,21 @@ export function validateBioCapabilities(
             }
           }
         }
+      } else if (node.adapterId === 'rfd3' && contigSpans.length > 0) {
+        const tplEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
+        const tplNode = tplEdge ? graph.nodes.find((n) => n.id === tplEdge.fromNode) : null;
+        if (tplNode?.adapterId === 'pdb-input') {
+          const cropSpec = String(tplNode.params.cropSegments ?? '').trim();
+          const cropSpans = cropSpec ? parseProteinCropSpans(cropSpec) : [];
+          if (cropSpans.length > 0 && !residueSpansOverlapAny(contigSpans, cropSpans)) {
+            issues.push({
+              severity: 'warning',
+              code: 'motif-span-disjoint-from-crop',
+              nodeId: node.id,
+              message: `${node.label ?? node.adapterId} contig "${rawContig}" is completely disjoint from upstream cropSegments "${cropSpec}" — 0 motif residues will match.`,
+            });
+          }
+        }
       }
     }
 
@@ -2749,7 +2804,7 @@ export function validateBioCapabilities(
               : `Upstream structure has ${up.missingBackboneCount} residue(s) with incomplete backbone coordinates — ${consumerName} requires full N/CA/C/O backbone coordinates.`;
           } else {
             msg = up.isCaOnly
-              ? `${srcName} outputs Cα-only coordinates, whereas ${consumerName} requires full N/CA/C/O backbone atoms. Switch upstream to a full-backbone generator (RFD4-Proteina, RFdiffusion, ProtPardelle-1c, BoltzGen-1, or La-Proteina) or replace ${consumerName} with Cα-ProteinMPNN.`
+              ? `${srcName} outputs Cα-only coordinates, whereas ${consumerName} requires full N/CA/C/O backbone atoms. Switch upstream to a full-backbone generator (RFD4-Proteina, RFdiffusion3, RFdiffusion, ProtPardelle-1c, BoltzGen-1, or La-Proteina) or replace ${consumerName} with Cα-ProteinMPNN.`
               : `Upstream structure has ${up.missingBackboneCount} residue(s) with incomplete backbone coordinates — ${consumerName} requires full N/CA/C/O backbone coordinates.`;
           }
           issues.push({
