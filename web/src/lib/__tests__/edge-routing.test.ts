@@ -1,7 +1,10 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   cleanPolyline,
   computeSmartEdgePath,
+  computeStraightEdgeHitRect,
   countPolylineHits,
   pointsToRoundedPath,
   type ObstacleRect,
@@ -171,5 +174,73 @@ describe('obstacle-avoiding smart edge routing', () => {
     ]);
     const built = pointsToRoundedPath(cleaned, 12);
     expect(built.path).toBe('M 0.0 0.0 L 88.0 0.0 Q 100.0 0.0 100.0 12.0 L 100.0 100.0');
+  });
+
+  it('Issue #104: computes a non-degenerate 2D hit rect for straight horizontal & vertical edges (Safari SVG hit-test)', () => {
+    const horiz = computeStraightEdgeHitRect({
+      sourceX: 260,
+      sourceY: 170,
+      targetX: 380,
+      targetY: 170,
+      points: null,
+      interactionWidth: 22,
+    });
+    expect(horiz).not.toBeNull();
+    expect(horiz!.width).toBe(112); // 120px span minus 4px inset on each end
+    expect(horiz!.height).toBe(22);
+    expect(horiz!.x).toBe(264);
+    expect(horiz!.y).toBe(159);
+
+    const vert = computeStraightEdgeHitRect({
+      sourceX: 300,
+      sourceY: 100,
+      targetX: 300,
+      targetY: 220,
+      points: null,
+      interactionWidth: 22,
+    });
+    expect(vert).not.toBeNull();
+    expect(vert!.width).toBe(22);
+    expect(vert!.height).toBe(112);
+
+    // Bent Z-path or multi-segment detour returns null (already has non-zero 2D bbox)
+    expect(
+      computeStraightEdgeHitRect({
+        sourceX: 260,
+        sourceY: 170,
+        targetX: 380,
+        targetY: 230,
+        points: null,
+      }),
+    ).toBeNull();
+    expect(
+      computeStraightEdgeHitRect({
+        sourceX: 260,
+        sourceY: 170,
+        targetX: 80,
+        targetY: 170,
+        points: [
+          { x: 260, y: 170 },
+          { x: 284, y: 170 },
+          { x: 284, y: 300 },
+          { x: 56, y: 300 },
+          { x: 56, y: 170 },
+          { x: 80, y: 170 },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it('Issue #104: SmartEdge provides explicit stroke hit-target & WorkflowCanvas disables Shift selection-box hijack', () => {
+    const edgeSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/SmartEdge.svelte'), 'utf8');
+    expect(edgeSrc).toContain('smart-edge-hit-rect');
+    expect(edgeSrc).toContain('pointer-events="all"');
+    expect(edgeSrc).toContain('.svelte-flow__edge-interaction');
+    expect(edgeSrc).toContain('pointer-events: stroke');
+
+    const canvasSrc = readFileSync(resolve(process.cwd(), 'src/lib/ui/WorkflowCanvas.svelte'), 'utf8');
+    expect(canvasSrc).toContain('panOnDrag={true}');
+    expect(canvasSrc).toContain('selectionOnDrag={false}');
+    expect(canvasSrc).toContain('selectionKey={[]}');
   });
 });

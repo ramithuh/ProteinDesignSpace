@@ -36,6 +36,64 @@ export interface RoutedEdgeResult {
   points: Point[];
 }
 
+export interface HitRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Compute a non-degenerate 2D hit rectangle for straight axis-aligned edges.
+ * Safari/WebKit can fail to hit-test strictly horizontal or vertical SVG `<path>`
+ * elements whose geometry bounding box collapses to zero height or width.
+ */
+export function computeStraightEdgeHitRect(opts: {
+  sourceX: number;
+  sourceY: number;
+  targetX: number;
+  targetY: number;
+  points?: readonly Point[] | null;
+  interactionWidth?: number;
+}): HitRect | null {
+  const { sourceX, sourceY, targetX, targetY, points, interactionWidth = 22 } = opts;
+  if (points && points.length > 2) return null;
+
+  const hitW = Math.max(12, interactionWidth);
+  const dx = Math.abs(targetX - sourceX);
+  const dy = Math.abs(targetY - sourceY);
+
+  if (dy < 4 && dx >= 8) {
+    const minX = Math.min(sourceX, targetX);
+    const maxX = Math.max(sourceX, targetX);
+    const inset = Math.min(4, dx * 0.15);
+    const width = Math.max(4, maxX - minX - inset * 2);
+    const midY = (sourceY + targetY) * 0.5;
+    return {
+      x: minX + inset,
+      y: midY - hitW * 0.5,
+      width,
+      height: hitW,
+    };
+  }
+
+  if (dx < 4 && dy >= 8) {
+    const minY = Math.min(sourceY, targetY);
+    const maxY = Math.max(sourceY, targetY);
+    const inset = Math.min(4, dy * 0.15);
+    const height = Math.max(4, maxY - minY - inset * 2);
+    const midX = (sourceX + targetX) * 0.5;
+    return {
+      x: midX - hitW * 0.5,
+      y: minY + inset,
+      width: hitW,
+      height,
+    };
+  }
+
+  return null;
+}
+
 interface Box {
   left: number;
   right: number;

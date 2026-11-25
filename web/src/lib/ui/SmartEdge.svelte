@@ -7,7 +7,11 @@
     useNodes,
     type EdgeProps,
   } from '@xyflow/svelte';
-  import { computeSmartEdgePath, type ObstacleRect } from './edge-routing';
+  import {
+    computeSmartEdgePath,
+    computeStraightEdgeHitRect,
+    type ObstacleRect,
+  } from './edge-routing';
   import type { EdgeFlowInfo } from '$lib/engine/batch-flow';
 
   let {
@@ -90,7 +94,12 @@
     });
 
     if (smart) {
-      return { path: smart.path, labelX: smart.labelX, labelY: smart.labelY };
+      return {
+        path: smart.path,
+        labelX: smart.labelX,
+        labelY: smart.labelY,
+        points: smart.points,
+      };
     }
 
     const [path, labelX, labelY] = getSmoothStepPath({
@@ -103,8 +112,19 @@
       borderRadius: 14,
       offset: 26,
     });
-    return { path, labelX, labelY };
+    return { path, labelX, labelY, points: null };
   });
+
+  let straightHitRect = $derived(
+    computeStraightEdgeHitRect({
+      sourceX,
+      sourceY,
+      targetX,
+      targetY,
+      points: routed.points,
+      interactionWidth: interactionWidth ?? 22,
+    }),
+  );
 </script>
 
 <g
@@ -125,6 +145,18 @@
     class={isProposed ? 'ghost-wire-path' : undefined}
     {style}
   />
+  {#if straightHitRect}
+    <rect
+      x={straightHitRect.x}
+      y={straightHitRect.y}
+      width={straightHitRect.width}
+      height={straightHitRect.height}
+      fill="transparent"
+      stroke="none"
+      pointer-events="all"
+      class="smart-edge-hit-rect"
+    />
+  {/if}
   {#if !isProposed && edgeFlow?.isTruncated}
     <circle
       cx={targetX - 10}
@@ -205,6 +237,18 @@
 {/if}
 
 <style>
+  /* Safari/WebKit drops pointer hit-tests on .svelte-flow__edge-interaction when stroke
+     defaults to none + stroke-opacity: 0 (especially on straight horizontal/vertical paths). */
+  :global(.svelte-flow__edge-interaction) {
+    stroke: transparent;
+    stroke-opacity: 1;
+    pointer-events: stroke;
+  }
+  .smart-edge-hit-rect {
+    pointer-events: all;
+    cursor: pointer;
+  }
+
   :global(.svelte-flow__edge-path.ghost-wire-path) {
     stroke-dasharray: 6 5;
     animation: ghost-dash 0.75s linear infinite;

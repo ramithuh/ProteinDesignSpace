@@ -1341,6 +1341,9 @@
       forceColorMode={theme}
       nodesDraggable={!disabled && !draftPreview}
       nodesConnectable={!disabled && !draftPreview}
+      panOnDrag={true}
+      selectionOnDrag={false}
+      selectionKey={[]}
       zoomOnDoubleClick={false}
       multiSelectionKey={['Meta', 'Control', 'Shift']}
       deleteKey={null}
