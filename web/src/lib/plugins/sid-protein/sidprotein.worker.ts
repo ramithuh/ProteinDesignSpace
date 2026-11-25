@@ -60,7 +60,9 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
   }
 
   const { adapter } = await requestResilientWebGpuAdapter({ allowSoftwareFallback: true });
+  const wantF16 = adapter.features.has('shader-f16');
   const device = await adapter.requestDevice({
+    requiredFeatures: wantF16 ? ['shader-f16'] : [],
     requiredLimits: {
       maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
       maxBufferSize: adapter.limits.maxBufferSize,
@@ -94,6 +96,7 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
         baseUrl,
         precision,
         device,
+        useF16: device.features.has('shader-f16'),
         allowSoftwareFallback: true,
         cache: 'none',
         read: async (url: string): Promise<ArrayBuffer> => {
@@ -190,23 +193,21 @@ createWorkerHarness({
             : `SiD-Protein distilled Cα sampler (${steps} steps, ${length} aa)...`,
         );
 
-        let completedSteps = 0;
         const res = await eng.generate({
           length,
           steps,
           noiseScale,
           seed: designSeed,
           signal: abortCtrl.signal,
-          onStep: () => {
+          onStepProgress: ({ step, steps: totalSteps }: { step: number; steps: number }) => {
             if (abortRequested || ctx.signal.aborted) return;
-            completedSteps++;
-            const frac = Math.min(1, completedSteps / steps);
+            const frac = Math.min(1, step / Math.max(1, totalSteps));
             ctx.progress(
               'sample',
               progressBase + frac * progressSpan,
               numDesigns > 1
-                ? `SiD-Protein ${d + 1}/${numDesigns} · step ${completedSteps}/${steps}`
-                : `SiD-Protein · step ${completedSteps}/${steps}`,
+                ? `SiD-Protein ${d + 1}/${numDesigns} · step ${step}/${totalSteps}`
+                : `SiD-Protein · step ${step}/${totalSteps}`,
             );
           },
         });

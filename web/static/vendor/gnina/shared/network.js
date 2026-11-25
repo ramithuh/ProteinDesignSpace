@@ -17,9 +17,14 @@ export async function forwardGraph(ops, grid, name, trace) {
     for(let level=0;level<3;level++) {
       const prefix="dense_block_"+level+".data_enc_level"+level;
       for(let i=0;i<4;i++) {
-        const norm=ops.norm(x,layer(prefix+"_batchnorm_conv"+i));
-        const y=ops.conv(norm,layer(prefix+"_conv"+i));
-        ops.release(norm);
+        const bnName=layer(prefix+"_batchnorm_conv"+i);
+        const convName=layer(prefix+"_conv"+i);
+        const y=ops.bnConv?ops.bnConv(x,bnName,convName):(()=>{
+          const norm=ops.norm(x,bnName);
+          const convOut=ops.conv(norm,convName);
+          ops.release(norm);
+          return convOut;
+        })();
         replace(ops.concat(x,y));ops.release(y);
       }
       await record("block"+level);

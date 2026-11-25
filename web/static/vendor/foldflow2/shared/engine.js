@@ -243,6 +243,51 @@ export class Engine {
       this.busy = false;
     }
   }
+  async encodeEsm({ length, esmTokens, signal, onProgress, maxReadbackBytes } = {}) {
+    if (this.destroyed) throw Error("Engine destroyed");
+    if (this.busy) throw Error("Engine is busy");
+    if (!Number.isInteger(length) || length < 1)
+      throw RangeError("length must be a positive integer");
+    const o = this.o;
+    const singleBytes = length * 34 * 1280 * 4;
+    const pairBytes = length * length * 660 * 4;
+    const deviceMaxBuf = o.device?.limits?.maxBufferSize ?? 256 * 1024 * 1024;
+    const readbackLimit = Math.min(
+      deviceMaxBuf,
+      maxReadbackBytes ?? 200 * 1024 * 1024,
+    );
+    if (singleBytes > readbackLimit || pairBytes > readbackLimit) {
+      return null;
+    }
+    this.busy = true;
+    this.controller = new AbortController();
+    const externalSignal = signal;
+    const relay = () => this.controller?.abort(externalSignal.reason);
+    externalSignal?.addEventListener("abort", relay, { once: true });
+    if (externalSignal?.aborted) relay();
+    signal = this.controller.signal;
+    const n = this.network;
+    n.signal = signal;
+    n.onProgress = onProgress;
+    n.tracing = false;
+    n.trace = {};
+    n.keep = [];
+    try {
+      abort(signal);
+      const raw = await n.esm(length, esmTokens);
+      // Read single and pair separately so we never concatenate both into one oversized MAP_READ buffer.
+      const single = await o.read(raw[0]);
+      const pair = await o.read(raw[1]);
+      return { single, pair };
+    } finally {
+      n.keep = [];
+      n.trace = {};
+      externalSignal?.removeEventListener("abort", relay);
+      this.controller = null;
+      o.clear();
+      this.busy = false;
+    }
+  }
   forward(opts) {
     return this.run({ ...opts, steps: 0 });
   }

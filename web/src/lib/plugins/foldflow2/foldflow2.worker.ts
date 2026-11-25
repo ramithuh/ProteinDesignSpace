@@ -82,8 +82,11 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
   }
 
   const { adapter } = await requestResilientWebGpuAdapter({ allowSoftwareFallback: true });
+  const wantF16 = adapter.features.has('shader-f16');
   const device = await adapter.requestDevice({
+    requiredFeatures: wantF16 ? ['shader-f16'] : [],
     requiredLimits: {
+      maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
       maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
       maxBufferSize: adapter.limits.maxBufferSize,
     },
@@ -116,6 +119,7 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
         baseUrl,
         precision,
         device,
+        useF16: device.features.has('shader-f16'),
         allowSoftwareFallback: true,
         cache: 'none',
         read: async (url: string): Promise<ArrayBuffer> => {
@@ -202,6 +206,31 @@ createWorkerHarness({
 
     const items: StructureArtifact[] = [];
     try {
+      // Cache the 33-layer ESM-2 650M embedding once across multi-design runs when readback fits safely.
+      let cachedSeqEmbed: { single: Float32Array; pair: Float32Array } | undefined;
+      if (numDesigns > 1 && typeof eng.encodeEsm === 'function') {
+        ctx.progress('sample', 0.45, `FoldFlow 2 · Computing shared ESM-2 650M embedding (${length} aa)...`);
+        const encoded = await eng.encodeEsm({
+          length,
+          ...(esmTokens ? { esmTokens } : {}),
+          signal: abortCtrl.signal,
+          onProgress: (info: { layer?: number; total?: number; phase?: string }) => {
+            if (abortRequested || ctx.signal.aborted) return;
+            const layer = info.layer ?? 0;
+            const totalLayers = info.total ?? 33;
+            const frac = totalLayers > 0 ? Math.min(1, layer / totalLayers) : 0.5;
+            ctx.progress(
+              'sample',
+              0.45 + frac * 0.1,
+              `FoldFlow 2 · Shared ESM-2 650M layer ${layer}/${totalLayers}`,
+            );
+          },
+        });
+        if (encoded) cachedSeqEmbed = encoded;
+      }
+      const designStartBase = cachedSeqEmbed ? 0.55 : 0.45;
+      const designTotalSpan = cachedSeqEmbed ? 0.42 : 0.52;
+
       for (let d = 0; d < numDesigns; d++) {
         if (abortRequested || ctx.signal.aborted) {
           throw new Error('Run aborted');
@@ -209,8 +238,8 @@ createWorkerHarness({
 
         const designSeed = seed + d;
         const designKey = `d${d + 1}`;
-        const progressBase = 0.45 + (d / numDesigns) * 0.52;
-        const progressSpan = 0.52 / numDesigns;
+        const progressBase = designStartBase + (d / numDesigns) * designTotalSpan;
+        const progressSpan = designTotalSpan / numDesigns;
 
         ctx.progress(
           'sample',
@@ -226,7 +255,7 @@ createWorkerHarness({
           seed: designSeed,
           selfConditioning,
           rotationScaling,
-          ...(esmTokens ? { esmTokens } : {}),
+          ...(cachedSeqEmbed ? { seqEmbed: cachedSeqEmbed } : esmTokens ? { esmTokens } : {}),
           signal: abortCtrl.signal,
           onProgress: (info: {
             step?: number;
@@ -240,7 +269,7 @@ createWorkerHarness({
             const step = isEsm ? (info.layer ?? 0) : (info.step ?? 0);
             const totalSteps = isEsm ? (info.total ?? 33) : (info.steps ?? info.total ?? steps);
             const frac = totalSteps > 0 ? Math.min(1, step / totalSteps) : 0.5;
-            const scaledFrac = isEsm ? frac * 0.25 : 0.25 + frac * 0.75;
+            const scaledFrac = cachedSeqEmbed ? frac : isEsm ? frac * 0.25 : 0.25 + frac * 0.75;
             ctx.progress(
               'sample',
               progressBase + scaledFrac * progressSpan,

@@ -1,9 +1,9 @@
 import { fetchWeights } from "../shared/ligandmpnn/weights.js";
 import { makeEngine } from "../shared/ligandmpnn/model.js?v=3";
-import { GpuOps } from "./ligandmpnn/ops.js?v=2";
+import { GpuOps } from "./ligandmpnn/ops.js?v=3";
 export { GpuOps };
 export { LigandModel } from "../shared/ligandmpnn/model.js?v=3";
-export * from "./ligandmpnn/shaders.js";
+export * from "./ligandmpnn/shaders.js?v=2";
 export async function requestWebGpuDevice({ useF16 = true } = {}) {
   if (!globalThis.navigator?.gpu)
     throw Error("WebGPU is unavailable; use HTTPS or localhost");

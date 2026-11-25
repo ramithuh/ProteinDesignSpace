@@ -1,5 +1,23 @@
-import * as S from "./shaders.js?v=2";
+import * as S from "./shaders.js?v=4";
 import { checkAbort } from "../shared/loader.js";
+let yieldChannel = null;
+const yieldQueue = [];
+function yieldMacrotask() {
+  if (typeof MessageChannel === "undefined") {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  if (!yieldChannel) {
+    yieldChannel = new MessageChannel();
+    yieldChannel.port1.onmessage = () => {
+      const next = yieldQueue.shift();
+      if (next) next();
+    };
+  }
+  return new Promise((resolve) => {
+    yieldQueue.push(resolve);
+    yieldChannel.port2.postMessage(null);
+  });
+}
 export class GPUOps {
   constructor(engine, input, options) {
     this.engine = engine;
@@ -87,8 +105,8 @@ export class GPUOps {
     this.options.onProgress?.({ phase });
     checkAbort(this.options.signal);
     this.engine.ensureAlive();
-    // Yield so UI cancellation can interrupt encoding; scratch buffers remain owned until finally.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Yield via MessageChannel (avoids 1000 ms background-tab setTimeout clamp) so cancellation stays responsive.
+    await yieldMacrotask();
     checkAbort(this.options.signal);
     this.engine.ensureAlive();
   }
@@ -105,7 +123,9 @@ export class GPUOps {
       [xyz, this.in.mask, dist],
       Math.ceil(L / 64),
     );
-    this.dispatch(S.topkShader(L, K), [dist, indices], L);
+    const q = this.alloc(L, L);
+    this.dispatch(S.topkShader(L, K), [dist, indices, q], L);
+    this.free(q);
     this.dispatch(
       S.geometryShader(L, K),
       [
@@ -149,6 +169,8 @@ export class GPUOps {
   }
   norm(x, delta, name, input) {
     const out = this.alloc(x.rows, x.cols);
+    const gx = x.rows <= 65535 ? x.rows : 65535;
+    const gy = Math.ceil(x.rows / 65535);
     this.dispatch(
       S.normShader(!!delta, !!input),
       [
@@ -159,7 +181,8 @@ export class GPUOps {
         this.in.mask,
         out,
       ],
-      x.rows,
+      gx,
+      gy,
     );
     return out;
   }

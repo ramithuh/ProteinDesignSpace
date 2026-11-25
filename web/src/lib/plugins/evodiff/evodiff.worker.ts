@@ -150,7 +150,14 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
         ctx.progress('init', 0.02, 'Loading EvoDiff-38M WebGPU modules...');
         evoWebgpuMod = await import(/* @vite-ignore */ `${base}/webgpu/index.js`);
       }
-      const device = await adapter.requestDevice();
+      const wantF16 = adapter.features.has('shader-f16');
+      const device = await adapter.requestDevice({
+        requiredFeatures: wantF16 ? ['shader-f16'] : [],
+        requiredLimits: {
+          maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+          maxBufferSize: adapter.limits.maxBufferSize,
+        },
+      });
       ownedDevice = device;
       void device.lost.then(() => {
         if (ownedDevice === device) {
@@ -160,7 +167,11 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
           loadedBackend = null;
         }
       });
-      engine = await loadWithFactory(evoWebgpuMod.createEvoDiffEngine, { device }, false);
+      engine = await loadWithFactory(
+        evoWebgpuMod.createEvoDiffEngine,
+        { device, useF16: device.features.has('shader-f16') },
+        false,
+      );
       loadedPrecision = precision;
       loadedBackend = 'webgpu';
       return { engine, backend: 'webgpu' as const };
@@ -274,6 +285,7 @@ createWorkerHarness({
             ? { fixedSequence: templateSeq, ...(maskPositions ? { maskPositions } : {}) }
             : { length }),
           seed: seed + s,
+          recordSteps: false,
           signal: controller.signal,
           onProgress: (prog: { completed?: number; step?: number; total?: number }) => {
             if (abortRequested || ctx.signal.aborted) return;

@@ -239,7 +239,7 @@ async function ensureEngine(
     try {
       if (!ligandMod) {
         ctx.progress('init', 0.02, 'Loading LigandMPNN WebGPU modules...');
-        const moduleUrl = new URL('/vendor/ligandmpnn/webgpu/index.js?v=3', self.location.origin).href;
+        const moduleUrl = new URL('/vendor/ligandmpnn/webgpu/index.js?v=4', self.location.origin).href;
         ligandMod = await import(/* @vite-ignore */ moduleUrl);
       }
 

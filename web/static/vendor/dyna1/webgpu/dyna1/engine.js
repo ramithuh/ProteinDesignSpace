@@ -26,6 +26,9 @@ import {
   selectLocalSource,
   codebookArgminSource,
 } from './shaders.js';
+import { QueuePacer } from '../../../localfold/webgpu/runtime/queue-pacing.js';
+import { startCompletionPump } from '../../../localfold/webgpu/runtime/completion-pump.js';
+import { yieldToBrowser } from '../../../localfold/webgpu/runtime/yield.js';
 
 const STRUCT_CHUNK_SIZE = 192; // 192 * 16 * 8192 * 4 = 100.66 MB < 128 MB default maxStorageBufferBindingSize
 
@@ -43,7 +46,16 @@ export async function requestWebGpuDevice({ useF16 = true } = {}) {
   if (!adapter) adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('No WebGPU adapter');
   const hasF16 = adapter.features.has('shader-f16');
-  const device = await adapter.requestDevice({ requiredFeatures: useF16 && hasF16 ? ['shader-f16'] : [] });
+  const requiredLimits = {};
+  for (const key of ['maxBufferSize', 'maxStorageBufferBindingSize', 'maxComputeWorkgroupsPerDimension']) {
+    if (typeof adapter.limits?.[key] === 'number' && Number.isFinite(adapter.limits[key])) {
+      requiredLimits[key] = adapter.limits[key];
+    }
+  }
+  const device = await adapter.requestDevice({
+    requiredFeatures: useF16 && hasF16 ? ['shader-f16'] : [],
+    requiredLimits,
+  });
   return { adapter, device, hasF16 };
 }
 
@@ -51,7 +63,7 @@ class Engine {
   constructor(device, { ownsDevice = false, useF16 = true, structureEncoderUrl = null, loadOptions = {} } = {}) {
     this.device = device;
     this.ownsDevice = ownsDevice;
-    this.useF16 = useF16 && device.features.has('shader-f16');
+    this.useF16 = Boolean(useF16 && device.features?.has?.('shader-f16'));
     this.structureEncoderUrl = structureEncoderUrl;
     this.loadOptions = loadOptions;
     this.weights = {};
@@ -63,12 +75,16 @@ class Engine {
     this.pipelines = new Map();
     this.readyPipelines = new Map();
     this.hasNewPipelines = false;
+    this.structPacer = new QueuePacer(device);
+    this.backbonePacer = new QueuePacer(device);
+    this.headPacer = new QueuePacer(device);
+    this._hasCommands = false;
     this.destroyed = false;
     this.busy = false;
     this.lost = null;
     this.pass = null;
     this._uploadedBytes = 0;
-    device.lost.then(info => { this.lost = info.message || 'Device lost'; });
+    device.lost?.then(info => { this.lost = info?.message || 'Device lost'; });
     this.zero = this.buffer(new Float32Array(4));
   }
   _endPass() {
@@ -76,6 +92,18 @@ class Engine {
       this.pass.end();
       this.pass = null;
     }
+  }
+  _submitPending() {
+    if (!this.encoder || !this._hasCommands) return;
+    this._endPass();
+    this.device.queue.submit([this.encoder.finish()]);
+    this.encoder = this.device.createCommandEncoder();
+    this._hasCommands = false;
+  }
+  async _paceBlock(pacer, drain = false) {
+    this._submitPending();
+    await pacer.blockSubmitted(drain);
+    await yieldToBrowser();
   }
   buffer(dataOrSize, temporary = false) {
     const data = typeof dataOrSize === 'number' ? null : dataOrSize;
@@ -89,7 +117,11 @@ class Engine {
       this.device.queue.writeBuffer(buffer, 0, bytes);
     }
     this.buffers.add(buffer);
-    if (temporary) { this.temporary.add(buffer); this.liveTemps.add(buffer); }
+    if (temporary) {
+      this.temporary.add(buffer);
+      // Never pool host-uploaded buffers across per-block submits so queue.writeBuffer cannot race.
+      if (!data) this.liveTemps.add(buffer);
+    }
     return buffer;
   }
   releaseExcept(keepList, traces) {
@@ -168,9 +200,11 @@ class Engine {
     if (!promise) {
       promise = (async () => {
         const module = this.device.createShaderModule({ code });
-        const info = await module.getCompilationInfo();
-        const errors = info.messages.filter(m => m.type === 'error');
-        if (errors.length) throw new Error(errors.map(e => e.message).join('\n'));
+        if (typeof module.getCompilationInfo === 'function') {
+          const info = await module.getCompilationInfo();
+          const errors = info.messages.filter(m => m.type === 'error');
+          if (errors.length) throw new Error(errors.map(e => e.message).join('\n'));
+        }
         const layout = this.device.createBindGroupLayout({
           entries: Array.from({ length: count }, (_, binding) => ({
             binding,
@@ -200,6 +234,7 @@ class Engine {
     this.pass.setPipeline(pipeline);
     this.pass.setBindGroup(0, bind);
     this.pass.dispatchWorkgroups(...groups);
+    this._hasCommands = true;
   }
   async dispatch(code, inputs, n, groups) {
     const y = this.buffer(n * 4, true), buffers = [...inputs, y];
@@ -280,17 +315,21 @@ class Engine {
         const gOut = await linS(ctx, g + '.out_proj', R, H * 3, D);
         x = await elemS(R * D, 'y[i]=x[i]+b[i];', [x, gOut]);
         this.releaseExcept([x, knnFramesBuf, nodeFramesBuf, allSelected], traces);
+        this.structPacer.pieceEnded(() => this._submitPending());
         const ffnIn = await lnS(x, p + '.ffn.0', R);
         const ff = await linS(ffnIn, p + '.ffn.1', R, D, 2 * F);
         const act = await elemS(R * F, `let r=i/${F}u;let j=i%${F}u;let a=x[r*${2 * F}u+j];y[i]=(a/(1.0+exp(-a)))*x[r*${2 * F}u+${F}u+j];`, [ff]);
         const fOut = await linS(act, p + '.ffn.3', R, F, D);
         x = await elemS(R * D, 'y[i]=x[i]+b[i];', [x, fOut]);
         this.releaseExcept([x, knnFramesBuf, nodeFramesBuf, allSelected], traces);
+        this.structPacer.pieceEnded(() => this._submitPending());
       }
       const chunkSel = await this.dispatch(selectLocalSource(B, K, D), [x, nodeFramesBuf], B * D, grid1d(B * D, 256));
       this._endPass();
       this.encoder.copyBufferToBuffer(chunkSel, 0, allSelected, b0 * D * 4, B * D * 4);
+      this._hasCommands = true;
       this.releaseExcept([allSelected], traces);
+      await this._paceBlock(this.structPacer, b0 + chunkSize >= L);
     }
     const preVq = await linS(allSelected, 'encoder.pre_vq_proj', L, D, codeDim);
     save('pre_vq', preVq, L * codeDim, 'F32');
@@ -308,6 +347,7 @@ class Engine {
       grid1d(L, 1)
     );
     this.releaseExcept([structTokensBuf], traces);
+    this._submitPending();
     return structTokensBuf;
   }
   async encodeStructure(structureCoords, { residueIndex, signal, onProgress } = {}) {
@@ -326,30 +366,52 @@ class Engine {
     this.pool = new Map();
     this.encoder = this.device.createCommandEncoder();
     this.pass = null;
+    this._hasCommands = false;
     this.hasNewPipelines = false;
     const started = performance.now();
-    let checkValidation = false;
+    const pushedValidation = typeof this.device.pushErrorScope === 'function';
+    if (pushedValidation) this.device.pushErrorScope('validation');
+    let caughtError = null;
     try {
       const structTokensBuf = await this._encodeStructureOps(coords, resIdx, { signal });
       this._endPass();
-      checkValidation = this.hasNewPipelines;
-      if (checkValidation) this.device.pushErrorScope('validation');
       const readback = this.device.createBuffer({ size: L * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
       this.buffers.add(readback);
       this.temporary.add(readback);
       this.encoder.copyBufferToBuffer(structTokensBuf, 0, readback, 0, L * 4);
       this.device.queue.submit([this.encoder.finish()]);
+      this.encoder = null;
+      this._hasCommands = false;
       await readback.mapAsync(GPUMapMode.READ);
       const structureTokens = new Int32Array(readback.getMappedRange().slice(0, L * 4));
       readback.unmap();
       signal?.throwIfAborted();
       return { structureTokens, timingMs: performance.now() - started };
+    } catch (err) {
+      caughtError = err;
+      // Reset pacers on abort/error so stale in-flight fences cannot mis-size the next run.
+      this.structPacer = new QueuePacer(this.device);
+      this.backbonePacer = new QueuePacer(this.device);
+      this.headPacer = new QueuePacer(this.device);
+      throw err;
     } finally {
       this._endPass();
-      const validation = checkValidation ? await this.device.popErrorScope() : null;
+      this.encoder = null;
+      this._hasCommands = false;
+      let validation = null;
+      if (pushedValidation) {
+        try {
+          validation = await this.device.popErrorScope();
+        } catch {
+          /* device already destroyed/lost */
+        }
+      }
       for (const b of this.temporary) { b.destroy(); this.buffers.delete(b); }
       this.temporary.clear(); this.liveTemps.clear(); this.pool.clear(); this.busy = false;
-      if (validation) throw new Error(`WebGPU validation: ${validation.message}`);
+      if (validation) {
+        if (!caughtError) throw new Error(`WebGPU validation: ${validation.message}`);
+        console.error('[dyna1] WebGPU validation error:', validation.message);
+      }
     }
   }
   async predict(sequence, opts = {}) {
@@ -371,9 +433,12 @@ class Engine {
     this.pool = new Map();
     this.encoder = this.device.createCommandEncoder();
     this.pass = null;
+    this._hasCommands = false;
     this.hasNewPipelines = false;
     const started = performance.now(), traces = {}, w = this.weights;
-    let checkValidation = false;
+    const pushedValidation = typeof this.device.pushErrorScope === 'function';
+    if (pushedValidation) this.device.pushErrorScope('validation');
+    let caughtError = null;
     const save = (name, value, n = L * D, dtype = 'F32') => { if (returnIntermediates) traces[name] = { buffer: value, n, dtype }; };
     const elem = (n, exp, inputs) => this.dispatch(elementSource(n, exp, inputs.length), inputs, n, grid1d(n, 256));
     const ln = (x, p, { stride = D, offset = 0, eps = 1e-5 } = {}) => this.dispatch(
@@ -421,6 +486,7 @@ class Engine {
         );
       }
       save('embedding', x);
+      this._submitPending();
       for (let i = 0; i < this.config.backbone_layers; i++) {
         signal?.throwIfAborted();
         if (this.destroyed) throw new Error('Engine destroyed');
@@ -430,33 +496,37 @@ class Engine {
         q = await this.dispatch(ropeSource(L, D, H), [q], L * D, grid1d(L * D, 256));
         k = await this.dispatch(ropeSource(L, D, H), [k], L * D, grid1d(L * D, 256));
         x = await residual(x, await linear(await attn(q, k, qkv, H), p + '.attn.out_proj'), this.config.residual_scale);
+        this.backbonePacer.pieceEnded(() => this._submitPending());
         const ff = await linear(await ln(x, p + '.ffn.0'), p + '.ffn.1', D, 2 * F);
         const act = await elem(L * F, `let r=i/${F}u;let j=i%${F}u;let a=x[r*${2 * F}u+j];y[i]=(a/(1.0+exp(-a)))*x[r*${2 * F}u+${F}u+j];`, [ff]);
         x = await residual(x, await linear(act, p + '.ffn.3', F, D), this.config.residual_scale);
         save(`backbone.${i}`, x);
         this.releaseExcept(x, traces);
+        await this._paceBlock(this.backbonePacer, i === this.config.backbone_layers - 1);
       }
       save('final_embeddings', x);
       x = await ln(x, 'head.norm1', { eps: 1e-12 });
+      this._submitPending();
       for (let i = 0; i < this.config.head_layers; i++) {
         signal?.throwIfAborted();
+        if (this.destroyed) throw new Error('Engine destroyed');
         const p = `head.encoder.layers.${i}`, F = this.config.head_ffn_size;
         const qkv = await linear(await ln(x, p + '.norm1'), p + '.self_attn.in_proj', D, 3 * D, true);
         const context = await attn(qkv, qkv, qkv, this.config.head_heads, { packedQkv: true });
         x = await residual(x, await linear(context, p + '.self_attn.out_proj'));
+        this.headPacer.pieceEnded(() => this._submitPending());
         const a = await linear(await ln(x, p + '.norm2'), p + '.linear1', D, F);
         const relu = await elem(L * F, 'y[i]=max(x[i],0.0);', [a]);
         x = await residual(x, await linear(relu, p + '.linear2', F, D));
         save(`head.${i}`, x);
         this.releaseExcept(x, traces);
+        await this._paceBlock(this.headPacer, i === this.config.head_layers - 1);
       }
       const logits = await linear(await ln(x, 'head.norm2', { eps: 1e-12 }), 'head.output_layer', D, 1);
       const probs = await elem(L, `y[i]=1.0/(1.0+exp(-(x[i]-(${Math.log(.05 / .95)}))));`, [logits]);
       traces.logits = { buffer: logits, n: L, dtype: 'F32' };
       traces.probs = { buffer: probs, n: L, dtype: 'F32' };
       this._endPass();
-      checkValidation = this.hasNewPipelines;
-      if (checkValidation) this.device.pushErrorScope('validation');
       const size = Object.values(traces).reduce((a, t) => a + t.n * 4, 0);
       const readback = this.device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
       this.buffers.add(readback);
@@ -468,6 +538,8 @@ class Engine {
         offset += t.n * 4;
       }
       this.device.queue.submit([this.encoder.finish()]);
+      this.encoder = null;
+      this._hasCommands = false;
       await readback.mapAsync(GPUMapMode.READ);
       const mapped = readback.getMappedRange(), values = {};
       for (const [name, t] of Object.entries(traces)) {
@@ -490,12 +562,31 @@ class Engine {
         timingMs: performance.now() - started,
         ...(returnIntermediates ? { intermediates: { tokens, ...values } } : {}),
       };
+    } catch (err) {
+      caughtError = err;
+      // Reset pacers on abort/error so stale in-flight fences cannot mis-size the next run.
+      this.structPacer = new QueuePacer(this.device);
+      this.backbonePacer = new QueuePacer(this.device);
+      this.headPacer = new QueuePacer(this.device);
+      throw err;
     } finally {
       this._endPass();
-      const validation = checkValidation ? await this.device.popErrorScope() : null;
+      this.encoder = null;
+      this._hasCommands = false;
+      let validation = null;
+      if (pushedValidation) {
+        try {
+          validation = await this.device.popErrorScope();
+        } catch {
+          /* device already destroyed/lost */
+        }
+      }
       for (const b of this.temporary) { b.destroy(); this.buffers.delete(b); }
       this.temporary.clear(); this.liveTemps.clear(); this.pool.clear(); this.busy = false;
-      if (validation) throw new Error(`WebGPU validation: ${validation.message}`);
+      if (validation) {
+        if (!caughtError) throw new Error(`WebGPU validation: ${validation.message}`);
+        console.error('[dyna1] WebGPU validation error:', validation.message);
+      }
     }
   }
   destroy() {
@@ -531,6 +622,10 @@ export async function createDyna1Engine({
   const structUrl = structureEncoderUrl ?? `${rootUrl}/structure_encoder`;
   const ownsDevice = !device;
   if (!device) ({ device } = await requestWebGpuDevice({ useF16 }));
+  const isFirefox = /firefox/i.test(globalThis.navigator?.userAgent ?? '');
+  if (isFirefox && typeof globalThis.GPUBufferUsage !== 'undefined') {
+    startCompletionPump(device, true);
+  }
   const engine = new Engine(device, {
     ownsDevice,
     useF16,

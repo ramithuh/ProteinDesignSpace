@@ -1,7 +1,7 @@
 import {loadWeights,prepareInput,regionMask,VOCAB,CANONICAL_TOKENS} from '../shared/index.js';
 import {encode,decode} from '../shared/model.js';
 import {independentPlan,finishIndependent} from '../shared/sampling.js';
-import {GPUOps} from './ops.js';
+import {GPUOps} from './ops.js?v=3';
 export async function requestWebGPU({useF16=false,allowSoftwareFallback=true}={}){
  if(!globalThis.navigator?.gpu)throw new Error('Hardware WebGPU is required (HTTPS or localhost)');
  const adapter=(await navigator.gpu.requestAdapter({powerPreference:'high-performance'}))??(await navigator.gpu.requestAdapter());if(!adapter)throw new Error('No WebGPU adapter');
@@ -11,6 +11,10 @@ export async function requestWebGPU({useF16=false,allowSoftwareFallback=true}={}
  const device=await adapter.requestDevice({requiredFeatures:useF16&&adapter.features.has('shader-f16')?['shader-f16']:[],requiredLimits:{maxBufferSize:adapter.limits.maxBufferSize,maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize}});
  return {device,adapter,info};
 }
+// sample() decodes a length rounded up to DECODE_BUCKET, the tail <pad>: every kernel bakes its length in, so decoding
+// i+1 tokens compiled a fresh set of pipelines per position (~5,000 at 250 residues). The decoder is causal and masks
+// padding, and its softmax gives a masked score exactly zero weight, so row i is unchanged.
+const DECODE_BUCKET=32,PAD=1;
 async function outputStats(ops,logits,p){
  const tokens=ops.tensor(p.tokens,[p.L,1]);
  const packed=await ops.elem([p.L,22],`let r=i/22u;let j=i%22u;var m=-3.402823e38;for(var t=0u;t<35u;t++){m=max(m,x0[r*35u+t]);}var s=0.0;for(var t=0u;t<35u;t++){s+=exp(x0[r*35u+t]-m);}if(j==0u){y[i]=x0[r*35u+u32(x1[r])]-m-log(s);return;}
@@ -41,12 +45,12 @@ export async function createGVPTransformerEngine({baseUrl,variant='antifold',pre
  async sample(input,{uniforms,temperature=1,fixed={},length,signal,returnIntermediates=false,...options}={}){
   signal?.throwIfAborted();const p=prepareInput(input,options);length??=p.targetChain?p.residues.findIndex(r=>!r||r.chain!==p.targetChain):p.L;if(length<0)length=p.L;if(options.regions){fixed={...fixed};const mask=regionMask(p.residues,{...p,...options});for(let i=0;i<length;i++)if(!mask[i]&&fixed[i]===undefined)fixed[i]=p.tokens[i];}if(!Number.isInteger(length)||length<1||length>p.L||uniforms?.length!==length||Array.from(uniforms).some(u=>!(u>=0&&u<1)))throw new Error('Supply one uniform draw in [0,1) per position');if(!(temperature>0&&Number.isFinite(temperature)))throw new Error('Invalid temperature');
   for(const [pos,t]of Object.entries(fixed))if(!Number.isInteger(+pos)||+pos<0||+pos>=length||(typeof t==='number'?t<0||t>=35||!Number.isInteger(t):!VOCAB.includes(t)))throw new Error('Invalid fixed position/token');
-  ops.admit(p.N,length);enter();const started=performance.now();
+  ops.admit(p.N,Math.ceil(length/DECODE_BUCKET)*DECODE_BUCKET);enter();const started=performance.now();
   const arSampleWgsl=`var aa:array<u32,20>=array<u32,20>(${Array.from(CANONICAL_TOKENS,t=>t+'u').join(',')});let base=u32(x1[0]);let temp=x1[1];let uDraw=x1[2];var m=-3.402823e38;for(var j=0u;j<20u;j++){m=max(m,x0[base+aa[j]]);}var sum=0.0;for(var j=0u;j<20u;j++){sum+=exp((x0[base+aa[j]]-m)/temp);}var cumulative=0.0;var token=aa[19u];for(var j=0u;j<20u;j++){cumulative+=exp((x0[base+aa[j]]-m)/temp)/sum;if(uDraw<cumulative){token=aa[j];break;}}y[0]=f32(token);`;
   try{
    const enc=await encode(ops,p,{},false,signal),tokens=new Int32Array(length+1);tokens[0]=33;const replayLogits=[];
    for(let i=0;i<length;i++){
-    signal?.throwIfAborted();const logits=await decode(ops,enc,tokens.subarray(0,i+1),{},false,signal);
+    signal?.throwIfAborted();const prev=new Int32Array(Math.ceil((i+1)/DECODE_BUCKET)*DECODE_BUCKET).fill(PAD);prev.set(tokens.subarray(0,i+1));const logits=await decode(ops,enc,prev,{},false,signal);
     const drawParams=ops.tensor(new Float32Array([i*35,temperature,uniforms[i]]),[3]);
     const sampled=await ops.elem([1,1],arSampleWgsl,[logits,drawParams]);
     const values=await ops.readMany({sampled,...(returnIntermediates?{logits}:{})});signal?.throwIfAborted();tokens[i+1]=fixed[i]===undefined?values.sampled[0]:typeof fixed[i]==='number'?fixed[i]:VOCAB.indexOf(fixed[i]);if(returnIntermediates)replayLogits.push(...values.logits.subarray(i*35,(i+1)*35));ops.keep([enc.x,enc.padding]);

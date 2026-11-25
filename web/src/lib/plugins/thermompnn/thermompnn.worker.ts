@@ -178,7 +178,7 @@ async function ensureEngine(
     if (backend === 'webgpu') {
       if (!thermoMod) {
         ctx.progress('init', 0.02, 'Loading ThermoMPNN WebGPU modules...');
-        const moduleUrl = new URL('/vendor/thermompnn/webgpu/index.js?v=3', self.location.origin).href;
+        const moduleUrl = new URL('/vendor/thermompnn/webgpu/index.js?v=5', self.location.origin).href;
         thermoMod = await import(/* @vite-ignore */ moduleUrl);
       }
     } else if (!thermoCpuMod) {
@@ -204,6 +204,7 @@ async function ensureEngine(
         precision,
         cache: 'none',
         allowSoftwareFallback: true,
+        ...(backend === 'webgpu' ? { useF16: true } : {}),
         read: async (url: string): Promise<ArrayBuffer> => {
           const resp = await cachedFetch(url);
           if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${url}`);

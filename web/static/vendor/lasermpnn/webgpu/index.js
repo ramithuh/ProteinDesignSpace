@@ -21,19 +21,21 @@ export async function createLaserMpnnEngine({
   if (shaderF16 && precision !== "fp16")
     throw Error("shaderF16 requires the fp16 weight bundle");
   let owned = false;
+  let effectiveShaderF16 = Boolean(shaderF16);
   if (!device) {
     if (!globalThis.navigator?.gpu) throw Error("WebGPU is unavailable");
     const adapter = await navigator.gpu.requestAdapter({
       powerPreference: "high-performance",
     });
     if (!adapter) throw Error("No WebGPU adapter");
+    effectiveShaderF16 = Boolean(
+      shaderF16 && adapter.features?.has?.("shader-f16"),
+    );
     device = await adapter.requestDevice({
-      requiredFeatures: shaderF16 ? ["shader-f16"] : [],
+      requiredFeatures: effectiveShaderF16 ? ["shader-f16"] : [],
     });
     owned = true;
-  }
-  if (shaderF16 && !device.features.has("shader-f16")) {
-    if (owned) device.destroy();
+  } else if (effectiveShaderF16 && !device.features.has("shader-f16")) {
     throw Error("shader-f16 was requested but is unavailable");
   }
   try {
@@ -43,7 +45,7 @@ export async function createLaserMpnnEngine({
     if (bundle.manifest.precision !== precision)
       throw Error("Manifest precision does not match requested precision");
     const backend = await GpuBackend.create(device, bundle.tensors, {
-      shaderF16,
+      shaderF16: effectiveShaderF16,
     });
     return createDesignEngine(backend, bundle, {
       signal,

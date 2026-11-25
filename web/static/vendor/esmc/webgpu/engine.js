@@ -330,6 +330,7 @@ class Engine {
         [Math.ceil((L * D) / 256)],
       );
       save("embedding", x);
+      const queued = [];
       for (let i = 0; i < this.config.n_layers; i++) {
         signal?.throwIfAborted();
         if (this.destroyed) throw new Error("Engine destroyed");
@@ -401,6 +402,14 @@ class Engine {
         save(`block.${i}`, x);
         if (i === hiddenLayer) traces.hiddenState = { buffer: x, n: L * D };
         this.releaseExcept(x, { ...traces, ...keep });
+        // A submit per block, as LocalFold's ESM-C tower does: the whole stack in one submission ran for seconds at
+        // long lengths, and macOS draws nothing while one runs. Two blocks stay queued so the GPU never waits on encoding.
+        this.device.queue.submit([this.encoder.finish()]);
+        this.encoder = this.device.createCommandEncoder();
+        const done = this.device.queue.onSubmittedWorkDone();
+        done.catch(() => {});
+        queued.push(done);
+        if (queued.length > 2) await queued.shift();
       }
       x = await ln(x, "transformer.norm");
       save("final_ln", x);

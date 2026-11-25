@@ -417,10 +417,23 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision): Promis
 
       ctx.progress('init', 0.94, 'Uploading LASErMPNN weights to GPU...');
 
+      let wantShaderF16 = false;
+      if (precision === 'fp16' && typeof navigator !== 'undefined' && navigator.gpu) {
+        try {
+          const probeAdapter =
+            (await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })) ??
+            (await navigator.gpu.requestAdapter());
+          wantShaderF16 = Boolean(probeAdapter?.features.has('shader-f16'));
+        } catch {
+          wantShaderF16 = false;
+        }
+      }
+
       return (await laserMod.createLaserMpnnEngine({
         baseUrl,
         precision,
         weights: bundle,
+        shaderF16: wantShaderF16,
         cache: false,
       })) as LaserEngine;
     } catch (err) {

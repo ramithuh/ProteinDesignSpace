@@ -1,16 +1,15 @@
-/** Tiled matmul, FP32 accumulation for all paths. Optional f16 is weight storage. */
+/** Tiled matmul, FP32 accumulation for all paths. Packed weights unpack via core WGSL unpack2x16float (Firefox/naga safe). */
 export function linearShader(
   R,
   I,
   O,
   { packed = false, f16 = false, bias = true } = {},
 ) {
+  void f16;
   const load = packed
-    ? f16
-      ? "f32(bitcast<vec2<f16>>(w[index/2u])[index%2u])"
-      : "unpack2x16float(w[index/2u])[index%2u]"
+    ? "unpack2x16float(w[index/2u])[index%2u]"
     : "w[index]";
-  return `${packed && f16 ? "enable f16;" : ""}
+  return `
 @group(0) @binding(0) var<storage,read> x:array<f32>;
 @group(0) @binding(1) var<storage,read> w:array<${packed ? "u32" : "f32"}>;
 ${bias ? "@group(0) @binding(2) var<storage,read> b:array<f32>;" : ""}

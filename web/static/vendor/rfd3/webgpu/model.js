@@ -73,6 +73,7 @@ export class RFD3GPUModel {
       const out = this.o.attention(q, k, v, { queries: n, keys: n, channels: q.length / n, heads: this.w(p + '.to_b.weight').shape[0], bias, gate, qPreScale: true });
       s = this.o.add(s, this.linear(p + '.to_a', out));
       s = this.o.add(s, this.transition(name + '.s_transition', s));
+      this.o.piece();
       return [s, z];
     });
   }
@@ -206,6 +207,7 @@ out[idx]=select(0.0,1.0,c==u32(residue)||c==${bins}u+u32(token)||(c==${2 * bins}
     });
   }
   initialize(ctx) {
+    this.o.setPacerPhase?.('init');
     return this.o.scope(() => {
       const o = this.o, { f, n, l } = ctx, p = 'token_initializer', cfg = this.config.token_initializer, { c_s: cs, c_z: cz, c_atom: ca, c_atompair: cp } = this.config;
       let s = this.embed(p + '.token_1d_embedder', f, cfg.token_1d_features);
@@ -307,7 +309,9 @@ out[idx]=select(0.0,1.0,c==u32(residue)||c==${bins}u+u32(token)||(c==${2 * bins}
       a = o.add(a, o.mul(this.linear(p + '.to_o', update), o.activation(this.linear(p + '.linear_output_project.0', s), 'sigmoid')));
       const tr = name + '.transition_block', norm = this.ada(tr + '.ada_ln', a, s, channels);
       const swiglu = o.mul(o.activation(this.linear(tr + '.linear_1', norm), 'silu'), this.linear(tr + '.linear_2', norm));
-      return o.add(a, o.mul(o.activation(this.linear(tr + '.linear_output_project.0', s), 'sigmoid'), this.linear(tr + '.linear_3', swiglu)));
+      const nextA = o.add(a, o.mul(o.activation(this.linear(tr + '.linear_output_project.0', s), 'sigmoid'), this.linear(tr + '.linear_3', swiglu)));
+      o.piece();
+      return nextA;
     });
   }
   time(index, mask, tParams) {
@@ -326,6 +330,7 @@ let distance=sqrt(square);var bin=0u;for(var b=0u;b<64u;b++){if(distance>${1 / s
     });
   }
   denoise(ctx, input, t, recycles, init, { coordinatesOnly = false } = {}) {
+    this.o.setPacerPhase?.('denoise');
     return this.o.scope(() => {
       const o = this.o, { f, n, l } = ctx, cfg = this.config.diffusion_module, p = 'diffusion_module', ct = cfg.c_token, cz = this.config.c_z, cp = this.config.c_atompair, sigma = cfg.sigma_data;
       const fourierT = Math.fround(Math.fround(Math.log(Math.fround(Math.max(t, 1e-20) / sigma))) / 4);
@@ -343,7 +348,7 @@ let distance=sqrt(square);var bin=0u;for(var b=0u;b<64u;b++){if(distance>${1 / s
       let q = o.add(init.Q_L_init, this.linear(p + '.process_r', scaled));
       for (let b = 0; b < cfg.atom_attention_encoder.n_blocks; b++) q = this.block(p + '.encoder.blocks.' + b, q, c, atomPair, l, atomKnn);
       const baseQ = q, baseA = this.downcast(p + '.downcast_q', q, a0, ctx, baseS);
-      o.flush();
+      o.piece();
 
       let last, lastDistance, logits;
       for (let cycle = 0; cycle < recycles; cycle++) {
@@ -364,9 +369,9 @@ let distance=sqrt(square);var bin=0u;for(var b=0u;b<64u;b++){if(distance>${1 / s
           const halfBlocks = Math.floor(cfg.diffusion_transformer.n_block / 2);
           for (let b = 0; b < cfg.diffusion_transformer.n_block; b++) {
             a = this.block(p + '.diffusion_transformer.blocks.' + b, a, s, tokenPair, n, tokenKnn);
-            if (b + 1 === halfBlocks) o.flush();
+            if (b + 1 === halfBlocks) o.piece();
           }
-          o.flush();
+          o.piece();
 
           const split = cfg.atom_attention_decoder.upcast.n_split;
           for (let b = 0; b < cfg.atom_attention_decoder.n_blocks; b++) {
@@ -388,7 +393,7 @@ let distance=sqrt(square);var bin=0u;for(var b=0u;b<64u;b++){if(distance>${1 / s
         last = result.coords;
         lastDistance = result.distance;
         logits = result.logits;
-        if (!isLastCycle) o.flush();
+        if (!isLastCycle) o.piece();
       }
       if (coordinatesOnly) {
         return { X_L: last };

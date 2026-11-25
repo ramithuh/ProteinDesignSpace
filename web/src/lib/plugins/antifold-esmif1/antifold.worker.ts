@@ -319,7 +319,7 @@ async function ensureEngine(
       0.02,
       `Loading ${variant === 'antifold' ? 'AntiFold' : 'ESM-IF1'} WebGPU modules...`,
     );
-    const webgpuUrl = new URL('/vendor/antifold-esmif1/webgpu/index.js?v=2', self.location.origin).href;
+    const webgpuUrl = new URL('/vendor/antifold-esmif1/webgpu/index.js?v=3', self.location.origin).href;
     const sharedUrl = new URL('/vendor/antifold-esmif1/shared/index.js', self.location.origin).href;
     [antiFoldMod, sharedMod] = await Promise.all([
       import(/* @vite-ignore */ webgpuUrl),

@@ -6,6 +6,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()` for standardized lifecycle, progress, and disposal.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { requestResilientWebGpuDevice } from '$lib/engine/webgpu-device';
 import {
   extractDyna1Backbone3Coords,
   normalizeDyna1InputMode,
@@ -65,20 +66,13 @@ let ownedDevice: GPUDevice | null = null;
 let loadedPrecision: Precision | null = null;
 
 async function acquireWebGpuDevice(): Promise<GPUDevice> {
-  if (typeof navigator === 'undefined' || !navigator.gpu) {
-    throw new Error('WebGPU is not available in this browser worker.');
-  }
-  let adapter: GPUAdapter | null = null;
-  for (let attempt = 0; attempt < 3 && !adapter; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, attempt * 250));
-    adapter =
-      (await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })) ??
-      (await navigator.gpu.requestAdapter());
-  }
-  if (!adapter) {
-    throw new Error('No WebGPU adapter found for Dyna-1.');
-  }
-  return await adapter.requestDevice();
+  const { device } = await requestResilientWebGpuDevice({
+    useF16: true,
+    allowSoftwareFallback: true,
+    retries: 3,
+    retryDelayMs: 250,
+  });
+  return device;
 }
 
 async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
@@ -104,7 +98,7 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
 
   if (!dynaMod) {
     ctx.progress('init', 0.02, 'Loading Dyna-1 WebGPU modules...');
-    const moduleUrl = new URL('/vendor/dyna1/webgpu/index.js', self.location.origin).href;
+    const moduleUrl = new URL('/vendor/dyna1/webgpu/index.js?v=2', self.location.origin).href;
     dynaMod = await import(/* @vite-ignore */ moduleUrl);
   }
 
@@ -137,7 +131,7 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
         precision,
         device,
         cache: 'none',
-        useF16: false,
+        useF16: device.features.has('shader-f16'),
         read: async (url: string): Promise<ArrayBuffer> => {
           const resp = await cachedFetch(url);
           if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${url}`);

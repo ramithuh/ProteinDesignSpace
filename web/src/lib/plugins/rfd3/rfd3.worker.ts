@@ -166,7 +166,7 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision, signal:
   const vendorBase = `${self.location.origin}/vendor/rfd3`;
   if (!mod) {
     ctx.progress('init', 0.02, 'Loading RFdiffusion3 WebGPU modules...');
-    mod = await import(/* @vite-ignore */ `${vendorBase}/webgpu/index.js`);
+    mod = await import(/* @vite-ignore */ `${vendorBase}/webgpu/index.js?v=2`);
   }
   if (!cachedArchitecture) {
     ctx.progress('init', 0.04, 'Loading RFdiffusion3 architecture metadata...');
@@ -178,14 +178,31 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision, signal:
   }
 
   const { adapter } = await requestResilientWebGpuAdapter({ allowSoftwareFallback: true });
-  const requiredLimits: Record<string, number> = {};
-  for (const key of NEGOTIATED_LIMIT_KEYS) {
-    const val = (adapter.limits as unknown as Record<string, unknown>)[key];
-    if (typeof val === 'number' && Number.isFinite(val)) {
-      requiredLimits[key] = val;
+  const buildLimits = (a: GPUAdapter) => {
+    const out: Record<string, number> = {};
+    for (const key of NEGOTIATED_LIMIT_KEYS) {
+      const val = (a.limits as unknown as Record<string, unknown>)[key];
+      if (typeof val === 'number' && Number.isFinite(val)) out[key] = val;
     }
+    return out;
+  };
+  const wantF16 = adapter.features.has('shader-f16');
+  const requiredFeatures: GPUFeatureName[] = wantF16 ? ['shader-f16'] : [];
+  let device: GPUDevice;
+  try {
+    device = await adapter.requestDevice({
+      requiredFeatures,
+      requiredLimits: buildLimits(adapter),
+    });
+  } catch (err) {
+    if (requiredFeatures.length === 0) throw err;
+    const { adapter: retryAdapter } = await requestResilientWebGpuAdapter({
+      allowSoftwareFallback: true,
+    });
+    device = await retryAdapter.requestDevice({
+      requiredLimits: buildLimits(retryAdapter),
+    });
   }
-  const device = await adapter.requestDevice({ requiredLimits });
   ownedDevice = device;
   void device.lost.then(() => {
     if (ownedDevice === device) {

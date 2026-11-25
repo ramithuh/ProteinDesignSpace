@@ -13,7 +13,7 @@ export class GPUOps {
  admit(N,M){const E=N*Math.min(30,N),bytes=4*Math.max(E*2593,N*4096,8*Math.max(N*N,M*M,M*N));if(bytes>this.device.limits.maxBufferSize||bytes>this.device.limits.maxStorageBufferBindingSize)throw new Error(`Inference needs a ${bytes}-byte scratch buffer; exceeds WebGPU maxBufferSize/maxStorageBufferBindingSize`);}
  begin(){if(this.destroyed)throw new Error('Engine destroyed');if(this.lost)throw new Error(this.lost);this.encoder=this.device.createCommandEncoder();this.device.pushErrorScope('validation');}
  async finish(){const error=await this.device.popErrorScope();for(const b of this.temporary){b.destroy();this.buffers.delete(b);}this.temporary.clear();this.live.clear();this.pool.clear();this.encoder=null;if(error)throw new Error(`WebGPU validation: ${error.message}`);}
- keep(tensors){const keep=new Set(tensors.map(t=>t.buffer));for(const b of this.live)if(!keep.has(b)){if(!this.pool.has(b.size))this.pool.set(b.size,[]);this.pool.get(b.size).push(b);this.live.delete(b);}}
+ keep(tensors){const keep=new Set(tensors.flatMap(t=>t.reverse?[t.buffer,t.reverse.offsets.buffer,t.reverse.edges.buffer]:[t.buffer]));for(const b of this.live)if(!keep.has(b)){if(!this.pool.has(b.size))this.pool.set(b.size,[]);this.pool.get(b.size).push(b);this.live.delete(b);}}
  async checkpoint(){if(this.destroyed)throw new Error('Engine destroyed');if(this.lost)throw new Error(this.lost);this.onProgress?.({phase:'inference'});await new Promise(r=>setTimeout(r,0));}
  async pipeline(code,count){let p=this.pipelines.get(code);if(!p){p=(async()=>{const module=this.device.createShaderModule({code});const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==='error');if(errors.length)throw new Error(errors.map(e=>`${e.lineNum}:${e.linePos} ${e.message}`).join('\n'));
  const layout=this.device.createBindGroupLayout({entries:Array.from({length:count},(_,binding)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===count-1?'storage':'read-only-storage'}}))});
@@ -33,7 +33,13 @@ export class GPUOps {
  vectorNorm(x){return this.dispatch(vectorNorm(...x.shape),[x],x.shape,[Math.ceil(x.shape[0]/64)]);}
  rotate(x,f){const D=x.shape[1];return this.elem(x.shape,`let r=i/${D}u;let j=(i%${D}u)/3u;let k=i%3u;let v=vec3<f32>(x0[r*${D}u+j*3u],x0[r*${D}u+j*3u+1u],x0[r*${D}u+j*3u+2u]);let a=r*9u+k*3u;y[i]=dot(v,vec3<f32>(x1[a],x1[a+1u],x1[a+2u]));`,[x,f]);}
  gather(x,index,which){const E=index.shape[0],D=x.shape[1];return this.elem([E,D],`let r=x1[(i/${D}u)*2u+${which}u];var v=0.0;if(r>=0){v=x0[u32(r)*${D}u+i%${D}u];}y[i]=v;`,[x,index]);}
- aggregate(x,index,N){const [E,D]=x.shape;return this.elem([N,D],`let r=i/${D}u;let j=i%${D}u;var sum=0.0;var count=0.0;for(var e=0u;e<${E}u;e++){if(x1[e*2u+1u]==i32(r)){sum+=x0[e*${D}u+j];count+=1.0;}}y[i]=sum/max(count,1.0);`,[x,index]);}
+ // The edges into each node, in edge order: node r's are edges[offsets[r]..offsets[r+1]] (ids exact in f32 below 2^24).
+ // Built once per graph and kept on the index tensor, so aggregate reads its own in-edges instead of scanning all E.
+ async reverseEdges(index,N){const E=index.shape[0],groups=Math.ceil(N/256);
+  const offsets=await this.elem([N+1,1],`var c=0u;for(var e=0u;e<${E}u;e++){let d=x0[e*2u+1u];if(d>=0&&d<i32(i)){c++;}}y[i]=f32(c);`,[index]);
+  const edges=await this.dispatch(element(N,`let a=u32(x1[i]);var k=0u;for(var e=0u;e<${E}u;e++){if(x0[e*2u+1u]==i32(i)){y[a+k]=f32(e);k++;}}`,['i32','f32']),[index,offsets],[E,1],[Math.min(groups,65535),Math.ceil(groups/65535)]);
+  return {offsets,edges};}
+ async aggregate(x,index,N){const D=x.shape[1];index.reverse??=await this.reverseEdges(index,N);const {offsets,edges}=index.reverse;return this.elem([N,D],`let r=i/${D}u;let j=i%${D}u;let a=u32(x2[r]);let b=u32(x2[r+1u]);var sum=0.0;for(var k=a;k<b;k++){sum+=x0[u32(x1[k])*${D}u+j];}y[i]=sum/max(f32(b-a),1.0);`,[x,edges,offsets]);}
  embed(tokens,p){const w=this.weights[p+'.weight'],D=w.shape[1],M=tokens.shape[0];if(w.dtype!=='F32')throw new Error('Embeddings must remain F32');return this.elem([M,D],`y[i]=x1[u32(x0[i/${D}u])*${D}u+i%${D}u]*${Math.sqrt(D)};`,[tokens,w]);}
  position(x,pad,zeroPad=false){const [M,D]=x.shape;return this.elem(x.shape,`let r=i/${D}u;let j=i%${D}u;let a=f32(r+2u)*exp(f32(j%${D/2}u)*${-Math.log(10000)/(D/2-1)});var pos=select(cos(a),sin(a),j<${D/2}u);if(x1[r]!=0){pos=0.0;}y[i]=${zeroPad?'select(x0[i]+pos,0.0,x1[r]!=0)':'x0[i]+pos'};`,[x,pad]);}
  async attention(q,k,v,padding,causal=false){const M=q.shape[0],S=k.shape[0],D=q.shape[1],groups=Math.ceil(8*M*S/256);

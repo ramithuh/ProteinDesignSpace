@@ -130,6 +130,7 @@ export class BoltzGen {
         false,
         cache?.tokenLayers?.[i] ?? null,
       );
+      if (i % 4 === 3) o.backend.piece?.();
     }
     a = o.norm(a, p + ".a_norm");
     const update = this.atoms.decoder(
@@ -196,8 +197,10 @@ export class BoltzGen {
       await stage?.("msa_module", msa);
       z = o.add(z, msa);
       keep();
+      if (o.backend.paceBlock) await o.backend.flush?.(true);
       for (let i = 0; i < 64; i++) {
         signal?.throwIfAborted();
+        o.backend.beginPacedBlock?.("trunk");
         ({ s, z } = this.layers.pairformer(
           s,
           z,
@@ -207,8 +210,12 @@ export class BoltzGen {
         ));
         await stage?.("pairformer_module.layers." + i, [s, z]);
         keep();
-        if (i % 4 === 3) {
+        if (o.backend.paceBlock) {
+          await o.backend.paceBlock("trunk", i === 63);
+        } else if (i % 4 === 3) {
           await o.backend.flush?.(false);
+        }
+        if (i % 4 === 3 || i === 63) {
           onProgress?.({ phase: "trunk", block: i + 1, total: 64, recycle });
         }
       }

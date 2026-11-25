@@ -220,7 +220,9 @@ async function ensureEngine(
   }
 
   const { adapter } = await requestResilientWebGpuAdapter({ allowSoftwareFallback: true });
+  const wantF16 = adapter.features.has('shader-f16');
   const device = await adapter.requestDevice({
+    requiredFeatures: wantF16 ? ['shader-f16'] : [],
     requiredLimits: {
       maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
       maxBufferSize: adapter.limits.maxBufferSize,
@@ -257,6 +259,7 @@ async function ensureEngine(
         variant,
         device,
         adapter,
+        useF16: device.features.has('shader-f16'),
         allowSoftwareFallback: true,
         cache: 'none',
         read: async (url: string): Promise<ArrayBuffer> => {

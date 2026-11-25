@@ -4,7 +4,7 @@ import {
   elementShader,
   normShader,
   GELU_BODY,
-} from "./shaders.js";
+} from "./shaders.js?v=2";
 function floatToHalf(x) {
   const b = new ArrayBuffer(4),
     v = new DataView(b);

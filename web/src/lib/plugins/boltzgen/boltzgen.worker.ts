@@ -142,17 +142,31 @@ async function ensureEngine(ctx: WorkerRunContext, variant: Variant, precision: 
   if (!bgMod) {
     ctx.progress('init', 0.02, 'Loading BoltzGen-1 WebGPU modules...');
     const base = `${self.location.origin}/vendor/boltzgen`;
-    bgMod = await import(/* @vite-ignore */ `${base}/webgpu/index.js`);
+    bgMod = await import(/* @vite-ignore */ `${base}/webgpu/index.js?v=2`);
   }
 
   const { adapter } = await requestResilientWebGpuAdapter({ allowSoftwareFallback: true });
-  const device = await adapter.requestDevice({
-    requiredLimits: {
-      maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
-      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-      maxBufferSize: adapter.limits.maxBufferSize,
-    },
+  const wantF16 = adapter.features.has('shader-f16');
+  const buildLimits = (a: GPUAdapter) => ({
+    maxStorageBuffersPerShaderStage: a.limits.maxStorageBuffersPerShaderStage,
+    maxStorageBufferBindingSize: a.limits.maxStorageBufferBindingSize,
+    maxBufferSize: a.limits.maxBufferSize,
   });
+  let device: GPUDevice;
+  try {
+    device = await adapter.requestDevice({
+      requiredFeatures: wantF16 ? ['shader-f16'] : [],
+      requiredLimits: buildLimits(adapter),
+    });
+  } catch (err) {
+    if (!wantF16) throw err;
+    const { adapter: retryAdapter } = await requestResilientWebGpuAdapter({
+      allowSoftwareFallback: true,
+    });
+    device = await retryAdapter.requestDevice({
+      requiredLimits: buildLimits(retryAdapter),
+    });
+  }
   ownedDevice = device;
   void device.lost.then(() => {
     if (ownedDevice === device) {

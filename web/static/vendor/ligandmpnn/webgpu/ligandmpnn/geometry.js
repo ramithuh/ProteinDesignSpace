@@ -1,5 +1,5 @@
 import { PERIODIC_TABLE } from "../../shared/ligandmpnn/constants.js";
-import { elementShader } from "./shaders.js";
+import { elementShader } from "./shaders.js?v=2";
 const RBF = `fn rbf(d:f32,k:u32)->f32{var mu=2.0+f32(k)*(20.0/15.0);if(k>7u){mu=22.0-f32(15u-k)*(20.0/15.0);}let z=(d-mu)/1.25;return exp(-z*z);}`;
 const XYZ = `fn atom(r:u32,a:u32)->vec3<f32>{if(a==4u){return vec3<f32>(CB[r*3u],CB[r*3u+1u],CB[r*3u+2u]);}let i=r*12u+a*3u;return vec3<f32>(X[i],X[i+1u],X[i+2u]);}`;
 const YXYZ = `fn context(i:u32)->vec3<f32>{return vec3<f32>(Y[i*3u],Y[i*3u+1u],Y[i*3u+2u]);}`;

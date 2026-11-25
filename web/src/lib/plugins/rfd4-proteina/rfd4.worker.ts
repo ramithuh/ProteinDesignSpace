@@ -22,6 +22,7 @@ import { makeSequenceKey } from '$lib/engine/collections';
 import { deriveStableItemSeed, planGeneratorDesigns } from '$lib/engine/work-plan';
 import { createWorkerHarness, fnv1a, type WorkerRunContext } from '$lib/kernel';
 import { releaseRfd4GeneratorActivations } from './lifecycle';
+import { installRfd4QueuePacing } from './queue-pacing';
 import type {
   ConditionSpecArtifact,
   SequenceCandidate,
@@ -730,6 +731,8 @@ createWorkerHarness({
       let res: any;
       let gpuValErr: GPUError | null = null;
       try {
+        // Cut each trunk step into ~15 ms submissions so macOS keeps drawing while it runs (see queue-pacing.ts).
+        installRfd4QueuePacing(generator);
         res = await generator.generate(built.batch, genOpts);
       } finally {
         releaseGeneratorActivations();

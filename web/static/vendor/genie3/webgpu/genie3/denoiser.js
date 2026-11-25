@@ -173,6 +173,9 @@ fn rotToQuat(
   return q;
 }
 
+var<workgroup> sharedBin: u32;
+var<workgroup> sharedQ: vec4<f32>;
+
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   let pairIdx = wid.x + wid.y * 65535u;
@@ -199,46 +202,51 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
   let condPairMask = pairMasks[mBase + 3u];
   let condFramePairMask = pairMasks[mBase + 4u];
 
-  // Distance bin (exact argmin |d - (distMin + k * binSize)|)
-  let ti = i * 3u;
-  let tj = j * 3u;
-  let dx = trans[ti + 0u] - trans[tj + 0u];
-  let dy = trans[ti + 1u] - trans[tj + 1u];
-  let dz = trans[ti + 2u] - trans[tj + 2u];
-  let dist = sqrt(p.eps + dx * dx + dy * dy + dz * dz);
-  let scaled = (dist - p.distMin) / p.binSize;
-  let maxBin = f32(p.nBins - 1u);
-  let bin = u32(clamp(floor(scaled + 0.5), 0.0, maxBin));
+  // Compute distance bin and relative quaternion ONCE per pair on lane 0 (avoids 64x redundant Jacobi rotToQuat).
+  if (li == 0u) {
+    let ti = i * 3u;
+    let tj = j * 3u;
+    let dx = trans[ti + 0u] - trans[tj + 0u];
+    let dy = trans[ti + 1u] - trans[tj + 1u];
+    let dz = trans[ti + 2u] - trans[tj + 2u];
+    let dist = sqrt(p.eps + dx * dx + dy * dy + dz * dz);
+    let scaled = (dist - p.distMin) / p.binSize;
+    let maxBin = f32(p.nBins - 1u);
+    sharedBin = u32(clamp(floor(scaled + 0.5), 0.0, maxBin));
 
-  var q = vec4<f32>(0.0);
-  if (framePairMask > 0.0) {
-    if (p.useOverrideQuat != 0u) {
-      let qb = ij * 4u;
-      q = vec4<f32>(overrideQuat[qb], overrideQuat[qb + 1u], overrideQuat[qb + 2u], overrideQuat[qb + 3u]);
-    } else {
-      // R_rel = R_j^T @ R_i (exact match to pair/v1.py:253)
-      let ri = i * 9u;
-      let rj = j * 9u;
-      let i00 = rots[ri + 0u]; let i01 = rots[ri + 1u]; let i02 = rots[ri + 2u];
-      let i10 = rots[ri + 3u]; let i11 = rots[ri + 4u]; let i12 = rots[ri + 5u];
-      let i20 = rots[ri + 6u]; let i21 = rots[ri + 7u]; let i22 = rots[ri + 8u];
-      let j00 = rots[rj + 0u]; let j01 = rots[rj + 1u]; let j02 = rots[rj + 2u];
-      let j10 = rots[rj + 3u]; let j11 = rots[rj + 4u]; let j12 = rots[rj + 5u];
-      let j20 = rots[rj + 6u]; let j21 = rots[rj + 7u]; let j22 = rots[rj + 8u];
+    var q0 = vec4<f32>(0.0);
+    if (framePairMask > 0.0) {
+      if (p.useOverrideQuat != 0u) {
+        let qb = ij * 4u;
+        q0 = vec4<f32>(overrideQuat[qb], overrideQuat[qb + 1u], overrideQuat[qb + 2u], overrideQuat[qb + 3u]);
+      } else {
+        // R_rel = R_j^T @ R_i (exact match to pair/v1.py:253)
+        let ri = i * 9u;
+        let rj = j * 9u;
+        let i00 = rots[ri + 0u]; let i01 = rots[ri + 1u]; let i02 = rots[ri + 2u];
+        let i10 = rots[ri + 3u]; let i11 = rots[ri + 4u]; let i12 = rots[ri + 5u];
+        let i20 = rots[ri + 6u]; let i21 = rots[ri + 7u]; let i22 = rots[ri + 8u];
+        let j00 = rots[rj + 0u]; let j01 = rots[rj + 1u]; let j02 = rots[rj + 2u];
+        let j10 = rots[rj + 3u]; let j11 = rots[rj + 4u]; let j12 = rots[rj + 5u];
+        let j20 = rots[rj + 6u]; let j21 = rots[rj + 7u]; let j22 = rots[rj + 8u];
 
-      let r00 = j00 * i00 + j10 * i10 + j20 * i20;
-      let r01 = j00 * i01 + j10 * i11 + j20 * i21;
-      let r02 = j00 * i02 + j10 * i12 + j20 * i22;
-      let r10 = j01 * i00 + j11 * i10 + j21 * i20;
-      let r11 = j01 * i01 + j11 * i11 + j21 * i21;
-      let r12 = j01 * i02 + j11 * i12 + j21 * i22;
-      let r20 = j02 * i00 + j12 * i10 + j22 * i20;
-      let r21 = j02 * i01 + j12 * i11 + j22 * i21;
-      let r22 = j02 * i02 + j12 * i12 + j22 * i22;
-      q = rotToQuat(r00, r01, r02, r10, r11, r12, r20, r21, r22, p.canonicalQuat != 0u);
+        let r00 = j00 * i00 + j10 * i10 + j20 * i20;
+        let r01 = j00 * i01 + j10 * i11 + j20 * i21;
+        let r02 = j00 * i02 + j10 * i12 + j20 * i22;
+        let r10 = j01 * i00 + j11 * i10 + j21 * i20;
+        let r11 = j01 * i01 + j11 * i11 + j21 * i21;
+        let r12 = j01 * i02 + j11 * i12 + j21 * i22;
+        let r20 = j02 * i00 + j12 * i10 + j22 * i20;
+        let r21 = j02 * i01 + j12 * i11 + j22 * i21;
+        let r22 = j02 * i02 + j12 * i12 + j22 * i22;
+        q0 = rotToQuat(r00, r01, r02, r10, r11, r12, r20, r21, r22, p.canonicalQuat != 0u);
+      }
     }
+    sharedQ = q0 * framePairMask;
   }
-  q *= framePairMask;
+  workgroupBarrier();
+  let bin = sharedBin;
+  let q = sharedQ;
 
   let ziBase = i * p.cZ;
   let zjBase = (p.N + j) * p.cZ;

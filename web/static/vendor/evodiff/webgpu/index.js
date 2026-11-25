@@ -189,6 +189,12 @@ export async function createEvoDiffEngine({
         "scratch",
         "params",
       );
+      scratch.staging = alloc(
+        L * 31 * 4,
+        GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        "scratch",
+        "readback",
+      );
       capacity = L;
     } catch (e) {
       for (const b of Object.values(scratch)) free(b);
@@ -214,7 +220,9 @@ export async function createEvoDiffEngine({
     ensure(L);
     device.pushErrorScope("validation");
     device.pushErrorScope("out-of-memory");
-    let staging,
+    let staging = null,
+      ownsStaging = false,
+      isMapped = false,
       scopeDone = false;
     try {
       device.queue.writeBuffer(scratch.tokens, 0, tokens);
@@ -227,18 +235,31 @@ export async function createEvoDiffEngine({
         params = new Uint32Array(160 * 64),
         copies = [];
       let op = 0,
-        offset = 0;
+        offset = 0,
+        pass = null;
       const traceSize = returnIntermediates
         ? (8 + 1024 + 16 * 1024 + 1024 + 31) * L * 4
         : L * 31 * 4;
-      staging = alloc(
-        traceSize,
-        GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-        "transient",
-        "readback",
-      );
+      if (!returnIntermediates && scratch.staging && scratch.staging.size >= traceSize) {
+        staging = scratch.staging;
+      } else {
+        staging = alloc(
+          traceSize,
+          GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+          "transient",
+          "readback",
+        );
+        ownsStaging = true;
+      }
+      const endPass = () => {
+        if (pass) {
+          pass.end();
+          pass = null;
+        }
+      };
       const record = (name, buffer, width) => {
         if (returnIntermediates || name === "logits") {
+          endPass();
           const bytes = L * width * 4;
           encoder.copyBufferToBuffer(buffer, 0, staging, offset, bytes);
           copies.push({ name, offset, bytes });
@@ -256,7 +277,7 @@ export async function createEvoDiffEngine({
           binding: buffers.length,
           resource: { buffer: scratch.params, offset: op * 256, size: 32 },
         });
-        const pass = encoder.beginComputePass();
+        if (!pass) pass = encoder.beginComputePass();
         pass.setPipeline(pipeline);
         pass.setBindGroup(
           0,
@@ -266,7 +287,6 @@ export async function createEvoDiffEngine({
           }),
         );
         pass.dispatchWorkgroups(...groups);
-        pass.end();
         op++;
       };
       const weight = (n) => {
@@ -326,21 +346,23 @@ export async function createEvoDiffEngine({
       record("final_norm", scratch.a, 1024);
       conv(scratch.a, scratch.b, "decoder.conv", 1024, 31);
       record("logits", scratch.b, 31);
+      endPass();
       device.queue.writeBuffer(scratch.params, 0, params);
       device.queue.submit([encoder.finish()]);
-      await device.queue.onSubmittedWorkDone();
       const oom = await device.popErrorScope(),
         validation = await device.popErrorScope();
       scopeDone = true;
       if (oom || validation) throw new Error((oom || validation).message);
       if (lost) throw new Error(lost);
       signal?.throwIfAborted();
-      await staging.mapAsync(GPUMapMode.READ);
-      const mapped = staging.getMappedRange(),
+      await staging.mapAsync(GPUMapMode.READ, 0, traceSize);
+      isMapped = true;
+      const mapped = staging.getMappedRange(0, traceSize),
         trace = {};
       for (const c of copies)
         trace[c.name] = new Float32Array(mapped, c.offset, c.bytes / 4).slice();
       staging.unmap();
+      isMapped = false;
       signal?.throwIfAborted();
       return {
         logits: trace.logits,
@@ -349,7 +371,14 @@ export async function createEvoDiffEngine({
         ...(returnIntermediates ? { intermediates: trace } : {}),
       };
     } finally {
-      free(staging);
+      if (isMapped && staging) {
+        try {
+          staging.unmap();
+        } catch {
+          /* ignore */
+        }
+      }
+      if (ownsStaging && staging) free(staging);
       if (!scopeDone) {
         await device.popErrorScope();
         await device.popErrorScope();

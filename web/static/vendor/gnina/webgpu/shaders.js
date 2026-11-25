@@ -45,10 +45,17 @@ export const shaders={
    if(live) {out[c*110592u+pos]=sum;}
  }`,
  conv:`${input} ${weights} ${output} ${params} ${weightRead}
- var<workgroup> features:array<f32,2112>;
+ fn applyBn(val:f32,ch:u32,bnW:u32,bnB:u32,bnM:u32,bnV:u32)->f32 {
+   let scale=bitcast<f32>(weights[bnW+ch]);let bias=bitcast<f32>(weights[bnB+ch]);
+   let mean=bitcast<f32>(weights[bnM+ch]);let variance=bitcast<f32>(weights[bnV+ch]);
+   return (val-mean)*inverseSqrt(variance+1e-5)*scale+bias;
+ }
+ var<workgroup> features0:array<f32,1056>;
+ var<workgroup> features1:array<f32,1056>;
  var<workgroup> kernel:array<f32,272>;
  @compute @workgroup_size(256) fn main(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) tid:u32) {
    let d=p[0];let v=d*d*d;let cin=p[1];let cout=p[2];let k=p[3];let k3=k*k*k;let total=cin*k3;
+   let hasBn=p[9]!=0u;let bnW=p[10];let bnB=p[11];let bnM=p[12];let bnV=p[13];
    let left=group.x*128u;let top=group.y*16u;
    let vCol=tid%128u;let kHalf=tid/128u;
    let pos=left+vCol;let posValid=pos<v;
@@ -65,14 +72,14 @@ export const shaders={
      let kkBase=kHalf*8u;
      if(k==1u) {
        for(var u=0u;u<8u;u++) {
-         let kk=kkBase+u;let ch=step+kk;
+         let ch=step+kkBase+u;
          var fv=0.0;
-         if(posValid && ch<cin){fv=x[ch*v+pos];}
-         features[kk*132u+vCol]=fv;
+         if(posValid && ch<cin){fv=x[ch*v+pos];if(hasBn){fv=applyBn(fv,ch,bnW,bnB,bnM,bnV);}}
+         if(kHalf==0u){features0[u*132u+vCol]=fv;}else{features1[u*132u+vCol]=fv;}
        }
      } else {
        for(var u=0u;u<8u;u++) {
-         let kk=kkBase+u;let kidx=step+kk;
+         let kidx=step+kkBase+u;
          var fv=0.0;
          if(posValid && kidx<total) {
            let ch=kidx/k3;let rem=kidx%k3;
@@ -80,19 +87,26 @@ export const shaders={
            let at=coords+delta;
            if(all(at>=vec3i(0)) && all(at<vec3i(dInt))) {
              let q=vec3u(at);fv=x[((ch*d+q.x)*d+q.y)*d+q.z];
+             if(hasBn){fv=applyBn(fv,ch,bnW,bnB,bnM,bnV);}
            }
          }
-         features[kk*132u+vCol]=fv;
+         if(kHalf==0u){features0[u*132u+vCol]=fv;}else{features1[u*132u+vCol]=fv;}
        }
      }
      workgroupBarrier();
      let fCol=laneX*4u;
      let r0=laneY*2u;let r1=r0+1u;
-     for(var j=0u;j<16u;j++) {
+     for(var j=0u;j<8u;j++) {
        let fb=j*132u+fCol;
-       let f=vec4f(features[fb],features[fb+1u],features[fb+2u],features[fb+3u]);
+       let f=vec4f(features0[fb],features0[fb+1u],features0[fb+2u],features0[fb+3u]);
        a=fma(f,vec4f(kernel[r0*17u+j]),a);
        b=fma(f,vec4f(kernel[r1*17u+j]),b);
+     }
+     for(var j=0u;j<8u;j++) {
+       let fb=j*132u+fCol;let kIdx=j+8u;
+       let f=vec4f(features1[fb],features1[fb+1u],features1[fb+2u],features1[fb+3u]);
+       a=fma(f,vec4f(kernel[r0*17u+kIdx]),a);
+       b=fma(f,vec4f(kernel[r1*17u+kIdx]),b);
      }
      workgroupBarrier();
    }

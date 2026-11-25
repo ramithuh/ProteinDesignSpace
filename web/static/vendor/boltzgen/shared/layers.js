@@ -246,10 +246,16 @@ export class Layers {
     const o = this.o;
     return o.tidy(() => {
       z = o.add(z, this.triangleMult(z, mask, p + ".tri_mul_out"));
+      o.backend.piece?.();
       z = o.add(z, this.triangleMult(z, mask, p + ".tri_mul_in", true));
+      o.backend.piece?.();
       z = o.add(z, this.triangleAttention(z, mask, p + ".tri_att_start"));
+      o.backend.piece?.();
       z = o.add(z, this.triangleAttention(z, mask, p + ".tri_att_end", true));
-      return o.add(z, this.transition(z, p + ".transition_z"));
+      o.backend.piece?.();
+      const nextZ = o.add(z, this.transition(z, p + ".transition_z"));
+      o.backend.piece?.();
+      return nextZ;
     });
   }
   pairformer(s, z, mask, pairMask, p) {
@@ -258,6 +264,7 @@ export class Layers {
       z = this.pair(z, pairMask, p);
       const sn = o.norm(s, p + ".pre_norm_s");
       s = o.add(s, this.attention(sn, z, mask, p + ".attention", 16));
+      o.backend.piece?.();
       s = o.add(s, this.transition(s, p + ".transition_s"));
       if (o.weight(p + ".s_post_norm.weight", true))
         s = o.norm(s, p + ".s_post_norm");

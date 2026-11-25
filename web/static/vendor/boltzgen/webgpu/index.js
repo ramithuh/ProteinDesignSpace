@@ -1,5 +1,6 @@
 import { GPUBackend } from "./backend.js";
 import { loadEngine } from "../shared/engine.js";
+import { startCompletionPump } from "../../localfold/webgpu/runtime/completion-pump.js";
 export async function hardwareDevice() {
   if (!navigator.gpu) throw Error("Hardware WebGPU required");
   const adapter = await navigator.gpu.requestAdapter({
@@ -42,10 +43,15 @@ export async function createBoltzGenEngine(options = {}) {
   const hardware = options.device
     ? { device: options.device, info: { external: true } }
     : await hardwareDevice();
-  const engine = await loadEngine(new GPUBackend(hardware.device), {
+  const dev = hardware.device;
+  const isFirefox = /firefox/i.test(globalThis.navigator?.userAgent ?? "");
+  if (isFirefox && typeof globalThis.GPUBufferUsage !== "undefined") {
+    startCompletionPump(dev, true);
+  }
+  const engine = await loadEngine(new GPUBackend(dev), {
     ...options,
     disposeDevice: () => {
-      if (!options.device) hardware.device.destroy();
+      if (!options.device) dev.destroy();
     },
   });
   engine.adapterInfo = hardware.info;

@@ -96,6 +96,7 @@ export async function sample(
   trajectory.push(x);
   for (let i = 0; i < numSteps; i++) {
     signal?.throwIfAborted();
+    o.backend.beginPacedBlock?.("diffusion");
     const sigma = sigmas[i],
       next = sigmas[i + 1],
       gamma = next > 1 ? Math.fround(0.8) : 0,
@@ -141,9 +142,14 @@ export async function sample(
       denoised,
       denoiseCache,
     );
-    await o.backend.flush?.(false);
-    onProgress?.({ phase: "diffusion", step: i + 1, total: numSteps });
-    if (i % 4 === 3) await fastYield();
+    if (o.backend.paceBlock) {
+      await o.backend.paceBlock("diffusion", i === numSteps - 1);
+      onProgress?.({ phase: "diffusion", step: i + 1, total: numSteps });
+    } else {
+      await o.backend.flush?.(false);
+      onProgress?.({ phase: "diffusion", step: i + 1, total: numSteps });
+      if (i % 4 === 3) await fastYield();
+    }
   }
   trajectory.push(x);
   return { atom_coords: x, trajectory, denoised };

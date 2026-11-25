@@ -137,7 +137,7 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
 
   if (!esmcMod) {
     ctx.progress('init', 0.02, 'Loading ESM-C 300M WebGPU modules...');
-    const moduleUrl = new URL('/vendor/esmc/webgpu/index.js', self.location.origin).href;
+    const moduleUrl = new URL('/vendor/esmc/webgpu/index.js?v=2', self.location.origin).href;
     esmcMod = await import(/* @vite-ignore */ moduleUrl);
   }
 

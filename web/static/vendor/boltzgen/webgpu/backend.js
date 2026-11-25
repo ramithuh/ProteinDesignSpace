@@ -1,6 +1,8 @@
 import { contiguous, tensor, sizeOf } from "../shared/tensor.js";
 import { decodeTensor } from "../shared/loader.js";
 import { shader } from "./shaders.js";
+import { QueuePacer } from "../../localfold/webgpu/runtime/queue-pacing.js";
+import { yieldToBrowser } from "../../localfold/webgpu/runtime/yield.js";
 
 const UNIFORM_SLAB_BYTES = 262144;
 const UNIFORM_SLOT_BYTES = 256;
@@ -14,6 +16,8 @@ export class GPUBackend {
     this.live = new Set();
     this.pool = new Map();
     this.pipelines = new Map();
+    this.pacers = new Map();
+    this.activePacer = null;
     this.encoder = null;
     this.pass = null;
     this.pending = 0;
@@ -215,8 +219,31 @@ export class GPUBackend {
     this.pass.setBindGroup(0, group);
     this.pass.dispatchWorkgroups(...built.dispatch);
     this.pending++;
-    if (this.pending >= 512) this.submit();
+    if ((!this.activePacer && this.pending >= 256) || this.pending >= 512) this.submit();
     return outputs.length === 1 ? outputs[0] : outputs;
+  }
+  _pacerFor(phase) {
+    let pacer = this.pacers.get(phase);
+    if (!pacer) {
+      pacer = new QueuePacer(this.device);
+      this.pacers.set(phase, pacer);
+    }
+    return pacer;
+  }
+  beginPacedBlock(phase = "trunk") {
+    this.activePacer = this._pacerFor(phase);
+  }
+  piece() {
+    if (!this.activePacer || this.pending === 0) return;
+    this.activePacer.pieceEnded(() => this.submit());
+  }
+  async paceBlock(phase = "trunk", drain = false) {
+    const pacer = this._pacerFor(phase);
+    this.submit();
+    this.activePacer = null;
+    await pacer.blockSubmitted(drain);
+    if (this.errors.length) throw Error(this.errors.splice(0).join("\n"));
+    await yieldToBrowser();
   }
   async flush(wait = false) {
     this.submit();
@@ -289,6 +316,8 @@ export class GPUBackend {
       this.encoder = null;
       this.pass = null;
       this.pending = 0;
+      this.activePacer = null;
+      this.pacers.clear();
       for (const s of this.live)
         if (!s.persistent) {
           s.buffer.destroy();

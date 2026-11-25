@@ -732,7 +732,7 @@ export async function createSidProteinEngine({
     }
     const scaleVal = steps === 1 ? onestepGamma : noiseScale;
 
-    // Fast single-session GPU path when no per-step JS callback/trace is requested:
+    // Fast single-session GPU path when no per-step JS coordinate callback/trace is requested:
     // keeps scratch pool resident across all 16 steps and performs ONE batched readback at the end!
     if (!opts.onStep && !opts.onTrace) {
       sampling = true;
@@ -755,6 +755,12 @@ export async function createSidProteinEngine({
           b.pinnedTensors.add(xGpu);
           b.keep([xGpu]);
           b._flush();
+          // Pace GPU queue every 4 steps so macOS Metal / Windows TDR never stall
+          if ((i + 1) % 4 === 0 && i + 1 < steps) {
+            await b.device.queue.onSubmittedWorkDone();
+            b.check();
+          }
+          await opts.onStepProgress?.({ step: i + 1, steps });
         }
         const trajectory = await b.readMany(trajGpu);
         const coordinates = trajectory[trajectory.length - 1];

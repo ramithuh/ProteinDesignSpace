@@ -6,6 +6,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()` for standardized lifecycle, progress, and disposal.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { requestResilientWebGpuDevice } from '$lib/engine/webgpu-device';
 import {
   collectOwnedTransferables,
   createWorkerHarness,
@@ -84,20 +85,13 @@ let ownedDevice: GPUDevice | null = null;
 let loadedPrecision: Precision | null = null;
 
 async function acquireWebGpuDevice(): Promise<GPUDevice> {
-  if (typeof navigator === 'undefined' || !navigator.gpu) {
-    throw new Error('WebGPU is not available in this browser worker.');
-  }
-  let adapter: GPUAdapter | null = null;
-  for (let attempt = 0; attempt < 3 && !adapter; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, attempt * 250));
-    adapter =
-      (await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })) ??
-      (await navigator.gpu.requestAdapter());
-  }
-  if (!adapter) {
-    throw new Error('No WebGPU adapter found for GNINA 1.3.');
-  }
-  return await adapter.requestDevice();
+  const { device } = await requestResilientWebGpuDevice({
+    useF16: true,
+    allowSoftwareFallback: true,
+    retries: 3,
+    retryDelayMs: 250,
+  });
+  return device;
 }
 
 async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
@@ -123,7 +117,7 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
 
   if (!gninaMod) {
     ctx.progress('init', 0.02, 'Loading GNINA 1.3 WebGPU modules...');
-    const moduleUrl = new URL('/vendor/gnina/webgpu/index.js', self.location.origin).href;
+    const moduleUrl = new URL('/vendor/gnina/webgpu/index.js?v=2', self.location.origin).href;
     gninaMod = await import(/* @vite-ignore */ moduleUrl);
   }
 

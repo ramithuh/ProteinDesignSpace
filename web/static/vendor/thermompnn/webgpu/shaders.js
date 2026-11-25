@@ -42,11 +42,12 @@ export function normShader(delta, masked) {
 ${bind(0, "x")}${bind(1, "d")}${bind(2, "w")}${bind(3, "b")}${bind(4, "mask")}${bind(5, "y", "f32", true)}
 var<workgroup> values:array<f32,128>;var<workgroup> sums:array<f32,128>;
 @compute @workgroup_size(128) fn main(@builtin(local_invocation_id) lid:vec3<u32>,@builtin(workgroup_id) wid:vec3<u32>){
- let c=lid.x;let i=wid.x*128u+c;let v=x[i]${delta ? "+d[i]" : ""};values[c]=v;sums[c]=v;workgroupBarrier();
+ let row=wid.x+wid.y*65535u;let rows=arrayLength(&x)/128u;if(row>=rows){return;}
+ let c=lid.x;let i=row*128u+c;let v=x[i]${delta ? "+d[i]" : ""};values[c]=v;sums[c]=v;workgroupBarrier();
  for(var step=64u;step>0u;step/=2u){if(c<step){sums[c]+=sums[c+step];}workgroupBarrier();}
  let mean=sums[0]/128.0;workgroupBarrier();sums[c]=(v-mean)*(v-mean);workgroupBarrier();
  for(var step=64u;step>0u;step/=2u){if(c<step){sums[c]+=sums[c+step];}workgroupBarrier();}
- let inv=inverseSqrt(sums[0]/128.0+0.00001);y[i]=((v-mean)*inv*w[c]+b[c])${masked ? "*mask[wid.x]" : ""};
+ let inv=inverseSqrt(sums[0]/128.0+0.00001);y[i]=((v-mean)*inv*w[c]+b[c])${masked ? "*mask[row]" : ""};
 }`;
 }
 export function xyzShader() {
@@ -67,35 +68,38 @@ export function distanceShader(L) {
 }`;
 }
 export function topkShader(L, K) {
-  return `${bind(0, "d")}${bind(1, "indices", "u32", true)}
-var<private> q:array<u32,${L}>;var<private> base:u32;
+  // Exact PyTorch 2.5 CPU / libstdc++ introselect + introsort [0, K-1) matching cpu/topk.js
+  // bit-for-bit on tie permutations (including masked/gapped residues), using a transient GPU
+  // storage scratch buffer `q` (L*L u32s) instead of an O(L) var<private> array (8 KB/thread at L=2048).
+  return `${bind(0, "d")}${bind(1, "indices", "u32", true)}${bind(2, "q", "u32", true)}
+var<private> base:u32;
 fn less(a:u32,b:u32)->bool{return d[base+a]<d[base+b];}
-fn swap(a:u32,b:u32){let t=q[a];q[a]=q[b];q[b]=t;}
+fn swap(a:u32,b:u32){let t=q[base+a];q[base+a]=q[base+b];q[base+b]=t;}
 fn median(out:u32,a:u32,b:u32,c:u32){
- if(less(q[a],q[b])){if(less(q[b],q[c])){swap(out,b);}else if(less(q[a],q[c])){swap(out,c);}else{swap(out,a);}}
- else if(less(q[a],q[c])){swap(out,a);}else if(less(q[b],q[c])){swap(out,c);}else{swap(out,b);}
+ if(less(q[base+a],q[base+b])){if(less(q[base+b],q[base+c])){swap(out,b);}else if(less(q[base+a],q[base+c])){swap(out,c);}else{swap(out,a);}}
+ else if(less(q[base+a],q[base+c])){swap(out,a);}else if(less(q[base+b],q[base+c])){swap(out,c);}else{swap(out,b);}
 }
 fn splitRange(lo:u32,hi:u32)->u32{
- median(lo,lo+1u,lo+(hi-lo)/2u,hi-1u);let pivot=q[lo];var a=lo+1u;var b=hi;
- loop{while(less(q[a],pivot)){a++;}b--;while(less(pivot,q[b])){b--;}if(a>=b){break;}swap(a,b);a++;}
+ median(lo,lo+1u,lo+(hi-lo)/2u,hi-1u);let pivot=q[base+lo];var a=lo+1u;var b=hi;
+ loop{while(less(q[base+a],pivot)){a++;}b--;while(less(pivot,q[base+b])){b--;}if(a>=b){break;}swap(a,b);a++;}
  return a;
 }
-fn insertion(lo:u32,hi:u32){for(var i=lo+1u;i<hi;i++){let value=q[i];var j=i;while(j>lo){if(!less(value,q[j-1u])){break;}q[j]=q[j-1u];j--;}q[j]=value;}}
+fn insertion(lo:u32,hi:u32){for(var i=lo+1u;i<hi;i++){let value=q[base+i];var j=i;while(j>lo){if(!less(value,q[base+j-1u])){break;}q[base+j]=q[base+j-1u];j--;}q[base+j]=value;}}
 fn adjust(lo:u32,h:u32,len:u32,value:u32){
  let top=h;var hole=h;var child=hole;
- while(child<(len-1u)/2u){child=2u*(child+1u);if(less(q[lo+child],q[lo+child-1u])){child--;}q[lo+hole]=q[lo+child];hole=child;}
- if(len%2u==0u && child==(len-2u)/2u){child=2u*(child+1u);q[lo+hole]=q[lo+child-1u];hole=child-1u;}
+ while(child<(len-1u)/2u){child=2u*(child+1u);if(less(q[base+lo+child],q[base+lo+child-1u])){child--;}q[base+lo+hole]=q[base+lo+child];hole=child;}
+ if(len%2u==0u && child==(len-2u)/2u){child=2u*(child+1u);q[base+lo+hole]=q[base+lo+child-1u];hole=child-1u;}
  var parent=(hole-1u)/2u;
- while(hole>top){if(!less(q[lo+parent],value)){break;}q[lo+hole]=q[lo+parent];hole=parent;parent=(hole-1u)/2u;}
- q[lo+hole]=value;
+ while(hole>top){if(!less(q[base+lo+parent],value)){break;}q[base+lo+hole]=q[base+lo+parent];hole=parent;parent=(hole-1u)/2u;}
+ q[base+lo+hole]=value;
 }
-fn heap(lo:u32,hi:u32){let n=hi-lo;if(n<2u){return;}var p=i32((n-2u)/2u);while(p>=0){adjust(lo,u32(p),n,q[lo+u32(p)]);p--;}}
-fn heapsort(lo:u32,hi:u32){heap(lo,hi);var end=hi;while(end-lo>1u){let v=q[end-1u];q[end-1u]=q[lo];end--;adjust(lo,0u,end-lo,v);}}
+fn heap(lo:u32,hi:u32){let n=hi-lo;if(n<2u){return;}var p=i32((n-2u)/2u);while(p>=0){adjust(lo,u32(p),n,q[base+lo+u32(p)]);p--;}}
+fn heapsort(lo:u32,hi:u32){heap(lo,hi);var end=hi;while(end-lo>1u){let v=q[base+end-1u];q[base+end-1u]=q[base+lo];end--;adjust(lo,0u,end-lo,v);}}
 @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id:vec3<u32>){
- let row=id.x;base=row*${L}u;for(var i=0u;i<${L}u;i++){q[i]=i;}
+ let row=id.x;base=row*${L}u;for(var i=0u;i<${L}u;i++){q[base+i]=i;}
  var lo=0u;var hi=${L}u;var depth=${2 * Math.floor(Math.log2(L))}u;
  while(hi-lo>3u){
-  if(depth==0u){heap(lo,${K}u);for(var i=${K}u;i<hi;i++){if(less(q[i],q[lo])){let v=q[i];q[i]=q[lo];adjust(lo,0u,${K}u-lo,v);}}swap(lo,${K - 1}u);break;}
+  if(depth==0u){heap(lo,${K}u);for(var i=${K}u;i<hi;i++){if(less(q[base+i],q[base+lo])){let v=q[base+i];q[base+i]=q[base+lo];adjust(lo,0u,${K}u-lo,v);}}swap(lo,${K - 1}u);break;}
   depth--;let cut=splitRange(lo,hi);if(cut<=${K - 1}u){lo=cut;}else{hi=cut;}
  }
  if(hi-lo<=3u){insertion(lo,hi);}
@@ -103,7 +107,7 @@ fn heapsort(lo:u32,hi:u32){heap(lo,hi);var end=hi;while(end-lo>1u){let v=q[end-1
  while(size>0u){size--;let s=stack[size];lo=s.x;hi=s.y;depth=s.z;
   while(hi-lo>16u){if(depth==0u){heapsort(lo,hi);break;}depth--;let cut=splitRange(lo,hi);stack[size]=vec3<u32>(cut,hi,depth);size++;hi=cut;}
  }
- insertion(0u,${K - 1}u);for(var k=0u;k<${K}u;k++){indices[row*${K}u+k]=q[k];}
+ insertion(0u,${K - 1}u);for(var k=0u;k<${K}u;k++){indices[row*${K}u+k]=q[base+k];}
 }`;
 }
 export function geometryShader(L, K) {

@@ -220,7 +220,15 @@ export class GPUOps {
       const b = this.engine.weights[name + ".bias"];
       const bufs = [x, w, b ?? this.engine.zero, w.scale ?? this.engine.zero, y];
       const vals = { n: x.rows, c: C, k: K, a: b ? 1 : 0 };
-      if (x.rows <= 160) {
+      if (x.rows <= 4 && K % 4 === 0) {
+        this.dispatch(
+          "linearSmallM-" + dtype + "-" + half,
+          S.linearSmallM(dtype, half),
+          bufs,
+          vals,
+          fold2(Math.ceil(C / 8)),
+        );
+      } else if (x.rows <= 160) {
         this.dispatch(
           "linear32x64-" + dtype + "-" + half,
           S.linear32x64(dtype, half),

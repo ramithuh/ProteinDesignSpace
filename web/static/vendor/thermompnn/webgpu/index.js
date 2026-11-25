@@ -2,7 +2,7 @@ import { loadWeights, checkAbort } from "../shared/loader.js";
 import { parseStructure } from "../shared/structure.js";
 import { prepareInput, resultFrom } from "../shared/results.js";
 import { executeGraph } from "../shared/graph.js";
-import { GPUOps } from "./ops.js?v=2";
+import { GPUOps } from "./ops.js?v=4";
 export function assertHardware(adapter, allowSoftwareFallback = true) {
   if (!adapter) throw new Error("Hardware WebGPU adapter is required");
   const info = adapter.info ?? adapter.adapterInfo ?? {};

@@ -1,41 +1,104 @@
 import { createGpuResources } from './resources.js';
+
 const code = `
-struct Dims { m: u32, n: u32, k: u32, dtype: u32, bias: u32, pad0: u32, pad1: u32, pad2: u32 }
+struct Dims { m: u32, n: u32, k: u32, dtype: u32, bias: u32, tilesN: u32, totalTiles: u32, pad0: u32 }
 @group(0) @binding(0) var<storage, read> x: array<f32>;
 @group(0) @binding(1) var<storage, read> w: array<u32>;
 @group(0) @binding(2) var<storage, read> scales: array<f32>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
 @group(0) @binding(5) var<uniform> d: Dims;
-var<workgroup> a: array<f32, 128>;
-var<workgroup> b: array<f32, 128>;
+var<workgroup> ta: array<vec4<f32>, 144>;
+var<workgroup> tb: array<vec4<f32>, 272>;
 fn weight(index: u32, row: u32) -> f32 {
   if (d.dtype == 0u) { return bitcast<f32>(w[index]); }
-  if (d.dtype == 1u) { let v = unpack2x16float(w[index / 2u]); return v[index % 2u]; }
-  let byte = (w[index / 4u] >> (8u * (index % 4u))) & 255u;
-  return f32(bitcast<i32>(byte << 24u) >> 24) * scales[row];
+  if (d.dtype == 1u) { let v = unpack2x16float(w[index >> 1u]); return select(v.x, v.y, (index & 1u) != 0u); }
+  let byte = (w[index >> 2u] >> (8u * (index & 3u))) & 255u;
+  return f32(bitcast<i32>(byte << 24u) >> 24u) * scales[row];
 }
-@compute @workgroup_size(8, 8) fn main(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
-  let row = group.y * 8u + local.y;
-  let col = group.x * 8u + local.x;
-  var sum = 0.0;
-  for (var base = 0u; base < d.k; base += 16u) {
-    for (var j = 0u; j < 2u; j++) {
-      let ka = local.x + 8u * j;
-      let kb = local.y + 8u * j;
-      var av = 0.0; var bv = 0.0;
-      if (row < d.m && base + ka < d.k) { av = x[row * d.k + base + ka]; }
-      if (col < d.n && base + kb < d.k) { bv = weight(col * d.k + base + kb, col); }
-      a[local.y * 16u + ka] = av;
-      b[local.x * 16u + kb] = bv;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let flat = wid.x + wid.y * 65535u;
+  let inTile = flat < d.totalTiles;
+  let tile = min(flat, d.totalTiles - 1u);
+  let m0 = (tile / d.tilesN) * 32u;
+  let n0 = (tile % d.tilesN) * 64u;
+  let tm4 = li / 16u;
+  let tx = li % 16u;
+  let tm = tm4 * 2u;
+  let r4Read = tm4 >> 1u;
+  let hiPair = (tm4 & 1u) != 0u;
+  var acc0 = vec4<f32>(0.0);
+  var acc1 = vec4<f32>(0.0);
+  let kkA = li % 16u;
+  let r4A = li / 16u;
+  let rowA0 = m0 + r4A * 4u;
+  let fullA = rowA0 + 3u < d.m;
+  let kkB = li % 16u;
+  let r4B = li / 16u;
+  let rowB0 = n0 + r4B * 4u;
+  let fullB = rowB0 + 3u < d.n;
+  for (var k0 = 0u; k0 < d.k; k0 += 16u) {
+    if (li < 128u) {
+      var av = vec4<f32>(0.0);
+      if (inTile && k0 + kkA < d.k) {
+        let aOff = rowA0 * d.k + k0 + kkA;
+        if (fullA) {
+          av = vec4<f32>(x[aOff], x[aOff + d.k], x[aOff + 2u * d.k], x[aOff + 3u * d.k]);
+        } else {
+          if (rowA0 < d.m) { av.x = x[aOff]; }
+          if (rowA0 + 1u < d.m) { av.y = x[aOff + d.k]; }
+          if (rowA0 + 2u < d.m) { av.z = x[aOff + 2u * d.k]; }
+          if (rowA0 + 3u < d.m) { av.w = x[aOff + 3u * d.k]; }
+        }
+      }
+      ta[kkA * 9u + r4A] = av;
+    }
+    {
+      var bv = vec4<f32>(0.0);
+      let gk = k0 + kkB;
+      if (inTile && gk < d.k) {
+        let bOff = rowB0 * d.k + gk;
+        if (fullB) {
+          bv = vec4<f32>(weight(bOff, rowB0), weight(bOff + d.k, rowB0 + 1u), weight(bOff + 2u * d.k, rowB0 + 2u), weight(bOff + 3u * d.k, rowB0 + 3u));
+        } else {
+          if (rowB0 < d.n) { bv.x = weight(bOff, rowB0); }
+          if (rowB0 + 1u < d.n) { bv.y = weight(bOff + d.k, rowB0 + 1u); }
+          if (rowB0 + 2u < d.n) { bv.z = weight(bOff + 2u * d.k, rowB0 + 2u); }
+          if (rowB0 + 3u < d.n) { bv.w = weight(bOff + 3u * d.k, rowB0 + 3u); }
+        }
+      }
+      tb[kkB * 17u + r4B] = bv;
     }
     workgroupBarrier();
-    for (var k = 0u; k < 16u; k++) { sum += a[local.y * 16u + k] * b[local.x * 16u + k]; }
+    for (var kk = 0u; kk < 16u; kk++) {
+      let av4 = ta[kk * 9u + r4Read];
+      let av = select(av4.xy, av4.zw, hiPair);
+      let bv = tb[kk * 17u + tx];
+      acc0 = fma(vec4<f32>(av.x), bv, acc0);
+      acc1 = fma(vec4<f32>(av.y), bv, acc1);
+    }
     workgroupBarrier();
   }
-  if (row < d.m && col < d.n) {
-    if (d.bias != 0u) { sum += bias[col]; }
-    out[row * d.n + col] = sum;
+  if (!inTile) { return; }
+  let col0 = n0 + tx * 4u;
+  var bVec = vec4<f32>(0.0);
+  if (d.bias != 0u) {
+    if (col0 < d.n) { bVec.x = bias[col0]; }
+    if (col0 + 1u < d.n) { bVec.y = bias[col0 + 1u]; }
+    if (col0 + 2u < d.n) { bVec.z = bias[col0 + 2u]; }
+    if (col0 + 3u < d.n) { bVec.w = bias[col0 + 3u]; }
+  }
+  for (var ri = 0u; ri < 2u; ri++) {
+    let m = m0 + tm + ri;
+    if (m < d.m) {
+      let res = select(acc0, acc1, ri == 1u) + bVec;
+      let rowOut = m * d.n;
+      if (col0 < d.n) { out[rowOut + col0] = res.x; }
+      if (col0 + 1u < d.n) { out[rowOut + col0 + 1u] = res.y; }
+      if (col0 + 2u < d.n) { out[rowOut + col0 + 2u] = res.z; }
+      if (col0 + 3u < d.n) { out[rowOut + col0 + 3u] = res.w; }
+    }
   }
 }`;
 
@@ -95,13 +158,16 @@ export async function createPackedLinearRuntime(options = {}) {
         const x = keep(upload(input)), biasBuffer = bias ? keep(upload(bias)) : zero;
         const output = keep(arena.allocate(m * n * 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC));
         const readback = keep(arena.allocate(m * n * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ));
-        const uniform = keep(upload(new Uint32Array([m, n, k, weight.dtype, bias ? 1 : 0, 0, 0, 0]), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST));
+        const tilesM = Math.ceil(m / 32), tilesN = Math.ceil(n / 64), totalTiles = tilesM * tilesN;
+        const gx = totalTiles <= 65535 ? Math.max(1, totalTiles) : 65535;
+        const gy = totalTiles <= 65535 ? 1 : Math.ceil(totalTiles / 65535);
+        const uniform = keep(upload(new Uint32Array([m, n, k, weight.dtype, bias ? 1 : 0, tilesN, totalTiles, 0]), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST));
         const entries = [x, weight.buffer, weight.scales, biasBuffer, output, uniform].map((buffer, binding) =>
           ({ binding, resource: binding === 5 ? { buffer } : arena.storageBinding(buffer) }));
         const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
         const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
         pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup);
-        pass.dispatchWorkgroups(Math.ceil(n / 8), Math.ceil(m / 8)); pass.end();
+        pass.dispatchWorkgroups(gx, gy); pass.end();
         encoder.copyBufferToBuffer(output, 0, readback, 0, m * n * 4);
         device.queue.submit([encoder.finish()]);
         await readback.mapAsync(GPUMapMode.READ);

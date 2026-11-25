@@ -1,3 +1,5 @@
+import { startCompletionPump } from '../../localfold/webgpu/runtime/completion-pump.js';
+
 const software = /swiftshader|llvmpipe|lavapipe|softpipe|software|\bwarp\b|basic render driver/i;
 const negotiatedLimits = ['maxStorageBufferBindingSize', 'maxBufferSize', 'maxComputeWorkgroupStorageSize',
   'maxStorageBuffersPerShaderStage', 'maxComputeInvocationsPerWorkgroup', 'maxComputeWorkgroupSizeX',
@@ -35,7 +37,18 @@ export async function createGpuResources({ device: supplied, allowSoftwareFallba
     const limits = Object.fromEntries(negotiatedLimits.filter(k => adapter.limits[k] != null)
       .map(k => [k, adapter.limits[k]]));
     Object.assign(limits, requiredLimits);
-    device = await adapter.requestDevice({ requiredLimits: limits });
+    const requiredFeatures = adapter.features?.has?.('shader-f16') ? ['shader-f16'] : [];
+    try {
+      device = await adapter.requestDevice({ requiredFeatures, requiredLimits: limits });
+    } catch (err) {
+      if (!requiredFeatures.length) throw err;
+      const retryAdapter = await gpu.requestAdapter({ powerPreference: 'high-performance' }) ?? await gpu.requestAdapter();
+      if (!retryAdapter) throw err;
+      const retryLimits = Object.fromEntries(negotiatedLimits.filter(k => retryAdapter.limits[k] != null)
+        .map(k => [k, retryAdapter.limits[k]]));
+      Object.assign(retryLimits, requiredLimits);
+      device = await retryAdapter.requestDevice({ requiredLimits: retryLimits });
+    }
     if (signal?.aborted) { device.destroy(); signal.throwIfAborted(); }
   } else {
     checkAdapter(info, fallback, allowSoftwareFallback);
@@ -44,6 +57,11 @@ export async function createGpuResources({ device: supplied, allowSoftwareFallba
       if (!(key in device.limits) || (isMinimum ? device.limits[key] > value : device.limits[key] < value))
         throw new RangeError('Supplied device does not meet required limit: ' + key);
     }
+  }
+  const hasF16 = Boolean(device?.features?.has?.('shader-f16'));
+  const isFirefox = /firefox/i.test(globalThis.navigator?.userAgent ?? '');
+  if (isFirefox && typeof globalThis.GPUBufferUsage !== 'undefined') {
+    startCompletionPump(device, true);
   }
   const buffers = new Set();
   let resident = 0, peak = 0, closed = false, loss;
@@ -61,7 +79,7 @@ export async function createGpuResources({ device: supplied, allowSoftwareFallba
   }
   const lost = device.lost?.then(reason => { invalidate(reason); return reason; });
   return {
-    device, adapterInfo: info, lost,
+    device, adapterInfo: info, lost, hasF16,
     isFallbackAdapter: Boolean(fallback || software.test(adapterText(info))),
     get closed() { return closed; },
     get loss() { return loss; },

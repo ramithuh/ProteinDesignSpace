@@ -1,5 +1,6 @@
 const block=256;
-const PARAM_SLOTS=256;
+const PARAM_SLOTS=512;
+const MAP_READ_MODE=0x0001;
 
 function fold2(groups) {
   return groups<=65535?[Math.max(1,groups),1]:[65535,Math.ceil(groups/65535)];
@@ -7,24 +8,25 @@ function fold2(groups) {
 
 export class GPUOps {
   constructor(resources,check) {
-    this.gpu=resources;this.check=check;this.owned=new Set();this.poolBySize=new Map();
+    this.gpu=resources;this.check=check;
     this.device=resources.device;this.encoder=this.device.createCommandEncoder();
     this.pass=null;
     this.paramData=new Uint32Array(PARAM_SLOTS*64);
-    this.paramBuffer=this.buffer(this.paramData.byteLength,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST);
+    this.paramBuffer=this.gpu.acquireParamBuffer(this.paramData.byteLength);
     this.paramCount=0;
-  }
-  buffer(size,usage,data) {
-    const b=this.gpu.allocate(size,usage,false,data);this.owned.add(b);return b;
+    this.liveActivations=new Set();
+    this.usedAtomBuffers=[];
+    this.usedStartsBuffers=[];
+    this.inFlightFailed=false;
   }
   tensor(c,d) {
     const size=c*d**3*4;
-    const b=this.poolBySize.get(size)?.pop()??this.buffer(size,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
+    const b=this.gpu.acquireActivation(size);
+    this.liveActivations.add(b);
     return {c,d,b,size};
   }
-  release({b,size}) {
-    if(!this.poolBySize.has(size)) this.poolBySize.set(size,[]);
-    this.poolBySize.get(size).push(b);
+  release({b}) {
+    if(this.liveActivations.delete(b)) this.gpu.releaseActivation(b);
   }
   _endPass() {
     if(this.pass){this.pass.end();this.pass=null;}
@@ -66,35 +68,72 @@ export class GPUOps {
     this._flushParams();
     const sizes=tensors.map(t=>Math.max(4,t.size));
     const total=sizes.reduce((a,b)=>a+b,0);
-    const staging=this.buffer(total,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ);
+    const staging=this.gpu.acquireStagingBuffer(total);
+    let mapped=false;
     try {
       let off=0;
       for(let i=0;i<tensors.length;i++) {
         this.encoder.copyBufferToBuffer(tensors[i].b,0,staging,off,tensors[i].size);
         off+=sizes[i];
       }
+      this.inFlightFailed=true;
       this.device.queue.submit([this.encoder.finish()]);
+      this.gpu.flushDeferredDestroy();
       this.encoder=this.device.createCommandEncoder();
       this.paramCount=0;
-      await staging.mapAsync(GPUMapMode.READ);
+      await staging.mapAsync(MAP_READ_MODE);
+      this.inFlightFailed=false;
+      mapped=true;
       this.check();this.gpu.alive();
-      const mapped=staging.getMappedRange();
+      const range=staging.getMappedRange();
       const out=[];
       let pos=0;
       for(let i=0;i<tensors.length;i++) {
-        out.push(new Float32Array(mapped.slice(pos,pos+tensors[i].size)));
+        out.push(new Float32Array(range.slice(pos,pos+tensors[i].size)));
         pos+=sizes[i];
       }
+      staging.unmap();
+      mapped=false;
+      this.gpu.releaseStagingBuffer(staging);
       return out;
-    } finally {this.gpu.free(staging);this.owned.delete(staging);}
+    } catch(err) {
+      if(mapped) {try{staging.unmap();}catch{}}
+      this.gpu.free(staging);
+      throw err;
+    }
   }
-  finish() {this._endPass();for(const b of this.owned) this.gpu.free(b);this.owned.clear();this.poolBySize.clear();this.encoder=null;}
+  finish() {
+    this._endPass();
+    this.encoder=null;
+    const discard=this.inFlightFailed||this.gpu.dead||Boolean(this.gpu.lost);
+    if(this.paramBuffer) {
+      if(discard) this.gpu.free(this.paramBuffer);
+      else this.gpu.releaseParamBuffer(this.paramBuffer);
+      this.paramBuffer=null;
+    }
+    for(const b of this.liveActivations) {
+      if(discard) this.gpu.free(b);
+      else this.gpu.releaseActivation(b);
+    }
+    this.liveActivations.clear();
+    for(const b of this.usedAtomBuffers.splice(0)) {
+      if(discard) this.gpu.free(b);
+      else this.gpu.releaseAtomBuffer(b);
+    }
+    for(const b of this.usedStartsBuffers.splice(0)) {
+      if(discard) this.gpu.free(b);
+      else this.gpu.releaseStartsBuffer(b);
+    }
+    this.gpu.flushDeferredDestroy();
+  }
   grid({origin,groups}) {
     const out=this.tensor(28,48),starts=new Uint32Array(29);
     for(let i=0;i<28;i++) starts[i+1]=starts[i]+groups[i].length;
     const atoms=new Float32Array(Math.max(1,starts[28])*4);let i=0;
     for(const group of groups) for(const a of group) {atoms.set([a.x,a.y,a.z,a.radius],i);i+=4;}
-    this.dispatch("grid",{0:this.buffer(atoms.byteLength,GPUBufferUsage.STORAGE,atoms),1:this.buffer(starts.byteLength,GPUBufferUsage.STORAGE,starts),2:out.b},Float32Array.from(origin),Math.ceil(out.size/4/block));
+    const atomsBuf=this.gpu.acquireAtomBuffer(atoms);this.usedAtomBuffers.push(atomsBuf);
+    const startsBuf=this.gpu.acquireStartsBuffer(starts);this.usedStartsBuffers.push(startsBuf);
+    this.dispatch("grid",{0:atomsBuf,1:startsBuf,2:out.b},Float32Array.from(origin),Math.ceil(out.size/4/block));
     return out;
   }
   pool(x,kind,k) {
@@ -102,11 +141,24 @@ export class GPUOps {
     this.dispatch("pool",{0:x.b,2:out.b},Uint32Array.of(x.d,k,Number(kind==="avg"),out.size/4),Math.ceil(out.size/4/block));
     return out;
   }
-  conv(x,name,negativeSlope=0) {
+  conv(x,name,negativeSlope=0,normName=null) {
     const w=this.gpu.layout[name+".weight"],bias=this.gpu.layout[name+".bias"],[oc,,k]=w.shape;
     const out=this.tensor(oc,x.d);
-    this.dispatch("conv",{0:x.b,1:this.gpu.packed,2:out.b},Uint32Array.of(x.d,x.c,oc,k,w.offset,w.scale,w.kind,bias.offset,new Uint32Array(Float32Array.of(negativeSlope).buffer)[0]),Math.ceil(x.d**3/128),Math.ceil(oc/16));
+    const slopeBits=new Uint32Array(Float32Array.of(negativeSlope).buffer)[0];
+    const params=normName
+      ? Uint32Array.of(
+          x.d,x.c,oc,k,w.offset,w.scale,w.kind,bias.offset,slopeBits,1,
+          this.gpu.layout[normName+".weight"].offset,
+          this.gpu.layout[normName+".bias"].offset,
+          this.gpu.layout[normName+".running_mean"].offset,
+          this.gpu.layout[normName+".running_var"].offset,
+        )
+      : Uint32Array.of(x.d,x.c,oc,k,w.offset,w.scale,w.kind,bias.offset,slopeBits,0,0,0,0,0);
+    this.dispatch("conv",{0:x.b,1:this.gpu.packed,2:out.b},params,Math.ceil(x.d**3/128),Math.ceil(oc/16));
     return out;
+  }
+  bnConv(x,normName,convName,negativeSlope=0) {
+    return this.conv(x,convName,negativeSlope,normName);
   }
   norm(x,name) {
     const offsets=["weight","bias","running_mean","running_var"].map(k=>this.gpu.layout[name+"."+k].offset);

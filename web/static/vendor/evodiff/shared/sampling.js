@@ -97,6 +97,24 @@ export function choose(logits, position, u) {
   }
   return 20;
 }
+let yieldChannel = null;
+const yieldWaiters = [];
+function yieldToBrowser() {
+  if (typeof MessageChannel === "undefined") {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  if (!yieldChannel) {
+    yieldChannel = new MessageChannel();
+    yieldChannel.port1.onmessage = () => {
+      const next = yieldWaiters.shift();
+      if (next) next();
+    };
+  }
+  return new Promise((resolve) => {
+    yieldWaiters.push(resolve);
+    yieldChannel.port2.postMessage(null);
+  });
+}
 export async function generate(forward, options) {
   const start = performance.now(),
     plan = prepareGeneration(options),
@@ -108,7 +126,9 @@ export async function generate(forward, options) {
       uniform = plan.uniforms[i],
       token = choose(logits, position, uniform);
     plan.tokens[position] = token;
-    steps.push({ position, uniform, token, logits });
+    if (options.recordSteps !== false) {
+      steps.push({ position, uniform, token, logits });
+    }
     options.onProgress?.({
       phase: "sampling",
       completed: i + 1,
@@ -116,8 +136,8 @@ export async function generate(forward, options) {
       position,
       token,
     });
-    // Allow cancellation from a DOM event or Worker message between steps.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Yield via MessageChannel (avoids >=1000ms background-tab setTimeout throttling).
+    await yieldToBrowser();
   }
   options.signal?.throwIfAborted();
   return {

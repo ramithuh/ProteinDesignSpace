@@ -1,19 +1,496 @@
 import { formatGpuLossDetail } from './resources.js';
+import { QueuePacer } from '../../localfold/webgpu/runtime/queue-pacing.js';
+import { yieldToBrowser } from '../../localfold/webgpu/runtime/yield.js';
 
 // Eager WGSL tensor operations. All activation arithmetic stays on the GPU.
 // Scratch buffers are reused only after their last encoded use; host uploads are
 // never pooled, so queue.writeBuffer cannot overwrite earlier pending commands.
 const DEFAULT_MAX_POOL_BYTES = 256 * 1024 * 1024;
+const UNIFORM_SLAB_BYTES = 262144;
+const UNIFORM_SLOT_BYTES = 256;
+const SLOTS_PER_SLAB = UNIFORM_SLAB_BYTES / UNIFORM_SLOT_BYTES;
+
+const UNPACK_I8_FN = `fn unpack4i8(word: u32) -> vec4<f32> {
+  let s = bitcast<i32>(word);
+  return vec4<f32>(
+    f32((s << 24u) >> 24u),
+    f32((s << 16u) >> 24u),
+    f32((s << 8u) >> 24u),
+    f32(s >> 24u)
+  );
+}`;
+
+function foldGrid2D(groups) {
+  const g = Math.max(1, groups);
+  return g <= 65535 ? [g, 1] : [65535, Math.ceil(g / 65535)];
+}
+
+/**
+ * Uniform-parameterized register-tiled 64x128 / 32x64 GEMM for RFD3 linear layers.
+ * Eliminates per-(m, n, k) synchronous shader compilation, avoids >8 KiB workgroup
+ * array init penalties on Firefox/Naga (every panel <= 4,352 B), and stages F16 weights
+ * in half-precision workgroup panels when shader-f16 is active while accumulating in FP32.
+ */
+export function buildRfd3LinearGemmShader({
+  large = false,
+  dtype = 0,
+  hasBias = false,
+  reluInput = false,
+  alignedB = false,
+  useF16Panel = false,
+} = {}) {
+  const enableF16 = Boolean(dtype === 1 && alignedB && useF16Panel);
+  const EB = enableF16 ? 'f16' : 'f32';
+  const wElemType = dtype === 0 ? 'f32' : 'u32';
+  let bindIdx = 2;
+  const scalesBind = dtype === 2 ? bindIdx++ : -1;
+  const biasBind = hasBias ? bindIdx++ : -1;
+  const outBind = bindIdx++;
+  const uniBind = bindIdx;
+
+  const readUnalignedW =
+    dtype === 0
+      ? 'fn readW(row: u32, gk: u32, K: u32) -> f32 { return w[row * K + gk]; }'
+      : dtype === 1
+        ? 'fn readW(row: u32, gk: u32, K: u32) -> f32 { let idx = row * K + gk; let p = unpack2x16float(w[idx >> 1u]); return select(p.x, p.y, (idx & 1u) != 0u); }'
+        : 'fn readW(row: u32, gk: u32, K: u32) -> f32 { let idx = row * K + gk; let b = (w[idx >> 2u] >> ((idx & 3u) * 8u)) & 255u; return f32(bitcast<i32>(b << 24u) >> 24u) * scales[row]; }';
+
+  const header = [
+    enableF16 ? 'enable f16;' : '',
+    dtype === 2 && alignedB ? UNPACK_I8_FN : '',
+    !alignedB ? readUnalignedW : '',
+    'struct GemmDims { m: u32, n: u32, k: u32, tilesN: u32, totalTiles: u32, pad0: u32, pad1: u32, pad2: u32 };',
+    '@group(0) @binding(0) var<storage, read> x: array<f32>;',
+    `@group(0) @binding(1) var<storage, read> w: array<${wElemType}>;`,
+    scalesBind >= 0 ? `@group(0) @binding(${scalesBind}) var<storage, read> scales: array<f32>;` : '',
+    biasBind >= 0 ? `@group(0) @binding(${biasBind}) var<storage, read> bias: array<f32>;` : '',
+    `@group(0) @binding(${outBind}) var<storage, read_write> out: array<f32>;`,
+    `@group(0) @binding(${uniBind}) var<uniform> d: GemmDims;`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  if (large) {
+    // 64x128 register-tiled GEMM (256 threads, 4x8 per thread, BK=16)
+    // Split B into tb0/tb1 (272 vec4s = 4,352 B each < 8,192 B Naga threshold; total <= 13,056 B < 16 KiB)
+    const loadBSetup =
+      dtype === 1 && alignedB
+        ? `let kkB = (li % 8u) * 2u;
+  let r4B = li / 8u;
+  let rowB0 = n0 + r4B * 4u;
+  let sBnHalf = d.k >> 1u;
+  let bBase0 = (rowB0 * d.k + kkB) >> 1u;
+  let fullB = rowB0 + 3u < d.n;`
+        : dtype === 2 && alignedB
+          ? `let kkB = (li % 4u) * 4u;
+  let r4B = li / 4u;
+  let rowB0 = n0 + r4B * 4u;
+  let sBnQuad = d.k >> 2u;
+  let bBase0 = (rowB0 * d.k + kkB) >> 2u;
+  let fullB = rowB0 + 3u < d.n;
+  var scB = vec4<f32>(0.0);
+  if (li < 128u) {
+    if (rowB0 < d.n) { scB.x = scales[rowB0]; }
+    if (rowB0 + 1u < d.n) { scB.y = scales[rowB0 + 1u]; }
+    if (rowB0 + 2u < d.n) { scB.z = scales[rowB0 + 2u]; }
+    if (rowB0 + 3u < d.n) { scB.w = scales[rowB0 + 3u]; }
+  }`
+          : '';
+
+    const loadBLoop =
+      dtype === 1 && alignedB
+        ? `{
+      var lo = vec4<${EB}>(0.0);
+      var hi = vec4<${EB}>(0.0);
+      if (inTile && k0 + kkB < d.k) {
+        let bOff = bBase0 + (k0 >> 1u);
+        if (fullB) {
+          let p0 = unpack2x16float(w[bOff]);
+          let p1 = unpack2x16float(w[bOff + sBnHalf]);
+          let p2 = unpack2x16float(w[bOff + 2u * sBnHalf]);
+          let p3 = unpack2x16float(w[bOff + 3u * sBnHalf]);
+          lo = vec4<${EB}>(${EB}(p0.x), ${EB}(p1.x), ${EB}(p2.x), ${EB}(p3.x));
+          hi = vec4<${EB}>(${EB}(p0.y), ${EB}(p1.y), ${EB}(p2.y), ${EB}(p3.y));
+        } else {
+          if (rowB0 < d.n) { let p0 = unpack2x16float(w[bOff]); lo.x = ${EB}(p0.x); hi.x = ${EB}(p0.y); }
+          if (rowB0 + 1u < d.n) { let p1 = unpack2x16float(w[bOff + sBnHalf]); lo.y = ${EB}(p1.x); hi.y = ${EB}(p1.y); }
+          if (rowB0 + 2u < d.n) { let p2 = unpack2x16float(w[bOff + 2u * sBnHalf]); lo.z = ${EB}(p2.x); hi.z = ${EB}(p2.y); }
+          if (rowB0 + 3u < d.n) { let p3 = unpack2x16float(w[bOff + 3u * sBnHalf]); lo.w = ${EB}(p3.x); hi.w = ${EB}(p3.y); }
+        }
+      }
+      if (r4B < 16u) {
+        tb0[kkB * 17u + r4B] = lo;
+        tb0[(kkB + 1u) * 17u + r4B] = hi;
+      } else {
+        let r4H = r4B - 16u;
+        tb1[kkB * 17u + r4H] = lo;
+        tb1[(kkB + 1u) * 17u + r4H] = hi;
+      }
+    }`
+        : dtype === 2 && alignedB
+          ? `if (li < 128u) {
+      var q0 = vec4<f32>(0.0); var q1 = vec4<f32>(0.0);
+      var q2 = vec4<f32>(0.0); var q3 = vec4<f32>(0.0);
+      if (inTile && k0 + kkB < d.k) {
+        let bOff = bBase0 + (k0 >> 2u);
+        if (fullB) {
+          q0 = unpack4i8(w[bOff]) * scB.x;
+          q1 = unpack4i8(w[bOff + sBnQuad]) * scB.y;
+          q2 = unpack4i8(w[bOff + 2u * sBnQuad]) * scB.z;
+          q3 = unpack4i8(w[bOff + 3u * sBnQuad]) * scB.w;
+        } else {
+          if (rowB0 < d.n) { q0 = unpack4i8(w[bOff]) * scB.x; }
+          if (rowB0 + 1u < d.n) { q1 = unpack4i8(w[bOff + sBnQuad]) * scB.y; }
+          if (rowB0 + 2u < d.n) { q2 = unpack4i8(w[bOff + 2u * sBnQuad]) * scB.z; }
+          if (rowB0 + 3u < d.n) { q3 = unpack4i8(w[bOff + 3u * sBnQuad]) * scB.w; }
+        }
+      }
+      let c0 = vec4<f32>(q0.x, q1.x, q2.x, q3.x);
+      let c1 = vec4<f32>(q0.y, q1.y, q2.y, q3.y);
+      let c2 = vec4<f32>(q0.z, q1.z, q2.z, q3.z);
+      let c3 = vec4<f32>(q0.w, q1.w, q2.w, q3.w);
+      if (r4B < 16u) {
+        tb0[(kkB + 0u) * 17u + r4B] = c0;
+        tb0[(kkB + 1u) * 17u + r4B] = c1;
+        tb0[(kkB + 2u) * 17u + r4B] = c2;
+        tb0[(kkB + 3u) * 17u + r4B] = c3;
+      } else {
+        let r4H = r4B - 16u;
+        tb1[(kkB + 0u) * 17u + r4H] = c0;
+        tb1[(kkB + 1u) * 17u + r4H] = c1;
+        tb1[(kkB + 2u) * 17u + r4H] = c2;
+        tb1[(kkB + 3u) * 17u + r4H] = c3;
+      }
+    }`
+          : `{
+      let kk = li % 16u;
+      let r4 = li / 16u;
+      let gk = k0 + kk;
+      var v0 = vec4<f32>(0.0);
+      var v1 = vec4<f32>(0.0);
+      if (inTile && gk < d.k) {
+        let row0 = n0 + r4 * 4u;
+        if (row0 + 3u < d.n) {
+          v0 = vec4<f32>(readW(row0, gk, d.k), readW(row0 + 1u, gk, d.k), readW(row0 + 2u, gk, d.k), readW(row0 + 3u, gk, d.k));
+        } else {
+          if (row0 < d.n) { v0.x = readW(row0, gk, d.k); }
+          if (row0 + 1u < d.n) { v0.y = readW(row0 + 1u, gk, d.k); }
+          if (row0 + 2u < d.n) { v0.z = readW(row0 + 2u, gk, d.k); }
+          if (row0 + 3u < d.n) { v0.w = readW(row0 + 3u, gk, d.k); }
+        }
+        let row1 = row0 + 64u;
+        if (row1 + 3u < d.n) {
+          v1 = vec4<f32>(readW(row1, gk, d.k), readW(row1 + 1u, gk, d.k), readW(row1 + 2u, gk, d.k), readW(row1 + 3u, gk, d.k));
+        } else {
+          if (row1 < d.n) { v1.x = readW(row1, gk, d.k); }
+          if (row1 + 1u < d.n) { v1.y = readW(row1 + 1u, gk, d.k); }
+          if (row1 + 2u < d.n) { v1.z = readW(row1 + 2u, gk, d.k); }
+          if (row1 + 3u < d.n) { v1.w = readW(row1 + 3u, gk, d.k); }
+        }
+      }
+      tb0[kk * 17u + r4] = v0;
+      tb1[kk * 17u + r4] = v1;
+    }`;
+
+    const fmaBody = Array.from(
+      { length: 16 },
+      (_, kk) => `{
+      let av = ta[${kk * 17}u + tm4];
+      let bv0 = vec4<f32>(tb0[${kk * 17}u + tx]);
+      let bv1 = vec4<f32>(tb1[${kk * 17}u + tx]);
+      acc_0_0 = fma(vec4<f32>(av.x), bv0, acc_0_0); acc_0_1 = fma(vec4<f32>(av.x), bv1, acc_0_1);
+      acc_1_0 = fma(vec4<f32>(av.y), bv0, acc_1_0); acc_1_1 = fma(vec4<f32>(av.y), bv1, acc_1_1);
+      acc_2_0 = fma(vec4<f32>(av.z), bv0, acc_2_0); acc_2_1 = fma(vec4<f32>(av.z), bv1, acc_2_1);
+      acc_3_0 = fma(vec4<f32>(av.w), bv0, acc_3_0); acc_3_1 = fma(vec4<f32>(av.w), bv1, acc_3_1);
+    }`,
+    ).join('\n    ');
+
+    const storeRows = [0, 1, 2, 3]
+      .map(
+        (i) => `{
+    let m = m0 + tm + ${i}u;
+    if (m < d.m) {
+      let r0 = acc_${i}_0${hasBias ? ' + bVec0' : ''};
+      let r1 = acc_${i}_1${hasBias ? ' + bVec1' : ''};
+      let rowOut = m * d.n;
+      if (col0 < d.n) { out[rowOut + col0] = r0.x; }
+      if (col0 + 1u < d.n) { out[rowOut + col0 + 1u] = r0.y; }
+      if (col0 + 2u < d.n) { out[rowOut + col0 + 2u] = r0.z; }
+      if (col0 + 3u < d.n) { out[rowOut + col0 + 3u] = r0.w; }
+      if (col1 < d.n) { out[rowOut + col1] = r1.x; }
+      if (col1 + 1u < d.n) { out[rowOut + col1 + 1u] = r1.y; }
+      if (col1 + 2u < d.n) { out[rowOut + col1 + 2u] = r1.z; }
+      if (col1 + 3u < d.n) { out[rowOut + col1 + 3u] = r1.w; }
+    }
+  }`,
+      )
+      .join('\n  ');
+
+    return {
+      uniBind,
+      code: `${header}
+var<workgroup> ta: array<vec4<f32>, 272>;
+var<workgroup> tb0: array<vec4<${EB}>, 272>;
+var<workgroup> tb1: array<vec4<${EB}>, 272>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let flat = wid.x + wid.y * 65535u;
+  let inTile = flat < d.totalTiles;
+  let tile = min(flat, d.totalTiles - 1u);
+  let m0 = (tile / d.tilesN) * 64u;
+  let n0 = (tile % d.tilesN) * 128u;
+  let tm4 = li / 16u;
+  let tx = li % 16u;
+  let tm = tm4 * 4u;
+  var acc_0_0 = vec4<f32>(0.0); var acc_0_1 = vec4<f32>(0.0);
+  var acc_1_0 = vec4<f32>(0.0); var acc_1_1 = vec4<f32>(0.0);
+  var acc_2_0 = vec4<f32>(0.0); var acc_2_1 = vec4<f32>(0.0);
+  var acc_3_0 = vec4<f32>(0.0); var acc_3_1 = vec4<f32>(0.0);
+  let kkA = li % 16u;
+  let r4A = li / 16u;
+  let rowA0 = m0 + r4A * 4u;
+  let fullA = rowA0 + 3u < d.m;
+  let taWrite = kkA * 17u + r4A;
+  ${loadBSetup}
+  for (var k0 = 0u; k0 < d.k; k0 += 16u) {
+    {
+      var av = vec4<f32>(0.0);
+      if (inTile && k0 + kkA < d.k) {
+        let aOff = rowA0 * d.k + k0 + kkA;
+        if (fullA) {
+          av = vec4<f32>(x[aOff], x[aOff + d.k], x[aOff + 2u * d.k], x[aOff + 3u * d.k]);
+        } else {
+          if (rowA0 < d.m) { av.x = x[aOff]; }
+          if (rowA0 + 1u < d.m) { av.y = x[aOff + d.k]; }
+          if (rowA0 + 2u < d.m) { av.z = x[aOff + 2u * d.k]; }
+          if (rowA0 + 3u < d.m) { av.w = x[aOff + 3u * d.k]; }
+        }
+        ${reluInput ? 'av = max(av, vec4<f32>(0.0));' : ''}
+      }
+      ta[taWrite] = av;
+    }
+    ${loadBLoop}
+    workgroupBarrier();
+    ${fmaBody}
+    workgroupBarrier();
+  }
+  if (!inTile) { return; }
+  let col0 = n0 + tx * 4u;
+  let col1 = col0 + 64u;
+  ${hasBias ? `var bVec0 = vec4<f32>(0.0); var bVec1 = vec4<f32>(0.0);
+  if (col0 < d.n) { bVec0.x = bias[col0]; }
+  if (col0 + 1u < d.n) { bVec0.y = bias[col0 + 1u]; }
+  if (col0 + 2u < d.n) { bVec0.z = bias[col0 + 2u]; }
+  if (col0 + 3u < d.n) { bVec0.w = bias[col0 + 3u]; }
+  if (col1 < d.n) { bVec1.x = bias[col1]; }
+  if (col1 + 1u < d.n) { bVec1.y = bias[col1 + 1u]; }
+  if (col1 + 2u < d.n) { bVec1.z = bias[col1 + 2u]; }
+  if (col1 + 3u < d.n) { bVec1.w = bias[col1 + 3u]; }` : ''}
+  ${storeRows}
+}`,
+    };
+  }
+
+  // 32x64 register-tiled GEMM for smaller shapes / high occupancy (256 threads, 2x4 per thread, BK=16)
+  const loadBSetupSmall =
+    dtype === 1 && alignedB
+      ? `let kkB = (li % 8u) * 2u;
+  let r4B = li / 8u;
+  let rowB0 = n0 + r4B * 4u;
+  let sBnHalf = d.k >> 1u;
+  let bBase0 = (rowB0 * d.k + kkB) >> 1u;
+  let fullB = rowB0 + 3u < d.n;
+  let tbWrite0 = kkB * 17u + r4B;
+  let tbWrite1 = (kkB + 1u) * 17u + r4B;`
+      : dtype === 2 && alignedB
+        ? `let kkB = (li % 4u) * 4u;
+  let r4B = li / 4u;
+  let rowB0 = n0 + r4B * 4u;
+  let sBnQuad = d.k >> 2u;
+  let bBase0 = (rowB0 * d.k + kkB) >> 2u;
+  let fullB = rowB0 + 3u < d.n;
+  var scB = vec4<f32>(0.0);
+  if (li < 64u) {
+    if (rowB0 < d.n) { scB.x = scales[rowB0]; }
+    if (rowB0 + 1u < d.n) { scB.y = scales[rowB0 + 1u]; }
+    if (rowB0 + 2u < d.n) { scB.z = scales[rowB0 + 2u]; }
+    if (rowB0 + 3u < d.n) { scB.w = scales[rowB0 + 3u]; }
+  }`
+        : `let kkB = li % 16u;
+  let r4B = li / 16u;
+  let rowB0 = n0 + r4B * 4u;
+  let fullB = rowB0 + 3u < d.n;
+  let tbWrite = kkB * 17u + r4B;`;
+
+  const loadBLoopSmall =
+    dtype === 1 && alignedB
+      ? `if (li < 128u) {
+      var lo = vec4<${EB}>(0.0);
+      var hi = vec4<${EB}>(0.0);
+      if (inTile && k0 + kkB < d.k) {
+        let bOff = bBase0 + (k0 >> 1u);
+        if (fullB) {
+          let p0 = unpack2x16float(w[bOff]);
+          let p1 = unpack2x16float(w[bOff + sBnHalf]);
+          let p2 = unpack2x16float(w[bOff + 2u * sBnHalf]);
+          let p3 = unpack2x16float(w[bOff + 3u * sBnHalf]);
+          lo = vec4<${EB}>(${EB}(p0.x), ${EB}(p1.x), ${EB}(p2.x), ${EB}(p3.x));
+          hi = vec4<${EB}>(${EB}(p0.y), ${EB}(p1.y), ${EB}(p2.y), ${EB}(p3.y));
+        } else {
+          if (rowB0 < d.n) { let p0 = unpack2x16float(w[bOff]); lo.x = ${EB}(p0.x); hi.x = ${EB}(p0.y); }
+          if (rowB0 + 1u < d.n) { let p1 = unpack2x16float(w[bOff + sBnHalf]); lo.y = ${EB}(p1.x); hi.y = ${EB}(p1.y); }
+          if (rowB0 + 2u < d.n) { let p2 = unpack2x16float(w[bOff + 2u * sBnHalf]); lo.z = ${EB}(p2.x); hi.z = ${EB}(p2.y); }
+          if (rowB0 + 3u < d.n) { let p3 = unpack2x16float(w[bOff + 3u * sBnHalf]); lo.w = ${EB}(p3.x); hi.w = ${EB}(p3.y); }
+        }
+      }
+      tb[tbWrite0] = lo;
+      tb[tbWrite1] = hi;
+    }`
+      : dtype === 2 && alignedB
+        ? `if (li < 64u) {
+      var q0 = vec4<f32>(0.0); var q1 = vec4<f32>(0.0);
+      var q2 = vec4<f32>(0.0); var q3 = vec4<f32>(0.0);
+      if (inTile && k0 + kkB < d.k) {
+        let bOff = bBase0 + (k0 >> 2u);
+        if (fullB) {
+          q0 = unpack4i8(w[bOff]) * scB.x;
+          q1 = unpack4i8(w[bOff + sBnQuad]) * scB.y;
+          q2 = unpack4i8(w[bOff + 2u * sBnQuad]) * scB.z;
+          q3 = unpack4i8(w[bOff + 3u * sBnQuad]) * scB.w;
+        } else {
+          if (rowB0 < d.n) { q0 = unpack4i8(w[bOff]) * scB.x; }
+          if (rowB0 + 1u < d.n) { q1 = unpack4i8(w[bOff + sBnQuad]) * scB.y; }
+          if (rowB0 + 2u < d.n) { q2 = unpack4i8(w[bOff + 2u * sBnQuad]) * scB.z; }
+          if (rowB0 + 3u < d.n) { q3 = unpack4i8(w[bOff + 3u * sBnQuad]) * scB.w; }
+        }
+      }
+      tb[(kkB + 0u) * 17u + r4B] = vec4<f32>(q0.x, q1.x, q2.x, q3.x);
+      tb[(kkB + 1u) * 17u + r4B] = vec4<f32>(q0.y, q1.y, q2.y, q3.y);
+      tb[(kkB + 2u) * 17u + r4B] = vec4<f32>(q0.z, q1.z, q2.z, q3.z);
+      tb[(kkB + 3u) * 17u + r4B] = vec4<f32>(q0.w, q1.w, q2.w, q3.w);
+    }`
+        : `{
+      var bv = vec4<f32>(0.0);
+      let gk = k0 + kkB;
+      if (inTile && gk < d.k) {
+        if (fullB) {
+          bv = vec4<f32>(readW(rowB0, gk, d.k), readW(rowB0 + 1u, gk, d.k), readW(rowB0 + 2u, gk, d.k), readW(rowB0 + 3u, gk, d.k));
+        } else {
+          if (rowB0 < d.n) { bv.x = readW(rowB0, gk, d.k); }
+          if (rowB0 + 1u < d.n) { bv.y = readW(rowB0 + 1u, gk, d.k); }
+          if (rowB0 + 2u < d.n) { bv.z = readW(rowB0 + 2u, gk, d.k); }
+          if (rowB0 + 3u < d.n) { bv.w = readW(rowB0 + 3u, gk, d.k); }
+        }
+      }
+      tb[tbWrite] = bv;
+    }`;
+
+  const fmaSmall = Array.from(
+    { length: 16 },
+    (_, kk) => `{
+      let av4 = ta[${kk * 9}u + r4Read];
+      let av = select(av4.xy, av4.zw, hiPair);
+      let bv = vec4<f32>(tb[${kk * 17}u + tx]);
+      acc0 = fma(vec4<f32>(av.x), bv, acc0);
+      acc1 = fma(vec4<f32>(av.y), bv, acc1);
+    }`,
+  ).join('\n    ');
+
+  return {
+    uniBind,
+    code: `${header}
+var<workgroup> ta: array<vec4<f32>, 144>;
+var<workgroup> tb: array<vec4<${EB}>, 272>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let flat = wid.x + wid.y * 65535u;
+  let inTile = flat < d.totalTiles;
+  let tile = min(flat, d.totalTiles - 1u);
+  let m0 = (tile / d.tilesN) * 32u;
+  let n0 = (tile % d.tilesN) * 64u;
+  let tm4 = li / 16u;
+  let tx = li % 16u;
+  let tm = tm4 * 2u;
+  let r4Read = tm4 >> 1u;
+  let hiPair = (tm4 & 1u) != 0u;
+  var acc0 = vec4<f32>(0.0);
+  var acc1 = vec4<f32>(0.0);
+  let kkA = li % 16u;
+  let r4A = li / 16u;
+  let rowA0 = m0 + r4A * 4u;
+  let fullA = rowA0 + 3u < d.m;
+  let taWrite = kkA * 9u + r4A;
+  ${loadBSetupSmall}
+  for (var k0 = 0u; k0 < d.k; k0 += 16u) {
+    if (li < 128u) {
+      var av = vec4<f32>(0.0);
+      if (inTile && k0 + kkA < d.k) {
+        let aOff = rowA0 * d.k + k0 + kkA;
+        if (fullA) {
+          av = vec4<f32>(x[aOff], x[aOff + d.k], x[aOff + 2u * d.k], x[aOff + 3u * d.k]);
+        } else {
+          if (rowA0 < d.m) { av.x = x[aOff]; }
+          if (rowA0 + 1u < d.m) { av.y = x[aOff + d.k]; }
+          if (rowA0 + 2u < d.m) { av.z = x[aOff + 2u * d.k]; }
+          if (rowA0 + 3u < d.m) { av.w = x[aOff + 3u * d.k]; }
+        }
+        ${reluInput ? 'av = max(av, vec4<f32>(0.0));' : ''}
+      }
+      ta[taWrite] = av;
+    }
+    ${loadBLoopSmall}
+    workgroupBarrier();
+    ${fmaSmall}
+    workgroupBarrier();
+  }
+  if (!inTile) { return; }
+  let col0 = n0 + tx * 4u;
+  ${hasBias ? `var bVec = vec4<f32>(0.0);
+  if (col0 < d.n) { bVec.x = bias[col0]; }
+  if (col0 + 1u < d.n) { bVec.y = bias[col0 + 1u]; }
+  if (col0 + 2u < d.n) { bVec.z = bias[col0 + 2u]; }
+  if (col0 + 3u < d.n) { bVec.w = bias[col0 + 3u]; }` : ''}
+  let r0 = m0 + tm;
+  if (r0 < d.m) {
+    let res0 = acc0${hasBias ? ' + bVec' : ''};
+    let rowOut0 = r0 * d.n;
+    if (col0 < d.n) { out[rowOut0 + col0] = res0.x; }
+    if (col0 + 1u < d.n) { out[rowOut0 + col0 + 1u] = res0.y; }
+    if (col0 + 2u < d.n) { out[rowOut0 + col0 + 2u] = res0.z; }
+    if (col0 + 3u < d.n) { out[rowOut0 + col0 + 3u] = res0.w; }
+  }
+  let r1 = r0 + 1u;
+  if (r1 < d.m) {
+    let res1 = acc1${hasBias ? ' + bVec' : ''};
+    let rowOut1 = r1 * d.n;
+    if (col0 < d.n) { out[rowOut1 + col0] = res1.x; }
+    if (col0 + 1u < d.n) { out[rowOut1 + col0 + 1u] = res1.y; }
+    if (col0 + 2u < d.n) { out[rowOut1 + col0 + 2u] = res1.z; }
+    if (col0 + 3u < d.n) { out[rowOut1 + col0 + 3u] = res1.w; }
+  }
+}`,
+  };
+}
 
 export class GPUOps {
   constructor(resources, { maxPoolBytes = DEFAULT_MAX_POOL_BYTES } = {}) {
     this.owner = resources;
     this.device = resources.device;
+    this.hasF16 = Boolean(resources.hasF16 || resources.device?.features?.has?.('shader-f16'));
+    this.pacers = new Map();
+    this.pacerPhase = 'default';
+    this.pacer = new QueuePacer(this.device);
+    this.pacers.set('default', this.pacer);
+    this.pieceUsed = false;
+    this.pendingDispatches = 0;
     this.pipelines = new Map();
     this.pool = new Map();
     this.poolBytes = 0;
     this.maxPoolBytes = maxPoolBytes;
     this.deferredReleases = [];
+    this.uniformSlabs = [];
+    this.uniformSlabIdx = 0;
+    this.uniformSlotIdx = 0;
     this.tensors = new Set();
     this.scopes = [];
     this.encoder = null;
@@ -23,6 +500,49 @@ export class GPUOps {
     if (this.encoder) throw new Error('GPU command transaction already active');
     this.encoder = this.device.createCommandEncoder();
     this.pass = null;
+    this.pieceUsed = false;
+    this.pendingDispatches = 0;
+  }
+  allocUniform(words) {
+    if (this.uniformSlotIdx >= SLOTS_PER_SLAB) {
+      this.uniformSlabIdx++;
+      this.uniformSlotIdx = 0;
+    }
+    while (this.uniformSlabs.length <= this.uniformSlabIdx) {
+      const buffer = this.owner.allocate(UNIFORM_SLAB_BYTES, 64 | 8, 'RFD3 uniforms');
+      this.uniformSlabs.push({
+        buffer,
+        cpu: new Uint32Array(UNIFORM_SLAB_BYTES / 4),
+        usedWords: 0,
+      });
+    }
+    const slab = this.uniformSlabs[this.uniformSlabIdx];
+    const byteOffset = this.uniformSlotIdx * UNIFORM_SLOT_BYTES;
+    const wordOffset = byteOffset >>> 2;
+    slab.cpu.set(words, wordOffset);
+    slab.usedWords = wordOffset + words.length;
+    this.uniformSlotIdx++;
+    return { buffer: slab.buffer, offset: byteOffset, size: words.byteLength };
+  }
+  flushUniforms() {
+    const limit = Math.min(this.uniformSlabIdx + 1, this.uniformSlabs.length);
+    for (let i = 0; i < limit; i++) {
+      const slab = this.uniformSlabs[i];
+      if (slab.usedWords > 0) {
+        this.device.queue.writeBuffer(slab.buffer, 0, slab.cpu.subarray(0, slab.usedWords));
+        slab.usedWords = 0;
+      }
+    }
+    this.uniformSlabIdx = 0;
+    this.uniformSlotIdx = 0;
+  }
+  releaseUniformSlabs() {
+    for (const slab of this.uniformSlabs) {
+      this.owner.release(slab.buffer);
+    }
+    this.uniformSlabs.length = 0;
+    this.uniformSlabIdx = 0;
+    this.uniformSlotIdx = 0;
   }
   endPass() {
     if (this.pass) {
@@ -129,18 +649,40 @@ export class GPUOps {
     }
     const group = this.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
-      entries: buffers.map((t, binding) => ({ binding, resource: { buffer: t.buffer ?? t } })),
+      entries: buffers.map((t, binding) => ({
+        binding,
+        resource: t && t.buffer && t.offset !== undefined ? t : { buffer: t.buffer ?? t },
+      })),
     });
     if (!this.pass) this.pass = this.encoder.beginComputePass({ label });
     this.pass.setPipeline(pipeline);
     this.pass.setBindGroup(0, group);
     this.pass.dispatchWorkgroups(...groups);
+    this.pendingDispatches++;
+  }
+  setPacerPhase(phase = 'default') {
+    this.pacerPhase = phase;
+    let pacer = this.pacers.get(phase);
+    if (!pacer) {
+      pacer = new QueuePacer(this.device);
+      this.pacers.set(phase, pacer);
+    }
+    this.pacer = pacer;
+  }
+  piece() {
+    if (!this.encoder) return;
+    this.pieceUsed = true;
+    this.pacer.pieceEnded(() => {
+      if (this.pendingDispatches > 0) this.flush();
+    });
   }
   flush() {
     if (!this.encoder) return;
     this.endPass();
+    this.flushUniforms();
     const encoder = this.encoder;
     this.encoder = null;
+    this.pendingDispatches = 0;
     this.device.queue.submit([encoder.finish()]);
     this.drainDeferredReleases();
     this.encoder = this.device.createCommandEncoder();
@@ -149,6 +691,14 @@ export class GPUOps {
     try { this.endPass(); } catch { /* ignore */ }
     this.encoder = null;
     this.pass = null;
+    this.pendingDispatches = 0;
+    this.pieceUsed = false;
+    this.pacers.clear();
+    this.pacer = new QueuePacer(this.device);
+    this.pacers.set(this.pacerPhase, this.pacer);
+    this.uniformSlabIdx = 0;
+    this.uniformSlotIdx = 0;
+    for (const slab of this.uniformSlabs) slab.usedWords = 0;
     this.drainDeferredReleases();
   }
   kernel(inputs, length, body, label = 'RFD3 elementwise') {
@@ -177,48 +727,30 @@ export class GPUOps {
   linear(a, w, bias, { reluInput = false } = {}) {
     const [n, k] = w.shape, m = a.length / k;
     if (!Number.isInteger(m)) throw new Error('GPU linear shape mismatch');
-    const out = this.tensor(m * n), dtype = { F32: 0, F16: 1, I8: 2 }[w.dtype], inputs = [a, w];
-    let scale = '';
-    if (dtype === 2) { inputs.push(w.scales); scale = '*scales[row]'; }
+    const out = this.tensor(m * n), dtype = { F32: 0, F16: 1, I8: 2 }[w.dtype];
+    if (dtype === undefined) throw new Error('Unsupported GPU linear weight dtype: ' + w.dtype);
+    const alignedB = dtype === 1 ? k % 2 === 0 : dtype === 2 ? k % 4 === 0 : false;
+    const useF16Panel = Boolean(dtype === 1 && alignedB && this.hasF16);
+    const large = m >= 48 && n >= 96 && Math.ceil(m / 64) * Math.ceil(n / 128) >= 16;
+    const bm = large ? 64 : 32;
+    const bn = large ? 128 : 64;
+    const tilesM = Math.ceil(m / bm);
+    const tilesN = Math.ceil(n / bn);
+    const totalTiles = tilesM * tilesN;
+    const { code } = buildRfd3LinearGemmShader({
+      large,
+      dtype,
+      hasBias: Boolean(bias),
+      reluInput: Boolean(reluInput),
+      alignedB,
+      useF16Panel,
+    });
+    const uniformSlice = this.allocUniform(new Uint32Array([m, n, k, tilesN, totalTiles, 0, 0, 0]));
+    const inputs = [a, w];
+    if (dtype === 2) inputs.push(w.scales);
     if (bias) inputs.push(bias);
-    const code = `@group(0) @binding(0) var<storage,read> x:array<f32>;
-@group(0) @binding(1) var<storage,read> w:array<u32>;
-${dtype === 2 ? '@group(0) @binding(2) var<storage,read> scales:array<f32>;' : ''}
-${bias ? `@group(0) @binding(${inputs.length - 1}) var<storage,read> bias:array<f32>;` : ''}
-@group(0) @binding(${inputs.length}) var<storage,read_write> out:array<f32>;
-var<workgroup> tileA:array<f32,512>;
-var<workgroup> tileB:array<f32,512>;
-fn weight(i:u32,row:u32)->f32 {${dtype === 0 ? 'return bitcast<f32>(w[i]);' : dtype === 1 ? 'return unpack2x16float(w[i/2u])[i%2u];' : `return f32(bitcast<i32>(((w[i/4u]>>(8u*(i%4u)))&255u)<<24u)>>24)${scale};`}}
-@compute @workgroup_size(16,16) fn main(@builtin(workgroup_id) g:vec3<u32>,@builtin(local_invocation_id) id:vec3<u32>){
- let tileRow=(g.y+g.z*65535u)*32u;let tileCol=g.x*32u;
- let row0=tileRow+id.y*2u;let row1=row0+1u;
- let col0=tileCol+id.x*2u;let col1=col0+1u;
- let tid=id.y*16u+id.x;
- var s00=0.0;var s01=0.0;var s10=0.0;var s11=0.0;
- for(var base=0u;base<${k}u;base+=16u){
-  for(var t=0u;t<2u;t++){
-   let idx=tid+t*256u;let r=idx/16u;let kk=idx%16u;
-   let gr=tileRow+r;let gc=tileCol+r;let gk=base+kk;
-   var av=0.0;var bv=0.0;
-   if(gr<${m}u&&gk<${k}u){av=${reluInput ? `max(x[gr*${k}u+gk],0.0)` : `x[gr*${k}u+gk]`};}
-   if(gc<${n}u&&gk<${k}u){bv=weight(gc*${k}u+gk,gc);}
-   tileA[idx]=av;tileB[idx]=bv;
-  }
-  workgroupBarrier();
-  for(var j=0u;j<16u;j++){
-   let a0=tileA[(id.y*2u)*16u+j];let a1=tileA[(id.y*2u+1u)*16u+j];
-   let b0=tileB[(id.x*2u)*16u+j];let b1=tileB[(id.x*2u+1u)*16u+j];
-   s00+=a0*b0;s01+=a0*b1;s10+=a1*b0;s11+=a1*b1;
-  }
-  workgroupBarrier();
- }
- if(row0<${m}u&&col0<${n}u){out[row0*${n}u+col0]=s00${bias ? '+bias[col0]' : ''};}
- if(row0<${m}u&&col1<${n}u){out[row0*${n}u+col1]=s01${bias ? '+bias[col1]' : ''};}
- if(row1<${m}u&&col0<${n}u){out[row1*${n}u+col0]=s10${bias ? '+bias[col0]' : ''};}
- if(row1<${m}u&&col1<${n}u){out[row1*${n}u+col1]=s11${bias ? '+bias[col1]' : ''};}
-}`;
-    const groupsY = Math.ceil(m / 32);
-    this.dispatch(code, [...inputs, out], [Math.ceil(n / 32), Math.min(65535, groupsY), Math.ceil(groupsY / 65535)], 'RFD3 packed linear');
+    inputs.push(out, uniformSlice);
+    this.dispatch(code, inputs, foldGrid2D(totalTiles), 'RFD3 packed linear');
     return out;
   }
   fusedPosition(pos, mask, wA, bA, wB, bB, { sinusoidal = false, addTo } = {}) {
@@ -516,11 +1048,20 @@ for(var s=32u;s>0u;s/=2u){if(id<s){tmp[id]+=tmp[id+s];}workgroupBarrier();}for(v
       return;
     }
     this.endPass();
+    this.flushUniforms();
     const encoder = this.encoder;
+    const usedPacer = this.pieceUsed;
     this.encoder = null;
+    this.pendingDispatches = 0;
+    this.pieceUsed = false;
     this.device.queue.submit([encoder.finish()]);
     this.drainDeferredReleases();
-    await this.device.queue.onSubmittedWorkDone();
+    if (usedPacer) {
+      await this.pacer.blockSubmitted(true);
+      await yieldToBrowser();
+    } else {
+      await this.device.queue.onSubmittedWorkDone();
+    }
   }
   async read(t) {
     const [data] = await this.readMany([t]);
@@ -558,6 +1099,7 @@ for(var s=32u;s>0u;s/=2u){if(id<s){tmp[id]+=tmp[id+s];}workgroupBarrier();}for(v
   trim() {
     if (this.encoder) throw new Error('Cannot trim pending GPU commands');
     this.drainDeferredReleases();
+    this.releaseUniformSlabs();
     for (const bucket of this.pool.values()) for (const b of bucket) this.owner.release(b);
     this.pool.clear();
     this.poolBytes = 0;
@@ -566,7 +1108,9 @@ for(var s=32u;s>0u;s/=2u){if(id<s){tmp[id]+=tmp[id+s];}workgroupBarrier();}for(v
     try { this.endPass(); } catch { /* ignore */ }
     this.encoder = null;
     this.pass = null;
+    this.pendingDispatches = 0;
     this.drainDeferredReleases();
+    this.releaseUniformSlabs();
     for (const t of [...this.tensors]) {
       this.owner.release(t.buffer);
       t.released = true;

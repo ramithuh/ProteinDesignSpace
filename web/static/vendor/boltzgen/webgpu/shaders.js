@@ -29,6 +29,8 @@ const UNIFORM_STRUCT = `struct U {
   b1: vec4<u32>,
   f0: vec4<f32>,
   f1: vec4<f32>,
+  b2: vec4<u32>,
+  b3: vec4<u32>,
 };`;
 
 const UNPACK_I8_FN = `fn unpack4i8(word: u32) -> vec4<f32> {
@@ -69,7 +71,7 @@ function buildLinearGemm({ a, b, c, out, M, N, K, sAm, alpha, beta, hasF16 }) {
   bindings.push({ storage: out.storage, name: "out", write: true, binding: nextBind++ });
   const uniformBinding = nextBind;
 
-  const u = new Uint32Array(24);
+  const u = new Uint32Array(32);
   const f = new Float32Array(u.buffer);
   u[0] = a.offset;
   u[1] = b.offset;
@@ -106,7 +108,7 @@ function buildLinearGemm({ a, b, c, out, M, N, K, sAm, alpha, beta, hasF16 }) {
   };
 
   if (large) {
-    // 64x128 register-tiled GEMM (256 threads, 4x8 per thread, BK=16, <=12800B shared)
+    // 64x128 register-tiled GEMM (256 threads, 4x8 per thread, BK=16, split tb0/tb1 <=4352B each <8192B Naga limit)
     const loadBSetup =
       bEnc === "F16"
         ? `let kkB = (li % 8u) * 2u;
@@ -114,9 +116,7 @@ function buildLinearGemm({ a, b, c, out, M, N, K, sAm, alpha, beta, hasF16 }) {
   let rowB0 = n0 + r4B * 4u;
   let sBnHalf = K / 2u;
   let bBase0 = (rowB0 * K + kkB) / 2u;
-  let fullB = rowB0 + 3u < N;
-  let tbWrite0 = kkB * 33u + r4B;
-  let tbWrite1 = (kkB + 1u) * 33u + r4B;`
+  let fullB = rowB0 + 3u < N;`
         : bEnc === "I8"
           ? `let kkB = (li % 4u) * 4u;
   let r4B = li / 4u;
@@ -154,8 +154,14 @@ function buildLinearGemm({ a, b, c, out, M, N, K, sAm, alpha, beta, hasF16 }) {
           if (rowB0 + 3u < N) { let p3 = unpack2x16float(b[bOff + 3u * sBnHalf]); lo.w = ${EB}(p3.x); hi.w = ${EB}(p3.y); }
         }
       }
-      tb[tbWrite0] = lo;
-      tb[tbWrite1] = hi;
+      if (r4B < 16u) {
+        tb0[kkB * 17u + r4B] = lo;
+        tb0[(kkB + 1u) * 17u + r4B] = hi;
+      } else {
+        let r4H = r4B - 16u;
+        tb1[kkB * 17u + r4H] = lo;
+        tb1[(kkB + 1u) * 17u + r4H] = hi;
+      }
     }`
         : bEnc === "I8"
           ? `if (li < 128u) {
@@ -175,38 +181,61 @@ function buildLinearGemm({ a, b, c, out, M, N, K, sAm, alpha, beta, hasF16 }) {
           if (rowB0 + 3u < N) { q3 = unpack4i8(b[bOff + 3u * sBnQuad]) * scB.w; }
         }
       }
-      tb[(kkB + 0u) * 33u + r4B] = vec4<f32>(q0.x, q1.x, q2.x, q3.x);
-      tb[(kkB + 1u) * 33u + r4B] = vec4<f32>(q0.y, q1.y, q2.y, q3.y);
-      tb[(kkB + 2u) * 33u + r4B] = vec4<f32>(q0.z, q1.z, q2.z, q3.z);
-      tb[(kkB + 3u) * 33u + r4B] = vec4<f32>(q0.w, q1.w, q2.w, q3.w);
+      let c0 = vec4<f32>(q0.x, q1.x, q2.x, q3.x);
+      let c1 = vec4<f32>(q0.y, q1.y, q2.y, q3.y);
+      let c2 = vec4<f32>(q0.z, q1.z, q2.z, q3.z);
+      let c3 = vec4<f32>(q0.w, q1.w, q2.w, q3.w);
+      if (r4B < 16u) {
+        tb0[(kkB + 0u) * 17u + r4B] = c0;
+        tb0[(kkB + 1u) * 17u + r4B] = c1;
+        tb0[(kkB + 2u) * 17u + r4B] = c2;
+        tb0[(kkB + 3u) * 17u + r4B] = c3;
+      } else {
+        let r4H = r4B - 16u;
+        tb1[(kkB + 0u) * 17u + r4H] = c0;
+        tb1[(kkB + 1u) * 17u + r4H] = c1;
+        tb1[(kkB + 2u) * 17u + r4H] = c2;
+        tb1[(kkB + 3u) * 17u + r4H] = c3;
+      }
     }`
-          : `for (var e = 0u; e < 2u; e++) {
-      let slot = li + e * 256u;
-      let kk = slot % 16u;
-      let r4 = slot / 16u;
+          : `{
+      let kk = li % 16u;
+      let r4 = li / 16u;
       let k = k0 + kk;
-      var v = vec4<f32>(0.0);
+      var v0 = vec4<f32>(0.0);
+      var v1 = vec4<f32>(0.0);
       if (inTile && k < K) {
         let row0 = n0 + r4 * 4u;
         let bAddr0 = u.iOff.y + row0 * K + k;
         if (row0 + 3u < N) {
-          v = vec4<f32>(b[bAddr0], b[bAddr0 + K], b[bAddr0 + 2u * K], b[bAddr0 + 3u * K]);
+          v0 = vec4<f32>(b[bAddr0], b[bAddr0 + K], b[bAddr0 + 2u * K], b[bAddr0 + 3u * K]);
         } else {
-          if (row0 < N) { v.x = b[bAddr0]; }
-          if (row0 + 1u < N) { v.y = b[bAddr0 + K]; }
-          if (row0 + 2u < N) { v.z = b[bAddr0 + 2u * K]; }
-          if (row0 + 3u < N) { v.w = b[bAddr0 + 3u * K]; }
+          if (row0 < N) { v0.x = b[bAddr0]; }
+          if (row0 + 1u < N) { v0.y = b[bAddr0 + K]; }
+          if (row0 + 2u < N) { v0.z = b[bAddr0 + 2u * K]; }
+          if (row0 + 3u < N) { v0.w = b[bAddr0 + 3u * K]; }
+        }
+        let row1 = row0 + 64u;
+        let bAddr1 = u.iOff.y + row1 * K + k;
+        if (row1 + 3u < N) {
+          v1 = vec4<f32>(b[bAddr1], b[bAddr1 + K], b[bAddr1 + 2u * K], b[bAddr1 + 3u * K]);
+        } else {
+          if (row1 < N) { v1.x = b[bAddr1]; }
+          if (row1 + 1u < N) { v1.y = b[bAddr1 + K]; }
+          if (row1 + 2u < N) { v1.z = b[bAddr1 + 2u * K]; }
+          if (row1 + 3u < N) { v1.w = b[bAddr1 + 3u * K]; }
         }
       }
-      tb[kk * 33u + r4] = v;
+      tb0[kk * 17u + r4] = v0;
+      tb1[kk * 17u + r4] = v1;
     }`;
 
     const fmaBody = Array.from(
       { length: 16 },
       (_, kk) => `{
       let av = ta[${kk * 17}u + tm4];
-      let bv0 = vec4<f32>(tb[${kk * 33}u + tx]);
-      let bv1 = vec4<f32>(tb[${kk * 33 + 16}u + tx]);
+      let bv0 = vec4<f32>(tb0[${kk * 17}u + tx]);
+      let bv1 = vec4<f32>(tb1[${kk * 17}u + tx]);
       acc_0_0 = fma(vec4<f32>(av.x), bv0, acc_0_0); acc_0_1 = fma(vec4<f32>(av.x), bv1, acc_0_1);
       acc_1_0 = fma(vec4<f32>(av.y), bv0, acc_1_0); acc_1_1 = fma(vec4<f32>(av.y), bv1, acc_1_1);
       acc_2_0 = fma(vec4<f32>(av.z), bv0, acc_2_0); acc_2_1 = fma(vec4<f32>(av.z), bv1, acc_2_1);
@@ -236,7 +265,8 @@ function buildLinearGemm({ a, b, c, out, M, N, K, sAm, alpha, beta, hasF16 }) {
 
     const code = `${header}
 var<workgroup> ta: array<vec4<f32>, 272>;
-var<workgroup> tb: array<vec4<${EB}>, 528>;
+var<workgroup> tb0: array<vec4<${EB}>, 272>;
+var<workgroup> tb1: array<vec4<${EB}>, 272>;
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   let M = u.dims.x; let N = u.dims.y; let K = u.dims.z; let sAm = u.dims.w;
@@ -534,7 +564,7 @@ export function shader(kind, inputs, outputs, attrs = {}) {
   inputs.forEach((t) => bind(t));
   outputs.forEach((t) => bind(t, true));
 
-  const u = new Uint32Array(24);
+  const u = new Uint32Array(32);
   const f = new Float32Array(u.buffer);
 
   const rawElem = (t, index) => {
@@ -587,6 +617,7 @@ export function shader(kind, inputs, outputs, attrs = {}) {
 
   let body = "",
     extra = "",
+    directives = "",
     workgroup = "64",
     dispatch = [1, 1, 1],
     invocations = count,
@@ -713,37 +744,50 @@ export function shader(kind, inputs, outputs, attrs = {}) {
       break;
     }
     case "matmul": {
-      // Register-tiled 32x32 batched/general-stride GEMM (2x2 per thread, 2D-folded < 65535)
+      // Uniform-parameterized register-tiled 64x128 (4x8 vec4) / 32x64 (2x4 vec4) batched GEMM
       const M = a.shape.at(-2),
         K = a.shape.at(-1),
         N = b.shape.at(-1),
         batch = count / (M * N),
-        bias = c ? broadcast(c, shape) : null,
-        tilesM = Math.ceil(M / 32),
-        tilesN = Math.ceil(N / 32),
-        totalWG = batch * tilesM * tilesN;
-      customMain = true;
-      workgroup = "16,16";
-      dispatch = fold2(totalWG);
-      u[4] = M;
-      u[5] = N;
-      u[6] = K;
-      u[7] = batch;
-      u[8] = tilesN;
-      u[9] = tilesM * tilesN;
+        bias = c ? broadcast(c, shape) : null;
       f[16] = attrs.alpha ?? 1;
       f[17] = attrs.beta ?? 1;
 
       const bDims = a.shape.slice(0, -2);
+      const bEnc = b.storage.encoding ?? null;
       const fastStrides =
-        bDims.length <= 3 && !a.storage.encoding && !b.storage.encoding;
+        bDims.length <= 3 &&
+        !a.storage.encoding &&
+        (!bEnc || bEnc === "F16");
       if (fastStrides) {
+        const useF16Panel = Boolean(bEnc === "F16" && attrs.hasF16);
+        if (useF16Panel) directives = "enable f16;\n";
+        const EB = useF16Panel ? "f16" : "f32";
+        const large =
+          M >= 48 &&
+          N >= 96 &&
+          batch * Math.ceil(M / 64) * Math.ceil(N / 128) >= 16;
+        const BM = large ? 64 : 32;
+        const BN = large ? 128 : 64;
+        const tilesM = Math.ceil(M / BM);
+        const tilesN = Math.ceil(N / BN);
+        const totalWG = batch * tilesM * tilesN;
+        customMain = true;
+        workgroup = "256";
+        dispatch = fold2(totalWG);
+        u[4] = M;
+        u[5] = N;
+        u[6] = K;
+        u[7] = batch;
+        u[8] = tilesN;
+        u[9] = tilesM * tilesN;
+
         const pad3 = (arr, fill) => {
           const r = [...arr];
           while (r.length < 3) r.unshift(fill);
           return r;
         };
-        const [B0, B1, B2] = pad3(bDims, 1);
+        const [, B1, B2] = pad3(bDims, 1);
         const [sA0, sA1, sA2] = pad3(a.stride.slice(0, -2), 0);
         const [sB0, sB1, sB2] = pad3(b.stride.slice(0, -2), 0);
         const sAm = M > 1 ? a.stride.at(-2) : 0;
@@ -760,56 +804,149 @@ export function shader(kind, inputs, outputs, attrs = {}) {
         u[13] = sA1;
         u[14] = sA2;
         u[15] = sAm;
-        f[20] = 0; // unused
-        // Store sAk, sB0, sB1, sB2, sBk, sBn in remaining uniform slots or constants?
-        // Wait: b0/b1 have 8 u32s (u[8..15]); let's inline sAk/sBk===1 specialization & pass strides cleanly:
+        u[24] = sAk;
+        u[25] = sB0;
+        u[26] = sB1;
+        u[27] = sB2;
+        u[28] = sBk;
+        u[29] = sBn;
+
         const aName = bind(a),
           bName = bind(b);
-        extra = "var<workgroup> tileA:array<f32,544>;var<workgroup> tileB:array<f32,528>;";
-        body = `let M=u.dims.x;let N=u.dims.y;let K=u.dims.z;let batch=u.dims.w;
-          let tilesN=u.b0.x;let perBatch=u.b0.y;
-          let flat=wg.x+wg.y*65535u;let h=flat/perBatch;let inBatch=h<batch;let hc=min(h,batch-1u);
-          let rem=flat%perBatch;let m0=(rem/tilesN)*32u;let n0=(rem%tilesN)*32u;
-          let bi2=hc%${ui(B2)};let ht=hc/${ui(B2)};let bi1=ht%${ui(B1)};let bi0=ht/${ui(B1)};
-          let baseA=u.iOff.x+bi0*${ui(sA0)}+bi1*${ui(sA1)}+bi2*${ui(sA2)};
-          let baseB=u.iOff.y+bi0*${ui(sB0)}+bi1*${ui(sB1)}+bi2*${ui(sB2)};
-          let lx=lid.x;let ly=lid.y;
-          var acc00=0.0;var acc01=0.0;var acc10=0.0;var acc11=0.0;
-          for(var k0=0u;k0<K;k0+=16u){
-            let r0=m0+ly;let r1=r0+16u;let kA=k0+lx;
-            tileA[ly*17u+lx]=select(0.0,${aName}[baseA+min(r0,M-1u)*${ui(sAm)}+min(kA,K-1u)*${ui(sAk)}],inBatch&&r0<M&&kA<K);
-            tileA[(ly+16u)*17u+lx]=select(0.0,${aName}[baseA+min(r1,M-1u)*${ui(sAm)}+min(kA,K-1u)*${ui(sAk)}],inBatch&&r1<M&&kA<K);
-            ${
-              transposeLoadB
-                ? `let c0=n0+ly;let c1=c0+16u;let kB=k0+lx;
-            tileB[lx*33u+ly]=select(0.0,${bName}[baseB+min(kB,K-1u)+min(c0,N-1u)*${ui(sBn)}],inBatch&&c0<N&&kB<K);
-            tileB[lx*33u+ly+16u]=select(0.0,${bName}[baseB+min(kB,K-1u)+min(c1,N-1u)*${ui(sBn)}],inBatch&&c1<N&&kB<K);`
-                : `let c0=n0+lx;let c1=c0+16u;let kB=k0+ly;
-            tileB[ly*33u+lx]=select(0.0,${bName}[baseB+min(kB,K-1u)*${ui(sBk)}+min(c0,N-1u)*${ui(sBn)}],inBatch&&c0<N&&kB<K);
-            tileB[ly*33u+lx+16u]=select(0.0,${bName}[baseB+min(kB,K-1u)*${ui(sBk)}+min(c1,N-1u)*${ui(sBn)}],inBatch&&c1<N&&kB<K);`
-            }
-            workgroupBarrier();
-            for(var kk=0u;kk<16u;kk++){
-              let a0=tileA[(ly*2u)*17u+kk];let a1=tileA[(ly*2u+1u)*17u+kk];
-              let bv0=tileB[kk*33u+(lx*2u)];let bv1=tileB[kk*33u+(lx*2u+1u)];
-              acc00=fma(a0,bv0,acc00);acc01=fma(a0,bv1,acc01);
-              acc10=fma(a1,bv0,acc10);acc11=fma(a1,bv1,acc11);
-            }
-            workgroupBarrier();
-          }
-          if(!inBatch){return;}
-          ${[
-            [0, 0, "acc00"],
-            [0, 1, "acc01"],
-            [1, 0, "acc10"],
-            [1, 1, "acc11"],
-          ]
+        const readBScalar = (idxExpr) =>
+          bEnc === "F16"
+            ? `${EB}(select(unpack2x16float(${bName}[(${idxExpr})>>1u]).x,unpack2x16float(${bName}[(${idxExpr})>>1u]).y,((${idxExpr})&1u)!=0u))`
+            : `${EB}(${bName}[${idxExpr}])`;
+
+        if (large) {
+          extra = `var<workgroup> ta:array<vec4<f32>,272>;var<workgroup> tb0:array<vec4<${EB}>,272>;var<workgroup> tb1:array<vec4<${EB}>,272>;`;
+          const fma64 = Array.from(
+            { length: 16 },
+            (_, kk) => `{let av=ta[${kk * 17}u+tm4];let bv0=vec4<f32>(tb0[${kk * 17}u+tx]);let bv1=vec4<f32>(tb1[${kk * 17}u+tx]);
+              acc00=fma(vec4<f32>(av.x),bv0,acc00);acc01=fma(vec4<f32>(av.x),bv1,acc01);
+              acc10=fma(vec4<f32>(av.y),bv0,acc10);acc11=fma(vec4<f32>(av.y),bv1,acc11);
+              acc20=fma(vec4<f32>(av.z),bv0,acc20);acc21=fma(vec4<f32>(av.z),bv1,acc21);
+              acc30=fma(vec4<f32>(av.w),bv0,acc30);acc31=fma(vec4<f32>(av.w),bv1,acc31);}`,
+          ).join("");
+          const store64 = [0, 1, 2, 3]
             .map(
-              ([ri, ci, acc]) =>
-                `{let m=m0+ly*2u+${ri}u;let n=n0+lx*2u+${ci}u;if(m<M&&n<N){let i=(hc*M+m)*N+n;${putOut0("i", `${acc}*u.f0.x${bias ? "+" + getSlot(bias, 2, "i") + "*u.f0.y" : ""}`)}}}`,
+              (ri) => `{let m=m0+tm+${ri}u;if(m<M){let r0=acc${ri}0*u.f0.x;let r1=acc${ri}1*u.f0.x;${[0, 1, 2, 3, 4, 5, 6, 7]
+                .map((ci) => {
+                  const nE = ci < 4 ? `n0+tn0+${ci}u` : `n0+tn1+${ci - 4}u`;
+                  const vE = ci < 4 ? `r0.${"xyzw"[ci]}` : `r1.${"xyzw"[ci - 4]}`;
+                  return `{let n=${nE};if(n<N){let i=(hc*M+m)*N+n;${putOut0("i", `${vE}${bias ? "+" + getSlot(bias, 2, "i") + "*u.f0.y" : ""}`)}}}`;
+                })
+                .join("")}}}`,
             )
-            .join("")}`;
+            .join("");
+          body = `let M=u.dims.x;let N=u.dims.y;let K=u.dims.z;let batch=u.dims.w;
+            let tilesN=u.b0.x;let perBatch=u.b0.y;let B1=u.b0.z;let B2=u.b0.w;
+            let sA0=u.b1.x;let sA1=u.b1.y;let sA2=u.b1.z;let sAm=u.b1.w;
+            let sAk=u.b2.x;let sB0=u.b2.y;let sB1=u.b2.z;let sB2=u.b2.w;
+            let sBk=u.b3.x;let sBn=u.b3.y;
+            let flat=wg.x+wg.y*65535u;let h=flat/perBatch;let inBatch=h<batch;let hc=min(h,batch-1u);
+            let rem=flat%perBatch;let m0=(rem/tilesN)*64u;let n0=(rem%tilesN)*128u;
+            let bi2=hc%B2;let ht=hc/B2;let bi1=ht%B1;let bi0=ht/B1;
+            let baseA=u.iOff.x+bi0*sA0+bi1*sA1+bi2*sA2;
+            let baseB=u.iOff.y+bi0*sB0+bi1*sB1+bi2*sB2;
+            let li=lid.x;let tm4=li/16u;let tx=li%16u;let tm=tm4*4u;let tn0=tx*4u;let tn1=tn0+64u;
+            var acc00=vec4<f32>(0.0);var acc01=vec4<f32>(0.0);var acc10=vec4<f32>(0.0);var acc11=vec4<f32>(0.0);
+            var acc20=vec4<f32>(0.0);var acc21=vec4<f32>(0.0);var acc30=vec4<f32>(0.0);var acc31=vec4<f32>(0.0);
+            let kkA=li%16u;let r4A=li/16u;let rowA0=m0+r4A*4u;let fullA=rowA0+3u<M;
+            ${transposeLoadB ? "let kkB=li%16u;let c4B=li/16u;" : "let c4B=li%16u;let kkB=li/16u;"}
+            let colB0=n0+c4B*4u;let colB1=colB0+64u;let fullB0=colB0+3u<N;let fullB1=colB1+3u<N;
+            for(var k0=0u;k0<K;k0+=16u){
+              {var av=vec4<f32>(0.0);let gkA=k0+kkA;
+                if(inBatch&&gkA<K){let aOff=baseA+rowA0*sAm+gkA*sAk;
+                  if(fullA){av=vec4<f32>(${aName}[aOff],${aName}[aOff+sAm],${aName}[aOff+2u*sAm],${aName}[aOff+3u*sAm]);}
+                  else{if(rowA0<M){av.x=${aName}[aOff];}if(rowA0+1u<M){av.y=${aName}[aOff+sAm];}if(rowA0+2u<M){av.z=${aName}[aOff+2u*sAm];}if(rowA0+3u<M){av.w=${aName}[aOff+3u*sAm];}}
+                }
+                ta[kkA*17u+r4A]=av;
+              }
+              {var bv0=vec4<${EB}>(0.0);var bv1=vec4<${EB}>(0.0);let gkB=k0+kkB;
+                if(inBatch&&gkB<K){let bOff0=baseB+gkB*sBk+colB0*sBn;let bOff1=baseB+gkB*sBk+colB1*sBn;
+                  if(fullB0){bv0=vec4<${EB}>(${readBScalar("bOff0")},${readBScalar("bOff0+sBn")},${readBScalar("bOff0+2u*sBn")},${readBScalar("bOff0+3u*sBn")});}
+                  else{if(colB0<N){bv0.x=${readBScalar("bOff0")};}if(colB0+1u<N){bv0.y=${readBScalar("bOff0+sBn")};}if(colB0+2u<N){bv0.z=${readBScalar("bOff0+2u*sBn")};}if(colB0+3u<N){bv0.w=${readBScalar("bOff0+3u*sBn")};}}
+                  if(fullB1){bv1=vec4<${EB}>(${readBScalar("bOff1")},${readBScalar("bOff1+sBn")},${readBScalar("bOff1+2u*sBn")},${readBScalar("bOff1+3u*sBn")});}
+                  else{if(colB1<N){bv1.x=${readBScalar("bOff1")};}if(colB1+1u<N){bv1.y=${readBScalar("bOff1+sBn")};}if(colB1+2u<N){bv1.z=${readBScalar("bOff1+2u*sBn")};}if(colB1+3u<N){bv1.w=${readBScalar("bOff1+3u*sBn")};}}
+                }
+                tb0[kkB*17u+c4B]=bv0;tb1[kkB*17u+c4B]=bv1;
+              }
+              workgroupBarrier();
+              ${fma64}
+              workgroupBarrier();
+            }
+            if(!inBatch){return;}
+            ${store64}`;
+        } else {
+          extra = `var<workgroup> ta:array<vec4<f32>,144>;var<workgroup> tb:array<vec4<${EB}>,272>;`;
+          const fma32 = Array.from(
+            { length: 16 },
+            (_, kk) => `{let av4=ta[${kk * 9}u+r4Read];let av=select(av4.xy,av4.zw,hiPair);let bv=vec4<f32>(tb[${kk * 17}u+tx]);
+              acc0=fma(vec4<f32>(av.x),bv,acc0);acc1=fma(vec4<f32>(av.y),bv,acc1);}`,
+          ).join("");
+          const store32 = [0, 1]
+            .map(
+              (ri) => `{let m=m0+tm+${ri}u;if(m<M){let r=acc${ri}*u.f0.x;${[0, 1, 2, 3]
+                .map(
+                  (ci) =>
+                    `{let n=n0+tn0+${ci}u;if(n<N){let i=(hc*M+m)*N+n;${putOut0("i", `r.${"xyzw"[ci]}${bias ? "+" + getSlot(bias, 2, "i") + "*u.f0.y" : ""}`)}}}`,
+                )
+                .join("")}}}`,
+            )
+            .join("");
+          body = `let M=u.dims.x;let N=u.dims.y;let K=u.dims.z;let batch=u.dims.w;
+            let tilesN=u.b0.x;let perBatch=u.b0.y;let B1=u.b0.z;let B2=u.b0.w;
+            let sA0=u.b1.x;let sA1=u.b1.y;let sA2=u.b1.z;let sAm=u.b1.w;
+            let sAk=u.b2.x;let sB0=u.b2.y;let sB1=u.b2.z;let sB2=u.b2.w;
+            let sBk=u.b3.x;let sBn=u.b3.y;
+            let flat=wg.x+wg.y*65535u;let h=flat/perBatch;let inBatch=h<batch;let hc=min(h,batch-1u);
+            let rem=flat%perBatch;let m0=(rem/tilesN)*32u;let n0=(rem%tilesN)*64u;
+            let bi2=hc%B2;let ht=hc/B2;let bi1=ht%B1;let bi0=ht/B1;
+            let baseA=u.iOff.x+bi0*sA0+bi1*sA1+bi2*sA2;
+            let baseB=u.iOff.y+bi0*sB0+bi1*sB1+bi2*sB2;
+            let li=lid.x;let tm4=li/16u;let tx=li%16u;let tm=tm4*2u;let tn0=tx*4u;
+            let r4Read=tm4>>1u;let hiPair=(tm4&1u)!=0u;
+            var acc0=vec4<f32>(0.0);var acc1=vec4<f32>(0.0);
+            let kkA=li%16u;let r4A=li/16u;let rowA0=m0+r4A*4u;let fullA=rowA0+3u<M;
+            ${transposeLoadB ? "let kkB=li%16u;let c4B=li/16u;" : "let c4B=li%16u;let kkB=li/16u;"}
+            let colB0=n0+c4B*4u;let fullB=colB0+3u<N;
+            for(var k0=0u;k0<K;k0+=16u){
+              if(li<128u){
+                var av=vec4<f32>(0.0);let gkA=k0+kkA;
+                if(inBatch&&gkA<K){let aOff=baseA+rowA0*sAm+gkA*sAk;
+                  if(fullA){av=vec4<f32>(${aName}[aOff],${aName}[aOff+sAm],${aName}[aOff+2u*sAm],${aName}[aOff+3u*sAm]);}
+                  else{if(rowA0<M){av.x=${aName}[aOff];}if(rowA0+1u<M){av.y=${aName}[aOff+sAm];}if(rowA0+2u<M){av.z=${aName}[aOff+2u*sAm];}if(rowA0+3u<M){av.w=${aName}[aOff+3u*sAm];}}
+                }
+                ta[kkA*9u+r4A]=av;
+              }
+              {var bv=vec4<${EB}>(0.0);let gkB=k0+kkB;
+                if(inBatch&&gkB<K){let bOff=baseB+gkB*sBk+colB0*sBn;
+                  if(fullB){bv=vec4<${EB}>(${readBScalar("bOff")},${readBScalar("bOff+sBn")},${readBScalar("bOff+2u*sBn")},${readBScalar("bOff+3u*sBn")});}
+                  else{if(colB0<N){bv.x=${readBScalar("bOff")};}if(colB0+1u<N){bv.y=${readBScalar("bOff+sBn")};}if(colB0+2u<N){bv.z=${readBScalar("bOff+2u*sBn")};}if(colB0+3u<N){bv.w=${readBScalar("bOff+3u*sBn")};}}
+                }
+                tb[kkB*17u+c4B]=bv;
+              }
+              workgroupBarrier();
+              ${fma32}
+              workgroupBarrier();
+            }
+            if(!inBatch){return;}
+            ${store32}`;
+        }
       } else {
+        const tilesM = Math.ceil(M / 32),
+          tilesN = Math.ceil(N / 32),
+          totalWG = batch * tilesM * tilesN;
+        customMain = true;
+        workgroup = "16,16";
+        dispatch = fold2(totalWG);
+        u[4] = M;
+        u[5] = N;
+        u[6] = K;
+        u[7] = batch;
+        u[8] = tilesN;
+        u[9] = tilesM * tilesN;
         extra = "var<workgroup> tileA:array<f32,544>;var<workgroup> tileB:array<f32,528>;";
         body = `let M=u.dims.x;let N=u.dims.y;let K=u.dims.z;let batch=u.dims.w;
           let tilesN=u.b0.x;let perBatch=u.b0.y;
@@ -1101,7 +1238,7 @@ export function shader(kind, inputs, outputs, attrs = {}) {
   ].join("\n");
 
   return {
-    code: `${header}\n${extra}\n@compute @workgroup_size(${workgroup}) fn main(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(local_invocation_id) lid:vec3<u32>,@builtin(workgroup_id) wg:vec3<u32>){${body}}`,
+    code: `${directives}${header}\n${extra}\n@compute @workgroup_size(${workgroup}) fn main(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(local_invocation_id) lid:vec3<u32>,@builtin(workgroup_id) wg:vec3<u32>){${body}}`,
     bindings: renumbered,
     dispatch,
     uniforms: u,

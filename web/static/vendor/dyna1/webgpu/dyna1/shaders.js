@@ -176,13 +176,13 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
 }`;
   }
 
-  // 64x128 register-tiled GEMM (4x8 per thread, 256 threads) for M > 160
+  // 64x128 register-tiled GEMM (4x8 per thread, 256 threads, split tb0/tb1 <=4352B each <8192B Naga limit) for M > 160
   const unroll = Array.from(
     { length: 16 },
     (_, kk) => `{
       let av = ta[${kk * 17}u + tm4];
-      let bv0 = vec4<f32>(tb[${kk * 33}u + tx]);
-      let bv1 = vec4<f32>(tb[${kk * 33 + 16}u + tx]);
+      let bv0 = vec4<f32>(tb0[${kk * 17}u + tx]);
+      let bv1 = vec4<f32>(tb1[${kk * 17}u + tx]);
       acc00 = fma(vec4<f32>(av.x), bv0, acc00); acc01 = fma(vec4<f32>(av.x), bv1, acc01);
       acc10 = fma(vec4<f32>(av.y), bv0, acc10); acc11 = fma(vec4<f32>(av.y), bv1, acc11);
       acc20 = fma(vec4<f32>(av.z), bv0, acc20); acc21 = fma(vec4<f32>(av.z), bv1, acc21);
@@ -206,7 +206,8 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
           if (col0 + 3u < ${N}u) { let p3 = unpack2x16float(w[bOff + 3u * kh]); lo.w = p3.x; if (hasHi) { hi.w = p3.y; } }
         }
       }
-      tb[kk * 33u + c4] = lo; tb[(kk + 1u) * 33u + c4] = hi;
+      if (c4 < 16u) { tb0[kk * 17u + c4] = lo; tb0[(kk + 1u) * 17u + c4] = hi; }
+      else { let c4H = c4 - 16u; tb1[kk * 17u + c4H] = lo; tb1[(kk + 1u) * 17u + c4H] = hi; }
     }`
       : dtype === 'I8'
         ? `if (li < 128u) {
@@ -219,23 +220,32 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
         if (col0 + 2u < ${N}u) { let u = w[bOff + 2u * kq]; let sc = scale[col0 + 2u]; v0.z = f32(bitcast<i32>(u << 24u) >> 24u) * sc; v1.z = f32(bitcast<i32>(u << 16u) >> 24u) * sc; v2.z = f32(bitcast<i32>(u << 8u) >> 24u) * sc; v3.z = f32(bitcast<i32>(u) >> 24u) * sc; }
         if (col0 + 3u < ${N}u) { let u = w[bOff + 3u * kq]; let sc = scale[col0 + 3u]; v0.w = f32(bitcast<i32>(u << 24u) >> 24u) * sc; v1.w = f32(bitcast<i32>(u << 16u) >> 24u) * sc; v2.w = f32(bitcast<i32>(u << 8u) >> 24u) * sc; v3.w = f32(bitcast<i32>(u) >> 24u) * sc; }
       }
-      tb[kk * 33u + c4] = v0; tb[(kk + 1u) * 33u + c4] = v1; tb[(kk + 2u) * 33u + c4] = v2; tb[(kk + 3u) * 33u + c4] = v3;
+      if (c4 < 16u) { tb0[kk * 17u + c4] = v0; tb0[(kk + 1u) * 17u + c4] = v1; tb0[(kk + 2u) * 17u + c4] = v2; tb0[(kk + 3u) * 17u + c4] = v3; }
+      else { let c4H = c4 - 16u; tb1[kk * 17u + c4H] = v0; tb1[(kk + 1u) * 17u + c4H] = v1; tb1[(kk + 2u) * 17u + c4H] = v2; tb1[(kk + 3u) * 17u + c4H] = v3; }
     }`
-        : `for (var e = 0u; e < 2u; e++) {
-      let slot = li + e * 256u; let kk = slot % 16u; let c4 = slot / 16u; let k = k0 + kk; let col0 = n0 + c4 * 4u;
-      var bv = vec4<${EB}>(0.0);
+        : `{
+      let kk = li % 16u; let c4 = li / 16u; let k = k0 + kk;
+      let col0 = n0 + c4 * 4u; let col1 = col0 + 64u;
+      var bv0 = vec4<${EB}>(0.0); var bv1 = vec4<${EB}>(0.0);
       if (inTile && k < ${K}u) {
         let b0 = col0 * ${K}u + k;
-        if (col0 + 3u < ${N}u) {
-          bv = vec4<${EB}>(w[b0], w[b0 + ${K}u], w[b0 + ${2 * K}u], w[b0 + ${3 * K}u]);
-        } else {
-          if (col0 < ${N}u) { bv.x = w[b0]; }
-          if (col0 + 1u < ${N}u) { bv.y = w[b0 + ${K}u]; }
-          if (col0 + 2u < ${N}u) { bv.z = w[b0 + ${2 * K}u]; }
-          if (col0 + 3u < ${N}u) { bv.w = w[b0 + ${3 * K}u]; }
+        if (col0 + 3u < ${N}u) { bv0 = vec4<${EB}>(w[b0], w[b0 + ${K}u], w[b0 + ${2 * K}u], w[b0 + ${3 * K}u]); }
+        else {
+          if (col0 < ${N}u) { bv0.x = w[b0]; }
+          if (col0 + 1u < ${N}u) { bv0.y = w[b0 + ${K}u]; }
+          if (col0 + 2u < ${N}u) { bv0.z = w[b0 + ${2 * K}u]; }
+          if (col0 + 3u < ${N}u) { bv0.w = w[b0 + ${3 * K}u]; }
+        }
+        let b1 = col1 * ${K}u + k;
+        if (col1 + 3u < ${N}u) { bv1 = vec4<${EB}>(w[b1], w[b1 + ${K}u], w[b1 + ${2 * K}u], w[b1 + ${3 * K}u]); }
+        else {
+          if (col1 < ${N}u) { bv1.x = w[b1]; }
+          if (col1 + 1u < ${N}u) { bv1.y = w[b1 + ${K}u]; }
+          if (col1 + 2u < ${N}u) { bv1.z = w[b1 + ${2 * K}u]; }
+          if (col1 + 3u < ${N}u) { bv1.w = w[b1 + ${3 * K}u]; }
         }
       }
-      tb[kk * 33u + c4] = bv;
+      tb0[kk * 17u + c4] = bv0; tb1[kk * 17u + c4] = bv1;
     }`;
   const storeRows = [0, 1, 2, 3]
     .map(
@@ -251,7 +261,8 @@ fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: ve
     .join('\n    ');
   return `${native ? 'enable f16;\n' : ''}${decl(0, 'a')}${decl(1, 'w', wType)}${decl(2, 'bias')}${decl(3, 'scale')}${decl(4, 'y', 'f32', true)}
 var<workgroup> ta: array<vec4<f32>, 272>;
-var<workgroup> tb: array<vec4<${EB}>, 528>;
+var<workgroup> tb0: array<vec4<${EB}>, 272>;
+var<workgroup> tb1: array<vec4<${EB}>, 272>;
 @compute @workgroup_size(256)
 fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: vec3<u32>) {
   let M_dyn = arrayLength(&a) / ${K}u;
