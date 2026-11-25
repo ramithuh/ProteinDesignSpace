@@ -472,7 +472,7 @@
         <div>
           <h2 id="onb-title">Welcome to <span class="brand-accent">denovo</span>.run</h2>
           <p class="onb-sub">
-            Protein design and structure prediction, running locally on your GPU.
+            Prototype protein design, prediction, and docking workflows running locally in the browser (WebGPU).
           </p>
         </div>
       </div>
@@ -498,7 +498,7 @@
           <circle cx="10" cy="14.7" r="1" fill="currentColor"/>
         </svg>
         <span>
-          <b>GPU heads-up:</b> Initial model setup and structure prediction may take a moment and use GPU memory; weights stay cached for future runs.
+          <b>Heads up:</b> Since models run in your browser, first runs download weights like AlphaFold 3 (~265 MB) and use your own computer's compute (cached locally for future runs). This is not meant for heavy workloads unless you have a powerful GPU.
         </span>
       </div>
 
