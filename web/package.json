@@ -20,8 +20,8 @@
     "sync:upstream": "node ../tools/sync-upstream.mjs && node ../tools/sync-ort-wasm.mjs"
   },
   "devDependencies": {
-    "@sveltejs/adapter-static": "^3.0.0",
-    "@sveltejs/kit": "^2.20.0",
+    "@sveltejs/adapter-static": "^4.0.1",
+    "@sveltejs/kit": "^3.4.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@types/node": "^22.0.0",
     "@webgpu/types": "^0.1.74",
