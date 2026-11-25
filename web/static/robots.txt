@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+
+# Machine-readable LLM & agent workflow specification (?flow= URL DSL, 27 model schemas, 16 benchmarks, /api/link & Host-GPU API):
+# https://denovo.run/llms.txt

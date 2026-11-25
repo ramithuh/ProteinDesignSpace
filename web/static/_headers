@@ -7,9 +7,11 @@
 
 /
   Cache-Control: public, max-age=0, must-revalidate
+  Link: </llms.txt>; rel="llms"
 
 /index.html
   Cache-Control: public, max-age=0, must-revalidate
+  Link: </llms.txt>; rel="llms"
 
 /_app/immutable/*
   Cache-Control: public, max-age=31536000, immutable
@@ -20,3 +22,7 @@
 /llms.txt
   Content-Type: text/plain; charset=utf-8
   Cache-Control: public, max-age=300, must-revalidate
+
+/robots.txt
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=3600

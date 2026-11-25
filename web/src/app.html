@@ -93,6 +93,17 @@
       #denovo-preloader .pl-ribbon { stroke-dashoffset: 0; animation: none; }
       #denovo-preloader .pl-dot { animation: none; }
     }
+    .denovo-llm-discovery {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
   </style>
   %sveltekit.head%
 </head>
@@ -107,6 +118,13 @@
     </svg>
     <div class="pl-word"><span class="pl-accent">denovo</span>.run</div>
   </div>
+  <aside class="denovo-llm-discovery" aria-hidden="true">
+    denovo.run — Browser-native WebGPU workspace for de novo protein design, inverse folding, structure prediction, ligand docking, and designability evaluation (27 models including RFdiffusion3, RFD4-Proteina, La-Proteina, Genie 3, BoltzGen, ProtPardelle, ProteinMPNN, LigandMPNN, AlphaFold 2/3, Boltz-2, RoseTTAFold 3, GNINA 1.3, ThermoMPNN, ESM-C, Dyna-1).
+    For LLMs and agents without a browser: read the complete machine-readable workflow specification (?flow= URL DSL, all primary &amp; advanced model parameters, 16 benchmark targets, /api/link validator, and headless Host-GPU API) at <a href="https://denovo.run/llms.txt">https://denovo.run/llms.txt</a>.
+  </aside>
+  <noscript>
+    <p>denovo.run requires WebGPU/JavaScript for interactive execution. Machine-readable LLM &amp; URL workflow specification: <a href="https://denovo.run/llms.txt">https://denovo.run/llms.txt</a></p>
+  </noscript>
   <div style="display: contents">%sveltekit.body%</div>
 </body>
 </html>

@@ -1307,8 +1307,94 @@ export function stripTrailingProsePunctuation(raw: string): string {
   return s;
 }
 
-/** Split input on `;` or `\n` outside quotes and parentheses. */
-function splitStatements(input: string): string[] {
+const SEMICOLON_CONTINUATION_PARAM_KEYS = new Set([
+  'fixedAtoms',
+  'motifAtoms',
+  'tiedPositions',
+  'hbondSelection',
+  'hbondDonorSelection',
+  'hbondAcceptorSelection',
+  'hbondDonor',
+  'hbondAcceptor',
+  'rasaBuriedSelection',
+  'piStackSelection',
+  'unfixedSequence',
+]);
+
+const PIPE_SEPARABLE_PARAM_KEYS = new Set([
+  'fixedAtoms',
+  'motifAtoms',
+  'tiedPositions',
+  'unfixedSequence',
+]);
+
+const STEP_ALIAS_KEYS = new Set(['steps', 'nsteps', 'numSteps', 'nSampleStep']);
+
+function getActiveUnquotedParamKey(curStmt: string): string | null {
+  // Isolate the trailing node expression (after last unquoted `~` or `->`)
+  const chainParts = splitEdgeChain(curStmt);
+  const lastExpr = chainParts[chainParts.length - 1] ?? '';
+  const segs = splitOutsideQuotes(lastExpr, ':');
+  if (segs.length < 2) return null;
+
+  let paramTail = '';
+  const seg1FirstEq = segs[1].indexOf('=');
+  const seg1FirstComma = segs[1].indexOf(',');
+  const seg1StartsWithParam = seg1FirstEq > 0 && (seg1FirstComma === -1 || seg1FirstEq < seg1FirstComma);
+  if (seg1StartsWithParam) {
+    paramTail = segs.slice(1).join(':');
+  } else if (seg1FirstComma > 0 && (seg1FirstEq === -1 || seg1FirstComma < seg1FirstEq)) {
+    paramTail = segs.slice(1).join(':').slice(seg1FirstComma + 1);
+  } else if (segs.length >= 3) {
+    paramTail = segs.slice(2).join(':');
+  }
+  if (!paramTail) return null;
+
+  const pairs = splitParamPairs(paramTail);
+  if (pairs.length === 0) return null;
+  const lastPair = pairs[pairs.length - 1];
+  const eqIdx = lastPair.indexOf('=');
+  if (eqIdx <= 0) return null;
+  return lastPair.slice(0, eqIdx).trim();
+}
+
+function isIntraParamSemicolon(
+  curStmt: string,
+  restAfterSemi: string,
+  catalog?: FlowCatalogHooks,
+): boolean {
+  const activeKey = getActiveUnquotedParamKey(curStmt);
+  if (!activeKey || !SEMICOLON_CONTINUATION_PARAM_KEYS.has(activeKey)) return false;
+
+  const nextSemiChunk = restAfterSemi.split(/[;\r\n]/)[0] ?? '';
+  const nextNodeHead = (splitEdgeChain(nextSemiChunk)[0] ?? '').trim();
+  if (!nextNodeHead) return false;
+
+  if (activeKey === 'tiedPositions') {
+    const firstPair = splitParamPairs(nextNodeHead)[0]?.trim() ?? '';
+    return /^[A-Za-z0-9]+-?\d+(?:=[A-Za-z0-9]+-?\d+)+$/.test(firstPair);
+  }
+
+  // Isolate up to any `,nextKey=` parameter boundary on the same node
+  const firstParamChunk = splitParamPairs(nextNodeHead)[0]?.trim() ?? '';
+  const atomMapMatch =
+    /^([A-Za-z0-9]+-?\d+(?:--?\d+)?)\s*:\s*([A-Za-z0-9,'*]+(?:\s*,\s*[A-Za-z0-9,'*]+)*)$/.exec(
+      firstParamChunk,
+    );
+  if (atomMapMatch) {
+    const firstAtomTok = atomMapMatch[2].split(',')[0].trim();
+    if (!resolveFlowModelAlias(firstAtomTok, catalog)) {
+      return true;
+    }
+  }
+  if (/^[A-Za-z0-9_]+\/[^=~:]+$/.test(firstParamChunk) || /^sel\(/i.test(firstParamChunk)) {
+    return true;
+  }
+  return false;
+}
+
+/** Split input on `;` or `\n` outside quotes, parentheses, and unquoted atom-map / tiedPositions values. */
+function splitStatements(input: string, catalog?: FlowCatalogHooks): string[] {
   const out: string[] = [];
   let cur = '';
   let quote: string | null = null;
@@ -1341,6 +1427,10 @@ function splitStatements(input: string): string[] {
       continue;
     }
     if ((ch === ';' || ch === '\n' || ch === '\r') && parenDepth === 0) {
+      if (ch === ';' && isIntraParamSemicolon(cur, input.slice(i + 1), catalog)) {
+        cur += ch;
+        continue;
+      }
       out.push(cur);
       cur = '';
       continue;
@@ -1678,7 +1768,11 @@ function parseNodeExpression(
       }
       const key = pair.slice(0, eqIdx).trim();
       const rawRhs = pair.slice(eqIdx + 1);
-      const { value, wasQuoted } = unquoteValue(rawRhs);
+      const { value: unquotedVal, wasQuoted } = unquoteValue(rawRhs);
+      const value =
+        PIPE_SEPARABLE_PARAM_KEYS.has(key) && unquotedVal.includes('|')
+          ? unquotedVal.replace(/\s*\|\s*/g, '; ')
+          : unquotedVal;
       if (FORBIDDEN_KEYS.has(key)) {
         return {
           error: {
@@ -1782,6 +1876,12 @@ function buildParamsAndLabel(
       key = 'model';
     } else if (rawKey === 'mode' && manifest.modeParamKey && !hasFieldNamedMode) {
       key = manifest.modeParamKey;
+    } else if (manifest.stage === 'generate' && STEP_ALIAS_KEYS.has(rawKey)) {
+      const hasExactStep = manifest.paramSchema?.some((f) => f.key === rawKey);
+      if (!hasExactStep) {
+        const canonicalStep = manifest.paramSchema?.find((f) => STEP_ALIAS_KEYS.has(f.key));
+        if (canonicalStep) key = canonicalStep.key;
+      }
     }
 
     const val = coerceParamValue(manifest, key, rawVal);
@@ -2082,7 +2182,7 @@ export function parseFlowDsl(dsl: string, opts: FlowParseOptions = {}): FlowPars
     };
   }
 
-  const statements = splitStatements(trimmed)
+  const statements = splitStatements(trimmed, catalog)
     .map((s) => s.trim())
     .filter(Boolean);
 
@@ -2446,7 +2546,7 @@ export function extractWorkflowSearchOrHash(
 }
 
 function extractRawQueryParam(clean: string, targetKey: string): string | null {
-  const qs = new URLSearchParams(clean);
+  const qs = new URLSearchParams(clean.replace(/^[?#]/, ''));
   if (!qs.has(targetKey)) return null;
   return qs.get(targetKey) ?? '';
 }
@@ -3361,7 +3461,7 @@ export async function decodeWorkflowQuery(
 
   const qs = new URLSearchParams(clean);
   if (qs.has('flow')) {
-    return parseFlowDsl(qs.get('flow') ?? '', opts);
+    return parseFlowDsl(extractRawQueryParam(clean, 'flow') ?? qs.get('flow') ?? '', opts);
   }
   if (qs.has('recipe')) {
     return parseRecipeSafe(qs.get('recipe') ?? '', opts);

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { BENCHMARK_TARGETS } from '$lib/engine/benchmarks';
 import {
   ADAPTER_REGISTRY,
   ESMFOLD2_STEPS,
@@ -54,11 +55,15 @@ describe('engine/llms-txt', () => {
         expect(text).toContain(portSpec.type);
       }
       for (const field of manifest.paramSchema ?? []) {
-        if (field.tier === 'primary') {
-          expect(text).toContain(field.key);
+        if (field.tier === 'primary' || field.tier === 'advanced') {
+          expect(text, `Missing ${field.tier} param ${id}.${field.key}`).toContain(field.key);
         }
       }
     }
+
+    expect(text).toContain('nsteps');
+    expect(text).toContain('seed');
+    expect(text).toContain('earlyStop');
 
     const allPortTypes: PortType[] = [
       'StructureArtifact',
@@ -106,6 +111,27 @@ describe('engine/llms-txt', () => {
     expect(WORKFLOW_PRESETS).toHaveLength(8);
     for (const preset of WORKFLOW_PRESETS) {
       expect(text).toContain(preset.id);
+    }
+
+    expect(BENCHMARK_TARGETS).toHaveLength(16);
+    for (const bench of BENCHMARK_TARGETS) {
+      expect(text, `Missing benchmark target ${bench.id}`).toContain(bench.id);
+      expect(text).toContain(bench.pdbId);
+    }
+
+    // Host-GPU headless runner API + remote-codec + recipe schema + scorer gates
+    for (const hostToken of [
+      '/api/health',
+      '/api/run-node',
+      '/api/cancel',
+      '__denovoTypedArray',
+      '__denovoNum',
+      'scRmsd < 2.0',
+      'plddt >= 70',
+      'denovo: v1',
+      '%3B',
+    ]) {
+      expect(text).toContain(hostToken);
     }
   });
 
@@ -194,7 +220,11 @@ describe('engine/llms-txt', () => {
 
     const bytes = Buffer.byteLength(first, 'utf8');
     expect(bytes).toBeGreaterThan(500);
-    expect(bytes).toBeLessThan(48 * 1024);
+    expect(bytes).toBeLessThan(64 * 1024);
+    expect(first).toContain('Advanced params:');
+
+    const compact = generateLlmsTxt({ includeAdvancedParams: false });
+    expect(compact).not.toContain('Advanced params:');
 
     const staging = generateLlmsTxt({
       origin: 'https://staging.denovo.run/',
@@ -207,15 +237,21 @@ describe('engine/llms-txt', () => {
     expect(staging).toContain('Advanced params:');
   });
 
-  it('includes HTML <link rel="llms"> discovery and static headers rule (and matches built artifacts when present)', () => {
+  it('includes HTML <link rel="llms"> + body WebFetch discovery, Link header, and robots.txt (and matches built artifacts when present)', () => {
     const appHtml = readFileSync(resolve(WEB_ROOT, 'src/app.html'), 'utf8');
     expect(appHtml).toContain('<link rel="icon"');
     expect(appHtml).toContain('og:title');
     expect(appHtml).toContain('<link rel="llms" type="text/plain" href="/llms.txt" />');
+    expect(appHtml).toContain('denovo-llm-discovery');
+    expect(appHtml).toContain('https://denovo.run/llms.txt');
 
     const headersFile = readFileSync(resolve(WEB_ROOT, 'static/_headers'), 'utf8');
     expect(headersFile).toContain('/llms.txt');
     expect(headersFile).toContain('Content-Type: text/plain; charset=utf-8');
+    expect(headersFile).toContain('Link: </llms.txt>; rel="llms"');
+
+    const robotsFile = readFileSync(resolve(WEB_ROOT, 'static/robots.txt'), 'utf8');
+    expect(robotsFile).toContain('https://denovo.run/llms.txt');
 
     const buildDir = resolve(WEB_ROOT, 'build');
     const buildLlms = resolve(buildDir, 'llms.txt');

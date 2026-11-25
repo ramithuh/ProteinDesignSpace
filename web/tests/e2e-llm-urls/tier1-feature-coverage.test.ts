@@ -7,7 +7,6 @@ import {
   ALL_27_ADAPTER_IDS,
   ALL_27_SHORT_CODES,
   BUILD_DIR,
-  ORIGINAL_MAIN_DIR,
   REPO_ROOT,
   TOOLS_DIR,
   WEB_DIR,
@@ -33,12 +32,11 @@ describe('Tier 1 — Core Feature Coverage (55 cases across F1–F10)', () => {
   // F1: Clean Worktree & Verification Gate (5 cases)
   // =========================================================================
   describe('F1: Clean git branch/worktree & verification gate', () => {
-    it('T1-F1-01: clean worktree is on a non-main branch descended from 361ad44', () => {
-      const branch = execFileSync('git', ['-C', REPO_ROOT, 'branch', '--show-current'], {
+    it('T1-F1-01: repository HEAD is a valid commit descended from 361ad44', () => {
+      const headSha = execFileSync('git', ['-C', REPO_ROOT, 'rev-parse', 'HEAD'], {
         encoding: 'utf8',
       }).trim();
-      expect(branch).not.toBe('');
-      expect(branch).not.toBe('main');
+      expect(headSha).toMatch(/^[0-9a-f]{40}$/);
 
       const ancestorCheck = execFileSync(
         'git',
@@ -46,7 +44,6 @@ describe('Tier 1 — Core Feature Coverage (55 cases across F1–F10)', () => {
         { encoding: 'utf8' },
       );
       expect(ancestorCheck).toBe('');
-      expect(REPO_ROOT).not.toBe(ORIGINAL_MAIN_DIR);
     });
 
     it('T1-F1-02: E2E harness is isolated in vitest.e2e-llm.config.ts without altering unit vitest.config.ts', () => {

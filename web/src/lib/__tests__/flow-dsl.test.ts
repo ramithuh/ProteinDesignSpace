@@ -644,4 +644,46 @@ describe('engine/flow-dsl', () => {
     expect(emptyEnc.length).toBe(0);
     expect(buildShareableWorkflowUrl('https://denovo.run', '/', emptyEnc.query)).toBe('https://denovo.run/');
   });
+
+  it('supports %3B, unquoted atom-map semicolons, pipe separators, and universal steps= aliases across generators', async () => {
+    // 1. Unquoted multi-residue atom map directly in parseFlowDsl (even across multi-branch RFD3 vs RFD4)
+    const rawEnzyme = parseFlowDsl(
+      'src:pdb:pdbId=1CTT~r3:unindex=A102,A104,fixedAtoms=A102:ND1,CG,CE1;A104:OE1,CD~m1:ligandmpnn;src~r4:rfd4:motifSpan=A102,A104,unindexedMotif=true,motifAtoms=A102:ND1,CG,CE1;A104:OE1,CD~m2:ligandmpnn',
+    );
+    expect(rawEnzyme.ok, JSON.stringify(rawEnzyme.errors)).toBe(true);
+    expect(rawEnzyme.graph?.nodes.find((n) => n.id === 'r3')?.params.fixedAtoms).toBe('A102:ND1,CG,CE1;A104:OE1,CD');
+    expect(rawEnzyme.graph?.nodes.find((n) => n.id === 'r4')?.params.motifAtoms).toBe('A102:ND1,CG,CE1;A104:OE1,CD');
+
+    // 2. Percent-encoded `%3B` preserved across URL query decoding + lossless encodeGraphToFlow round-trip
+    const pctUrl =
+      'https://denovo.run/?flow=src:pdb:pdbId=1CTT~r3:length=180,steps=50,seed=42,unindex=A102,A104,fixedAtoms=A102:ND1,CG,CE1%3BA104:OE1,CD~lm1:ligandmpnn;src~r4:rfd4:length=180,steps=50,earlyStop=false,seed=42,motifSpan=A102,A104,unindexedMotif=true,motifAtoms=A102:ND1,CG,CE1%3BA104:OE1,CD~lm2:ligandmpnn';
+    const pctDecoded = decodeFlowQuery(pctUrl);
+    expect(pctDecoded.ok, JSON.stringify(pctDecoded.errors)).toBe(true);
+    expect(pctDecoded.graph?.nodes.find((n) => n.id === 'r3')?.params.fixedAtoms).toBe('A102:ND1,CG,CE1;A104:OE1,CD');
+    expect(pctDecoded.graph?.nodes.find((n) => n.id === 'r4')?.params.motifAtoms).toBe('A102:ND1,CG,CE1;A104:OE1,CD');
+    expect(pctDecoded.graph?.nodes.find((n) => n.id === 'r4')?.params.nsteps).toBe(50);
+
+    const reencoded = encodeGraphToFlow(pctDecoded.graph!);
+    const roundTrip = decodeFlowQuery(`https://denovo.run/?${reencoded.query}`);
+    expect(roundTrip.ok).toBe(true);
+    expect(roundTrip.graph?.nodes.find((n) => n.id === 'r3')?.params.fixedAtoms).toBe('A102:ND1,CG,CE1;A104:OE1,CD');
+
+    // 3. Pipe `|` separator also normalizes cleanly to `; `
+    const pipeParsed = parseFlowDsl('pdb:pdbId=1CTT~r3:unindex=A102,A104,fixedAtoms=A102:ND1,CG|A104:OE1,CD');
+    expect(pipeParsed.ok).toBe(true);
+    expect(pipeParsed.graph?.nodes[1].params.fixedAtoms).toBe('A102:ND1,CG; A104:OE1,CD');
+
+    // 4. Universal `steps=` alias maps cleanly to native step keys (`nsteps`, `numSteps`, `nSampleStep`, `steps`)
+    const stepAliases = parseFlowDsl(
+      'a:rfd4:steps=45;b:boltzgen:steps=40;c:protpardelle:steps=55;d:rfdiffusion:steps=35;e:genie3:steps=80;f:rfd3:nsteps=60',
+    );
+    expect(stepAliases.ok, JSON.stringify(stepAliases.errors)).toBe(true);
+    const byId = new Map(stepAliases.graph!.nodes.map((n) => [n.id, n.params]));
+    expect(byId.get('a')?.nsteps).toBe(45);
+    expect(byId.get('b')?.numSteps).toBe(40);
+    expect(byId.get('c')?.numSteps).toBe(55);
+    expect(byId.get('d')?.numSteps).toBe(35);
+    expect(byId.get('e')?.nSampleStep).toBe(80);
+    expect(byId.get('f')?.steps).toBe(60);
+  });
 });

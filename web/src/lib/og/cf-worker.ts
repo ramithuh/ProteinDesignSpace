@@ -625,6 +625,7 @@ export default {
           const headers = new Headers(assetRes.headers);
           headers.set('Content-Type', 'text/html; charset=utf-8');
           headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
+          headers.set('Link', '</llms.txt>; rel="llms"');
           return new Response(rewritten, { status: assetRes.status, headers });
         }
       } catch {
