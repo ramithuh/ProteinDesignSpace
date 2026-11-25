@@ -12,7 +12,7 @@ All neural inference executes locally in sequential, VRAM-isolated Dedicated Web
 | --- | --- | --- | --- | --- |
 | **Generation** | **RFD4-Proteina** | All-atom sequence-structure co-design, motif, binder, partial diffusion | [`sokrypton/rfd4-proteina-webgpu`](https://github.com/sokrypton/rfd4-proteina-webgpu) · [`nvidia/RFD4-Proteina`](https://huggingface.co/nvidia/RFD4-Proteina) | NVIDIA Open / MIT |
 | **Generation** | **RFdiffusion3 (All-Atom)** | All-atom monomer, atomic/tip-atom motif, binder, ligand/DNA/RNA, H-bond, cyclic, partial & Cn symmetry co-design | [`ramithuh/rfd3-webgpu`](https://huggingface.co/ramithuh/rfd3-webgpu) | BSD-3-Clause / Apache-2.0 |
-| **Generation** | **La-Proteina (LD1 + AE1)** | All-atom latent diffusion (LD1) + atom37/sequence decoder (AE1) | [`ramithuh/la-proteina-webgpu`](https://huggingface.co/ramithuh/la-proteina-webgpu) | Apache-2.0 / NVIDIA Open |
+| **Generation** | **La-Proteina (LD1, LD4–LD7 + AE1/AE3)** | Unconditional & conditional atomistic motif scaffolding latent diffusion + atom37/sequence decoder | [`ramithuh/la-proteina-webgpu`](https://huggingface.co/ramithuh/la-proteina-webgpu) | Apache-2.0 / NVIDIA Open |
 | **Generation** | **Proteina v1.2 (200M)** | Scalable 200M pair-biased transformer flow matching (Cα backbones) | [`ramithuh/proteina-webgpu`](https://huggingface.co/ramithuh/proteina-webgpu) | NVIDIA Research (NC) |
 | **Generation** | **SiD-Protein (16-Step)** | Score-identity distilled 200M Proteina generator (16-step Cα sampling) | [`ramithuh/sid-protein-webgpu`](https://huggingface.co/ramithuh/sid-protein-webgpu) | SiD-Protein / Proteina |
 | **Generation** | **Genie 3** | Fast 23.3M SE(3) DDIM backbone diffusion + SequenceNet | [`ramithuh/genie3-webgpu`](https://huggingface.co/ramithuh/genie3-webgpu) | Apache-2.0 |
@@ -31,6 +31,7 @@ All neural inference executes locally in sequential, VRAM-isolated Dedicated Web
 | **Property** | **ThermoMPNN** | Full L×20 site-saturation ΔΔG stability scan & 3D B-factor painting | [`ramithuh/thermompnn-webgpu`](https://huggingface.co/ramithuh/thermompnn-webgpu) | MIT |
 | **Property** | **ESM-C 300M** | Zero-shot L×20 LLR fitness heatmap, pseudo-perplexity & masked fill | [`ramithuh/esmc-webgpu`](https://huggingface.co/ramithuh/esmc-webgpu) | MIT |
 | **Property** | **Dyna-1** | Millisecond conformational exchange & flexibility prediction | [`ramithuh/dyna1-webgpu`](https://huggingface.co/ramithuh/dyna1-webgpu) | MIT / ESM-3 Open |
+| **Docking** | **GNINA 1.3** | 3-model 3D CNN ensemble pose scoring, BFGS minimization, flexible-ligand MC docking & pocket scan | [`ramithuh/gnina-webgpu`](https://huggingface.co/ramithuh/gnina-webgpu) | Apache-2.0 / GPLv2 |
 | **Evaluation** | **Designability / 3D Compare** | Kabsch SVD `scRMSD`, `scTM`, Motif RMSD, pLDDT, ipSAE, up to 6-way 3D superposition | Built-in CPU | MIT |
 
 ---
@@ -61,6 +62,7 @@ All neural inference executes locally in sequential, VRAM-isolated Dedicated Web
 - **ThermoMPNN** — Dieckhaus et al. (2024), *Transfer learning to leverage larger datasets for improving prediction of protein stability changes*, PNAS · [`Kuhlman-Lab/ThermoMPNN`](https://github.com/Kuhlman-Lab/ThermoMPNN)
 - **ESM-C & ESM-3** — EvolutionaryScale / Chan Zuckerberg Biohub · [`Biohub/esm`](https://github.com/Biohub/esm)
 - **Dyna-1** — Wayment-Steele et al. (2026), *Learning millisecond protein dynamics from what is missing in NMR spectra*, Nature · [`WaymentSteeleLab/Dyna-1`](https://github.com/WaymentSteeleLab/Dyna-1)
+- **GNINA 1.3** — McNutt, Li, Meli, Aggarwal & Koes (2025), *GNINA 1.3: the next increment in molecular docking with deep learning*, Journal of Cheminformatics 17, 28 · [`gnina/gnina`](https://github.com/gnina/gnina)
 - **Structure Predictors (via LocalFold)**:
   - **AlphaFold 2 & AlphaFold 3** — Jumper et al. (2021), *Nature*; Abramson et al. (2024), *Nature* (Google DeepMind)
   - **Boltz-2** — Passaro et al. (2025) (MIT / Recursion)
