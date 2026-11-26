@@ -52,3 +52,37 @@ jobs:
 
       - name: Verify Cloudflare Pages bundle constraints
         run: npm run check:deploy
+
+  e2e:
+    name: Browser E2E Smoke (Chromium & WebKit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.node-version
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        env:
+          SCARF_ANALYTICS: 'false'
+        run: npm ci
+
+      - name: Install Playwright browsers (Chromium & WebKit)
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Build static SPA
+        run: npm run build
+
+      - name: Run browser E2E smoke suite
+        run: npm run test:e2e
