@@ -178,7 +178,7 @@ describe('engine/catalog & biologist terminology', () => {
     expect(multiRes.matchingSubItems).toHaveLength(7);
   });
 
-  it('exposes 6 compact top-level workflow categories with direct model flyouts and LocalFold footnote', () => {
+  it('exposes 7 compact top-level workflow categories with direct model flyouts and LocalFold footnote', () => {
     expect(CATALOG_CATEGORIES.map((c) => c.title)).toEqual([
       'Inputs',
       'Structure Generation',
@@ -186,6 +186,7 @@ describe('engine/catalog & biologist terminology', () => {
       'Structure Prediction',
       'Property Prediction',
       'Evaluation',
+      'Refinement / Backmapping',
     ]);
 
     const pred = CATALOG_CATEGORIES.find((c) => c.id === 'prediction')!;
@@ -228,6 +229,11 @@ describe('engine/catalog & biologist terminology', () => {
       'designability-scorer',
       'structure-compare',
     ]);
+
+    const refCat = CATALOG_CATEGORIES.find((c) => c.id === 'refinement')!;
+    expect(refCat.subGroups.flatMap((g) => g.items).map((i) => i.key)).toEqual(['pulchra']);
+    expect(filterCatalogCategories('pulchra')[0].matchingSubItems.map((s) => s.key)).toEqual(['pulchra']);
+    expect(filterCatalogCategories('backmapping')[0].category.id).toBe('refinement');
 
     expect(filterCatalogCategories('ligandmpnn')[0].matchingSubItems.map((s) => s.key)).toEqual([
       'ligandmpnn',

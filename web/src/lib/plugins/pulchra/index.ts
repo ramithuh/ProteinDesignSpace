@@ -34,7 +34,7 @@ export const pulchraPlugin: ModelPlugin = {
     shortCode: 'pu',
   },
   catalog: {
-    categoryId: 'score',
+    categoryId: 'refinement',
     conciseRole: 'Cα / backbone trace → all-atom model (PULCHRA 3.06 backbone, rotamers & H-bonds)',
     searchKeywords: ['pulchra', 'all-atom', 'reconstruct', 'rebuild', 'side chain', 'sidechain', 'backbone', 'c-alpha', 'ca trace'],
   },

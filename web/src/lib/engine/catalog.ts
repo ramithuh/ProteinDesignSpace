@@ -80,8 +80,9 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
     ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1', 'evodiff'],
   },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
+  { title: 'Refinement / Backmapping', ids: ['pulchra'] },
   { title: 'Property Prediction', ids: ['thermompnn', 'esmc', 'dyna1', 'gnina'] },
-  { title: 'Evaluation', ids: ['top-k-filter', 'designability-scorer', 'structure-compare', 'pulchra'] },
+  { title: 'Evaluation', ids: ['top-k-filter', 'designability-scorer', 'structure-compare'] },
 ];
 
 export const CONCISE_BLOCK_ROLES: Record<string, string> = {
@@ -1157,6 +1158,34 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
       title: 'Evaluation',
       stage: 'score',
       subtitle: 'Top-K Filter, scRMSD / scTM & 3D Compare',
+      countLabel: `${items.length}`,
+      subGroups,
+      identityBlob,
+      searchBlob,
+    };
+  })(),
+
+  // 6. Refinement / Backmapping (PULCHRA; cg2all ready to slot right alongside)
+  (() => {
+    const pu = ADAPTER_REGISTRY.pulchra;
+    const items: CatalogSubItem[] = [
+      {
+        key: 'pulchra',
+        label: pu.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.pulchra,
+        meta: '~1.7 MB · CPU · MIT',
+        insert: { adapterId: 'pulchra', label: 'PULCHRA' },
+        searchBlob: `${pu.id} ${pu.shortName} ${pu.displayName} ${CONCISE_BLOCK_ROLES.pulchra} refinement backmapping all-atom reconstruct rebuild sidechain backbone ca trace`.toLowerCase(),
+      },
+    ];
+    const subGroups: CatalogSubGroup[] = [{ title: 'All-Atom Reconstruction & Backmapping', items }];
+    const identityBlob = 'refinement backmapping reconstruct rebuild all-atom sidechain backbone ca trace';
+    const searchBlob = `${identityBlob} ${items.map((i) => i.searchBlob).join(' ')}`;
+    return {
+      id: 'refinement',
+      title: 'Refinement / Backmapping',
+      stage: 'score',
+      subtitle: 'PULCHRA All-Atom Rebuild',
       countLabel: `${items.length}`,
       subGroups,
       identityBlob,

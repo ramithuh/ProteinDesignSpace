@@ -849,7 +849,7 @@ describe('PULCHRA registration (native plugin #28)', () => {
     expect(ADAPTER_TO_SHORT.pulchra).toBe('pu');
     expect(SHORT_TO_ADAPTER.pu).toBe('pulchra');
     expect(getModelCardForAdapter('pulchra')).toBeNull();
-    expect(CATALOG_ITEMS.find((c) => c.id === 'pulchra')?.group).toBe('Evaluation');
+    expect(CATALOG_ITEMS.find((c) => c.id === 'pulchra')?.group).toBe('Refinement / Backmapping');
     expect(formatNodeParamSummary('pulchra', { optimizeHbonds: true })).toBe('All-atom · H-bonds');
 
     const flow = parseFlowDsl('src:p:pdbId=1ubq~pu:optimizeHbonds=true');
