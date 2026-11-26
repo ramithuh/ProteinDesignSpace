@@ -274,6 +274,7 @@ describe('declarative ParamSchema & modes single source of truth', () => {
       { adapterId: 'protpardelle', file: 'src/lib/plugins/protpardelle/protpardelle.worker.ts' },
       { adapterId: 'esmc', file: 'src/lib/plugins/esmc/esmc.worker.ts' },
       { adapterId: 'dyna1', file: 'src/lib/plugins/dyna1/dyna1.worker.ts' },
+      { adapterId: 'cg2all', file: 'src/lib/plugins/cg2all/cg2all.worker.ts' },
     ];
 
     for (const target of WORKER_TARGETS) {

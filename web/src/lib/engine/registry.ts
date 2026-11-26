@@ -4044,6 +4044,69 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       },
     ],
   },
+  cg2all: {
+    id: 'cg2all',
+    displayName: 'cg2all All-Atom Backmapping',
+    shortName: 'cg2all',
+    stage: 'score',
+    runtime: 'wgsl-custom',
+    estimatedVramMB: 96,
+    approxWeightsMB: 8.1,
+    precisionWeightsMB: { fp16: 8.1, int8: 4.8 },
+    licenseNote: 'Apache-2.0 (huhlim/cg2all CalphaBasedModel · WebGPU port ramithuh/cg2all-webgpu)',
+    description:
+      'Neural Cα-trace → all-atom backmapping with the cg2all CalphaBasedModel (Heo & Feig 2024): a 6-layer rotation-equivariant graph transformer predicts per-residue backbone frames and torsion angles that place every heavy atom (and optional CHARMM hydrogens) by rigid-group assembly. Keeps chain IDs, numbering and B-factors; a connected sequence set is threaded onto the trace first.',
+    inputs: {
+      structure: { type: 'StructureArtifact' },
+      sequences: { type: 'SequenceSet', required: false },
+    },
+    outputs: {
+      structure: { type: 'StructureArtifact' },
+    },
+    paramSchema: [
+      {
+        key: 'variant',
+        label: 'Checkpoint',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'ca',
+        options: [
+          { value: 'ca', label: 'CalphaBasedModel (Cα refined by the model)' },
+          { value: 'ca-fix', label: 'CalphaBasedModel-FIX (input Cα kept exactly)' },
+        ],
+        description:
+          'The FIX checkpoint pins every Cα to its input position (cg2all --fix); the default lets the network nudge Cα atoms for better backbone geometry.',
+      },
+      {
+        key: 'precision',
+        label: 'Weight Precision',
+        kind: 'select',
+        tier: 'primary',
+        defaultValue: 'fp16',
+        options: [
+          { value: 'fp16', label: 'FP16 (default · ~8.1 MB)' },
+          { value: 'int8', label: 'INT8 (compact · ~4.8 MB)' },
+        ],
+        description: 'Storage precision of the radial-profile weights (dequantized to FP32 on load; compute is FP32).',
+      },
+      {
+        key: 'outputHydrogens',
+        label: 'Output hydrogens',
+        kind: 'boolean',
+        tier: 'advanced',
+        defaultValue: false,
+        description: 'Write the hydrogens cg2all predicts (CHARMM36 topology, PDB names) instead of a heavy-atom model.',
+      },
+      {
+        key: 'preserveLigands',
+        label: 'Keep ligands',
+        kind: 'boolean',
+        tier: 'advanced',
+        defaultValue: true,
+        description: 'Copy non-water HETATM groups (and nucleic acids) from the input into the all-atom model unchanged.',
+      },
+    ],
+  },
   'designability-scorer': {
     id: 'designability-scorer',
     displayName: 'Designability Scorer (Kabsch)',

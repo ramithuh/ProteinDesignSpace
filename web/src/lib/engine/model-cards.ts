@@ -433,6 +433,58 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     ],
   },
 
+  'cg2all-webgpu': {
+    id: 'cg2all-webgpu',
+    adapterId: 'cg2all',
+    displayName: 'cg2all (CalphaBasedModel)',
+    status: 'live',
+    activePrecisionId: 'fp16',
+    precisions: [
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'F16 radial-profile output layers (3.90 M of 4.05 M params), F32 embedding, LinearSE3 maps, norms & radial hidden layers; dequantized to F32, F32 WGSL compute (1 shard, 8.06 MiB)',
+        approxSizeMB: 8.1,
+        parityVsPytorchFp32: {
+          metric: 'All-atom RMSD (Å) of WebGPU output vs PyTorch FP32 cg2all',
+          value: '1.2e-4 – 4.3e-4 Å (CA & CA-FIX checkpoints; FP32 bundle ≤ 6.0e-5 Å)',
+          maxAbsDiff: '4.6e-3 Å (single atom)',
+          scope: '16-aa ideal helix, 46-aa crambin 1AB1 Cα trace (3 SSBONDs), 42-aa two-chain trace with a 14.6 Å break; secondary-structure classes identical',
+          hardware: 'SwiftShader WebGPU (Playwright Chromium 1243, ARM64) and Node 22 float64 CPU path',
+        },
+        latencyHint: '0.35 s (16 aa) · 0.80 s (46 aa) on the SwiftShader software adapter',
+      },
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Symmetric I8 radial-profile output layers with one F16 scale per 16 consecutive weights (two per radial row); F32 everything else; dequantized to F32 on load (1 shard, 4.82 MiB)',
+        approxSizeMB: 4.8,
+        parityVsPytorchFp32: {
+          metric: 'All-atom RMSD (Å) of WebGPU output vs PyTorch FP32 cg2all',
+          value: '5.5e-3 – 5.8e-2 Å (heavy atoms ≤ 4.6e-2 Å)',
+          maxAbsDiff: '0.544 Å (single atom, CA-FIX two-chain fixture)',
+          scope: 'Same 3 fixtures × CA / CA-FIX checkpoints; 1 of 208 residue SS classes flips at a near-tie (crambin, CA)',
+          hardware: 'SwiftShader WebGPU (Playwright Chromium 1243, ARM64) and Node 22 float64 CPU path',
+        },
+        caveat: 'INT8 saves 3.2 MB but moves a few side-chain atoms by up to ~0.5 Å; FP16 is within 5e-4 Å of PyTorch and recommended.',
+      },
+    ],
+    upstreamRepo: 'https://github.com/huhlim/cg2all',
+    upstreamCommit: 'a00b8816736c08852944f147e39164d0f5e1834e',
+    weightsRepo: 'https://huggingface.co/ramithuh/cg2all-webgpu',
+    license: 'Apache-2.0',
+    citation:
+      'Heo & Feig (2024) One particle per residue is sufficient to describe all-atom protein structures, Structure 32(1):97–111.e6.',
+    limitations: [
+      'Only the Cα-trace checkpoints (CalphaBasedModel and its FIX variant, Zenodo 8393343) are ported; Martini, PRIMO, backbone and residue-centre CG inputs are not.',
+      'Histidine is always built as HSD (Nδ tautomer) for reproducibility; upstream cg2all picks HSD or HSE at random.',
+      'Residues without a CHARMM template (non-standard amino acids) keep their input atoms unchanged; residues lacking a Cα are passed through.',
+      'Weights are served from the ramithuh/cg2all-webgpu main branch (revision pin pending upload); parity was measured on a software WebGPU adapter, not hardware GPUs.',
+    ],
+  },
+
   'ligandmpnn-webgpu': {
     id: 'ligandmpnn-webgpu',
     adapterId: 'ligandmpnn',

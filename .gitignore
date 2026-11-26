@@ -80,6 +80,8 @@ web/static/vendor/sid-protein/weights/
 !web/static/vendor/gnina/
 web/static/vendor/gnina/weights/
 !web/static/vendor/pulchra/
+!web/static/vendor/cg2all/
+web/static/vendor/cg2all/weights/
 # PULCHRA statistical tables (1.6 MB, packed by tools/pack-pulchra-tables.mjs) are source data, not weights.
 !web/static/vendor/pulchra/pulchra-tables.bin
 .upstream-tmp/

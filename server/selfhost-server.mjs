@@ -51,6 +51,7 @@ export const ALLOWED_GPU_ADAPTER_IDS = new Set([
   'esmc',
   'dyna1',
   'gnina',
+  'cg2all',
 ]);
 
 /**

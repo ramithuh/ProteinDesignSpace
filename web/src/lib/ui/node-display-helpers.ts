@@ -483,6 +483,12 @@ export function formatNodeParamSummary(
       if (rebuildBb && p.outputHydrogens === true) parts.push('+H');
       return parts.join(' · ');
     }
+    case 'cg2all': {
+      const parts = [p.variant === 'ca-fix' ? 'Fixed Cα' : 'Cα refined', String(p.precision ?? 'fp16').toUpperCase()];
+      if (p.outputHydrogens === true) parts.push('+H');
+      if (p.preserveLigands === false) parts.push('no ligands');
+      return parts.join(' · ');
+    }
     default:
       return '';
   }

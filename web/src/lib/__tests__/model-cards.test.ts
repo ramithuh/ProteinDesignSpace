@@ -111,7 +111,7 @@ describe('Scientific Model Cards & Precision/Parity Disclosure', () => {
 
   it('ensures every card in MODEL_CARDS has a valid activePrecisionId and complete provenance', () => {
     const cards = Object.values(MODEL_CARDS);
-    expect(cards.length).toBe(22); // All 22 GPU/ONNX adapters are live!
+    expect(cards.length).toBe(23); // All 23 GPU/ONNX adapters are live!
 
     for (const card of cards) {
       expect(card.precisions.length).toBeGreaterThan(0);

@@ -32,13 +32,14 @@ const EXPECTED_ADAPTER_IDS = [
   'designability-scorer',
   'structure-compare',
   'pulchra',
+  'cg2all',
 ] as const;
 
-describe('Phase 0 contract: plugin manifest & model-card completeness (28 adapters)', () => {
-  it('registers all 28 baseline adapters with valid manifests and default params', () => {
+describe('Phase 0 contract: plugin manifest & model-card completeness (29 adapters)', () => {
+  it('registers all 29 baseline adapters with valid manifests and default params', () => {
     const keys = Object.keys(ADAPTER_REGISTRY).sort();
     expect(keys).toEqual([...EXPECTED_ADAPTER_IDS].sort());
-    expect(keys).toHaveLength(28);
+    expect(keys).toHaveLength(29);
 
     let cpuCount = 0;
     let ortCount = 0;
@@ -67,14 +68,14 @@ describe('Phase 0 contract: plugin manifest & model-card completeness (28 adapte
 
     expect(cpuCount).toBe(6);
     expect(ortCount).toBe(1);
-    expect(wgslCount).toBe(21);
+    expect(wgslCount).toBe(22);
   });
 
-  it('provides model cards for all 22 ML adapters and none for the 6 pure CPU utilities', () => {
+  it('provides model cards for all 23 ML adapters and none for the 6 pure CPU utilities', () => {
     const mlAdapters = EXPECTED_ADAPTER_IDS.filter((id) => ADAPTER_REGISTRY[id].runtime !== 'cpu-ts');
     const cpuAdapters = EXPECTED_ADAPTER_IDS.filter((id) => ADAPTER_REGISTRY[id].runtime === 'cpu-ts');
 
-    expect(mlAdapters).toHaveLength(22);
+    expect(mlAdapters).toHaveLength(23);
     expect(cpuAdapters).toHaveLength(6);
 
     for (const id of mlAdapters) {

@@ -62,6 +62,7 @@ const HOST_GPU_ALLOWED_ADAPTERS: readonly string[] = [
   'esmc',
   'dyna1',
   'gnina',
+  'cg2all',
 ];
 
 function formatPorts(ports: Record<string, PortSpec>): string {

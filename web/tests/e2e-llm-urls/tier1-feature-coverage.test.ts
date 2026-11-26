@@ -4,8 +4,8 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
-  ALL_28_ADAPTER_IDS,
-  ALL_28_SHORT_CODES,
+  ALL_29_ADAPTER_IDS,
+  ALL_29_SHORT_CODES,
   BUILD_DIR,
   REPO_ROOT,
   TOOLS_DIR,
@@ -218,9 +218,9 @@ describe('Tier 1 — Core Feature Coverage (55 cases across F1–F10)', () => {
       expect(graphUtilsNs.validateGraph(g!)).toEqual([]);
     });
 
-    it('T1-F3-06: round-trips WorkflowGraph -> encodeGraphToFlow -> decodeHashToGraph across all 28 adapter IDs', async () => {
-      expect(Object.keys(registryNs.ADAPTER_REGISTRY)).toHaveLength(28);
-      for (const adapterId of ALL_28_ADAPTER_IDS) {
+    it('T1-F3-06: round-trips WorkflowGraph -> encodeGraphToFlow -> decodeHashToGraph across all 29 adapter IDs', async () => {
+      expect(Object.keys(registryNs.ADAPTER_REGISTRY)).toHaveLength(29);
+      for (const adapterId of ALL_29_ADAPTER_IDS) {
         const orig = buildMinimalRunnableGraphForAdapter(adapterId);
         expect(graphUtilsNs.validateGraph(orig)).toEqual([]);
 
@@ -409,13 +409,13 @@ describe('Tier 1 — Core Feature Coverage (55 cases across F1–F10)', () => {
   // F6: Build-Generated /llms.txt from ADAPTER_REGISTRY (5 cases)
   // =========================================================================
   describe('F6: Build-generated /llms.txt from ADAPTER_REGISTRY', () => {
-    it('T1-F6-01: generateLlmsTxt() lists all 28 adapter IDs and all 28 short codes', async () => {
+    it('T1-F6-01: generateLlmsTxt() lists all 29 adapter IDs and all 29 short codes', async () => {
       const { implemented, text } = await generateLiveLlmsTxt();
       expect(implemented).toBe(true);
       expect(text).toBeTruthy();
-      for (const id of ALL_28_ADAPTER_IDS) {
+      for (const id of ALL_29_ADAPTER_IDS) {
         expect(text!, `Missing adapter ID ${id}`).toContain(id);
-        const code = ALL_28_SHORT_CODES[id];
+        const code = ALL_29_SHORT_CODES[id];
         expect(text!, `Missing short code ${code} for ${id}`).toMatch(
           new RegExp(`(?:^|[^a-z0-9])${code}(?:$|[^a-z0-9])`, 'm'),
         );

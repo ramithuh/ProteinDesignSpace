@@ -1,5 +1,5 @@
-// Layer 3 Model Plugins Barrel — Single Registration Entrypoint (ALL 28 ADAPTERS NATIVE!).
-// Adding model #29 = 1 cohesive folder under `src/lib/plugins/<id>/` + 1 entry in `NATIVE_PLUGINS`.
+// Layer 3 Model Plugins Barrel — Single Registration Entrypoint (ALL 29 ADAPTERS NATIVE!).
+// Adding model #30 = 1 cohesive folder under `src/lib/plugins/<id>/` + 1 entry in `NATIVE_PLUGINS`.
 
 import { PluginRegistry, setActivePluginRegistry, type DomainPack, type ModelPlugin } from '$lib/kernel';
 import { proteinBiopolymerDomainPack } from '$lib/domains/protein-biopolymer';
@@ -39,13 +39,16 @@ import { dyna1Plugin } from './dyna1';
 // Batch 3E: docking & scoring (1)
 import { gninaPlugin } from './gnina';
 
+// Batch 3G: structure reconstruction (1)
+import { cg2allPlugin } from './cg2all';
+
 // Batch 3F: conditioned generators & multi-checkpoint folder (3)
 import { rfd4ProteinaPlugin } from './rfd4-proteina';
 import { genie3Plugin } from './genie3';
 import { localfoldAf2Plugin } from './localfold-af2';
 
 /**
- * All 28 native Layer 3 ModelPlugins (zero legacy-bridged adapters remain!).
+ * All 29 native Layer 3 ModelPlugins (zero legacy-bridged adapters remain!).
  */
 export const NATIVE_PLUGINS: readonly ModelPlugin[] = [
   // 6 cpu-ts utilities
@@ -78,6 +81,8 @@ export const NATIVE_PLUGINS: readonly ModelPlugin[] = [
   dyna1Plugin,
   // 1 docking
   gninaPlugin,
+  // 1 Cα → all-atom backmapping
+  cg2allPlugin,
   // 3 complex conditioned generators & multi-checkpoint folder
   rfd4ProteinaPlugin,
   genie3Plugin,

@@ -275,6 +275,15 @@
       linkLabel: 'euplotes/pulchra',
     },
     {
+      name: 'cg2all',
+      role: 'Neural Cα → All-Atom Backmapping',
+      detail:
+        'SE(3)-Transformer CalphaBasedModel that predicts backbone frames and torsions for rigid-group all-atom assembly (Heo & Feig, Structure 2024), ported to WebGPU with parity to the PyTorch reference.',
+      license: 'Apache-2.0',
+      url: 'https://github.com/huhlim/cg2all',
+      linkLabel: 'huhlim/cg2all',
+    },
+    {
       name: 'ipSAE',
       role: 'Multi-Chain Interface Quality Scoring',
       detail:

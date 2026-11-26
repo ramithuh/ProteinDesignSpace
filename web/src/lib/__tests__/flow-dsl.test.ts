@@ -24,11 +24,11 @@ import { validateGraph } from '$lib/engine/graph-utils';
 import type { AdapterManifest } from '$lib/engine/types';
 
 describe('engine/flow-dsl', () => {
-  it('resolves all 28 canonical adapter IDs, all 28 immutable short codes, and LLM aliases without collisions', () => {
+  it('resolves all 29 canonical adapter IDs, all 29 immutable short codes, and LLM aliases without collisions', () => {
     const adapterIds = Object.keys(ADAPTER_REGISTRY).sort();
-    expect(adapterIds).toHaveLength(28);
+    expect(adapterIds).toHaveLength(29);
     expect(Object.keys(ADAPTER_TO_SHORT).sort()).toEqual(adapterIds);
-    expect(new Set(Object.values(ADAPTER_TO_SHORT)).size).toBe(28);
+    expect(new Set(Object.values(ADAPTER_TO_SHORT)).size).toBe(29);
 
     for (const adapterId of adapterIds) {
       const short = ADAPTER_TO_SHORT[adapterId];

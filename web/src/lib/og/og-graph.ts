@@ -97,6 +97,7 @@ const ADAPTER_META: Record<string, AdapterMeta> = {
   esmc: { shortName: 'ESM-C 300M', category: 'evaluation' },
   dyna1: { shortName: 'Dyna-1', category: 'evaluation' },
   gnina: { shortName: 'GNINA', category: 'evaluation' },
+  cg2all: { shortName: 'cg2all', category: 'evaluation' },
   'top-k-filter': { shortName: 'Top-K Filter', category: 'evaluation' },
   'designability-scorer': { shortName: 'scRMSD / scTM', category: 'evaluation' },
   'structure-compare': { shortName: '3D Superpose', category: 'evaluation' },
@@ -187,6 +188,8 @@ function formatCompactParamChip(adapterId: string, params: Record<string, unknow
       return 'Conformational dynamics';
     case 'gnina':
       return str('taskMode', 'score') === 'dock' ? 'CNN Docking' : 'Pose Scoring';
+    case 'cg2all':
+      return str('variant', 'ca') === 'ca-fix' ? 'Fixed-Cα all-atom' : 'Cα → all-atom';
     case 'top-k-filter':
       return `Top-${num('topK', 2)} filter`;
     default:

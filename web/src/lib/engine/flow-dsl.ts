@@ -82,6 +82,7 @@ export const ADAPTER_TO_SHORT: Record<string, string> = {
   'designability-scorer': 's',
   'structure-compare': 'c',
   pulchra: 'pu',
+  cg2all: 'cg',
 };
 
 export const SHORT_TO_ADAPTER: Record<string, string> = Object.fromEntries(
@@ -229,6 +230,9 @@ export const FLOW_MODEL_ALIASES: Record<string, FlowAliasResolution> = {
   '3d-compare': { adapterId: 'structure-compare' },
   'pulchra-3.06': { adapterId: 'pulchra' },
   allatom: { adapterId: 'pulchra' },
+  'cg2all-ca': { adapterId: 'cg2all' },
+  'cg2all-fix': { adapterId: 'cg2all', presetParams: { variant: 'ca-fix' } },
+  backmap: { adapterId: 'cg2all' },
 };
 
 for (const opt of LOCALFOLD_MODEL_OPTIONS) {

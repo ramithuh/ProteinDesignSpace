@@ -80,7 +80,7 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
     ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1', 'evodiff'],
   },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
-  { title: 'Refinement / Backmapping', ids: ['pulchra'] },
+  { title: 'Refinement / Backmapping', ids: ['pulchra', 'cg2all'] },
   { title: 'Property Prediction', ids: ['thermompnn', 'esmc', 'dyna1', 'gnina'] },
   { title: 'Evaluation', ids: ['top-k-filter', 'designability-scorer', 'structure-compare'] },
 ];
@@ -114,6 +114,7 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   'designability-scorer': 'Kabsch alignment, scRMSD, scTM & pLDDT pass rate',
   'structure-compare': 'Multi-model 3D Kabsch / motif overlay & pairwise RMSD',
   pulchra: 'Cα / backbone trace → all-atom model (PULCHRA 3.06 backbone, rotamers & H-bonds)',
+  cg2all: 'Neural Cα trace → all-atom model (cg2all equivariant transformer, rigid-group side chains)',
 };
 
 function buildSubGroupsForAdapter(adapterId: string): {
@@ -1165,9 +1166,10 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
     };
   })(),
 
-  // 6. Refinement / Backmapping (PULCHRA; cg2all ready to slot right alongside)
+  // 6. Refinement / Backmapping (PULCHRA & cg2all)
   (() => {
     const pu = ADAPTER_REGISTRY.pulchra;
+    const cg = ADAPTER_REGISTRY.cg2all;
     const items: CatalogSubItem[] = [
       {
         key: 'pulchra',
@@ -1177,6 +1179,14 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         insert: { adapterId: 'pulchra', label: 'PULCHRA' },
         searchBlob: `${pu.id} ${pu.shortName} ${pu.displayName} ${CONCISE_BLOCK_ROLES.pulchra} refinement backmapping all-atom reconstruct rebuild sidechain backbone ca trace`.toLowerCase(),
       },
+      {
+        key: 'cg2all',
+        label: cg.shortName,
+        subtitle: CONCISE_BLOCK_ROLES.cg2all,
+        meta: '~8 MB · WebGPU · Apache-2.0 / CC-BY-4.0',
+        insert: { adapterId: 'cg2all', label: 'cg2all' },
+        searchBlob: `${cg.id} ${cg.shortName} ${cg.displayName} ${CONCISE_BLOCK_ROLES.cg2all} refinement backmapping all-atom neural equivariant ca-fix sidechain backbone`.toLowerCase(),
+      },
     ];
     const subGroups: CatalogSubGroup[] = [{ title: 'All-Atom Reconstruction & Backmapping', items }];
     const identityBlob = 'refinement backmapping reconstruct rebuild all-atom sidechain backbone ca trace';
@@ -1185,7 +1195,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
       id: 'refinement',
       title: 'Refinement / Backmapping',
       stage: 'score',
-      subtitle: 'PULCHRA All-Atom Rebuild',
+      subtitle: 'PULCHRA & cg2all All-Atom Rebuild',
       countLabel: `${items.length}`,
       subGroups,
       identityBlob,
