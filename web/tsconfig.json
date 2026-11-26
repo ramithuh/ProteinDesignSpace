@@ -1,5 +1,5 @@
 {
-  "extends": "./.svelte-kit/tsconfig.json",
+  "extends": "$app/tsconfig",
   "compilerOptions": {
     "allowJs": true,
     "checkJs": true,
@@ -10,6 +10,13 @@
     "sourceMap": true,
     "strict": true,
     "moduleResolution": "bundler",
-    "types": ["@webgpu/types"]
-  }
+    "types": ["$app/types", "@webgpu/types"],
+    "paths": {
+      "$lib": ["./src/lib"],
+      "$lib/*": ["./src/lib/*"],
+      "proteinmpnn-web": ["./node_modules/proteinmpnn-web/src/index.ts"]
+    }
+  },
+  "include": ["src", "test", "*"],
+  "exclude": ["src/service-worker", "../tests/e2e-localfold-template/**"]
 }

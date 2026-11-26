@@ -1,4 +1,6 @@
+import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
+import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 import { defineConfig, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import { createMemoryFeedbackKv, handleFeedbackRequest } from './src/lib/og/feedback-api';
@@ -126,14 +128,31 @@ function llmsTxtPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [devFeedbackApiPlugin(), llmsTxtPlugin(), sveltekit(), stripUnusedOrtWasm()],
+  plugins: [
+    devFeedbackApiPlugin(),
+    llmsTxtPlugin(),
+    sveltekit({
+      preprocess: vitePreprocess(),
+      alias: {
+        $lib: 'src/lib',
+      },
+      adapter: adapter({
+        pages: 'build',
+        assets: 'build',
+        fallback: 'index.html',
+        precompress: false,
+        strict: true,
+      }),
+    }),
+    stripUnusedOrtWasm(),
+  ],
   resolve: {
     alias: [
       // proteinmpnn-web ships TS source in GitHub installs (prepack only runs on publish).
       // Alias straight to src/index.ts so Vite bundles it cleanly in workers & main thread.
       {
         find: /^proteinmpnn-web$/,
-        replacement: resolve(__dirname, 'node_modules/proteinmpnn-web/src/index.ts'),
+        replacement: resolve(import.meta.dirname, 'node_modules/proteinmpnn-web/src/index.ts'),
       },
       // In onnxruntime-web@1.24.3:
       // - `onnxruntime-web/webgpu` requires `ort-wasm-simd-threaded.asyncify.wasm` (25.93 MiB),
@@ -144,11 +163,11 @@ export default defineConfig({
       // and WASM sessions (Safari/Firefox/CPU fallback) to the lean WASM runtime (`11.79 MiB`).
       {
         find: /^onnxruntime-web\/webgpu$/,
-        replacement: resolve(__dirname, 'node_modules/onnxruntime-web/dist/ort.jspi.bundle.min.mjs'),
+        replacement: resolve(import.meta.dirname, 'node_modules/onnxruntime-web/dist/ort.jspi.bundle.min.mjs'),
       },
       {
         find: /^onnxruntime-web$/,
-        replacement: resolve(__dirname, 'node_modules/onnxruntime-web/dist/ort.wasm.bundle.min.mjs'),
+        replacement: resolve(import.meta.dirname, 'node_modules/onnxruntime-web/dist/ort.wasm.bundle.min.mjs'),
       },
     ],
   },
@@ -179,9 +198,9 @@ export default defineConfig({
     fs: {
       strict: true,
       allow: [
-        resolve(__dirname),
-        resolve(__dirname, 'static'),
-        resolve(__dirname, 'node_modules'),
+        resolve(import.meta.dirname),
+        resolve(import.meta.dirname, 'static'),
+        resolve(import.meta.dirname, 'node_modules'),
       ],
     },
     allowedHosts: [
