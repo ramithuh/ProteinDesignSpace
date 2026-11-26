@@ -107,8 +107,8 @@ async function runSuiteForBrowser(browserName, baseUrl) {
       `[${browserName}] Welcome modal missing expected subtitle`,
     );
 
-    // Dismiss welcome modal by clicking backdrop corner
-    await page.mouse.click(20, 20);
+    // Dismiss welcome modal via the explicit "Skip & explore" button
+    await page.locator('.onb-backdrop .btn-skip').click();
     await page.waitForSelector('.onb-backdrop', { state: 'detached', timeout: 5000 });
     await page.waitForTimeout(250);
 
@@ -188,8 +188,8 @@ async function runSuiteForBrowser(browserName, baseUrl) {
       { timeout: 10000 },
     );
     // Dismiss welcome modal if shown on fresh navigation
-    if (await flowPage.locator('.onb-backdrop').count()) {
-      await flowPage.mouse.click(20, 20);
+    if (await flowPage.locator('.onb-backdrop .btn-skip').count()) {
+      await flowPage.locator('.onb-backdrop .btn-skip').click();
       await flowPage.waitForSelector('.onb-backdrop', { state: 'detached', timeout: 5000 });
     }
     const flowNodeCount = await flowPage.evaluate(
