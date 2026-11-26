@@ -14,7 +14,11 @@ import {
   type CollectionMember,
 } from '$lib/engine/collections';
 import { deriveStableItemSeed, planMpnnFanout } from '$lib/engine/work-plan';
-import { isWebGpuDeviceLostError } from '$lib/engine/webgpu-device';
+import {
+  createDeviceLostGuard,
+  isWebGpuDeviceLostError,
+  requestResilientWebGpuDevice,
+} from '$lib/engine/webgpu-device';
 import { createWorkerHarness, fnv1a, type WorkerRunContext } from '$lib/kernel';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import type { SequenceCandidate, SequenceSet, StructureArtifact } from '$lib/engine/types';
@@ -196,6 +200,23 @@ let ligandCpuMod: any = null;
 let engine: LigandEngine | null = null;
 let loadedKey: string | null = null;
 let loadedBackend: 'webgpu' | 'cpu' | null = null;
+// Resilient GPUDevice injected into the WebGPU engine: kept across checkpoint switches, destroyed only on dispose.
+let gpu: { device: GPUDevice; hasF16: boolean } | null = null;
+const deviceLostGuard = createDeviceLostGuard();
+
+async function ensureGpu(): Promise<{ device: GPUDevice; hasF16: boolean }> {
+  if (gpu) return gpu;
+  const { device, hasF16 } = await requestResilientWebGpuDevice({ optionalFeatures: ['shader-f16'] });
+  const acquired = { device, hasF16 };
+  gpu = acquired;
+  deviceLostGuard.watch(device, () => {
+    if (gpu !== acquired) return;
+    gpu = null;
+    // A WebGPU engine died with its device: the next run rebuilds on a fresh one. A CPU fallback stays as it is.
+    if (loadedBackend === 'webgpu') loadedKey = null;
+  });
+  return acquired;
+}
 
 async function ensureEngine(
   ctx: WorkerRunContext,
@@ -204,7 +225,9 @@ async function ensureEngine(
   forceCpu = false,
 ): Promise<{ engine: LigandEngine; backend: 'webgpu' | 'cpu' }> {
   const key = `${checkpoint}:${precision}`;
-  if (engine && loadedKey === key && (!forceCpu || loadedBackend === 'cpu')) {
+  // `gpu` is cleared when its device is lost, even mid-load, so a WebGPU cache hit always runs on a live device.
+  const live = loadedBackend === 'cpu' || gpu !== null;
+  if (engine && loadedKey === key && live && (!forceCpu || loadedBackend === 'cpu')) {
     return { engine, backend: loadedBackend ?? 'webgpu' };
   }
 
@@ -249,10 +272,13 @@ async function ensureEngine(
         `Fetching LigandMPNN (${checkpoint} · ${precision.toUpperCase()}) weights...`,
       );
 
+      const { device, hasF16 } = await ensureGpu();
       engine = (await ligandMod.createLigandMpnnEngine({
         baseUrl,
         variant: checkpoint,
         precision,
+        device,
+        useF16: hasF16,
         cache: true,
         onProgress: makeProgressCb(''),
       })) as LigandEngine;
@@ -621,6 +647,8 @@ createWorkerHarness({
     engine = null;
     loadedKey = null;
     loadedBackend = null;
+    deviceLostGuard.destroy(gpu?.device);
+    gpu = null;
   },
 });
 

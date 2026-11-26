@@ -7,6 +7,7 @@ import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
 import { assertSafeStepCount, formatLowStepGeometryWarning } from '$lib/engine/step-policy';
 import { makeSequenceKey } from '$lib/engine/collections';
 import { buildMotifLineage } from '$lib/engine/conditioning';
+import { createDeviceLostGuard, requestResilientWebGpuDevice } from '$lib/engine/webgpu-device';
 import {
   collectOwnedTransferables,
   createWorkerHarness,
@@ -83,6 +84,23 @@ let ppSamplerMod: any = null;
 let engine: any = null;
 let loadedKey: string | null = null;
 let lastMiniMpnnUrls: string[] = [];
+// Resilient GPUDevice injected into the engine: kept across checkpoint/precision switches, destroyed only on dispose.
+let gpu: { device: GPUDevice; hasF16: boolean } | null = null;
+const deviceLostGuard = createDeviceLostGuard();
+
+async function ensureGpu(): Promise<{ device: GPUDevice; hasF16: boolean }> {
+  if (gpu) return gpu;
+  const { device, hasF16 } = await requestResilientWebGpuDevice({ optionalFeatures: ['shader-f16'] });
+  const acquired = { device, hasF16 };
+  gpu = acquired;
+  deviceLostGuard.watch(device, () => {
+    if (gpu !== acquired) return;
+    gpu = null;
+    // The engine's buffers and pipelines died with the device: the next run rebuilds it on a fresh one.
+    loadedKey = null;
+  });
+  return acquired;
+}
 
 function makeSeededReplay(seed: number) {
   let state = seed >>> 0;
@@ -130,7 +148,8 @@ async function ensureModules(ctx: WorkerRunContext) {
 
 async function ensureEngine(ctx: WorkerRunContext, checkpoint: string, precision: Precision) {
   const key = `${checkpoint}:${precision}`;
-  if (engine && loadedKey === key) return engine;
+  // `gpu` is cleared when its device is lost, even mid-load, so a cache hit always runs on a live device.
+  if (engine && loadedKey === key && gpu) return engine;
 
   if (engine) {
     try {
@@ -146,6 +165,7 @@ async function ensureEngine(ctx: WorkerRunContext, checkpoint: string, precision
 
   const envBaseUrl = (import.meta.env.VITE_PROTPARDELLE_WEIGHTS_URL as string | undefined)?.trim();
   const baseUrl = envBaseUrl || DEFAULT_BASE_URL;
+  const { device, hasF16 } = await ensureGpu();
 
   const loadOnce = async (retried: boolean) => {
     const fetchedUrls: string[] = [];
@@ -167,6 +187,8 @@ async function ensureEngine(ctx: WorkerRunContext, checkpoint: string, precision
         baseUrl,
         variant: checkpoint,
         precision,
+        device,
+        useF16: hasF16,
         cache: 'none',
         read: async (url: string): Promise<ArrayBuffer> => {
           const resp = await cachedFetch(url);
@@ -557,6 +579,8 @@ createWorkerHarness({
     }
     engine = null;
     loadedKey = null;
+    deviceLostGuard.destroy(gpu?.device);
+    gpu = null;
   },
 });
 

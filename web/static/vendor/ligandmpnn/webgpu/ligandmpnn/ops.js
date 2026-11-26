@@ -39,9 +39,17 @@ export class GpuOps {
     this.peakBytes = 0;
     this.listener = (e) => this.validationErrors.push(e.error.message);
     device.addEventListener("uncapturederror", this.listener);
+    // Once the device is lost nothing more runs: later tensors, dispatches and reads fail fast with a device-lost
+    // error (the worker's CPU fallback keys on it), and work still being recorded is dropped rather than submitted.
+    this.lost = null;
+    device.lost?.then((info) => {
+      this.lost = `WebGPU device lost${info?.message ? `: ${info.message}` : ""}`;
+      this.encoder = null;
+    });
   }
   tensor(data, shape) {
     if (this.destroyed) throw Error("GPU engine destroyed");
+    if (this.lost) throw Error(this.lost);
     const size = Math.max(4, shape.reduce((a, b) => a * b, 1) * 4);
     if (size > this.device.limits.maxStorageBufferBindingSize)
       throw Error("Tensor exceeds GPU storage limit");
@@ -91,6 +99,7 @@ export class GpuOps {
     return p;
   }
   dispatch(code, inputs, out, workgroups) {
+    if (this.lost) throw Error(this.lost);
     const pipeline = this.pipeline(code),
       entries = [...inputs, out].map((t, binding) => ({
         binding,
@@ -221,7 +230,7 @@ export class GpuOps {
   }
   flush() {
     if (this.encoder) {
-      this.device.queue.submit([this.encoder.finish()]);
+      if (!this.lost) this.device.queue.submit([this.encoder.finish()]);
       this.encoder = null;
     }
     for (const t of this.retired) {
@@ -231,6 +240,7 @@ export class GpuOps {
     this.retired = [];
   }
   async read(t) {
+    if (this.lost) throw Error(this.lost);
     const size = t.shape.reduce((a, b) => a * b, 1) * 4,
       buffer = this.device.createBuffer({
         size,

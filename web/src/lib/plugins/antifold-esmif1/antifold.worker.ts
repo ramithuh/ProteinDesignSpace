@@ -17,6 +17,7 @@ import {
   type CollectionMember,
 } from '$lib/engine/collections';
 import { deriveStableItemSeed, planMpnnFanout } from '$lib/engine/work-plan';
+import { createDeviceLostGuard, requestResilientWebGpuDevice } from '$lib/engine/webgpu-device';
 import { createWorkerHarness, fnv1a, type WorkerRunContext } from '$lib/kernel';
 import type { SequenceCandidate, SequenceSet, StructureArtifact } from '$lib/engine/types';
 
@@ -294,6 +295,23 @@ let antiFoldMod: any = null;
 let sharedMod: any = null;
 let engine: GvpEngine | null = null;
 let loadedKey: string | null = null;
+// Resilient GPUDevice injected into the engine: kept across variant/precision switches, destroyed only on dispose.
+let gpu: { device: GPUDevice; hasF16: boolean } | null = null;
+const deviceLostGuard = createDeviceLostGuard();
+
+async function ensureGpu(): Promise<{ device: GPUDevice; hasF16: boolean }> {
+  if (gpu) return gpu;
+  const { device, hasF16 } = await requestResilientWebGpuDevice({ optionalFeatures: ['shader-f16'] });
+  const acquired = { device, hasF16 };
+  gpu = acquired;
+  deviceLostGuard.watch(device, () => {
+    if (gpu !== acquired) return;
+    gpu = null;
+    // The engine's buffers and pipelines died with the device: the next run rebuilds it on a fresh one.
+    loadedKey = null;
+  });
+  return acquired;
+}
 
 async function ensureEngine(
   ctx: WorkerRunContext,
@@ -301,7 +319,8 @@ async function ensureEngine(
   precision: Precision,
 ): Promise<GvpEngine> {
   const key = `${variant}:${precision}`;
-  if (engine && loadedKey === key) return engine;
+  // `gpu` is cleared when its device is lost, even mid-load, so a cache hit always runs on a live device.
+  if (engine && loadedKey === key && gpu) return engine;
 
   if (engine) {
     try {
@@ -330,6 +349,7 @@ async function ensureEngine(
   const envBaseUrl = (import.meta.env.VITE_ANTIFOLD_WEIGHTS_URL as string | undefined)?.trim();
   const baseUrl = envBaseUrl || DEFAULT_BASE_URL;
   const displayName = variant === 'antifold' ? 'AntiFold' : 'ESM-IF1';
+  const { device, hasF16 } = await ensureGpu();
 
   const loadOnce = async (retried: boolean): Promise<GvpEngine> => {
     const fetchedUrls: string[] = [];
@@ -346,6 +366,9 @@ async function ensureEngine(
         baseUrl,
         variant,
         precision,
+        device,
+        // Native f16 weight reads on FP16 bundles when the device has shader-f16 (activations stay f32).
+        useF16: hasF16,
         cache: 'none',
         read: async (url: string): Promise<ArrayBuffer> => {
           const resp = await cachedFetch(url);
@@ -679,6 +702,8 @@ createWorkerHarness({
     }
     engine = null;
     loadedKey = null;
+    deviceLostGuard.destroy(gpu?.device);
+    gpu = null;
   },
 });
 

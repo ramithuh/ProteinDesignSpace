@@ -5,6 +5,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()` for standardized lifecycle, progress, and disposal.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { createDeviceLostGuard, requestResilientWebGpuDevice } from '$lib/engine/webgpu-device';
 import {
   collectOwnedTransferables,
   createWorkerHarness,
@@ -121,9 +122,27 @@ let esmcMod: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let engine: any = null;
 let loadedPrecision: Precision | null = null;
+// Resilient GPUDevice injected into the engine: kept across precision switches, destroyed only on dispose.
+let gpu: { device: GPUDevice; hasF16: boolean } | null = null;
+const deviceLostGuard = createDeviceLostGuard();
+
+async function ensureGpu(): Promise<{ device: GPUDevice; hasF16: boolean }> {
+  if (gpu) return gpu;
+  const { device, hasF16 } = await requestResilientWebGpuDevice({ optionalFeatures: ['shader-f16'] });
+  const acquired = { device, hasF16 };
+  gpu = acquired;
+  deviceLostGuard.watch(device, () => {
+    if (gpu !== acquired) return;
+    gpu = null;
+    // The engine's buffers and pipelines died with the device: the next run rebuilds it on a fresh one.
+    loadedPrecision = null;
+  });
+  return acquired;
+}
 
 async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
-  if (engine && loadedPrecision === precision) return engine;
+  // `gpu` is cleared when its device is lost, even mid-load, so a cache hit always runs on a live device.
+  if (engine && loadedPrecision === precision && gpu) return engine;
 
   if (engine) {
     try {
@@ -143,6 +162,7 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
 
   const envBaseUrl = (import.meta.env.VITE_ESMC_WEIGHTS_URL as string | undefined)?.trim();
   const baseUrl = envBaseUrl || DEFAULT_BASE_URL;
+  const { device, hasF16 } = await ensureGpu();
 
   const loadOnce = async (retried: boolean) => {
     const fetchedUrls: string[] = [];
@@ -159,7 +179,9 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
         baseUrl,
         precision,
         cache: 'none',
-        useF16: false,
+        device,
+        // Native f16 weight reads on FP16 bundles when the device has shader-f16 (activations stay f32).
+        useF16: hasF16,
         read: async (url: string): Promise<ArrayBuffer> => {
           const resp = await cachedFetch(url);
           if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${url}`);
@@ -193,18 +215,8 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision) {
     }
   };
 
-  const loaded = await loadOnce(false);
-  engine = loaded;
+  engine = await loadOnce(false);
   loadedPrecision = precision;
-  const engDevice = (loaded as { device?: GPUDevice } | null)?.device;
-  if (engDevice?.lost) {
-    void engDevice.lost.then(() => {
-      if (engine === loaded) {
-        engine = null;
-        loadedPrecision = null;
-      }
-    });
-  }
   return engine;
 }
 
@@ -723,6 +735,8 @@ createWorkerHarness({
     }
     engine = null;
     loadedPrecision = null;
+    deviceLostGuard.destroy(gpu?.device);
+    gpu = null;
   },
 });
 

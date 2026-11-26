@@ -216,7 +216,7 @@ describe('Astra 6.2 Audit Wave 4: Precision Validation, Device-Loss Cleanup, Gen
     ];
     for (const rel of lostWorkers) {
       const src = readFileSync(resolve(process.cwd(), rel), 'utf8');
-      expect(src, `${rel} should handle device.lost`).toMatch(/\.lost\.then/);
+      expect(src, `${rel} should handle device.lost`).toMatch(/\.lost\.then|deviceLostGuard\.watch\(/);
     }
   });
 });

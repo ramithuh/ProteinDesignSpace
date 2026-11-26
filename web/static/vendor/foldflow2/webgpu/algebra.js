@@ -1,3 +1,5 @@
+import { QueuePacer } from '../../localfold/webgpu/runtime/queue-pacing.js';
+import { yieldToBrowser } from '../../localfold/webgpu/runtime/yield.js';
 import { edgeSoftmax } from './edge-softmax.js';
 import { numericWGSL, erfWGSL, trigWGSL } from '../shared/numeric.js';
 import { Algebra, sizeOf, stridesOf } from '../shared/tensor.js';
@@ -40,6 +42,48 @@ export class GPUAlgebra extends Algebra {
       this.validationError = e.error;
     };
     device.addEventListener('uncapturederror', this.listener);
+    // Queue pacing (LocalFold's QueuePacer, as boltzgen and rfd3 use it): a block opened by beginPacedBlock(phase) is
+    // cut into submissions of about SUBMISSION_MS (15 ms) with about QUEUED_WORK_MS (1 s) of blocks left queued, so an
+    // ESM stack or an ODE trajectory never holds the GPU for seconds and starves the compositor or a driver watchdog.
+    // One pacer per phase, because a pacer learns its cuts from blocks that repeat the same dispatches in the same order.
+    this.pacers = new Map();
+    this.activePhase = null;
+    this.activePacer = null;
+  }
+
+  _pacerFor(phase) {
+    let pacer = this.pacers.get(phase);
+    if (!pacer) {
+      pacer = new QueuePacer(this.device);
+      this.pacers.set(phase, pacer);
+    }
+    return pacer;
+  }
+
+  /** Opens a block of `phase`, paced as one unit until `checkpoint` or `stepBoundary` closes it. */
+  beginPacedBlock(phase) {
+    // Work encoded before the block goes first, on its own, so it is not timed as the block's first piece.
+    this.flush();
+    this.activePhase = phase;
+    this.activePacer = this._pacerFor(phase);
+  }
+
+  /** Submits what the open block has left, waits for room in the queue, and lets the browser paint. */
+  async _closePacedBlock() {
+    const pacer = this.activePacer;
+    if (!pacer) return;
+    this.activePacer = null;
+    this.activePhase = null;
+    this.flush();
+    await pacer.blockSubmitted();
+    await yieldToBrowser();
+  }
+
+  /** After every dispatch: an open block may cut here; otherwise (and as a backstop) the dispatch count does. */
+  _dispatched() {
+    ++this.dispatches;
+    if (this.activePacer) this.activePacer.pieceEnded(() => this.flush());
+    if (this.dispatches >= 512) this.flush();
   }
 
   _ensureAux() {
@@ -114,7 +158,7 @@ export class GPUAlgebra extends Algebra {
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bg);
     pass.dispatchWorkgroups(groupsX, groupsY);
-    if (++this.dispatches >= 512) this.flush();
+    this._dispatched();
   }
 
   _weightMode(w) {
@@ -512,7 +556,7 @@ export class GPUAlgebra extends Algebra {
     pass.setBindGroup(0, bindGroup);
     const groups = Math.ceil(size / 64);
     pass.dispatchWorkgroups(Math.min(groups, 65535), Math.ceil(groups / 65535));
-    if (++this.dispatches >= 512) this.flush();
+    this._dispatched();
     return out;
   }
 
@@ -610,19 +654,29 @@ export class GPUAlgebra extends Algebra {
 
   async checkpoint(keep = []) {
     this._recycle(keep);
+    await this._closePacedBlock();
     if (this.validationError) throw this.validationError;
   }
 
   async stepBoundary(keep = [], step = 0) {
     this._recycle(keep);
+    await this._closePacedBlock();
     this.flush();
     if ((step + 1) % 16 === 0) {
       await this.device.queue.onSubmittedWorkDone();
     }
+    // Each ODE step ends on a real task boundary (MessageChannel, not a background-tab-clamped timer).
+    await yieldToBrowser();
     if (this.validationError) throw this.validationError;
   }
 
   clear() {
+    // A run that threw inside a block leaves that pacer mid-block: drop it rather than mis-cut the phase next run.
+    if (this.activePacer) {
+      this.pacers.delete(this.activePhase);
+      this.activePacer = null;
+      this.activePhase = null;
+    }
     this.flush();
     this.pool.clear();
     this.available.clear();
@@ -656,6 +710,9 @@ export class GPUAlgebra extends Algebra {
     this.buffers.clear();
     this.persistent.clear();
     this.pipelines.clear();
+    this.pacers.clear();
+    this.activePacer = null;
+    this.activePhase = null;
   }
 
   memoryUsage() {

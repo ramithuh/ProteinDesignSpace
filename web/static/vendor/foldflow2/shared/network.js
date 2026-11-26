@@ -69,6 +69,8 @@ export class FoldFlow2Network {
     const reps = [o.slice(x, 0, 1, N - 1)],
       att = [];
     for (let b = 0; b < 33; b++) {
+      // A block the WebGPU backend paces as one unit (webgpu/algebra.js); boundary() closes it.
+      o.beginPacedBlock?.("esm");
       const pre = `${p}.layers.${b}`,
         z = this.norm(x, pre + ".self_attn_layer_norm");
       let q = o.mul(
@@ -315,6 +317,7 @@ export class FoldFlow2Network {
     t = o.mul(t, 0.1);
     q = normalize(o, q);
     for (let b = 0; b < 2; b++) {
+      o.beginPacedBlock?.(`${p}.${b}`);
       const pre = p + ".trunk";
       s = this.norm(
         o.add(s, this.ipa(s, z, q, t, `${pre}.ipa_${b}`)),
@@ -429,6 +432,7 @@ export class FoldFlow2Network {
     const o = this.o,
       L = s.shape[0];
     for (let b = 0; b < 2; b++) {
+      o.beginPacedBlock?.(`trunk.${b}`);
       const p = `trunk_network.blocks.${b}`,
         bias = this.lin(
           this.norm(z, p + ".pair_to_sequence.layernorm"),

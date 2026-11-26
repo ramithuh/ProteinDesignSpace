@@ -28,6 +28,13 @@ export class GpuBackend {
     this.pipelines = new Map();
     this.encoder = null;
     this.disposed = false;
+    // Once the device is lost nothing more runs: later dispatches and reads fail fast with a device-lost error,
+    // and work still being recorded is dropped rather than submitted to the dead queue.
+    this.lost = null;
+    device.lost?.then((info) => {
+      this.lost = `WebGPU device lost${info?.message ? `: ${info.message}` : ""}`;
+      this.encoder = null;
+    });
     this.zero = this.upload(new Float32Array(4), 1, 4, true);
   }
   static async create(device, weights, opts) {
@@ -145,6 +152,7 @@ export class GpuBackend {
   }
   dispatch(kind, inputs, params, groups) {
     if (this.disposed) throw Error("Engine destroyed");
+    if (this.lost) throw Error(this.lost);
     const pipeline = this.pipelines.get(kind),
       uniform = this.device.createBuffer({
         size: params.byteLength,
@@ -310,11 +318,12 @@ export class GpuBackend {
   }
   flush() {
     if (this.encoder) {
-      this.device.queue.submit([this.encoder.finish()]);
+      if (!this.lost) this.device.queue.submit([this.encoder.finish()]);
       this.encoder = null;
     }
   }
   async read(x) {
+    if (this.lost) throw Error(this.lost);
     if (!x.r || !x.c) return new Float32Array();
     const size = x.r * x.c * 4,
       staging = this.device.createBuffer({
@@ -336,6 +345,7 @@ export class GpuBackend {
     await this.device.queue.onSubmittedWorkDone();
   }
   async readMany(xs) {
+    if (this.lost) throw Error(this.lost);
     const sizes = xs.map((x) => (x && x.r && x.c ? x.r * x.c * 4 : 0));
     const total = sizes.reduce((a, b) => a + b, 0);
     if (!total) return xs.map(() => new Float32Array());

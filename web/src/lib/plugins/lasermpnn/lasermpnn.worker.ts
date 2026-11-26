@@ -14,6 +14,7 @@ import {
   type CollectionMember,
 } from '$lib/engine/collections';
 import { deriveStableItemSeed, planMpnnFanout } from '$lib/engine/work-plan';
+import { createDeviceLostGuard, requestResilientWebGpuDevice } from '$lib/engine/webgpu-device';
 import {
   collectOwnedTransferables,
   createWorkerHarness,
@@ -351,9 +352,27 @@ let laserMod: any = null;
 let weightsMod: any = null;
 let engine: LaserEngine | null = null;
 let loadedPrecision: Precision | null = null;
+// Resilient GPUDevice injected into the engine: kept across precision switches, destroyed only on dispose.
+let gpu: { device: GPUDevice; hasF16: boolean } | null = null;
+const deviceLostGuard = createDeviceLostGuard();
+
+async function ensureGpu(): Promise<{ device: GPUDevice; hasF16: boolean }> {
+  if (gpu) return gpu;
+  const { device, hasF16 } = await requestResilientWebGpuDevice({ optionalFeatures: ['shader-f16'] });
+  const acquired = { device, hasF16 };
+  gpu = acquired;
+  deviceLostGuard.watch(device, () => {
+    if (gpu !== acquired) return;
+    gpu = null;
+    // The engine's buffers and pipelines died with the device: the next run rebuilds it on a fresh one.
+    loadedPrecision = null;
+  });
+  return acquired;
+}
 
 async function ensureEngine(ctx: WorkerRunContext, precision: Precision): Promise<LaserEngine> {
-  if (engine && loadedPrecision === precision) return engine;
+  // `gpu` is cleared when its device is lost, even mid-load, so a cache hit always runs on a live device.
+  if (engine && loadedPrecision === precision && gpu) return engine;
 
   if (engine) {
     try {
@@ -381,6 +400,7 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision): Promis
   const envBaseUrl = (import.meta.env.VITE_LASERMPNN_WEIGHTS_URL as string | undefined)?.trim();
   const rootUrl = (envBaseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
   const baseUrl = /(fp32|fp16|int8)$/.test(rootUrl) ? rootUrl : `${rootUrl}/${precision}`;
+  const { device, hasF16 } = await ensureGpu();
 
   const loadOnce = async (retried: boolean): Promise<LaserEngine> => {
     const fetchedUrls: string[] = [];
@@ -417,23 +437,13 @@ async function ensureEngine(ctx: WorkerRunContext, precision: Precision): Promis
 
       ctx.progress('init', 0.94, 'Uploading LASErMPNN weights to GPU...');
 
-      let wantShaderF16 = false;
-      if (precision === 'fp16' && typeof navigator !== 'undefined' && navigator.gpu) {
-        try {
-          const probeAdapter =
-            (await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })) ??
-            (await navigator.gpu.requestAdapter());
-          wantShaderF16 = Boolean(probeAdapter?.features.has('shader-f16'));
-        } catch {
-          wantShaderF16 = false;
-        }
-      }
-
       return (await laserMod.createLaserMpnnEngine({
         baseUrl,
         precision,
         weights: bundle,
-        shaderF16: wantShaderF16,
+        device,
+        // f16 GEMMs need the fp16 bundle and a device that negotiated shader-f16.
+        shaderF16: precision === 'fp16' && hasF16,
         cache: false,
       })) as LaserEngine;
     } catch (err) {
@@ -878,6 +888,8 @@ createWorkerHarness({
     }
     engine = null;
     loadedPrecision = null;
+    deviceLostGuard.destroy(gpu?.device);
+    gpu = null;
   },
 });
 

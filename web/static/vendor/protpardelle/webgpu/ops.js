@@ -39,6 +39,12 @@ struct P { m:u32, n:u32, k:u32, hasBias:u32, tilesN:u32, totalTiles:u32, pad0:u3
   if (large) {
     // 64x128 tile (256 threads, 4x8 per thread, BK=16)
     const isI8 = dtype === "I8";
+    // The B tile (8448 B as vec4<f32>, 8704 B as I8 floats) is split into two halves of at most 8 KiB, the size
+    // Firefox zero-fills cheaply (see `NORM_SOURCE`). vec4: tb0 holds kk 0..7 and tb1 kk 8..15 (33 slots per kk).
+    // I8: tb0 holds rows 0..63 and tb1 rows 64..127 (17 slots per row). Reads index their half statically.
+    const tbType = isI8 ? "f32" : `vec4<${EB}>`;
+    const tbHalf = isI8 ? 1088 : 264;
+    const tbRead = (at) => (at < tbHalf ? `tb0[${at}u+tx]` : `tb1[${at - tbHalf}u+tx]`);
     const setupB =
       dtype === "F16"
         ? `let kkB=(li%8u)*2u;let r4B=li/8u;let rowB0=n0+r4B*4u;let sBnHalf=K/2u;let bBase0=(rowB0*K+kkB)/2u;let fullB=rowB0+3u<N;let tbWrite0=kkB*33u+r4B;let tbWrite1=(kkB+1u)*33u+r4B;`
@@ -63,7 +69,7 @@ struct P { m:u32, n:u32, k:u32, hasBias:u32, tilesN:u32, totalTiles:u32, pad0:u3
           if(rowB0+3u<N){let p3=unpack2x16float(W[bOff+3u*sBnHalf]);lo.w=${EB}(p3.x);hi.w=${EB}(p3.y);}
         }
       }
-      tb[tbWrite0]=lo;tb[tbWrite1]=hi;
+      tbSet(tbWrite0,lo);tbSet(tbWrite1,hi);
     }`
         : isI8
           ? `{
@@ -73,8 +79,8 @@ struct P { m:u32, n:u32, k:u32, hasBias:u32, tilesN:u32, totalTiles:u32, pad0:u3
         if(k0+kHalf*4u<K){q0=unpack4i8(W[bRowBase+k0q])*scB;}
         if(k0+(kHalf+1u)*4u<K){q1=unpack4i8(W[bRowBase+k0q+1u])*scB;}
       }
-      tb[tbRowBase+0u]=q0.x;tb[tbRowBase+1u]=q0.y;tb[tbRowBase+2u]=q0.z;tb[tbRowBase+3u]=q0.w;
-      tb[tbRowBase+4u]=q1.x;tb[tbRowBase+5u]=q1.y;tb[tbRowBase+6u]=q1.z;tb[tbRowBase+7u]=q1.w;
+      tbSet(tbRowBase+0u,q0.x);tbSet(tbRowBase+1u,q0.y);tbSet(tbRowBase+2u,q0.z);tbSet(tbRowBase+3u,q0.w);
+      tbSet(tbRowBase+4u,q1.x);tbSet(tbRowBase+5u,q1.y);tbSet(tbRowBase+6u,q1.z);tbSet(tbRowBase+7u,q1.w);
     }`
           : `for(var e=0u;e<2u;e++){
       let slot=li+e*256u;let kk=slot%16u;let r4=slot/16u;let k=k0+kk;
@@ -87,7 +93,7 @@ struct P { m:u32, n:u32, k:u32, hasBias:u32, tilesN:u32, totalTiles:u32, pad0:u3
           if(row0+2u<N){v.z=W[bAddr0+2u*K];}if(row0+3u<N){v.w=W[bAddr0+3u*K];}
         }
       }
-      tb[kk*33u+r4]=v;
+      tbSet(kk*33u+r4,v);
     }`;
     const fmas = Array.from(
       { length: 16 },
@@ -95,9 +101,9 @@ struct P { m:u32, n:u32, k:u32, hasBias:u32, tilesN:u32, totalTiles:u32, pad0:u3
       let av=ta[${kk * 17}u+tm4];
       ${
         isI8
-          ? `let bv0=vec4<f32>(tb[(tn0+0u)*17u+${kk}u],tb[(tn0+1u)*17u+${kk}u],tb[(tn0+2u)*17u+${kk}u],tb[(tn0+3u)*17u+${kk}u]);
-      let bv1=vec4<f32>(tb[(tn1+0u)*17u+${kk}u],tb[(tn1+1u)*17u+${kk}u],tb[(tn1+2u)*17u+${kk}u],tb[(tn1+3u)*17u+${kk}u]);`
-          : `let bv0=vec4<f32>(tb[${kk * 33}u+tx]);let bv1=vec4<f32>(tb[${kk * 33 + 16}u+tx]);`
+          ? `let bv0=vec4<f32>(tb0[(tn0+0u)*17u+${kk}u],tb0[(tn0+1u)*17u+${kk}u],tb0[(tn0+2u)*17u+${kk}u],tb0[(tn0+3u)*17u+${kk}u]);
+      let bv1=vec4<f32>(tb1[(tn0+0u)*17u+${kk}u],tb1[(tn0+1u)*17u+${kk}u],tb1[(tn0+2u)*17u+${kk}u],tb1[(tn0+3u)*17u+${kk}u]);`
+          : `let bv0=vec4<f32>(${tbRead(kk * 33)});let bv1=vec4<f32>(${tbRead(kk * 33 + 16)});`
       }
       acc_0_0=fma(vec4<f32>(av.x),bv0,acc_0_0);acc_0_1=fma(vec4<f32>(av.x),bv1,acc_0_1);
       acc_1_0=fma(vec4<f32>(av.y),bv0,acc_1_0);acc_1_1=fma(vec4<f32>(av.y),bv1,acc_1_1);
@@ -124,7 +130,9 @@ struct P { m:u32, n:u32, k:u32, hasBias:u32, tilesN:u32, totalTiles:u32, pad0:u3
       .join("");
     return `${head}
 var<workgroup> ta:array<vec4<f32>,272>;
-var<workgroup> tb:array<${isI8 ? "f32,2176" : `vec4<${EB}>,528`}>;
+var<workgroup> tb0:array<${tbType},${tbHalf}>;
+var<workgroup> tb1:array<${tbType},${tbHalf}>;
+fn tbSet(i:u32,v:${tbType}){if(i<${tbHalf}u){tb0[i]=v;}else{tb1[i-${tbHalf}u]=v;}}
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid:vec3<u32>,@builtin(local_invocation_index) li:u32){
   _ = B[0]; _ = S[0];
@@ -341,6 +349,10 @@ fn main(@builtin(local_invocation_id) lid:vec3<u32>,@builtin(workgroup_id) wg:ve
 }`;
 }
 
+// No workgroup array here reaches 8 KiB: Firefox zero-fills one over 8 KiB at ~3 ns a byte for every workgroup
+// (LocalFold webgpu/runtime/wgsl-compat.js), and the margin keeps Safari/Metal and constrained Dawn adapters clear of
+// per-array workgroup limits. rowTile / smTile (2048 floats) live as two 1024-float halves, index i < 1024 in the first;
+// rowTileGet4 reads four floats from a multiple of 4, which never straddles the halves. The arithmetic is unchanged.
 const NORM_SOURCE = `
 struct P { rows:u32, d:u32, pad0:u32, pad1:u32 };
 @group(0) @binding(0) var<storage,read> b0:array<f32>;
@@ -348,16 +360,23 @@ struct P { rows:u32, d:u32, pad0:u32, pad1:u32 };
 @group(0) @binding(2) var<storage,read> b2:array<f32>;
 @group(0) @binding(3) var<storage,read_write> b3:array<f32>;
 @group(0) @binding(4) var<uniform> p:P;
-var<workgroup> rowTile:array<f32,2048>;
+var<workgroup> rowTile0:array<f32,1024>;
+var<workgroup> rowTile1:array<f32,1024>;
 var<workgroup> wm:array<vec4<f32>,64>;
 var<workgroup> ws:array<vec4<f32>,64>;
 var<workgroup> wc:array<u32,64>;
 var<workgroup> stats:array<f32,2>;
+fn rowTileGet(i:u32)->f32{if(i<1024u){return rowTile0[i];}return rowTile1[i-1024u];}
+fn rowTileSet(i:u32,v:f32){if(i<1024u){rowTile0[i]=v;}else{rowTile1[i-1024u]=v;}}
+fn rowTileGet4(i:u32)->vec4<f32>{
+  if(i<1024u){return vec4<f32>(rowTile0[i],rowTile0[i+1u],rowTile0[i+2u],rowTile0[i+3u]);}
+  let k=i-1024u;return vec4<f32>(rowTile1[k],rowTile1[k+1u],rowTile1[k+2u],rowTile1[k+3u]);
+}
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg:vec3<u32>,@builtin(local_invocation_index) li:u32){
   let r=wg.x+wg.y*65535u;let live=r<p.rows;let row=min(r,p.rows-1u);let d=p.d;let base=row*d;
   if(d<=2048u&&(d&3u)==0u){
-    for(var j=li;j<d;j+=64u){rowTile[j]=b0[base+j];}
+    for(var j=li;j<d;j+=64u){rowTileSet(j,b0[base+j]);}
     workgroupBarrier();
     let n4=d/4u;let chunks=(n4+15u)/16u;
     var m=vec4<f32>(0.0);var s=vec4<f32>(0.0);var cnt=0u;
@@ -365,7 +384,7 @@ fn main(@builtin(workgroup_id) wg:vec3<u32>,@builtin(local_invocation_index) li:
       cnt=min(16u,n4-li*16u);
       for(var j=0u;j<cnt;j++){
         let off=li*64u+j*4u;
-        let value=vec4<f32>(rowTile[off],rowTile[off+1u],rowTile[off+2u],rowTile[off+3u]);
+        let value=rowTileGet4(off);
         let delta=value-m;
         m=fma(vec4<f32>(1.0/f32(j+1u)),delta,m);
         s=fma(delta,value-m,s);
@@ -410,22 +429,23 @@ fn main(@builtin(workgroup_id) wg:vec3<u32>,@builtin(local_invocation_index) li:
     workgroupBarrier();
     if(!live){return;}
     let mean=stats[0];let inv=stats[1];
-    for(var j=li;j<d;j+=64u){b3[base+j]=(rowTile[j]-mean)*inv*b1[j]+b2[j];}
+    for(var j=li;j<d;j+=64u){b3[base+j]=(rowTileGet(j)-mean)*inv*b1[j]+b2[j];}
     return;
   }
+  // Reduction scratch: lanes 0..63 only, all in rowTile0.
   var s=0.0;for(var j=li;j<d;j+=64u){s+=b0[base+j];}
-  rowTile[li]=s;workgroupBarrier();
-  if(li<32u){rowTile[li]+=rowTile[li+32u];}workgroupBarrier();
-  if(li<16u){rowTile[li]+=rowTile[li+16u];}workgroupBarrier();
-  if(li<8u){rowTile[li]+=rowTile[li+8u];}workgroupBarrier();
-  if(li==0u){stats[0]=(((rowTile[0]+rowTile[4])+(rowTile[2]+rowTile[6]))+((rowTile[1]+rowTile[5])+(rowTile[3]+rowTile[7])))/f32(d);}
+  rowTile0[li]=s;workgroupBarrier();
+  if(li<32u){rowTile0[li]+=rowTile0[li+32u];}workgroupBarrier();
+  if(li<16u){rowTile0[li]+=rowTile0[li+16u];}workgroupBarrier();
+  if(li<8u){rowTile0[li]+=rowTile0[li+8u];}workgroupBarrier();
+  if(li==0u){stats[0]=(((rowTile0[0]+rowTile0[4])+(rowTile0[2]+rowTile0[6]))+((rowTile0[1]+rowTile0[5])+(rowTile0[3]+rowTile0[7])))/f32(d);}
   workgroupBarrier();let mean=stats[0];workgroupBarrier();
   var q=0.0;for(var j=li;j<d;j+=64u){let v=b0[base+j]-mean;q+=v*v;}
-  rowTile[li]=q;workgroupBarrier();
-  if(li<32u){rowTile[li]+=rowTile[li+32u];}workgroupBarrier();
-  if(li<16u){rowTile[li]+=rowTile[li+16u];}workgroupBarrier();
-  if(li<8u){rowTile[li]+=rowTile[li+8u];}workgroupBarrier();
-  if(li==0u){stats[1]=inverseSqrt((((rowTile[0]+rowTile[4])+(rowTile[2]+rowTile[6]))+((rowTile[1]+rowTile[5])+(rowTile[3]+rowTile[7])))/f32(d)+0.00001);}
+  rowTile0[li]=q;workgroupBarrier();
+  if(li<32u){rowTile0[li]+=rowTile0[li+32u];}workgroupBarrier();
+  if(li<16u){rowTile0[li]+=rowTile0[li+16u];}workgroupBarrier();
+  if(li<8u){rowTile0[li]+=rowTile0[li+8u];}workgroupBarrier();
+  if(li==0u){stats[1]=inverseSqrt((((rowTile0[0]+rowTile0[4])+(rowTile0[2]+rowTile0[6]))+((rowTile0[1]+rowTile0[5])+(rowTile0[3]+rowTile0[7])))/f32(d)+0.00001);}
   workgroupBarrier();if(!live){return;}
   let inv=stats[1];
   for(var j=li;j<d;j+=64u){b3[base+j]=(b0[base+j]-mean)*inv*b1[j]+b2[j];}
@@ -437,13 +457,16 @@ struct P { rows:u32, n:u32, pad0:u32, pad1:u32 };
 @group(0) @binding(1) var<storage,read_write> b1:array<f32>;
 @group(0) @binding(2) var<uniform> p:P;
 var<workgroup> red:array<f32,64>;
-var<workgroup> smTile:array<f32,2048>;
+var<workgroup> smTile0:array<f32,1024>;
+var<workgroup> smTile1:array<f32,1024>;
+fn smTileGet(i:u32)->f32{if(i<1024u){return smTile0[i];}return smTile1[i-1024u];}
+fn smTileSet(i:u32,v:f32){if(i<1024u){smTile0[i]=v;}else{smTile1[i-1024u]=v;}}
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg:vec3<u32>,@builtin(local_invocation_index) li:u32){
   let r=wg.x+wg.y*65535u;let live=r<p.rows;let row=min(r,p.rows-1u);let n=p.n;let base=row*n;
   var mx=-3.402823e38;
   if(n<=2048u){
-    for(var j=li;j<n;j+=64u){let v=b0[base+j];smTile[j]=v;mx=max(mx,v);}
+    for(var j=li;j<n;j+=64u){let v=b0[base+j];smTileSet(j,v);mx=max(mx,v);}
   }else{
     for(var j=li;j<n;j+=64u){mx=max(mx,b0[base+j]);}
   }
@@ -454,20 +477,21 @@ fn main(@builtin(workgroup_id) wg:vec3<u32>,@builtin(local_invocation_index) li:
   if(li==0u){red[0]=max(max(max(red[0],red[4]),max(red[2],red[6])),max(max(red[1],red[5]),max(red[3],red[7])));}
   workgroupBarrier();let top=red[0];workgroupBarrier();
   if(n<=64u){
+    // n<=64: every index is below 64, in smTile0.
     if(li==0u){
       var total=0.0;
-      for(var j=0u;j<n;j++){let e=exp(smTile[j]-top);smTile[j]=e;total+=e;}
+      for(var j=0u;j<n;j++){let e=exp(smTile0[j]-top);smTile0[j]=e;total+=e;}
       red[0]=total;
     }
     workgroupBarrier();
     let total=red[0];
     if(!live){return;}
-    if(li<n){b1[base+li]=smTile[li]/total;}
+    if(li<n){b1[base+li]=smTile0[li]/total;}
     return;
   }
   var s=0.0;
   if(n<=2048u){
-    for(var j=li;j<n;j+=64u){let e=exp(smTile[j]-top);smTile[j]=e;s+=e;}
+    for(var j=li;j<n;j+=64u){let e=exp(smTileGet(j)-top);smTileSet(j,e);s+=e;}
   }else{
     for(var j=li;j<n;j+=64u){s+=exp(b0[base+j]-top);}
   }
@@ -479,7 +503,7 @@ fn main(@builtin(workgroup_id) wg:vec3<u32>,@builtin(local_invocation_index) li:
   workgroupBarrier();let total=red[0];
   if(!live){return;}
   if(n<=2048u){
-    for(var j=li;j<n;j+=64u){b1[base+j]=smTile[j]/total;}
+    for(var j=li;j<n;j+=64u){b1[base+j]=smTileGet(j)/total;}
   }else{
     for(var j=li;j<n;j+=64u){b1[base+j]=exp(b0[base+j]-top)/total;}
   }

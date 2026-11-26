@@ -58,6 +58,7 @@ export async function createProtpardelleEngine({
         { signal, onProgress, returnIntermediates = false } = {},
       ) {
         if (destroyed) throw new Error("Engine destroyed");
+        if (lost) throw new Error(lost);
         if (busy) throw new Error("Concurrent inference is unsupported");
         abort(signal);
         busy = true;
@@ -118,6 +119,7 @@ export async function createProtpardelleEngine({
         { target, lossMask, signal, returnIntermediates = false } = {},
       ) {
         if (destroyed) throw new Error("Engine destroyed");
+        if (lost) throw new Error(lost);
         if (busy) throw new Error("Concurrent inference is unsupported");
         abort(signal);
         validateInput(input, manifest.config);
@@ -158,6 +160,7 @@ export async function createProtpardelleEngine({
       },
       async sequence(input, { signal, returnIntermediates = false } = {}) {
         if (destroyed) throw new Error("Engine destroyed");
+        if (lost) throw new Error(lost);
         if (busy) throw new Error("Concurrent inference is unsupported");
         abort(signal);
         validateInput(input, manifest.config);
