@@ -96,7 +96,15 @@ export function decodePulchraTables(input: ArrayBuffer | ArrayBufferView): Pulch
 }
 
 const decodedTables = new WeakMap<ArrayBuffer | ArrayBufferView, PulchraTables>();
-let fetchedTables: Promise<PulchraTables> | null = null;
+
+interface InFlightFetch {
+  promise: Promise<PulchraTables>;
+  controller: AbortController;
+  waiters: number;
+}
+
+const fetchedTablesByUrl = new Map<string, PulchraTables>();
+const inFlightFetchesByUrl = new Map<string, InFlightFetch>();
 
 export interface LoadPulchraTablesOptions {
   /** Pre-loaded pulchra-tables.bin bytes (Node/Vitest: fs.readFileSync). Skips the network. */
@@ -104,32 +112,96 @@ export interface LoadPulchraTablesOptions {
   /** Override the static asset URL (defaults to PULCHRA_TABLES_URL). */
   url?: string;
   fetchFn?: typeof fetch;
+  /** Optional signal to cancel table loading without poisoning shared cache entries. */
+  signal?: AbortSignal;
 }
 
-/** Decodes `tablesBuffer`, or lazily fetches the 1.6 MB table file once per page. */
-export function loadPulchraTables(opts: LoadPulchraTablesOptions = {}): Promise<PulchraTables> {
+function abortError(signal?: AbortSignal): unknown {
+  if (signal?.reason !== undefined) return signal.reason;
+  return new DOMException('The operation was aborted.', 'AbortError');
+}
+
+function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal, onAbort?: () => void): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    onAbort?.();
+    return Promise.reject(abortError(signal));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const handleAbort = () => {
+      onAbort?.();
+      reject(abortError(signal));
+    };
+    signal.addEventListener('abort', handleAbort, { once: true });
+    promise.then(
+      (val) => {
+        signal.removeEventListener('abort', handleAbort);
+        resolve(val);
+      },
+      (err) => {
+        signal.removeEventListener('abort', handleAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** Decodes `tablesBuffer`, or lazily fetches the 1.6 MB table file once per URL. */
+export async function loadPulchraTables(opts: LoadPulchraTablesOptions = {}): Promise<PulchraTables> {
+  opts.signal?.throwIfAborted();
   if (opts.tablesBuffer) {
     let t = decodedTables.get(opts.tablesBuffer);
     if (!t) {
       t = decodePulchraTables(opts.tablesBuffer);
       decodedTables.set(opts.tablesBuffer, t);
     }
-    return Promise.resolve(t);
+    return t;
   }
-  if (!fetchedTables) {
-    const url = opts.url ?? PULCHRA_TABLES_URL;
+  const url = opts.url ?? PULCHRA_TABLES_URL;
+  const cached = fetchedTablesByUrl.get(url);
+  if (cached) return cached;
+
+  let entry = inFlightFetchesByUrl.get(url);
+  if (!entry) {
     const fetchFn = opts.fetchFn ?? fetch;
-    fetchedTables = (async () => {
-      const res = await fetchFn(url);
+    const controller = new AbortController();
+    const promise = (async () => {
+      const res = await (opts.signal ? fetchFn(url, { signal: controller.signal }) : fetchFn(url));
       if (!res.ok) throw new Error(`PULCHRA tables: GET ${url} failed (HTTP ${res.status})`);
-      return decodePulchraTables(await res.arrayBuffer());
+      const tables = decodePulchraTables(await res.arrayBuffer());
+      fetchedTablesByUrl.set(url, tables);
+      return tables;
     })();
-    // A transient network failure must not poison every later run.
-    fetchedTables.catch(() => {
-      fetchedTables = null;
-    });
+    entry = { promise, controller, waiters: 0 };
+    inFlightFetchesByUrl.set(url, entry);
+    // Transient network failures or caller aborts must never poison later non-aborted runs.
+    promise
+      .finally(() => {
+        if (inFlightFetchesByUrl.get(url) === entry) {
+          inFlightFetchesByUrl.delete(url);
+        }
+      })
+      .catch(() => {});
   }
-  return fetchedTables;
+
+  entry.waiters++;
+  let abortedHere = false;
+  try {
+    return await awaitWithAbort(entry.promise, opts.signal, () => {
+      abortedHere = true;
+      entry!.waiters = Math.max(0, entry!.waiters - 1);
+      if (entry!.waiters === 0) {
+        if (inFlightFetchesByUrl.get(url) === entry) {
+          inFlightFetchesByUrl.delete(url);
+        }
+        entry!.controller.abort(opts.signal?.reason);
+      }
+    });
+  } finally {
+    if (!abortedHere) {
+      entry.waiters = Math.max(0, entry.waiters - 1);
+    }
+  }
 }
 
 // ─── Constants from pulchra.c ────────────────────────────────────────────────
@@ -167,7 +239,17 @@ const AA_ALIASES: Record<string, string> = {
   // common force-field protonation names
   HIE: 'H', HIP: 'H', HSD: 'H', HSE: 'H', HSP: 'H', CYX: 'C',
 };
+const SOLVENT_WATER_RESNAMES = new Set(['HOH', 'WAT', 'DOD', 'H2O', 'TIP', 'TIP3']);
+const PEPTIDE_CAP_RESNAMES = new Set(['ACE', 'NME', 'NH2', 'FOR']);
+const NUCLEIC_RESNAMES = new Set([
+  'DA', 'DC', 'DG', 'DT', 'DU', 'DI',
+  'A', 'C', 'G', 'U', 'T', 'I',
+  'ADE', 'CYT', 'GUA', 'THY', 'URA',
+]);
+const CHAIN_BREAK_CA_DIST = 4.5;
+
 const TYPE_PRO = 7;
+const TYPE_MET = 8;
 const TYPE_UNK = 20;
 const NHEAVY = [0, 1, 2, 2, 3, 3, 4, 3, 4, 4, 4, 4, 5, 5, 5, 7, 6, 7, 8, 10];
 const HEAVY_ATOMS: string[][] = [
@@ -208,8 +290,10 @@ function aaType(letter: string): number {
 // ─── Atom / residue model (mirrors atom_type / res_type) ────────────────────
 
 interface Atom {
-  /** 3-character PULCHRA name (PDB columns 14-16), e.g. 'CA ', 'OXT', 'CD1'. */
+  /** 3-character PULCHRA name (or 4-char if 4-char heavy atom), e.g. 'CA ', 'OXT', 'CD1', 'SE '. */
   name: string;
+  /** Uppercase chemical element symbol (1-2 chars), e.g. 'C', 'N', 'O', 'S', 'SE'. */
+  element: string;
   x: number;
   y: number;
   z: number;
@@ -227,7 +311,7 @@ interface Residue {
   num: number;
   iCode: string;
   chainId: string;
-  /** Sequential index within the chain (res->locnum). */
+  /** Sequential index within the chain/segment (res->locnum). */
   locnum: number;
   protein: boolean;
   pdbsg: boolean;
@@ -240,8 +324,25 @@ interface Residue {
   next: Residue | null;
 }
 
-function newAtom(res: Residue, name: string, x: number, y: number, z: number, flag: number): Atom {
-  return { name, x, y, z, flag, cispro: false, gx: 0, gy: 0, gz: 0, res };
+function inferAtomElement(name: string, rawElement = ''): string {
+  const cleanElem = rawElement.trim().toUpperCase().replace(/[^A-Z]/g, '');
+  if (cleanElem) return cleanElem.slice(0, 2);
+  const trimmed = name.trim().toUpperCase();
+  if (trimmed === 'SE') return 'SE';
+  const alpha = trimmed.replace(/^[^A-Z]+/, '');
+  return alpha[0] ?? 'C';
+}
+
+function newAtom(
+  res: Residue,
+  name: string,
+  x: number,
+  y: number,
+  z: number,
+  flag: number,
+  element = inferAtomElement(name),
+): Atom {
+  return { name, element, x, y, z, flag, cispro: false, gx: 0, gy: 0, gz: 0, res };
 }
 
 const isName = (a: Atom, c0: string, c1: string) => a.name[0] === c0 && a.name[1] === c1;
@@ -251,6 +352,13 @@ function findAtom(res: Residue, name: string): Atom | null {
   return null;
 }
 
+function parsePdbAtomName(line: string): { name: string; trimmed: string } {
+  const raw4 = (line.substring(12, 16) + '    ').slice(0, 4);
+  const trimmed = raw4.trim();
+  const name = trimmed.length >= 4 ? trimmed.slice(0, 4) : trimmed.padEnd(3, ' ');
+  return { name, trimmed };
+}
+
 // ─── PDB input ───────────────────────────────────────────────────────────────
 
 interface ParsedChain {
@@ -258,21 +366,42 @@ interface ParsedChain {
   residues: Residue[];
 }
 
-function parsePdbChains(pdbText: string, warnings: string[]): ParsedChain[] {
+interface PreservedRecord {
+  line: string;
+  chainId: string;
+  resName: string;
+  x: number;
+  y: number;
+  z: number;
+  altPrio: number;
+}
+
+interface ParsedPdbData {
+  chains: ParsedChain[];
+  preservedNucleic: PreservedRecord[];
+  preservedHetatm: PreservedRecord[];
+}
+
+function parsePdbChains(pdbText: string, warnings: string[]): ParsedPdbData {
   const chains: ParsedChain[] = [];
+  const preservedNucleic: PreservedRecord[] = [];
+  const preservedHetatm: PreservedRecord[] = [];
+  const preservedKeyToIndex = new Map<string, number>();
+  const preservedSiteBest = new Map<string, { prio: number; resName: string }>();
+  const waterKeys = new Set<string>();
+  const resAltInfo = new WeakMap<Residue, { rawResName: string; prio: number }>();
+  const atomAltInfo = new WeakMap<Atom, { prio: number; altLoc: string }>();
+
   // `as` keeps the declared unions: the close* helpers below reassign both.
   let chain = null as ParsedChain | null;
   let res = null as Residue | null;
   let resKey = '';
-  let resIsHet = false;
   let skippedNoCa = 0;
-  let skippedHet = 0;
 
   const closeResidue = () => {
     if (!res || !chain) return;
     const hasCa = res.atoms.some((a) => a.name === 'CA ');
-    if (resIsHet && res.type === TYPE_UNK) skippedHet++;
-    else if (!hasCa) skippedNoCa++;
+    if (!hasCa) skippedNoCa++;
     else {
       res.protein = res.type < 20;
       chain.residues.push(res);
@@ -285,6 +414,39 @@ function parsePdbChains(pdbText: string, warnings: string[]): ParsedChain[] {
     chain = null;
   };
 
+  const recordPreserved = (
+    list: PreservedRecord[],
+    kindTag: 'NUC' | 'HET',
+    line: string,
+    chainId: string,
+    resNumStr: string,
+    iCode: string,
+    resName: string,
+    atomTrimmed: string,
+    x: number,
+    y: number,
+    z: number,
+    altPrio: number,
+  ) => {
+    const siteKey = `${kindTag}:${chainId}:${resNumStr}:${iCode}`;
+    const prevSite = preservedSiteBest.get(siteKey);
+    if (prevSite && prevSite.resName !== resName) {
+      if (altPrio >= prevSite.prio) return;
+      preservedSiteBest.set(siteKey, { prio: altPrio, resName });
+    } else if (!prevSite || altPrio < prevSite.prio) {
+      preservedSiteBest.set(siteKey, { prio: altPrio, resName });
+    }
+    const atomKey = `${siteKey}:${resName}:${atomTrimmed}`;
+    const existingIdx = preservedKeyToIndex.get(atomKey);
+    const rec: PreservedRecord = { line, chainId, resName, x, y, z, altPrio };
+    if (existingIdx === undefined) {
+      preservedKeyToIndex.set(atomKey, list.length);
+      list.push(rec);
+    } else if (altPrio < list[existingIdx].altPrio) {
+      list[existingIdx] = rec;
+    }
+  };
+
   for (const line of pdbText.split(/\r?\n/)) {
     if (line.startsWith('END')) break; // END / ENDMDL: first model only
     if (line.startsWith('TER')) {
@@ -294,40 +456,122 @@ function parsePdbChains(pdbText: string, warnings: string[]): ParsedChain[] {
     const isAtom = line.startsWith('ATOM  ');
     const isHet = line.startsWith('HETATM');
     if (!isAtom && !isHet) continue;
-    // Alternate locations: first conformer only (' ', 'A', or '1').
+
     const altLoc = line[16] ?? ' ';
-    if (altLoc !== ' ' && altLoc !== 'A' && altLoc !== '1') continue;
-    const name = (line.substring(13, 16) + '   ').slice(0, 3);
-    const element = line.substring(76, 78).trim().toUpperCase();
-    if (name[0] === 'H' || element === 'H' || element === 'D') continue;
+    const altPrio = altLoc === ' ' || altLoc === 'A' || altLoc === '1' ? 0 : 1;
+    const { name, trimmed } = parsePdbAtomName(line);
+    const rawElement = line.substring(76, 78).trim().toUpperCase();
     const resName = line.substring(17, 20).trim().toUpperCase();
     const chainId = line[21] ?? ' ';
+    const resNumStr = line.substring(22, 26).trim();
     const num = Number.parseInt(line.substring(22, 26), 10);
     const iCode = (line[26] ?? ' ').trim() ? line[26] : ' ';
     const x = Number.parseFloat(line.substring(30, 38));
     const y = Number.parseFloat(line.substring(38, 46));
     const z = Number.parseFloat(line.substring(46, 54));
-    if (!Number.isFinite(num) || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
 
+    // Skip solvent waters (HOH, WAT, DOD, ...).
+    if (isHet && SOLVENT_WATER_RESNAMES.has(resName)) {
+      waterKeys.add(`${chainId}|${resNumStr}|${iCode}|${resName}`);
+      continue;
+    }
+
+    // Preserve nucleic-acid ATOM records cleanly after rebuilt protein chains.
+    if (isAtom && NUCLEIC_RESNAMES.has(resName)) {
+      recordPreserved(preservedNucleic, 'NUC', line, chainId, resNumStr, iCode, resName, trimmed, x, y, z, altPrio);
+      continue;
+    }
+
+    // Preserve non-water HETATM ligands, ions, cofactors, and modified-residue HETATMs (e.g. SEP)
+    // verbatim without shifting protein residue numbering/length vs parsePdbBackbone (only MSE is
+    // rebuilt as a protein residue).
+    if (isHet && resName !== 'MSE') {
+      recordPreserved(preservedHetatm, 'HET', line, chainId, resNumStr, iCode, resName, trimmed, x, y, z, altPrio);
+      continue;
+    }
+
+    // Skip terminal peptide caps (ACE, NME, NH2, FOR) on ATOM lines, matching parsePdbBackbone.
+    if (isAtom && PEPTIDE_CAP_RESNAMES.has(resName)) continue;
+
+    if (rawElement === 'H' || rawElement === 'D' || /^[0-9]?H/.test(trimmed)) continue;
+    if (!Number.isFinite(num)) continue;
+
+    const atomElement = inferAtomElement(name, rawElement);
     if (chain && chain.chainId !== chainId) closeChain();
     if (!chain) chain = { chainId, residues: [] };
     const key = `${num}|${iCode}`;
-    // pulchra.c also opens a new residue at every backbone N ("fault in numeration").
-    if (!res || key !== resKey || (name === 'N  ' && res.atoms.some((a) => a.name === 'N  '))) {
+
+    const openNewResidue = () => {
       closeResidue();
       resKey = key;
-      resIsHet = isHet;
       const type = aaType(oneLetter(resName));
       res = {
         name: resName.padStart(3).slice(-3), type, num, iCode, chainId,
-        locnum: chain.residues.length, protein: false, pdbsg: false,
+        locnum: chain!.residues.length, protein: false, pdbsg: false,
         cmx: 0, cmy: 0, cmz: 0, bfactor: 0, atoms: [], prev: null, next: null,
       };
-    }
-    const r = res;
-    if (r.atoms.some((a) => a.name === name)) continue;
+      resAltInfo.set(res, { rawResName: resName, prio: altPrio });
+    };
 
-    const atom = newAtom(r, name, x, y, z, FLAG_INITIAL);
+    if (!res || key !== resKey) {
+      openNewResidue();
+    } else {
+      const resMeta = resAltInfo.get(res)!;
+      const existing = res.atoms.find((a) => a.name === name);
+      if (existing) {
+        const prevAtomMeta = atomAltInfo.get(existing)!;
+        // pulchra.c opens a new residue on duplicate backbone N ("fault in numeration"),
+        // whereas distinct altLocs on the same residue select the preferred conformer.
+        if (name === 'N  ' && prevAtomMeta.altLoc === altLoc) {
+          openNewResidue();
+        } else if (altPrio < prevAtomMeta.prio) {
+          if (resName !== resMeta.rawResName) {
+            res.name = resName.padStart(3).slice(-3);
+            res.type = aaType(oneLetter(resName));
+            res.pdbsg = false;
+            res.atoms = [];
+            resAltInfo.set(res, { rawResName: resName, prio: altPrio });
+          } else {
+            existing.x = x;
+            existing.y = y;
+            existing.z = z;
+            existing.element = atomElement;
+            atomAltInfo.set(existing, { prio: altPrio, altLoc });
+            if ((name[0] === 'S' && name[1] === 'C') || (name[0] === 'C' && name[1] === 'M')) {
+              res.cmx = x;
+              res.cmy = y;
+              res.cmz = z;
+              res.pdbsg = true;
+            } else if (name[0] === 'C' && name[1] === 'A') {
+              res.bfactor = Number.parseFloat(line.substring(60, 66)) || 0;
+              if (!res.pdbsg) {
+                res.cmx = x;
+                res.cmy = y;
+                res.cmz = z;
+              }
+            }
+            continue;
+          }
+        } else {
+          continue;
+        }
+      } else if (resName !== resMeta.rawResName) {
+        if (altPrio < resMeta.prio) {
+          res.name = resName.padStart(3).slice(-3);
+          res.type = aaType(oneLetter(resName));
+          res.pdbsg = false;
+          res.atoms = [];
+          resAltInfo.set(res, { rawResName: resName, prio: altPrio });
+        } else {
+          continue;
+        }
+      }
+    }
+
+    const r = res!;
+    const atom = newAtom(r, name, x, y, z, FLAG_INITIAL, atomElement);
+    atomAltInfo.set(atom, { prio: altPrio, altLoc });
     if ((name[0] === 'S' && name[1] === 'C') || (name[0] === 'C' && name[1] === 'M')) {
       r.cmx = x;
       r.cmy = y;
@@ -358,7 +602,7 @@ function parsePdbChains(pdbText: string, warnings: string[]): ParsedChain[] {
   }
   closeChain();
   if (skippedNoCa) warnings.push(`Skipped ${skippedNoCa} residue(s) without a Cα atom.`);
-  if (skippedHet) warnings.push(`Skipped ${skippedHet} non-amino-acid HETATM group(s).`);
+  if (waterKeys.size) warnings.push(`Skipped ${waterKeys.size} water HETATM group(s).`);
   for (const c of chains) {
     c.residues.forEach((r, i) => {
       r.locnum = i;
@@ -366,7 +610,18 @@ function parsePdbChains(pdbText: string, warnings: string[]): ParsedChain[] {
       r.next = c.residues[i + 1] ?? null;
     });
   }
-  return chains;
+  const filterMicroHet = (list: PreservedRecord[], kindTag: 'NUC' | 'HET') =>
+    list.filter((rec) => {
+      const resNumStr = rec.line.substring(22, 26).trim();
+      const iCode = (rec.line[26] ?? ' ').trim() ? rec.line[26] : ' ';
+      const best = preservedSiteBest.get(`${kindTag}:${rec.chainId}:${resNumStr}:${iCode}`);
+      return !best || best.resName === rec.resName;
+    });
+  return {
+    chains,
+    preservedNucleic: filterMicroHet(preservedNucleic, 'NUC'),
+    preservedHetatm: filterMicroHet(preservedHetatm, 'HET'),
+  };
 }
 
 // ─── Numerics shared by every stage ─────────────────────────────────────────
@@ -607,6 +862,7 @@ class ChainBuilder {
     readonly residues: Residue[],
     private readonly T: PulchraTables,
     private readonly preserve: boolean,
+    private readonly emitTerminalOxt = true,
   ) {
     this.L = residues.length;
     this.xc = new Float64Array((this.L + 10) * 3);
@@ -943,7 +1199,9 @@ class ChainBuilder {
         this.addReplace(prevres, 'O  ', tmpcoords[5][0], tmpcoords[5][1], tmpcoords[5][2], FLAG_BACKBONE);
       }
       if (res) this.addReplace(res, 'N  ', tmpcoords[6][0], tmpcoords[6][1], tmpcoords[6][2], FLAG_BACKBONE);
-      else if (prevres) this.addReplace(prevres, 'OXT', tmpcoords[6][0], tmpcoords[6][1], tmpcoords[6][2], FLAG_BACKBONE);
+      else if (prevres && this.emitTerminalOxt) {
+        this.addReplace(prevres, 'OXT', tmpcoords[6][0], tmpcoords[6][1], tmpcoords[6][2], FLAG_BACKBONE);
+      }
       prevres = res;
       if (res) res = res.next;
     }
@@ -953,9 +1211,9 @@ class ChainBuilder {
 
   // ── Grid shared by clash fixing and H-bond optimisation (allocate_grid) ──
 
-  /** Allocated once per chain; atoms added later keep cell (0,0,0) as in C. */
-  private allocateGrid(): Grid {
-    if (this.grid) return this.grid;
+  /** Allocates (or rebuilds) the spatial grid over all atoms currently in the segment. */
+  private allocateGrid(forceRebuild = false): Grid {
+    if (this.grid && !forceRebuild) return this.grid;
     const first = this.residues[0]?.atoms[0];
     const min = [first?.x ?? 0, first?.y ?? 0, first?.z ?? 0];
     const max = [...min];
@@ -1250,6 +1508,17 @@ class ChainBuilder {
         }
         pos = crot;
       }
+      if (res.type === TYPE_MET) {
+        // Map selenomethionine SE to MET SD before rotamer placement/preservation so MSE never emits both SE and SD.
+        const seIdx = res.atoms.findIndex((a) => a.name === 'SE ');
+        if (seIdx >= 0) {
+          if (res.atoms.some((a) => a.name === 'SD ')) res.atoms.splice(seIdx, 1);
+          else {
+            res.atoms[seIdx].name = 'SD ';
+            res.atoms[seIdx].element = 'S';
+          }
+        }
+      }
       this.applyRotamer(res, this.placeRotamer(i, frame, pos, nsc), nsc);
       if (res.next) res = res.next;
     }
@@ -1318,7 +1587,9 @@ class ChainBuilder {
     const sorted = this.sorted;
     if (!sorted) return;
     const T = this.T;
-    const grid = this.allocateGrid();
+    // Rebuild the spatial grid right before clash fixing so sidechain atoms are always indexed
+    // even when optimizeHbonds() already built an earlier backbone-only grid.
+    const grid = this.allocateGrid(true);
     let iter = 0;
     let remaining = 0;
     do {
@@ -1344,7 +1615,18 @@ class ChainBuilder {
               const cpos = sorted[i * 20 + l * 2 + 1];
               for (let m = 0; m < T.rotIdx[cpos * 5 + 4]; m++) {
                 const pos = T.rotPos[cpos] + nsc * m;
-                this.applyRotamer(res, this.placeRotamer(i, frame, pos, nsc), nsc);
+                if (res.type === TYPE_MET) {
+        // Map selenomethionine SE to MET SD before rotamer placement/preservation so MSE never emits both SE and SD.
+        const seIdx = res.atoms.findIndex((a) => a.name === 'SE ');
+        if (seIdx >= 0) {
+          if (res.atoms.some((a) => a.name === 'SD ')) res.atoms.splice(seIdx, 1);
+          else {
+            res.atoms[seIdx].name = 'SD ';
+            res.atoms[seIdx].element = 'S';
+          }
+        }
+      }
+      this.applyRotamer(res, this.placeRotamer(i, frame, pos, nsc), nsc);
                 con = this.conflicts(res, grid);
                 if (con < con0) {
                   con0 = con;
@@ -1561,6 +1843,84 @@ function outputAtoms(res: Residue, hydrogens: boolean): Atom[] {
 
 const fmt = (v: number, w: number, d: number) => v.toFixed(d).padStart(w);
 
+function emptyChainStats(): ChainStats {
+  return {
+    backboneRmsdMean: null,
+    backboneRmsdMax: null,
+    caOptimizationSteps: 0,
+    cisProlines: 0,
+    hbondEnergyBefore: null,
+    hbondEnergyAfter: null,
+    clashesBefore: null,
+    clashesAfter: null,
+    dAminoAcidsFixed: 0,
+  };
+}
+
+function splitContiguousSegments(residues: Residue[]): Residue[][] {
+  if (residues.length === 0) return [];
+  const segments: Residue[][] = [[residues[0]]];
+  for (let i = 1; i < residues.length; i++) {
+    const prevCa = findAtom(residues[i - 1], 'CA ');
+    const currCa = findAtom(residues[i], 'CA ');
+    const d =
+      prevCa && currCa
+        ? calcDistance(prevCa.x, prevCa.y, prevCa.z, currCa.x, currCa.y, currCa.z)
+        : 0;
+    if (d > CHAIN_BREAK_CA_DIST) segments.push([residues[i]]);
+    else segments[segments.length - 1].push(residues[i]);
+  }
+  return segments;
+}
+
+function aggregateSegmentStats(segStats: Array<{ length: number; stats: ChainStats }>): ChainStats {
+  if (segStats.length === 1) return segStats[0].stats;
+  const out = emptyChainStats();
+  let rmsdNum = 0;
+  let rmsdDen = 0;
+  let maxRmsd: number | null = null;
+  let hbBefore: number | null = null;
+  let hbAfter: number | null = null;
+  let clBefore: number | null = null;
+  let clAfter: number | null = null;
+  for (const { length, stats } of segStats) {
+    if (stats.backboneRmsdMean !== null) {
+      rmsdNum += stats.backboneRmsdMean * length;
+      rmsdDen += length;
+    }
+    if (stats.backboneRmsdMax !== null) {
+      maxRmsd = maxRmsd === null ? stats.backboneRmsdMax : Math.max(maxRmsd, stats.backboneRmsdMax);
+    }
+    if (stats.caOptimizationSteps > out.caOptimizationSteps) {
+      out.caOptimizationSteps = stats.caOptimizationSteps;
+    }
+    out.cisProlines += stats.cisProlines;
+    if (stats.hbondEnergyBefore !== null) hbBefore = (hbBefore ?? 0) + stats.hbondEnergyBefore;
+    if (stats.hbondEnergyAfter !== null) hbAfter = (hbAfter ?? 0) + stats.hbondEnergyAfter;
+    if (stats.clashesBefore !== null) clBefore = (clBefore ?? 0) + stats.clashesBefore;
+    if (stats.clashesAfter !== null) clAfter = (clAfter ?? 0) + stats.clashesAfter;
+    out.dAminoAcidsFixed += stats.dAminoAcidsFixed;
+  }
+  out.backboneRmsdMean = rmsdDen > 0 ? rmsdNum / rmsdDen : null;
+  out.backboneRmsdMax = maxRmsd;
+  out.hbondEnergyBefore = hbBefore;
+  out.hbondEnergyAfter = hbAfter;
+  out.clashesBefore = clBefore;
+  out.clashesAfter = clAfter;
+  return out;
+}
+
+function formatPreservedAtomLine(rec: PreservedRecord, serial: number, dx: number, dy: number, dz: number): string {
+  const prefix = rec.line.slice(0, 6);
+  const mid = rec.line.slice(11, 30);
+  const coords =
+    dx === 0 && dy === 0 && dz === 0 && rec.line.length >= 54
+      ? rec.line.slice(30, 54)
+      : `${fmt(rec.x - dx, 8, 3)}${fmt(rec.y - dy, 8, 3)}${fmt(rec.z - dz, 8, 3)}`;
+  const tail = rec.line.length > 54 ? rec.line.slice(54) : '';
+  return `${prefix}${String(serial % 100000).padStart(5)}${mid}${coords}${tail}`;
+}
+
 /**
  * Rebuilds an all-atom model from PDB text (Cα-only, backbone or partial).
  * Synchronous; pass tables from `loadPulchraTables()`.
@@ -1582,29 +1942,58 @@ export function reconstructPdb(pdbText: string, tables: PulchraTables, options: 
   const preserve = options.preserveInput ?? !o.optimizeCa;
   if (!Number.isFinite(o.maxCaShift) || o.maxCaShift < 0) throw new Error('PULCHRA: maxCaShift must be >= 0');
   const warnings: string[] = [];
-  const chains = parsePdbChains(pdbText, warnings);
+  const { chains, preservedNucleic, preservedHetatm } = parsePdbChains(pdbText, warnings);
   if (!chains.length) throw new Error('PULCHRA: no protein residues with Cα atoms found in the input');
   if (options.sequence !== undefined && options.sequence !== '') threadSequence(chains, options.sequence);
 
-  const builders = chains.map((chain) => {
-    if (chain.residues.length < 3) {
-      warnings.push(`Chain ${chain.chainId.trim() || '_'} has only ${chain.residues.length} residue(s); geometry will be approximate.`);
+  const chainStats: ChainStats[] = [];
+  for (const chain of chains) {
+    const chainLabel = chain.chainId.trim() || '_';
+    const segments = splitContiguousSegments(chain.residues);
+    if (segments.length > 1) {
+      warnings.push(
+        `Chain ${chainLabel} split into ${segments.length} contiguous segments at Cα–Cα break(s) (> ${CHAIN_BREAK_CA_DIST} Å).`,
+      );
     }
-    const b = new ChainBuilder(chain.residues, tables, preserve);
-    if (o.optimizeCa) b.optimizeCa(o.maxCaShift, o.detectCisProline);
-    if (o.reconstructBackbone) {
-      b.rebuildBackbone();
-      if (o.optimizeHbonds) b.optimizeHbonds();
-    }
-    if (o.reconstructSidechains) {
-      b.rebuildSidechains(o.useSidechainCenters);
-      if (o.fixClashes) b.fixClashes();
-      if (o.checkChirality) b.checkChirality();
-    }
-    return b;
-  });
+    const segStats: Array<{ length: number; stats: ChainStats }> = [];
+    const rebuiltResidues: Residue[] = [];
+    segments.forEach((seg, segIdx) => {
+      seg.forEach((r, idx) => {
+        r.locnum = idx;
+        r.prev = seg[idx - 1] ?? null;
+        r.next = seg[idx + 1] ?? null;
+      });
+      const isTerminalSegment = segIdx === segments.length - 1;
+      if (seg.length < 5) {
+        warnings.push(
+          `Chain ${chainLabel} segment (${seg.length} residue(s), L < 5) preserved as-is without PULCHRA reconstruction.`,
+        );
+        segStats.push({ length: seg.length, stats: emptyChainStats() });
+        rebuiltResidues.push(...seg);
+        return;
+      }
+      const b = new ChainBuilder(seg, tables, preserve, isTerminalSegment);
+      if (o.optimizeCa) b.optimizeCa(o.maxCaShift, o.detectCisProline);
+      if (o.reconstructBackbone) {
+        b.rebuildBackbone();
+        if (o.optimizeHbonds) b.optimizeHbonds();
+      }
+      if (o.reconstructSidechains) {
+        b.rebuildSidechains(o.useSidechainCenters);
+        if (o.fixClashes) b.fixClashes();
+        if (o.checkChirality) b.checkChirality();
+      }
+      segStats.push({ length: seg.length, stats: b.stats });
+      rebuiltResidues.push(...seg);
+    });
+    chain.residues = rebuiltResidues;
+    chainStats.push(aggregateSegmentStats(segStats));
+  }
 
   const allResidues = chains.flatMap((c) => c.residues);
+  let shiftX = 0;
+  let shiftY = 0;
+  let shiftZ = 0;
   if (o.centerChain) {
     let cx = 0, cy = 0, cz = 0, n = 0;
     for (const res of allResidues) {
@@ -1618,6 +2007,9 @@ export function reconstructPdb(pdbText: string, tables: PulchraTables, options: 
     cx /= n;
     cy /= n;
     cz /= n;
+    shiftX = cx;
+    shiftY = cy;
+    shiftZ = cz;
     for (const res of allResidues) {
       for (const a of res.atoms) {
         a.x -= cx;
@@ -1639,7 +2031,7 @@ export function reconstructPdb(pdbText: string, tables: PulchraTables, options: 
       hx = hx * dd + n.x;
       hy = hy * dd + n.y;
       hz = hz * dd + n.z;
-      res.atoms.push(newAtom(res, 'H  ', hx, hy, hz, FLAG_BACKBONE));
+      res.atoms.push(newAtom(res, 'H  ', hx, hy, hz, FLAG_BACKBONE, 'H'));
     }
   }
 
@@ -1661,12 +2053,17 @@ export function reconstructPdb(pdbText: string, tables: PulchraTables, options: 
           throw new Error(`PULCHRA: non-finite coordinates for ${res.name} ${res.num} ${a.name.trim()} (degenerate Cα trace?)`);
         }
         const name = a.name.trim();
-        const element = name[0];
+        const element = a.element || inferAtomElement(a.name);
+        const atomField4 =
+          name.length >= 4 || element.length === 2
+            ? name.slice(0, 4).padEnd(4, ' ')
+            : ` ${name.padEnd(3, ' ')}`;
+        const elem2 = element.slice(0, 2).toUpperCase().padStart(2, ' ');
         record.atoms.push({ name, element, x: a.x, y: a.y, z: a.z });
         lines.push(
-          `ATOM  ${String(serial % 100000).padStart(5)}  ${a.name} ${res.name} ${res.chainId}` +
+          `ATOM  ${String(serial % 100000).padStart(5)} ${atomField4} ${res.name} ${res.chainId}` +
             `${String(res.num).padStart(4)}${res.iCode}   ${fmt(a.x, 8, 3)}${fmt(a.y, 8, 3)}${fmt(a.z, 8, 3)}` +
-            `  1.00${fmt(res.bfactor, 6, 2)}           ${element}`,
+            `  1.00${fmt(res.bfactor, 6, 2)}          ${elem2}`,
         );
         serial++;
         atomCount++;
@@ -1679,8 +2076,42 @@ export function reconstructPdb(pdbText: string, tables: PulchraTables, options: 
       lines.push(`TER   ${String(serial % 100000).padStart(5)}      ${last.name} ${last.chainId}${String(last.num).padStart(4)}${last.iCode}`);
       serial++;
     }
-    chainResults.push({ chainId: chain.chainId, residues, stats: builders[ci].stats });
+    chainResults.push({ chainId: chain.chainId, residues, stats: chainStats[ci] });
   });
+
+  if (preservedNucleic.length > 0) {
+    const nucOrder: string[] = [];
+    const nucByChain = new Map<string, PreservedRecord[]>();
+    for (const rec of preservedNucleic) {
+      let arr = nucByChain.get(rec.chainId);
+      if (!arr) {
+        arr = [];
+        nucByChain.set(rec.chainId, arr);
+        nucOrder.push(rec.chainId);
+      }
+      arr.push(rec);
+    }
+    for (const ch of nucOrder) {
+      const recs = nucByChain.get(ch)!;
+      for (const rec of recs) {
+        lines.push(formatPreservedAtomLine(rec, serial, shiftX, shiftY, shiftZ));
+        serial++;
+        atomCount++;
+      }
+      const lastNuc = recs[recs.length - 1];
+      const lastResName = lastNuc.line.slice(17, 20);
+      const lastResSeq = lastNuc.line.slice(22, 27);
+      lines.push(`TER   ${String(serial % 100000).padStart(5)}      ${lastResName} ${lastNuc.chainId}${lastResSeq}`);
+      serial++;
+    }
+  }
+
+  for (const rec of preservedHetatm) {
+    lines.push(formatPreservedAtomLine(rec, serial, shiftX, shiftY, shiftZ));
+    serial++;
+    atomCount++;
+  }
+
   lines.push('END', '');
 
   return {

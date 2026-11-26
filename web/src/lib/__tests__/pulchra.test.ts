@@ -29,7 +29,7 @@ import {
   type PulchraOptions,
 } from '$lib/plugins/pulchra/pulchra-core';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
-import { parseStructureText } from '$lib/protein-ops/pdb';
+import { parsePdbBackbone, parseStructureText } from '$lib/protein-ops/pdb';
 import { formatNodeParamSummary } from '$lib/ui/node-display-helpers';
 
 // ─── Fixtures (RES num x y z; '; '-separated) and C-reference goldens ───────
@@ -210,7 +210,10 @@ const UBIQUITIN_NCO_GOLDEN = `
 `;
 const DIGESTS = {
   trpDefault: '154:77635cee',
-  trpHbonds: '154:4b72cdac',
+  // Upstream C 3.06 bug fix: optimize_backbone() previously allocated the spatial grid before
+  // sidechains existed, leaving fixClashes() with a stale backbone-only grid. Rebuilding the
+  // grid before fixClashes() resolves real sidechain clashes when optimizeHbonds is true.
+  trpHbonds: '154:3b5429b4',
   trpNoClashFix: '154:3b4cc5ff',
   trpBackboneOnly: '81:a16f249b',
   trpNoBackbone: '93:cb994610',
@@ -218,7 +221,8 @@ const DIGESTS = {
   trpThreaded: '154:6511bc61',
   trpSidechainCenters: '154:a228cf91',
   ubqDefault: '602:02dc8684',
-  ubqHbonds: '602:441e1ebb',
+  // Updated for the same clash-grid rebuild fix under optimizeHbonds: true (0 remaining clashes).
+  ubqHbonds: '602:2f3e6745',
   insulinDefault: '403:3d771e34',
   rnaseCaOptimized: '85:14b8aae6',
   rnaseCisPro: '85:7e3b2458',
@@ -682,7 +686,7 @@ describe('PULCHRA reconstruction', () => {
     expect(dist(centered[3].xyz, centered[40].xyz)).toBeCloseTo(dist(plain[3].xyz, plain[40].xyz), 2);
   });
 
-  it('reads only the first model and first altloc, and skips hydrogens, waters and ligands', () => {
+  it('reads only the first model and first altloc, skips hydrogens and waters, and preserves ligands', () => {
     const base = TRP.split('\n').filter((l) => l.startsWith('ATOM'));
     const alt = base[2].substring(0, 16) + 'B' + base[2].substring(17, 30) + '  50.000  50.000  50.000' + base[2].substring(54);
     const messy = [
@@ -700,7 +704,10 @@ describe('PULCHRA reconstruction', () => {
     ].join('\n');
     const res = reconstructPdb(messy, tables);
     expect(digest(res.pdbText)).toBe(DIGESTS.trpDefault);
-    expect(res.warnings.join(' ')).toMatch(/2 non-amino-acid HETATM/);
+    expect(res.warnings.join(' ')).toMatch(/Skipped 1 water HETATM/);
+    expect(res.pdbText).toContain('HETATM');
+    expect(res.pdbText).toContain('NAG A 201');
+    expect(res.pdbText).not.toContain('HOH');
     expect(() => reconstructPdb('HETATM    1  O   HOH A   1       0.000   0.000   0.000\nEND\n', tables)).toThrow(/no protein residues/);
     expect(() => reconstructPdb(TRP, tables, { maxCaShift: -1 })).toThrow(/maxCaShift/);
   });
@@ -860,5 +867,358 @@ describe('PULCHRA registration (native plugin #28)', () => {
     expect(est(['structure']).outputCardinality).toEqual({ structure: 4 });
     expect(est(['structure', 'sequences']).outputCardinality).toEqual({ structure: 12 });
     expect(est(['structure']).estimatedDownloadMB).toBeGreaterThan(1);
+  });
+});
+
+// ─── QA regression tests (P0 & P1 fixes) ─────────────────────────────────────
+
+describe('PULCHRA QA regressions (P0 & P1)', () => {
+  const runnerOpts = { tablesBuffer: readFileSync(resolve(process.cwd(), 'static/vendor/pulchra/pulchra-tables.bin')) };
+
+  it('P0-1: optimizeHbonds rebuilds the clash grid before fixClashes and leaves zero heavy-atom clashes < 1.6 Å', () => {
+    for (const input of [TRP, UBQ]) {
+      const res = reconstructPdb(input, tables, { optimizeHbonds: true });
+      const stats = res.chains[0].stats;
+      expect(stats.clashesBefore).toBeGreaterThan(0);
+      expect(stats.clashesAfter).toBe(0);
+      const atoms = res.chains[0].residues.flatMap((r, ri) => r.atoms.map((a) => ({ ...a, ri })));
+      const bb = new Set(['N', 'CA', 'C', 'O', 'OXT']);
+      let minNonBonded = Infinity;
+      for (let i = 0; i < atoms.length; i++) {
+        for (let j = i + 1; j < atoms.length; j++) {
+          const a = atoms[i], b = atoms[j];
+          if (a.ri === b.ri) continue;
+          if (Math.abs(a.ri - b.ri) === 1 && ((a.name === 'C' && b.name === 'N') || (a.name === 'N' && b.name === 'C'))) continue;
+          if (bb.has(a.name) && bb.has(b.name)) continue;
+          const d = dist([a.x, a.y, a.z], [b.x, b.y, b.z]);
+          if (d < minNonBonded) minNonBonded = d;
+        }
+      }
+      expect(minNonBonded).toBeGreaterThanOrEqual(1.6);
+    }
+  });
+
+  it('P0-2: splits chains at Cα–Cα breaks (> 4.5 Å) without bridging gaps or collapsing them during Cα refinement', () => {
+    const seg1 = rows(UBIQUITIN_CA).slice(0, 8);
+    const seg2 = rows(UBIQUITIN_CA).slice(0, 8);
+    // Shift segment 2 so Cα(8)–Cα(15) is exactly 9.0 Å (missing loop 9..14)
+    const last1 = seg1[seg1.length - 1].split(/\s+/).slice(-3).map(Number);
+    const first2 = seg2[0].split(/\s+/).slice(-3).map(Number);
+    const dx = last1[0] + 9.0 - first2[0];
+    const dy = last1[1] - first2[1];
+    const dz = last1[2] - first2[2];
+    const lines: string[] = [];
+    let serial = 1;
+    seg1.forEach((r, idx) => {
+      const [res, num, x, y, z] = r.split(/\s+/);
+      const bf = (70 + idx).toFixed(2).padStart(6);
+      lines.push(
+        `ATOM  ${String(serial++).padStart(5)}  CA  ${res} A${num.padStart(4)}    ` +
+          `${Number(x).toFixed(3).padStart(8)}${Number(y).toFixed(3).padStart(8)}${Number(z).toFixed(3).padStart(8)}  1.00${bf}           C`,
+      );
+    });
+    seg2.forEach((r, idx) => {
+      const [res, , x, y, z] = r.split(/\s+/);
+      const num = String(15 + idx);
+      const bf = (85 + idx).toFixed(2).padStart(6);
+      lines.push(
+        `ATOM  ${String(serial++).padStart(5)}  CA  ${res} A${num.padStart(4)}    ` +
+          `${(Number(x) + dx).toFixed(3).padStart(8)}${(Number(y) + dy).toFixed(3).padStart(8)}${(Number(z) + dz).toFixed(3).padStart(8)}  1.00${bf}           C`,
+      );
+    });
+    lines.push('TER', 'END');
+    const gappedPdb = lines.join('\n') + '\n';
+
+    for (const opts of [{}, { optimizeCa: true, maxCaShift: 0.5 }] as PulchraOptions[]) {
+      const out = reconstructPdb(gappedPdb, tables, opts);
+      expect(out.chains).toHaveLength(1);
+      expect(out.chains[0].chainId).toBe('A');
+      expect(out.chains[0].residues.map((r) => r.resSeq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 17, 18, 19, 20, 21, 22]);
+      expect(out.chains[0].residues[0].bfactor).toBeCloseTo(70, 2);
+      expect(out.chains[0].residues[8].bfactor).toBeCloseTo(85, 2);
+      expect(out.warnings.join(' ')).toMatch(/contiguous segments/i);
+
+      const m = atomMap(out.pdbText);
+      const gapCa = dist(m.get('A8:CA')!, m.get('A15:CA')!);
+      expect(gapCa).toBeGreaterThan(7.5);
+      if (!opts.optimizeCa) expect(gapCa).toBeCloseTo(9.0, 2);
+      const gapCN = dist(m.get('A8:C')!, m.get('A15:N')!);
+      expect(gapCN).toBeGreaterThan(5.0);
+      expect(dist(m.get('A8:CA')!, m.get('A8:C')!)).toBeLessThan(2.0);
+      expect(m.has('A8:OXT')).toBe(false);
+      expect(m.has('A22:OXT')).toBe(true);
+    }
+  });
+
+  it('P0-3: preserves L < 5 segments as-is with exact +100 Å translation invariance and provenance warning', async () => {
+    const fourResCa = rows(UBIQUITIN_CA).slice(0, 4);
+    const makeFourPdb = (shift: number) =>
+      fourResCa
+        .map((r, i) => {
+          const [res, num, x, y, z] = r.split(/\s+/);
+          return (
+            `ATOM  ${String(i + 1).padStart(5)}  CA  ${res} A${num.padStart(4)}    ` +
+            `${(Number(x) + shift).toFixed(3).padStart(8)}${(Number(y) + shift).toFixed(3).padStart(8)}${(Number(z) + shift).toFixed(3).padStart(8)}  1.00  0.00           C`
+          );
+        })
+        .join('\n') + '\nTER\nEND\n';
+
+    const baseRes = reconstructPdb(makeFourPdb(0), tables, { optimizeCa: true });
+    const shiftedRes = reconstructPdb(makeFourPdb(100), tables, { optimizeCa: true });
+    expect(baseRes.warnings.join(' ')).toMatch(/L < 5.*preserved as-is/);
+    expect(baseRes.chains[0].residues.flatMap((r) => r.atoms.map((a) => a.name))).toEqual(['CA', 'CA', 'CA', 'CA']);
+
+    const pairDists = (res: ReturnType<typeof reconstructPdb>) => {
+      const atoms = res.chains[0].residues.flatMap((r) => r.atoms.map((a) => [a.x, a.y, a.z] as const));
+      const d: number[] = [];
+      for (let i = 0; i < atoms.length; i++) {
+        for (let j = i + 1; j < atoms.length; j++) d.push(dist(atoms[i], atoms[j]));
+      }
+      return d;
+    };
+    const d0 = pairDists(baseRes);
+    const d100 = pairDists(shiftedRes);
+    const maxShiftDiff = Math.max(...d0.map((v, i) => Math.abs(v - d100[i])));
+    expect(maxShiftDiff).toBeLessThan(1e-6);
+
+    const artifactOut = await runPulchraCpu(pulchraNode(), { structure: structureFromPdb(makeFourPdb(0), 'short4') }, undefined, runnerOpts);
+    const s = artifactOut.structure as StructureArtifact;
+    expect(s.atomGranularity).toBe('ca-only');
+    expect(s.provenance?.warnings?.join(' ')).toMatch(/L < 5/);
+  });
+
+  it('P1-4: derives accurate atomGranularity and omits H-bonds/+H in canvas summary when reconstructBackbone is false', async () => {
+    const trpStruct = structureFromPdb(TRP, 'trp');
+    const caOnlyOut = (
+      await runPulchraCpu(
+        pulchraNode({ reconstructBackbone: false, reconstructSidechains: false }),
+        { structure: trpStruct },
+        undefined,
+        runnerOpts,
+      )
+    ).structure as StructureArtifact;
+    expect(caOnlyOut.atomGranularity).toBe('ca-only');
+
+    // Sidechains on a CA-only input without N/C/O backbone must NOT claim all-atom
+    const scOnlyOut = (
+      await runPulchraCpu(
+        pulchraNode({ reconstructBackbone: false, reconstructSidechains: true }),
+        { structure: trpStruct },
+        undefined,
+        runnerOpts,
+      )
+    ).structure as StructureArtifact;
+    expect(scOnlyOut.atomGranularity).toBe('ca-only');
+
+    // When input already has N/CA/C/O backbone, reconstructBackbone: false + sidechains yields all-atom
+    const bb4Struct = (
+      await runPulchraCpu(
+        pulchraNode({ reconstructSidechains: false }),
+        { structure: trpStruct },
+        undefined,
+        runnerOpts,
+      )
+    ).structure as StructureArtifact;
+    const rebuiltFromBb4 = (
+      await runPulchraCpu(
+        pulchraNode({ reconstructBackbone: false, reconstructSidechains: true }),
+        { structure: bb4Struct },
+        undefined,
+        runnerOpts,
+      )
+    ).structure as StructureArtifact;
+    expect(rebuiltFromBb4.atomGranularity).toBe('all-atom');
+
+    const summary = pulchraPlugin.display!.formatCanvasSummary!;
+    expect(summary({ reconstructBackbone: false, optimizeHbonds: true, outputHydrogens: true })).toBe('Sidechains');
+    expect(summary({ reconstructBackbone: false, reconstructSidechains: false, optimizeHbonds: true, outputHydrogens: true })).toBe('Cα only');
+    expect(formatNodeParamSummary('pulchra', { reconstructBackbone: false, optimizeHbonds: true, outputHydrogens: true })).toBe('Sidechains');
+    expect(summary({ reconstructBackbone: true, optimizeHbonds: true, outputHydrogens: true })).toBe('All-atom · H-bonds · +H');
+  });
+
+  it('P1-5: parses 2-char MSE SE atoms without truncating to E and never emits both SE and SD', () => {
+    const mseCa = rows(TRP_CAGE_CA)
+      .slice(0, 6)
+      .map((r, i) => {
+        const [res, num, x, y, z] = r.split(/\s+/);
+        if (i === 2) {
+          const [nx, ny, nz] = [Number(x), Number(y), Number(z)];
+          return [
+            `HETATM    3  N   MSE A   3    ${(nx - 1.2).toFixed(3).padStart(8)}${ny.toFixed(3).padStart(8)}${nz.toFixed(3).padStart(8)}  1.00 20.00           N`,
+            `HETATM    4  CA  MSE A   3    ${nx.toFixed(3).padStart(8)}${ny.toFixed(3).padStart(8)}${nz.toFixed(3).padStart(8)}  1.00 20.00           C`,
+            `HETATM    5  C   MSE A   3    ${(nx + 1.2).toFixed(3).padStart(8)}${ny.toFixed(3).padStart(8)}${nz.toFixed(3).padStart(8)}  1.00 20.00           C`,
+            `HETATM    6  O   MSE A   3    ${(nx + 1.5).toFixed(3).padStart(8)}${(ny + 1.1).toFixed(3).padStart(8)}${nz.toFixed(3).padStart(8)}  1.00 20.00           O`,
+            `HETATM    7  CB  MSE A   3    ${nx.toFixed(3).padStart(8)}${(ny - 1.5).toFixed(3).padStart(8)}${nz.toFixed(3).padStart(8)}  1.00 20.00           C`,
+            `HETATM    8  CG  MSE A   3    ${nx.toFixed(3).padStart(8)}${(ny - 2.9).toFixed(3).padStart(8)}${nz.toFixed(3).padStart(8)}  1.00 20.00           C`,
+            `HETATM    9 SE   MSE A   3    ${(nx + 1.1).toFixed(3).padStart(8)}${(ny - 4.1).toFixed(3).padStart(8)}${nz.toFixed(3).padStart(8)}  1.00 20.00          SE`,
+            `HETATM   10  CE  MSE A   3    ${(nx + 2.4).toFixed(3).padStart(8)}${(ny - 3.6).toFixed(3).padStart(8)}${nz.toFixed(3).padStart(8)}  1.00 20.00           C`,
+          ].join('\n');
+        }
+        return `ATOM  ${String(i + 1).padStart(5)}  CA  ${res} A${num.padStart(4)}    ${Number(x).toFixed(3).padStart(8)}${Number(y).toFixed(3).padStart(8)}${Number(z).toFixed(3).padStart(8)}  1.00  0.00           C`;
+      })
+      .join('\n') + '\nTER\nEND\n';
+
+    // When sidechains are NOT rebuilt, both left- and right-aligned SE are kept intact as 'SE' (not 'E').
+    for (const seLine of [
+      `HETATM    9 SE   MSE A   3    `,
+      `HETATM    9  SE  MSE A   3    `,
+    ]) {
+      const variant = mseCa.replace(`HETATM    9 SE   MSE A   3    `, seLine);
+      const bbOnly = reconstructPdb(variant, tables, { reconstructSidechains: false });
+      const mseResKept = bbOnly.chains[0].residues[2];
+      expect(mseResKept.atoms.map((a) => a.name)).toContain('SE');
+      expect(mseResKept.atoms.map((a) => a.name)).not.toContain('E');
+      expect(mseResKept.atoms.find((a) => a.name === 'SE')?.element).toBe('SE');
+      expect(bbOnly.pdbText).toMatch(/^ATOM\s+\d+\sSE\s+MSE A\s+3.*\sSE$/m);
+    }
+
+    // When sidechains ARE rebuilt (both preserve and optimizeCa), SE maps cleanly to SD without duplicating SE+SD.
+    for (const opts of [{}, { optimizeCa: true }] as PulchraOptions[]) {
+      const rebuilt = reconstructPdb(mseCa, tables, opts);
+      const mseAtoms = rebuilt.chains[0].residues[2].atoms.map((a) => a.name);
+      expect(mseAtoms).toContain('SD');
+      expect(mseAtoms).not.toContain('SE');
+      expect(mseAtoms).not.toContain('E');
+    }
+  });
+
+  it('P1-6: keeps B-only and C-only altloc residues aligned with parsePdbBackbone', () => {
+    const base = TRP.split('\n').filter((l) => l.startsWith('ATOM'));
+    const bOnly = base.map((l, i) => (i === 2 ? l.substring(0, 16) + 'B' + l.substring(17) : l)).join('\n') + '\nTER\nEND\n';
+    const cOnly = base.map((l, i) => (i === 4 ? l.substring(0, 16) + 'C' + l.substring(17) : l)).join('\n') + '\nTER\nEND\n';
+    // Out-of-order B then A on residue 3: A must supersede B without creating a duplicate residue
+    const bThenA = [
+      ...base.slice(0, 2),
+      base[2].substring(0, 16) + 'B' + base[2].substring(17, 30) + '  50.000  50.000  50.000' + base[2].substring(54),
+      base[2].substring(0, 16) + 'A' + base[2].substring(17),
+      ...base.slice(3),
+      'TER',
+      'END',
+    ].join('\n') + '\n';
+
+    const resB = reconstructPdb(bOnly, tables);
+    expect(resB.residueCount).toBe(20);
+    expect(resB.residueCount).toBe(parsePdbBackbone(bOnly).nResidues);
+    expect(resB.sequence).toBe('NLYIQWLKDGGPSSGRPPPS');
+
+    const resC = reconstructPdb(cOnly, tables);
+    expect(resC.residueCount).toBe(20);
+    expect(resC.sequence).toBe('NLYIQWLKDGGPSSGRPPPS');
+
+    const resBA = reconstructPdb(bThenA, tables);
+    expect(resBA.residueCount).toBe(20);
+    expect(digest(resBA.pdbText)).toBe(DIGESTS.trpDefault);
+  });
+
+  it('P1-7: preserves non-water HETATM ligands/ions, nucleic chains, molecularContext, and HETATM SEP length parity', async () => {
+    const holoInput = [
+      ...TRP.split('\n').filter((l) => l.startsWith('ATOM')),
+      'TER',
+      'ATOM    101  P    DG D   1      20.000  20.000  20.000  1.00  0.00           P',
+      "ATOM    102  O5'  DG D   1      21.000  20.500  20.000  1.00  0.00           O",
+      'TER',
+      'HETATM  103 ZN    ZN Z   1      10.000  10.000  10.000  1.00  0.00          ZN',
+      'HETATM  104  C1  SAM Z   2      12.000  12.000  12.000  1.00  0.00           C',
+      'HETATM  105  O   HOH W   1      30.000  30.000  30.000  1.00  0.00           O',
+      'END',
+    ].join('\n');
+
+    const parent = structureFromPdb(holoInput, 'holo-trp');
+    const out = (await runPulchraCpu(pulchraNode(), { structure: parent }, undefined, runnerOpts)).structure as StructureArtifact;
+    expect(out.length).toBe(20);
+    expect(out.pdbText).toContain('HETATM');
+    expect(out.pdbText).toContain('ZN Z   1');
+    expect(out.pdbText).toContain('SAM Z   2');
+    expect(out.pdbText).toContain('DG D   1');
+    expect(out.pdbText).not.toContain('HOH');
+    expect(out.diagnostics?.hasLigands).toBe(true);
+    expect(out.diagnostics?.ligandNames).toEqual(expect.arrayContaining(['ZN', 'SAM']));
+    expect(out.diagnostics?.hasNucleicAcids).toBe(true);
+    expect(out.diagnostics?.nucleicAcidChains).toEqual(['D']);
+    expect(out.molecularContext?.ligands).toEqual(expect.arrayContaining(['ZN', 'SAM']));
+    expect(out.molecularContext?.nucleicAcidChains).toEqual(['D']);
+
+    // Modified-residue HETATM SEP must not cause a protein length mismatch vs parsePdbBackbone
+    const baseLines = TRP.split('\n').filter((l) => l.startsWith('ATOM'));
+    const withSep = [
+      ...baseLines.slice(0, 5),
+      'HETATM   50  N   SEP A   6      -0.716  -0.631  -0.993  1.00  0.00           N',
+      'HETATM   51  CA  SEP A   6      -0.716  -0.631  -0.993  1.00  0.00           C',
+      'HETATM   52  P   SEP A   6       1.000   1.000   1.000  1.00  0.00           P',
+      ...baseLines.slice(6),
+      'TER',
+      'END',
+    ].join('\n');
+    const parsedIn = parsePdbBackbone(withSep);
+    const sepParent = structureFromPdb(withSep, 'sep-trp');
+    const sepOut = (await runPulchraCpu(pulchraNode(), { structure: sepParent }, undefined, runnerOpts)).structure as StructureArtifact;
+    expect(sepOut.length).toBe(parsedIn.nResidues);
+    expect(sepOut.sequence).toBe(parsedIn.sequence);
+    expect(sepOut.pdbText).toContain('HETATM');
+    expect(sepOut.pdbText).toContain('SEP A   6');
+  });
+
+  it('P1-8: aborts pre-aborted and stalled pulchra-tables.bin fetches promptly without poisoning subsequent callers', async () => {
+    const body = readFileSync(resolve(process.cwd(), 'static/vendor/pulchra/pulchra-tables.bin'));
+    const testUrl = '/test/abortable-pulchra-tables.bin';
+
+    // 1. Pre-aborted signal never invokes fetchFn
+    const preAc = new AbortController();
+    preAc.abort(new DOMException('Pre-aborted', 'AbortError'));
+    const neverCalled = vi.fn(async () => new Response(new Uint8Array(body)));
+    await expect(
+      loadPulchraTables({ url: testUrl, fetchFn: neverCalled as unknown as typeof fetch, signal: preAc.signal }),
+    ).rejects.toThrow(/Pre-aborted|abort/i);
+    await expect(
+      runPulchraCpu(pulchraNode(), { structure: structureFromPdb(TRP, 'trp') }, undefined, {
+        url: testUrl,
+        fetchFn: neverCalled as unknown as typeof fetch,
+        signal: preAc.signal,
+      }),
+    ).rejects.toThrow(/Pre-aborted|abort/i);
+    expect(neverCalled).not.toHaveBeenCalled();
+
+    // 2. Stalled fetch aborts promptly when signal fires and propagates abort to fetchFn's signal
+    let capturedSignal: AbortSignal | undefined;
+    const stalledFetch = vi.fn(
+      (_url: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>(() => {
+          capturedSignal = init?.signal ?? undefined;
+        }),
+    );
+    const ac = new AbortController();
+    const pending = loadPulchraTables({
+      url: testUrl,
+      fetchFn: stalledFetch as unknown as typeof fetch,
+      signal: ac.signal,
+    });
+    expect(stalledFetch).toHaveBeenCalledTimes(1);
+    expect(capturedSignal?.aborted).toBe(false);
+    ac.abort(new DOMException('Cancelled by user', 'AbortError'));
+    await expect(pending).rejects.toThrow(/Cancelled by user|abort/i);
+    expect(capturedSignal?.aborted).toBe(true);
+
+    // 3. Subsequent non-aborted caller succeeds cleanly (cache was not poisoned)
+    const okFetch = vi.fn(async () => new Response(new Uint8Array(body)));
+    const recovered = await loadPulchraTables({ url: testUrl, fetchFn: okFetch as unknown as typeof fetch });
+    expect(okFetch).toHaveBeenCalledTimes(1);
+    expect(recovered.rotPos.length).toBe(19897);
+
+    // 4. Concurrent aborted caller does not cancel a healthy sibling caller on a fresh URL
+    const concUrl = '/test/concurrent-pulchra-tables.bin';
+    let releaseSibling!: (res: Response) => void;
+    const siblingFetch = vi.fn(
+      () =>
+        new Promise<Response>((resolveFn) => {
+          releaseSibling = resolveFn;
+        }),
+    );
+    const ac1 = new AbortController();
+    const p1 = loadPulchraTables({ url: concUrl, fetchFn: siblingFetch as unknown as typeof fetch, signal: ac1.signal });
+    const p2 = loadPulchraTables({ url: concUrl, fetchFn: siblingFetch as unknown as typeof fetch });
+    ac1.abort();
+    await expect(p1).rejects.toThrow(/abort/i);
+    releaseSibling(new Response(new Uint8Array(body)));
+    expect((await p2).rotPos.length).toBe(19897);
   });
 });

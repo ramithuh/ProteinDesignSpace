@@ -45,10 +45,19 @@ export const pulchraPlugin: ModelPlugin = {
   },
   display: {
     formatCanvasSummary: (params) => {
-      const parts = [params.reconstructSidechains === false ? 'Backbone' : 'All-atom'];
+      const rebuildBb = params.reconstructBackbone !== false;
+      const rebuildSc = params.reconstructSidechains !== false;
+      const modeLabel = !rebuildBb
+        ? rebuildSc
+          ? 'Sidechains'
+          : 'Cα only'
+        : rebuildSc
+          ? 'All-atom'
+          : 'Backbone';
+      const parts = [modeLabel];
       if (params.optimizeCa === true) parts.push('Cα refine');
-      if (params.optimizeHbonds === true) parts.push('H-bonds');
-      if (params.outputHydrogens === true) parts.push('+H');
+      if (rebuildBb && params.optimizeHbonds === true) parts.push('H-bonds');
+      if (rebuildBb && params.outputHydrogens === true) parts.push('+H');
       return parts.join(' · ');
     },
     displayOnlyParamKeys: [],

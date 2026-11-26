@@ -12,6 +12,7 @@ import type {
   SequenceCandidate,
   SequenceSet,
   StructureArtifact,
+  StructureMolecularContext,
   WorkflowNode,
 } from '$lib/engine/types';
 import {
@@ -79,9 +80,65 @@ function inputPdbText(parent: StructureArtifact): string {
 }
 
 function granularity(result: PulchraResult): AtomGranularity {
-  const atoms = result.chains.flatMap((c) => c.residues.flatMap((r) => r.atoms.map((a) => a.name)));
-  if (atoms.some((n) => !['N', 'CA', 'C', 'O', 'OXT', 'H'].includes(n))) return 'all-atom';
-  return atoms.includes('N') && atoms.includes('C') ? 'backbone4' : 'ca-only';
+  const backbone = new Set<string>();
+  let hasSidechainHeavy = false;
+  for (const chain of result.chains) {
+    for (const res of chain.residues) {
+      for (const atom of res.atoms) {
+        if (atom.element === 'H' || atom.name.startsWith('H')) continue;
+        if (atom.name === 'N' || atom.name === 'CA' || atom.name === 'C' || atom.name === 'O') {
+          backbone.add(atom.name);
+        } else if (atom.name !== 'OXT') {
+          hasSidechainHeavy = true;
+        }
+      }
+    }
+  }
+  const hasBackbone4 = backbone.has('N') && backbone.has('CA') && backbone.has('C') && backbone.has('O');
+  if (!hasBackbone4) return 'ca-only';
+  return hasSidechainHeavy ? 'all-atom' : 'backbone4';
+}
+
+function buildMolecularContext(
+  parent: StructureArtifact,
+  parsed: ReturnType<typeof parseStructureText>,
+  result: PulchraResult,
+  options: PulchraOptions,
+): StructureMolecularContext | undefined {
+  const chainTypes = parent.molecularContext?.chainTypes
+    ? { ...parent.molecularContext.chainTypes }
+    : undefined;
+  const ligandSet = new Set<string>(parsed.diagnostics.ligandNames);
+  if (parent.molecularContext?.ligands?.length) {
+    const preservedHetResNames = new Set<string>();
+    for (const line of result.pdbText.split('\n')) {
+      if (line.startsWith('HETATM') && line.length >= 20) {
+        const resName = line.slice(17, 20).trim().toUpperCase();
+        if (resName) preservedHetResNames.add(resName);
+      }
+    }
+    for (const lig of parent.molecularContext.ligands) {
+      if (preservedHetResNames.has(lig.toUpperCase())) ligandSet.add(lig);
+    }
+  }
+  const ligands = ligandSet.size > 0 ? [...ligandSet] : undefined;
+  const nucleicAcidChains = parsed.diagnostics.hasNucleicAcids
+    ? [...parsed.diagnostics.nucleicAcidChains]
+    : undefined;
+  const hasOutputProteinH =
+    Boolean(options.outputHydrogens) &&
+    result.chains.some((c) => c.residues.some((r) => r.atoms.some((a) => a.element === 'H')));
+  const hasExplicitHydrogens =
+    hasOutputProteinH ||
+    (Boolean(parent.molecularContext?.hasExplicitHydrogens) &&
+      Boolean(ligands?.length || nucleicAcidChains?.length));
+  if (!chainTypes && !ligands && !nucleicAcidChains && !hasExplicitHydrogens) return undefined;
+  return {
+    ...(chainTypes ? { chainTypes } : {}),
+    ...(ligands ? { ligands } : {}),
+    ...(nucleicAcidChains ? { nucleicAcidChains } : {}),
+    ...(hasExplicitHydrogens ? { hasExplicitHydrogens: true } : {}),
+  };
 }
 
 function buildArtifact(job: PulchraJob, result: PulchraResult, options: PulchraOptions): StructureArtifact {
@@ -91,6 +148,7 @@ function buildArtifact(job: PulchraJob, result: PulchraResult, options: PulchraO
   const sameLength = parsed.nResidues === parent.length;
   const id = `pulchra-${fnv1a(`${parent.id}|${candidate?.id ?? ''}|${candidate?.sequence ?? ''}|${JSON.stringify(options)}`)}`;
   const label = candidate ? `${parent.label} · ${candidate.id} (PULCHRA)` : `${parent.label} (PULCHRA)`;
+  const molecularContext = buildMolecularContext(parent, parsed, result, options);
   return {
     kind: 'StructureArtifact',
     id,
@@ -112,7 +170,7 @@ function buildArtifact(job: PulchraJob, result: PulchraResult, options: PulchraO
     diagnostics: parsed.diagnostics,
     atomGranularity: granularity(result),
     bfactorSemantics: parent.bfactorSemantics ?? 'none',
-    ...(parent.molecularContext?.chainTypes ? { molecularContext: { chainTypes: { ...parent.molecularContext.chainTypes } } } : {}),
+    ...(molecularContext ? { molecularContext } : {}),
     ...(parent.designKey !== undefined ? { designKey: parent.designKey } : {}),
     ...(parent.designIndex !== undefined ? { designIndex: parent.designIndex } : {}),
     ...(parent.seed !== undefined ? { seed: parent.seed } : {}),
@@ -169,6 +227,7 @@ export async function runPulchraCpu(
   const options = pulchraOptionsFromParams(node);
   const jobs = planJobs(structureItems(structure), sequences);
 
+  opts.signal?.throwIfAborted();
   onProgress?.({ nodeId: node.id, status: 'running', phase: 'load', progress: 0.02, detail: 'Loading PULCHRA tables…' });
   const tables = await loadPulchraTables(opts);
 

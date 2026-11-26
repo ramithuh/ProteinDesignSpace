@@ -467,11 +467,20 @@ export function formatNodeParamSummary(
       return `scRMSD < ${num(p.scRmsdThreshold, 2.0).toFixed(1)} Å · pLDDT ≥ ${num(p.plddtThreshold, 70)}`;
     }
     case 'pulchra': {
-      const parts = [p.reconstructSidechains === false ? 'Backbone' : 'All-atom'];
+      const rebuildBb = p.reconstructBackbone !== false;
+      const rebuildSc = p.reconstructSidechains !== false;
+      const modeLabel = !rebuildBb
+        ? rebuildSc
+          ? 'Sidechains'
+          : 'Cα only'
+        : rebuildSc
+          ? 'All-atom'
+          : 'Backbone';
+      const parts = [modeLabel];
       if (p.optimizeCa === true) parts.push(`Cα refine ≤${num(p.maxCaShift, 0.5).toFixed(1)} Å`);
-      if (p.optimizeHbonds === true) parts.push('H-bonds');
+      if (rebuildBb && p.optimizeHbonds === true) parts.push('H-bonds');
       if (p.fixClashes === false) parts.push('no clash fix');
-      if (p.outputHydrogens === true) parts.push('+H');
+      if (rebuildBb && p.outputHydrogens === true) parts.push('+H');
       return parts.join(' · ');
     }
     default:
