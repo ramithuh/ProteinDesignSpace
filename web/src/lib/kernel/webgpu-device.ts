@@ -235,6 +235,8 @@ export async function requestResilientWebGpuDevice(opts?: {
   retryDelayMs?: number;
   allowSoftwareFallback?: boolean;
   optionalFeatures?: readonly string[];
+  /** Extra adapter limits to raise to the adapter's maximum (e.g. the set ONNX Runtime requests for its own device). */
+  adapterLimits?: readonly string[];
 }): Promise<ResilientDeviceResult> {
   const res = await requestResilientWebGpuAdapter(opts);
   const wantF16 = (opts?.useF16 ?? true) && res.hasF16;
@@ -246,10 +248,17 @@ export async function requestResilientWebGpuDevice(opts?: {
     }
   }
 
-  const requiredLimits = {
+  const requiredLimits: Record<string, number> = {
     maxBufferSize: res.adapter.limits.maxBufferSize,
     maxStorageBufferBindingSize: res.adapter.limits.maxStorageBufferBindingSize,
   };
+  const adapterLimitTable = res.adapter.limits as unknown as Record<string, unknown>;
+  for (const key of opts?.adapterLimits ?? []) {
+    const value = adapterLimitTable[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      requiredLimits[key] = value;
+    }
+  }
 
   let device: GPUDevice;
   try {
@@ -271,4 +280,95 @@ export async function requestResilientWebGpuDevice(opts?: {
     });
   }
   return { ...res, device };
+}
+
+/** A `createBuffer` the device refused for lack of memory (see `tryCreateBuffer`). */
+export class WebGpuOutOfMemoryError extends Error {
+  readonly size: number;
+  readonly label: string;
+
+  constructor(desc: GPUBufferDescriptor, cause: unknown) {
+    const label = desc.label ? ` "${desc.label}"` : '';
+    const detail = (cause as { message?: string } | null)?.message;
+    super(`WebGPU out of memory allocating ${desc.size} bytes for buffer${label}${detail ? `: ${detail}` : ''}`);
+    this.name = 'WebGpuOutOfMemoryError';
+    this.size = desc.size;
+    this.label = String(desc.label ?? '');
+  }
+}
+
+/**
+ * `device.createBuffer(desc)` inside an `out-of-memory` error scope (TVM `webgpu.ts` `tryCreateBuffer`).
+ * WebGPU reports a refused allocation asynchronously and hands back an invalid buffer, so without the
+ * scope the failure only surfaces at a later submit, or as a device loss. Resolves to the buffer, or
+ * destroys the invalid buffer and rejects with `WebGpuOutOfMemoryError` so callers can shrink and retry.
+ */
+export async function tryCreateBuffer(
+  device: GPUDevice,
+  desc: GPUBufferDescriptor,
+): Promise<GPUBuffer> {
+  device.pushErrorScope('out-of-memory');
+  let buffer: GPUBuffer;
+  try {
+    buffer = device.createBuffer(desc);
+  } catch (err) {
+    // Keep the error-scope stack balanced even when createBuffer throws synchronously.
+    await device.popErrorScope().catch(() => null);
+    throw err;
+  }
+  const oom = await device.popErrorScope();
+  if (oom) {
+    try {
+      buffer.destroy();
+    } catch {
+      /* invalid buffer */
+    }
+    throw new WebGpuOutOfMemoryError(desc, oom);
+  }
+  return buffer;
+}
+
+export interface WebGpuDeviceLostGuard {
+  /** False only while `destroy()` is tearing a device down (WebLLM `engine.ts` `deviceLostIsError`). */
+  readonly deviceLostIsError: boolean;
+  /** Run `onUnexpectedLoss` when `device` is lost for any reason other than this guard's own `destroy()`. */
+  watch(device: GPUDevice, onUnexpectedLoss: (info: GPUDeviceLostInfo) => void): void;
+  /** Destroy `device` intentionally: its `lost` promise then resolves without calling `onUnexpectedLoss`. */
+  destroy(device: GPUDevice | null | undefined): void;
+}
+
+/**
+ * Separates intentional `device.destroy()` from real device loss. `device.lost` resolves
+ * asynchronously after `destroy()`, so a plain boolean flipped around the call would already
+ * be reset by the time the handler runs; the guard also remembers each device it destroyed.
+ */
+export function createDeviceLostGuard(): WebGpuDeviceLostGuard {
+  const destroyedIntentionally = new WeakSet<GPUDevice>();
+  let deviceLostIsError = true;
+  return {
+    get deviceLostIsError() {
+      return deviceLostIsError;
+    },
+    watch(device, onUnexpectedLoss) {
+      void device.lost.then(
+        (info) => {
+          if (!deviceLostIsError || destroyedIntentionally.has(device)) return;
+          onUnexpectedLoss(info);
+        },
+        () => {},
+      );
+    },
+    destroy(device) {
+      if (!device) return;
+      destroyedIntentionally.add(device);
+      deviceLostIsError = false;
+      try {
+        device.destroy();
+      } catch {
+        /* already lost */
+      } finally {
+        deviceLostIsError = true;
+      }
+    },
+  };
 }

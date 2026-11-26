@@ -20,19 +20,58 @@ import {
 } from '$lib/engine/collections';
 import { deriveStableItemSeed, planMpnnFanout } from '$lib/engine/work-plan';
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
-import { isWebGpuDeviceLostError } from '$lib/engine/webgpu-device';
+import {
+  createDeviceLostGuard,
+  isWebGpuDeviceLostError,
+  requestResilientWebGpuDevice,
+} from '$lib/engine/webgpu-device';
 import { createWorkerHarness, fnv1a, type WorkerRunContext } from '$lib/kernel';
 import type { SequenceCandidate, SequenceSet, StructureArtifact } from '$lib/engine/types';
+import {
+  MPNN_WEBGPU_EP_OPTIONS,
+  ORT_WEBGPU_ADAPTER_LIMITS,
+  resolveOrtWasmThreads,
+  withWebGpuExecutionProviderOptions,
+} from './ort-session-tuning';
 
 declare const self: DedicatedWorkerGlobalScope;
 
-// First-party same-origin ONNX Runtime 1.24.3 WASM/MJS binaries synced from npm-locked node_modules
+// First-party same-origin ONNX Runtime 1.31.1 WASM/MJS binaries synced from npm-locked node_modules
 // (zero third-party CDN code execution; all files < 25 MiB Cloudflare Pages limit).
 const WASM_PATHS = new URL('/vendor/ort/', self.location.origin).href;
+// Multi-threaded WASM only when SharedArrayBuffer is available (cross-origin isolated); 1 otherwise.
+const WASM_NUM_THREADS = resolveOrtWasmThreads(
+  Boolean(self.crossOriginIsolated),
+  typeof navigator !== 'undefined' ? navigator.hardwareConcurrency : undefined,
+);
 
 let model: ProteinMPNN | null = null;
 let loadedKey: string | null = null;
 let loadedBackendMode: 'auto' | 'wasm' = 'auto';
+// Resilient GPUDevice handed to ORT's WebGPU EP: kept across model switches, destroyed on dispose.
+let ortWebGpuDevice: GPUDevice | null = null;
+const deviceLostGuard = createDeviceLostGuard();
+
+/** The shared resilient device for ORT's WebGPU EP, or null (caller falls back to WASM). */
+async function acquireOrtWebGpuDevice(): Promise<GPUDevice | null> {
+  if (ortWebGpuDevice) return ortWebGpuDevice;
+  try {
+    const { device } = await requestResilientWebGpuDevice({
+      optionalFeatures: ['subgroups'],
+      adapterLimits: ORT_WEBGPU_ADAPTER_LIMITS,
+    });
+    ortWebGpuDevice = device;
+    deviceLostGuard.watch(device, () => {
+      if (ortWebGpuDevice !== device) return;
+      ortWebGpuDevice = null;
+      // Sessions on the lost device are dead: force the next ensureModel to reload on a fresh one.
+      if (loadedBackendMode === 'auto') loadedKey = null;
+    });
+    return device;
+  } catch {
+    return null;
+  }
+}
 
 function supportsWebAssemblyJspi(): boolean {
   return (
@@ -53,13 +92,15 @@ async function ensureModel(
   modelName: string,
   backendOverride: 'auto' | 'wasm' = 'auto',
 ) {
-  const effectiveBackend: 'auto' | 'wasm' =
+  let effectiveBackend: 'auto' | 'wasm' =
     backendOverride === 'wasm' ||
     !supportsWebAssemblyJspi() ||
     typeof navigator === 'undefined' ||
     !('gpu' in navigator)
       ? 'wasm'
       : 'auto';
+  const webGpuDevice = effectiveBackend === 'auto' ? await acquireOrtWebGpuDevice() : null;
+  if (!webGpuDevice) effectiveBackend = 'wasm';
   const key = `${family}:${modelName}:${effectiveBackend}`;
   if (model && loadedKey === key) return;
   if (model) {
@@ -77,22 +118,29 @@ async function ensureModel(
     const fetchedUrls: string[] = [];
     let anyFromCache = false;
     try {
-      // Suppress non-fatal ONNX Runtime WARNING logs (which ORT Web emits via console.error
-      // in DevTools) while preserving genuine ERROR/FATAL diagnostics.
+      let ortMod: typeof import('onnxruntime-web') | null = null;
       try {
-        const ortMod =
+        ortMod =
           effectiveBackend === 'wasm'
             ? await import('onnxruntime-web')
             : await import('onnxruntime-web/webgpu');
-        if (ortMod?.env) ortMod.env.logLevel = 'error';
+        if (ortMod?.env) {
+          // Suppress non-fatal ONNX Runtime WARNING logs (which ORT Web emits via console.error
+          // in DevTools) while preserving genuine ERROR/FATAL diagnostics.
+          ortMod.env.logLevel = 'error';
+          // ORT's standard SIMD check. 'relaxed' would only add a Relaxed-SIMD capability check on the
+          // same ort-wasm-simd-threaded*.wasm binary, and throws where Relaxed SIMD is missing (Safari).
+          ortMod.env.wasm.simd = true;
+          if (webGpuDevice) ortMod.env.webgpu.device = webGpuDevice;
+        }
       } catch {
-        /* ignore if unavailable */
+        ortMod = null;
       }
-      return await ProteinMPNN.load(url, {
+      const load = () => ProteinMPNN.load(url, {
         backend: effectiveBackend,
         wasmPaths: WASM_PATHS,
-        numThreads: 1,
-        sessionOptions: { logSeverityLevel: 3 },
+        numThreads: WASM_NUM_THREADS,
+        sessionOptions: { graphOptimizationLevel: 'all', logSeverityLevel: 3 },
         fetch: makeCachedFetch((u, fromCache) => {
           fetchedUrls.push(u);
           if (fromCache) anyFromCache = true;
@@ -106,6 +154,14 @@ async function ensureModel(
           );
         }),
       });
+      // The native WebGPU EP takes the injected device and its tunables only as per-EP options.
+      return ortMod && webGpuDevice
+        ? await withWebGpuExecutionProviderOptions(
+            ortMod,
+            { ...MPNN_WEBGPU_EP_OPTIONS, device: webGpuDevice },
+            load,
+          )
+        : await load();
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       if (
@@ -484,6 +540,9 @@ createWorkerHarness({
     }
     loadedKey = null;
     loadedBackendMode = 'auto';
+    // Sessions are released above; the device is ours (not ORT's) to destroy.
+    deviceLostGuard.destroy(ortWebGpuDevice);
+    ortWebGpuDevice = null;
   },
 });
 

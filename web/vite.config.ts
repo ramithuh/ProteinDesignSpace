@@ -154,13 +154,14 @@ export default defineConfig({
         find: /^proteinmpnn-web$/,
         replacement: resolve(import.meta.dirname, 'node_modules/proteinmpnn-web/src/index.ts'),
       },
-      // In onnxruntime-web@1.24.3:
-      // - `onnxruntime-web/webgpu` requires `ort-wasm-simd-threaded.asyncify.wasm` (25.93 MiB),
+      // In onnxruntime-web@1.31.1:
+      // - `onnxruntime-web/webgpu` requires `ort-wasm-simd-threaded.asyncify.wasm` (27.42 MiB),
+      //   and the default JSEP build `ort-wasm-simd-threaded.jsep.wasm` (28.15 MiB), both
       //   exceeding Cloudflare Pages' 25 MiB per-file asset limit.
-      // - The default `onnxruntime-web` JSEP build omits `maxStorageBuffersPerShaderStage` in
-      //   its WebGPU `requestDevice()` call, causing silent Concat pipeline validation errors.
-      // Route WebGPU sessions to the modern C++ WebGPU EP via JSPI (`16.11 MiB < 25 MiB`),
-      // and WASM sessions (Safari/Firefox/CPU fallback) to the lean WASM runtime (`11.79 MiB`).
+      // - The JSEP build also omits `maxStorageBuffersPerShaderStage` in its WebGPU
+      //   `requestDevice()` call, causing silent Concat pipeline validation errors.
+      // Route WebGPU sessions to the modern C++ WebGPU EP via JSPI (`17.09 MiB < 25 MiB`),
+      // and WASM sessions (Safari/Firefox/CPU fallback) to the lean WASM runtime (`14.16 MiB`).
       {
         find: /^onnxruntime-web\/webgpu$/,
         replacement: resolve(import.meta.dirname, 'node_modules/onnxruntime-web/dist/ort.jspi.bundle.min.mjs'),

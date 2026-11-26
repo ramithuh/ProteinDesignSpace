@@ -1,5 +1,6 @@
 // Compatibility facade re-exporting Layer 1 Core Kernel WebGPU utilities.
 export {
+  createDeviceLostGuard,
   estimateSafeBrowserMemoryBudgetBytes,
   extractAdapterInfo,
   extractAdapterLimits,
@@ -9,9 +10,12 @@ export {
   probeBrowserHardwareCapabilities,
   requestResilientWebGpuAdapter,
   requestResilientWebGpuDevice,
+  tryCreateBuffer,
+  WebGpuOutOfMemoryError,
   type ResilientAdapterResult,
   type ResilientDeviceResult,
   type WebGpuAdapterInfoSnapshot,
   type WebGpuAdapterLimitsSnapshot,
+  type WebGpuDeviceLostGuard,
   type WebGpuHardwareCapabilities,
 } from '$lib/kernel/webgpu-device';

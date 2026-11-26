@@ -42,7 +42,7 @@ import {
 import { fetchCachedBytes } from '$lib/engine/opfs-cache';
 import { sha256Hex, type CollectionMember } from '$lib/engine/collections';
 import { planLocalFoldFanout } from '$lib/engine/work-plan';
-import { createWorkerHarness, fnv1a, type WorkerRunContext } from '$lib/kernel';
+import { createDeviceLostGuard, createWorkerHarness, fnv1a, type WorkerRunContext } from '$lib/kernel';
 import type {
   ArtifactProvenance,
   CollectionItemOutcome,
@@ -133,6 +133,8 @@ let lfCore: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let lfAf3: any = null;
 let gpuDevice: GPUDevice | null = null;
+// Intentional `gpuDevice.destroy()` on dispose must not run the device-lost recovery path.
+const deviceLostGuard = createDeviceLostGuard();
 let loadedModelKey: string | null = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let loadedAf2: any = null;
@@ -272,7 +274,7 @@ async function ensureDevice() {
     memoryBudgetBytes: resolveLocalFoldMemoryBudgetBytes(),
   });
   gpuDevice = dev;
-  void dev.lost.then(() => {
+  deviceLostGuard.watch(dev, () => {
     if (gpuDevice === dev) {
       gpuDevice = null;
       releaseCurrentModel();
@@ -284,13 +286,9 @@ async function ensureModelLoaded(ctx: WorkerRunContext, modelKey: string, maxTar
   await ensureCoreModules(ctx);
 
   if (loadedModelKey && loadedModelKey !== modelKey) {
+    // Checkpoint switch: release only the previous model's weights (releaseAllWeights, upstream's
+    // change-of-model path) and keep gpuDevice, so its ComputePipelineCache survives the switch.
     releaseCurrentModel();
-    try {
-      gpuDevice?.destroy();
-    } catch {
-      /* ignore */
-    }
-    gpuDevice = null;
   }
 
   await ensureDevice();
@@ -1508,7 +1506,7 @@ createWorkerHarness({
 
   async dispose() {
     releaseCurrentModel();
-    gpuDevice?.destroy();
+    deviceLostGuard.destroy(gpuDevice);
     gpuDevice = null;
   },
 });

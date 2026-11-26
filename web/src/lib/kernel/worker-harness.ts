@@ -4,6 +4,8 @@
 //   - Unified resilient WebGPU adapter/device acquisition + Safari desktop memory budget helper
 //   - Reference-counted serialized control chain (`inFlightRunPromise` + `activeControlOps` + `controlChain`) preventing abort/dispose/run GPU races:
 //     `{ id, type: 'aborted' }` is ONLY posted after `inFlightRunPromise` settles cleanly.
+//   - Non-poisoning control chain (Transformers.js `serializeOn`): a rejected abort/dispose step still posts its
+//     `aborted`/`disposed` reply and never wedges the commands queued behind it.
 //   - Owned transferable ArrayBuffer collection (`collectOwnedTransferables`).
 
 import {
@@ -162,10 +164,14 @@ export function createWorkerHarness<
 
   const enqueueControlOp = (op: () => Promise<void>): Promise<void> => {
     activeControlOps++;
-    const next = controlChain.then(op, op).finally(() => {
+    const next = controlChain.then(op).finally(() => {
       activeControlOps--;
     });
-    controlChain = next.catch(() => {});
+    // Advance the chain on either outcome so one rejected step never poisons the steps queued behind it.
+    controlChain = next.then(
+      () => {},
+      () => {},
+    );
     return next;
   };
 
@@ -207,7 +213,11 @@ export function createWorkerHarness<
       await enqueueControlOp(async () => {
         const runIdToAbort = activeRunId ?? msgId;
         activeAbortController?.abort(new Error('Run aborted'));
-        await runner.abort?.(runIdToAbort);
+        try {
+          await runner.abort?.(runIdToAbort);
+        } catch {
+          /* the AbortSignal above already stops the run; a failing runner hook must not withhold 'aborted' */
+        }
         // Critical invariant: NEVER post 'aborted' until in-flight run's finally block settles!
         if (inFlightRunPromise) {
           await inFlightRunPromise.catch(() => {});
@@ -220,12 +230,21 @@ export function createWorkerHarness<
     if (msg.type === 'dispose') {
       await enqueueControlOp(async () => {
         activeAbortController?.abort(new Error('Worker disposed'));
-        if (inFlightRunPromise) {
-          await runner.abort?.(activeRunId ?? msgId);
-          await inFlightRunPromise.catch(() => {});
+        try {
+          if (inFlightRunPromise) {
+            try {
+              await runner.abort?.(activeRunId ?? msgId);
+            } catch {
+              /* still wait for the run to settle before disposing */
+            }
+            await inFlightRunPromise.catch(() => {});
+          }
+          await runner.dispose();
+        } catch {
+          /* best-effort teardown: the scheduler terminates the worker after 'disposed' either way */
+        } finally {
+          initialized = false;
         }
-        await runner.dispose();
-        initialized = false;
         post({ id: msgId, type: 'disposed' });
       });
       return;

@@ -21,8 +21,12 @@ import {
 } from '$lib/engine/conditioning';
 import { makeSequenceKey } from '$lib/engine/collections';
 import { deriveStableItemSeed, planGeneratorDesigns } from '$lib/engine/work-plan';
-import { createWorkerHarness, fnv1a, type WorkerRunContext } from '$lib/kernel';
-import { releaseRfd4GeneratorActivations } from './lifecycle';
+import { createWorkerHarness, fnv1a, type ModelRunner, type WorkerRunContext } from '$lib/kernel';
+import {
+  releaseRfd4GeneratorActivations,
+  releaseRfd4UploadedShardBytes,
+  Rfd4ReleasedWeightError,
+} from './lifecycle';
 import { installRfd4QueuePacing } from './queue-pacing';
 import type {
   ConditionSpecArtifact,
@@ -78,6 +82,22 @@ let gpuDevice: GPUDevice | null = null;
 let shardedBundle: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let generator: any = null;
+// True once `shardedBundle.tensors` was compacted after GPU upload: a new generator must re-open the bundle.
+let shardBytesReleased = false;
+// Set if a released tensor is ever read; the worker then keeps the full bundle for its lifetime.
+let shardReleaseDisabled = false;
+
+/**
+ * Drop the sharded bundle's JS-heap shard bytes once the generator has them on the GPU
+ * (see `releaseRfd4UploadedShardBytes`). Encoder tensors go once `getEncoder()` has uploaded them.
+ */
+function releaseUploadedShardBytes() {
+  if (shardReleaseDisabled || !generator || !shardedBundle) return;
+  // The generator reads `this.weights` after upload; only compact when that is this bundle's tensors.
+  if (generator.weights !== shardedBundle.tensors) return;
+  releaseRfd4UploadedShardBytes(shardedBundle, { encoderUploaded: Boolean(generator.encoder) });
+  shardBytesReleased = true;
+}
 
 async function ensureLoaded(ctx: WorkerRunContext, needEncoder: boolean) {
   if (!rfd4Mod) {
@@ -175,6 +195,12 @@ async function ensureLoaded(ctx: WorkerRunContext, needEncoder: boolean) {
     });
   }
 
+  if (!generator && shardBytesReleased) {
+    // The released tensors now live only on a lost device's GPU: re-open the bundle (a Cache API hit).
+    shardedBundle = null;
+    shardBytesReleased = false;
+  }
+
   if (!shardedBundle) {
     ctx.progress('weights', 0.05, 'Fetching RFD4-Proteina weights (~330 MB, cached after first run)...');
     shardedBundle = await rfd4Mod.fetchShardedWeights(RFD4_SHARDED_URL, {
@@ -220,6 +246,7 @@ async function ensureLoaded(ctx: WorkerRunContext, needEncoder: boolean) {
       { half: true },
     );
   }
+  releaseUploadedShardBytes();
 }
 
 const SAFE_EXAMPLE_CIF_RE = /^[a-zA-Z0-9/_-]+\.cif(?:\.zst)?$/;
@@ -395,7 +422,35 @@ export function formatRfd4AuthorRunLabel(
   return outParts.join(' · ');
 }
 
-createWorkerHarness({
+/**
+ * Safety net for the post-upload shard release: if any code path reads a released tensor, rebuild
+ * from a freshly opened bundle (Cache API, no network) with release disabled, and rerun once.
+ */
+function withShardReleaseRecovery(runner: ModelRunner): ModelRunner {
+  return {
+    ...runner,
+    async run(ctx) {
+      try {
+        return await runner.run(ctx);
+      } catch (err) {
+        if (!(err instanceof Rfd4ReleasedWeightError) || shardReleaseDisabled) throw err;
+        console.warn('[rfd4] Released weight read after GPU upload; reloading the full bundle:', err.message);
+        shardReleaseDisabled = true;
+        try {
+          generator?.destroy?.();
+        } catch {
+          /* ignore */
+        }
+        generator = null;
+        shardedBundle = null;
+        shardBytesReleased = false;
+        return await runner.run(ctx);
+      }
+    },
+  };
+}
+
+createWorkerHarness(withShardReleaseRecovery({
   async run(ctx) {
     const p = ctx.params ?? {};
     const template = (ctx.inputs?.structure ?? ctx.inputs?.template) as StructureArtifact | undefined;
@@ -1041,6 +1096,8 @@ createWorkerHarness({
       designs.push(struct);
       candidates.push(candidate);
     }
+    // A partial-diffusion / inverse-folding run built the encoder lazily; its shard bytes can go now.
+    releaseUploadedShardBytes();
 
     const representative = designs[0];
     const repSelection = {
@@ -1101,7 +1158,8 @@ createWorkerHarness({
     }
     generator = null;
     shardedBundle = null;
+    shardBytesReleased = false;
     gpuDevice?.destroy();
     gpuDevice = null;
   },
-});
+}));

@@ -1,5 +1,7 @@
 // OPFS + CacheStorage weight caching utilities with streaming progress.
-// Runs in both Dedicated Web Workers (where OPFS is fastest) and main thread.
+// Runs in both Dedicated Web Workers (where OPFS is fastest) and main thread. In workers,
+// downloads stream straight to OPFS through `createSyncAccessHandle`; concurrent loads of
+// the same artifact share one download (`INFLIGHT_LOADS`).
 
 import { ARTIFACT_DB_NAME, clearArtifactDatabase } from './artifact-store';
 import {
@@ -89,9 +91,27 @@ export interface FetchProgress {
   fromCache: boolean;
 }
 
+interface InflightLoad {
+  key: string;
+  promise: Promise<Uint8Array>;
+  controller: AbortController;
+  listeners: Set<(p: FetchProgress) => void>;
+  last: FetchProgress | null;
+  /** Callers still waiting; the shared download is aborted only once every one of them has aborted. */
+  waiting: number;
+}
+
+/**
+ * In-flight load dedup (Transformers.js `utils/hub.js` `INFLIGHT_LOADS`): concurrent
+ * `fetchCachedBytes` calls for the same key + URL share one OPFS read / network download.
+ */
+const INFLIGHT_LOADS = new Map<string, InflightLoad>();
+
 /**
  * Fetch a binary artifact with streaming progress, persisting it in OPFS
  * (falling back gracefully to Cache API / direct network in private mode).
+ * Concurrent calls for the same key + URL coalesce into one load and resolve to the same
+ * bytes, so callers must treat the result as read-only.
  */
 export async function fetchCachedBytes(
   cacheKey: string,
@@ -99,10 +119,84 @@ export async function fetchCachedBytes(
   onProgress?: (p: FetchProgress) => void,
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
+  signal?.throwIfAborted();
+  const loadKey = `${cacheKey}\n${url}`;
+  let load = INFLIGHT_LOADS.get(loadKey);
+  if (!load) {
+    const created = {
+      key: loadKey,
+      controller: new AbortController(),
+      listeners: new Set<(p: FetchProgress) => void>(),
+      last: null,
+      waiting: 0,
+    } as unknown as InflightLoad;
+    const emit = (p: FetchProgress) => {
+      created.last = p;
+      for (const listener of created.listeners) {
+        try {
+          listener(p);
+        } catch {
+          /* one caller's progress callback must not fail the shared load */
+        }
+      }
+    };
+    created.promise = loadCachedBytes(cacheKey, url, emit, created.controller.signal).finally(() => {
+      if (INFLIGHT_LOADS.get(loadKey) === created) INFLIGHT_LOADS.delete(loadKey);
+    });
+    INFLIGHT_LOADS.set(loadKey, created);
+    load = created;
+  }
+  return joinInflightLoad(load, onProgress, signal);
+}
+
+function joinInflightLoad(
+  load: InflightLoad,
+  onProgress: ((p: FetchProgress) => void) | undefined,
+  signal: AbortSignal | undefined,
+): Promise<Uint8Array> {
+  load.waiting++;
+  if (onProgress) {
+    load.listeners.add(onProgress);
+    // A caller joining mid-download starts from the shared load's latest progress.
+    if (load.last) onProgress(load.last);
+  }
+  return new Promise<Uint8Array>((resolve, reject) => {
+    const leave = () => {
+      signal?.removeEventListener('abort', onAbort);
+      if (onProgress) load.listeners.delete(onProgress);
+    };
+    const onAbort = () => {
+      leave();
+      if (--load.waiting === 0) {
+        if (INFLIGHT_LOADS.get(load.key) === load) INFLIGHT_LOADS.delete(load.key);
+        load.controller.abort(signal?.reason);
+      }
+      reject(signal?.reason);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    load.promise.then(
+      (bytes) => {
+        leave();
+        resolve(bytes);
+      },
+      (err) => {
+        leave();
+        reject(err);
+      },
+    );
+  });
+}
+
+async function loadCachedBytes(
+  cacheKey: string,
+  url: string,
+  onProgress: (p: FetchProgress) => void,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
   // 1. Try OPFS read first
   const opfsHit = await readFromOpfs(cacheKey);
   if (opfsHit) {
-    onProgress?.({ loaded: opfsHit.byteLength, total: opfsHit.byteLength, fromCache: true });
+    onProgress({ loaded: opfsHit.byteLength, total: opfsHit.byteLength, fromCache: true });
     return opfsHit;
   }
 
@@ -113,7 +207,7 @@ export async function fetchCachedBytes(
       const hit = await cache.match(url);
       if (hit) {
         const buf = new Uint8Array(await hit.arrayBuffer());
-        onProgress?.({ loaded: buf.byteLength, total: buf.byteLength, fromCache: true });
+        onProgress({ loaded: buf.byteLength, total: buf.byteLength, fromCache: true });
         return buf;
       }
     } catch {
@@ -134,30 +228,49 @@ export async function fetchCachedBytes(
   const canTrustContentLength = !contentEncoding && resp.type !== 'cors';
 
   let bytes: Uint8Array;
+  let storedOpfs = false;
   if (resp.body) {
+    // Dedicated workers stream chunks straight to OPFS instead of holding them all on the JS heap.
+    const sink = await openOpfsStreamSink(cacheKey);
     const reader = resp.body.getReader();
     const chunks: Uint8Array[] = [];
     let loaded = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      loaded += value.byteLength;
-      // Keep reported total >= loaded so callers computing loaded / total stay <= 1 (e.g. gzipped bodies)
-      onProgress?.({ loaded, total: Math.max(total, loaded), fromCache: false });
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (sink?.active) {
+          const spilled = sink.write(value);
+          if (spilled) chunks.push(...spilled);
+        } else {
+          chunks.push(value);
+        }
+        loaded += value.byteLength;
+        // Keep reported total >= loaded so callers computing loaded / total stay <= 1 (e.g. gzipped bodies)
+        onProgress({ loaded, total: Math.max(total, loaded), fromCache: false });
+      }
+      if (total > 0 && (loaded === 0 || (canTrustContentLength && loaded < total))) {
+        chunks.length = 0;
+        throw new Error(`Truncated download for ${url}: received ${loaded} of ${total} bytes`);
+      }
+    } catch (err) {
+      await sink?.abort();
+      throw err;
     }
-    if (total > 0 && (loaded === 0 || (canTrustContentLength && loaded < total))) {
+    if (sink?.active) {
+      bytes = await sink.commit(loaded);
+      storedOpfs = true;
+    } else {
+      await sink?.abort();
+      bytes = new Uint8Array(loaded);
+      let off = 0;
+      for (let i = 0; i < chunks.length; i++) {
+        bytes.set(chunks[i], off);
+        off += chunks[i].byteLength;
+      }
+      // Release chunk references before persisting to OPFS to avoid holding ~2x RAM during write
       chunks.length = 0;
-      throw new Error(`Truncated download for ${url}: received ${loaded} of ${total} bytes`);
     }
-    bytes = new Uint8Array(loaded);
-    let off = 0;
-    for (let i = 0; i < chunks.length; i++) {
-      bytes.set(chunks[i], off);
-      off += chunks[i].byteLength;
-    }
-    // Release chunk references before persisting to OPFS to avoid holding ~2x RAM during write
-    chunks.length = 0;
   } else {
     bytes = new Uint8Array(await resp.arrayBuffer());
     if (total > 0 && (bytes.byteLength === 0 || (canTrustContentLength && bytes.byteLength < total))) {
@@ -165,11 +278,11 @@ export async function fetchCachedBytes(
         `Truncated download for ${url}: received ${bytes.byteLength} of ${total} bytes`,
       );
     }
-    onProgress?.({ loaded: bytes.byteLength, total: bytes.byteLength, fromCache: false });
+    onProgress({ loaded: bytes.byteLength, total: bytes.byteLength, fromCache: false });
   }
 
   // 4. Persist to OPFS (best-effort)
-  const storedOpfs = await writeToOpfs(cacheKey, bytes);
+  if (!storedOpfs) storedOpfs = await writeToOpfs(cacheKey, bytes);
   if (!storedOpfs && typeof caches !== 'undefined') {
     try {
       const cache = await caches.open(CACHE_NAME);
@@ -265,17 +378,160 @@ async function getWeightsDir(create: boolean): Promise<FileSystemDirectoryHandle
   }
 }
 
+/**
+ * Marker file present while an entry is being streamed (`<name>.incomplete`). A crash or closed tab
+ * mid-download leaves it behind, so the partial file reads as a miss; entries written before the
+ * marker existed have none and stay valid.
+ */
+const INCOMPLETE_SUFFIX = '.incomplete';
+
+/** Worker-only `FileSystemSyncAccessHandle` surface used for streaming writes. */
+interface SyncAccessHandleLike {
+  read(buffer: Uint8Array, opts?: { at: number }): number;
+  write(buffer: Uint8Array, opts?: { at: number }): number;
+  truncate(size: number): void;
+  getSize(): number;
+  flush(): void;
+  close(): void;
+}
+
+interface OpfsStreamSink {
+  /** False once the sink has failed over to memory (or been committed / aborted). */
+  readonly active: boolean;
+  /** Append a chunk; on a failed write, returns the bytes to keep buffering in memory instead. */
+  write(chunk: Uint8Array): Uint8Array[] | null;
+  /** Truncate, flush, verify the size, read the entry back, close, and clear the incomplete marker. */
+  commit(nbytes: number): Promise<Uint8Array>;
+  /** Close and delete the partial entry (and wait for a failed write's cleanup). */
+  abort(): Promise<void>;
+}
+
+/**
+ * Open a streaming OPFS writer for `key` via `createSyncAccessHandle` (TVM `opfs_store.ts` pattern).
+ * Returns null where sync access handles do not exist (main thread) or cannot be taken
+ * (`NoModificationAllowedError` while another context holds the file), leaving the caller on the
+ * buffered `createWritable()` / Cache API path.
+ */
+async function openOpfsStreamSink(key: string): Promise<OpfsStreamSink | null> {
+  const dir = await getWeightsDir(true);
+  if (!dir) return null;
+  const safeName = sanitizeKey(key);
+  const markerName = `${safeName}${INCOMPLETE_SUFFIX}`;
+  let handle: SyncAccessHandleLike;
+  try {
+    const fh = (await dir.getFileHandle(safeName, { create: true })) as unknown as {
+      createSyncAccessHandle?: () => Promise<SyncAccessHandleLike>;
+    };
+    if (typeof fh.createSyncAccessHandle !== 'function') return null;
+    // Exclusive per file: fails with NoModificationAllowedError while another context streams it,
+    // in which case that context's marker must be left alone.
+    handle = await fh.createSyncAccessHandle();
+  } catch {
+    return null;
+  }
+
+  let active = true;
+  let offset = 0;
+  let discarding: Promise<void> = Promise.resolve();
+  const discard = async () => {
+    try {
+      handle.close();
+    } catch {
+      /* already closed */
+    }
+    await dir.removeEntry(safeName).catch(() => {});
+    await dir.removeEntry(markerName).catch(() => {});
+  };
+  try {
+    // Mark the entry incomplete before its old bytes are truncated away.
+    await dir.getFileHandle(markerName, { create: true });
+    handle.truncate(0);
+  } catch {
+    await discard();
+    return null;
+  }
+
+  return {
+    get active() {
+      return active;
+    },
+    write(chunk) {
+      try {
+        const written = handle.write(chunk, { at: offset });
+        if (written !== chunk.byteLength) {
+          throw new Error(`Short OPFS write: ${written}/${chunk.byteLength} bytes`);
+        }
+        offset += written;
+        return null;
+      } catch {
+        // Quota or I/O failure mid-stream: move what reached disk back into memory and keep downloading.
+        active = false;
+        const prefix = new Uint8Array(offset);
+        let read = -1;
+        try {
+          read = handle.read(prefix, { at: 0 });
+        } catch {
+          /* reported below */
+        }
+        discarding = discard();
+        if (read !== offset) {
+          throw new Error(`OPFS read-back failed after a write error: ${read}/${offset} bytes`);
+        }
+        return [prefix, chunk];
+      }
+    },
+    async commit(nbytes) {
+      active = false;
+      try {
+        handle.truncate(nbytes);
+        handle.flush();
+        const size = handle.getSize();
+        if (size !== nbytes) throw new Error(`OPFS size mismatch: ${size}/${nbytes} bytes`);
+        const out = new Uint8Array(nbytes);
+        const read = handle.read(out, { at: 0 });
+        if (read !== nbytes) throw new Error(`Short OPFS read: ${read}/${nbytes} bytes`);
+        handle.close();
+        // Complete from here on: drop the marker so later reads treat the entry as a hit.
+        await dir.removeEntry(markerName).catch(() => {});
+        return out;
+      } catch (err) {
+        await discard();
+        throw err;
+      }
+    },
+    async abort() {
+      if (active) {
+        active = false;
+        discarding = discard();
+      }
+      // Also settles a discard started by a failed write, before the caller rewrites the entry.
+      await discarding;
+    },
+  };
+}
+
 async function readFromOpfs(key: string): Promise<Uint8Array | null> {
   const dir = await getWeightsDir(false);
   if (!dir) return null;
+  const safeName = sanitizeKey(key);
   try {
-    const fh = await dir.getFileHandle(sanitizeKey(key));
+    const incomplete = await dir.getFileHandle(`${safeName}${INCOMPLETE_SUFFIX}`).then(
+      () => true,
+      () => false,
+    );
+    if (incomplete) return null;
+    const fh = await dir.getFileHandle(safeName);
     const file = await fh.getFile();
     if (file.size === 0) return null;
     return new Uint8Array(await file.arrayBuffer());
   } catch {
     return null;
   }
+}
+
+/** A complete rewrite supersedes a marker left behind by an interrupted stream. */
+async function clearIncompleteMarker(dir: FileSystemDirectoryHandle, safeName: string): Promise<void> {
+  await dir.removeEntry(`${safeName}${INCOMPLETE_SUFFIX}`).catch(() => {});
 }
 
 async function writeToOpfs(key: string, bytes: Uint8Array): Promise<boolean> {
@@ -291,6 +547,7 @@ async function writeToOpfs(key: string, bytes: Uint8Array): Promise<boolean> {
       await writable.write(bytes as unknown as BufferSource);
       await writable.close();
       writable = null;
+      await clearIncompleteMarker(dir, safeName);
       return true;
     }
     // Worker-only sync access handle fallback
@@ -315,6 +572,7 @@ async function writeToOpfs(key: string, bytes: Uint8Array): Promise<boolean> {
       } finally {
         syncHandle.close();
       }
+      await clearIncompleteMarker(dir, safeName);
       return true;
     }
     return false;
@@ -355,7 +613,7 @@ export async function getCacheStats(): Promise<{
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           for await (const [name, handle] of (dir as any).entries()) {
-            if (handle.kind === 'file') {
+            if (handle.kind === 'file' && !name.endsWith(INCOMPLETE_SUFFIX)) {
               const f = await handle.getFile();
               opfsFiles.push({
                 name: dirName === 'denovo-weights' ? name : `${dirName}/${name}`,

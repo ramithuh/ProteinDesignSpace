@@ -31,6 +31,20 @@ describe('ONNX Runtime Web first-party asset integrity (issue #59)', () => {
     expect(existsSync(resolve(ORT_VENDOR_DIR, 'ort-wasm-simd-threaded.jsep.wasm'))).toBe(false);
   });
 
+  it('pins onnxruntime-web 1.31.1 and dedupes proteinmpnn-web onto the same ORT copy', () => {
+    const pkg = JSON.parse(readFileSync(resolve(WEB_ROOT, 'package.json'), 'utf8'));
+    expect(pkg.dependencies['onnxruntime-web']).toBe('1.31.1');
+    expect(pkg.overrides?.['proteinmpnn-web']?.['onnxruntime-web']).toBe('$onnxruntime-web');
+    const lock = JSON.parse(readFileSync(resolve(WEB_ROOT, 'package-lock.json'), 'utf8'));
+    expect(lock.packages['node_modules/onnxruntime-web'].version).toBe('1.31.1');
+    expect(lock.packages['node_modules/onnxruntime-common'].version).toBe('1.31.1');
+    expect(lock.packages['node_modules/proteinmpnn-web/node_modules/onnxruntime-web']).toBeUndefined();
+    const installed = JSON.parse(
+      readFileSync(resolve(WEB_ROOT, 'node_modules/onnxruntime-web/package.json'), 'utf8'),
+    );
+    expect(installed.version).toBe('1.31.1');
+  });
+
   it('uses ORT bundles whose referenced WASM/MJS filenames are all present in vendor/ort/', () => {
     for (const bundleName of ['ort.jspi.bundle.min.mjs', 'ort.wasm.bundle.min.mjs']) {
       const ortBundlePath = resolve(WEB_ROOT, 'node_modules/onnxruntime-web/dist', bundleName);

@@ -37,7 +37,12 @@
   "dependencies": {
     "@xyflow/svelte": "^2.0.2",
     "molstar": "^5.13.1",
-    "onnxruntime-web": "1.24.3",
+    "onnxruntime-web": "1.31.1",
     "proteinmpnn-web": "github:MurrellGroup/webProteinMPNN#10849c13a9"
+  },
+  "overrides": {
+    "proteinmpnn-web": {
+      "onnxruntime-web": "$onnxruntime-web"
+    }
   }
 }
