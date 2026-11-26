@@ -4,6 +4,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()`.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { assertSafeStepCount, formatLowStepGeometryWarning } from '$lib/engine/step-policy';
 import { requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
@@ -179,7 +180,7 @@ createWorkerHarness({
       condSeq.length > 0
         ? condSeq.length
         : Math.max(20, Math.min(256, Math.round(Number(p.length ?? 80))));
-    const steps = Math.max(5, Math.min(100, Math.round(Number(p.steps ?? 50))));
+    const steps = assertSafeStepCount('foldflow2', { ...p, steps: p.steps }, 50);
     const rotationScaling = Math.max(1, Math.min(20, Number(p.rotationScaling ?? 10)));
     const selfConditioning = p.selfConditioning !== false;
     const seed = Math.round(Number(p.seed ?? 42));
@@ -289,6 +290,8 @@ createWorkerHarness({
         const pdbText = String(pdbMod.toPDB(res, condSeq ? { sequence: condSeq } : undefined));
         const parsed = parseStructureText(pdbText);
         const geom = computeGeometryStats(parsed.caCoords);
+        const stepGeomWarn = formatLowStepGeometryWarning('foldflow2', p, geom);
+        if (stepGeomWarn) console.warn(stepGeomWarn);
         const runHash = fnv1a(
           JSON.stringify({
             length,
@@ -324,6 +327,12 @@ createWorkerHarness({
           atomPresence: parsed.atomPresence,
           diagnostics: parsed.diagnostics,
           geometry: geom,
+          provenance: {
+            quantization: precision,
+            diffusionStepsScheduled: steps,
+            diffusionStepsRun: steps,
+            ...(stepGeomWarn ? { warnings: [stepGeomWarn] } : {}),
+          },
           designKey,
           designIndex: d,
         });

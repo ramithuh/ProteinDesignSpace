@@ -515,7 +515,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'integer',
         tier: 'advanced',
         defaultValue: 60,
-        min: 10,
+        min: 50,
         max: 120,
         step: 1,
         upstreamDefaultHint: 'Upstream default: 60 (≥58 recommended)',
@@ -924,10 +924,16 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'integer',
         tier: 'primary',
         defaultValue: 200,
-        min: 20,
+        min: 50,
         max: 500,
         step: 10,
         upstreamDefaultHint: 'Upstream default: 200',
+        warnBelow: {
+          threshold: 200,
+          message:
+            'ProtPardelle EDM reverse diffusion requires ≥200 steps to avoid fractured backbones and steric clashes (upstream default: 200; ≥50 allowed in Partial Diffusion mode).',
+          fixValue: 200,
+        },
         description: 'EDM reverse diffusion steps.',
       },
       {
@@ -1146,10 +1152,16 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'integer',
         tier: 'primary',
         defaultValue: 50,
-        min: 5,
+        min: 20,
         max: 50,
         step: 5,
         upstreamDefaultHint: 'Upstream full schedule: 50',
+        warnBelow: {
+          threshold: 50,
+          message:
+            'RFdiffusion full reverse schedule is 50 steps; fewer than 20 steps degrade backbone coherence.',
+          fixValue: 50,
+        },
         description: 'Number of reverse 3D backbone denoising steps (up to 50).',
       },
       {
@@ -1259,10 +1271,16 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'integer',
         tier: 'primary',
         defaultValue: 50,
-        min: 10,
+        min: 20,
         max: 200,
         step: 5,
         upstreamDefaultHint: 'Upstream default: 200 (50 recommended for fast browser runs)',
+        warnBelow: {
+          threshold: 50,
+          message:
+            'RFdiffusion3 browser default is 50 steps (upstream: 200); fewer than 20 steps degrade backbone geometry.',
+          fixValue: 50,
+        },
         description: 'Number of AF3/EDM reverse diffusion updates.',
       },
       {
@@ -1602,10 +1620,16 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'integer',
         tier: 'primary',
         defaultValue: 200,
-        min: 3,
+        min: 200,
         max: 500,
         step: 1,
         upstreamDefaultHint: 'Upstream default: 200 steps, 3 recycles (design.yaml: 500)',
+        warnBelow: {
+          threshold: 200,
+          message:
+            'BoltzGen-1 EDM/AF3 diffusion requires ≥200 steps for coherent backbone geometry (upstream default: 200; design.yaml: 500).',
+          fixValue: 200,
+        },
         description: 'Number of reverse EDM/AF3 diffusion steps.',
       },
       {
@@ -2060,6 +2084,12 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         max: 32,
         step: 1,
         upstreamDefaultHint: 'Distilled checkpoint default: 16 steps',
+        warnBelow: {
+          threshold: 4,
+          message:
+            'SiD-Protein is a distilled few-step sampler (1–32 steps supported; 16 matches upstream, ≥4 recommended for best geometry).',
+          fixValue: 16,
+        },
         description: 'Number of distilled reverse steps (16 matches the upstream launcher).',
       },
       {
@@ -2268,9 +2298,16 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'integer',
         tier: 'primary',
         defaultValue: 100,
-        min: 10,
+        min: 20,
         max: 200,
         step: 10,
+        upstreamDefaultHint: 'Upstream default: 100',
+        warnBelow: {
+          threshold: 50,
+          message:
+            'FrameFlow SE(3) Euler integration needs ≥20 steps (and dt*expRate ≤ 1.0 in exponential mode); 100 steps match upstream.',
+          fixValue: 100,
+        },
         description: 'Number of rigid-frame Euler integration steps.',
       },
       {
@@ -2377,9 +2414,16 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         kind: 'integer',
         tier: 'primary',
         defaultValue: 50,
-        min: 5,
+        min: 20,
         max: 100,
         step: 5,
+        upstreamDefaultHint: 'Upstream default: 50',
+        warnBelow: {
+          threshold: 50,
+          message:
+            'FoldFlow 2 SE(3) flow matching defaults to 50 steps; fewer than 20 steps degrade backbone geometry.',
+          fixValue: 50,
+        },
         description: 'Number of reverse flow-matching steps (upstream default: 50).',
       },
       {

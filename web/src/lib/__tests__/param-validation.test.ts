@@ -51,9 +51,11 @@ describe('parameter validation & numeric sanitization', () => {
     expect(commitNumericDraft('', lenSpec, 70)).toBe(70);
   });
 
-  it('warns on RFD4 nsteps below 58 due to vf_tsr instability', () => {
+  it('warns on RFD4 nsteps below 58 and rejects below 50 due to vf_tsr instability', () => {
     const stepSpec = NUMERIC_SPECS['rfd4-proteina'].nsteps;
-    expect(validateNumericDraft('30', stepSpec).status).toBe('warn');
+    expect(validateNumericDraft('30', stepSpec).status).toBe('error');
+    expect(validateNumericDraft('49', stepSpec).status).toBe('error');
+    expect(validateNumericDraft('52', stepSpec).status).toBe('warn');
     expect(validateNumericDraft('60', stepSpec).status).toBe('ok');
   });
 

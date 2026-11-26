@@ -4,6 +4,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()` for standardized lifecycle, progress, and disposal.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { assertSafeStepCount, formatLowStepGeometryWarning } from '$lib/engine/step-policy';
 import { requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
 import {
   collectOwnedTransferables,
@@ -172,7 +173,7 @@ createWorkerHarness({
     const precision = normalizePrecision(p.precision);
     const rawLength = Math.max(16, Math.min(256, Math.round(Number(p.length ?? 80))));
     const numDesigns = Math.max(1, Math.min(8, Math.round(Number(p.numDesigns ?? 1))));
-    const numSteps = Math.max(5, Math.min(50, Math.round(Number(p.numSteps ?? 50))));
+    const numSteps = assertSafeStepCount('rfdiffusion', { ...p, numSteps: p.numSteps }, 50);
     const contig = String(p.contig ?? '').trim();
     const symmetry = taskMode === 'symmetry' ? normalizeSymmetry(p.symmetry) : undefined;
     const seed = Math.max(0, Math.round(Number(p.seed ?? 42)));
@@ -256,6 +257,8 @@ createWorkerHarness({
         parsed.resNums,
         parsed.insCodes,
       );
+      const stepGeomWarn = formatLowStepGeometryWarning('rfdiffusion', p, geometry);
+      if (stepGeomWarn) console.warn(stepGeomWarn);
       const designKey = `design-${d + 1}`;
       const structId = `rfd-${taskMode}-${parsed.nResidues}aa-d${d + 1}-${runHash}`;
 
@@ -332,6 +335,7 @@ createWorkerHarness({
           quantization: precision,
           diffusionStepsScheduled: numSteps,
           diffusionStepsRun: numSteps,
+          ...(stepGeomWarn ? { warnings: [stepGeomWarn] } : {}),
         },
       };
       items.push(artifact);

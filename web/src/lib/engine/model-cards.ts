@@ -4,6 +4,7 @@
 
 import { LOCALFOLD_MODEL_OPTIONS, MPNN_VARIANT_OPTIONS } from './registry';
 import { getActivePluginRegistry } from '$lib/kernel/active-registry';
+import { getModelStepPolicy, type ModelSamplingEnvelope } from './step-policy';
 
 export interface ParityMeasurement {
   /** Measured quantity and comparison basis (e.g. "WebGPU ΔΔG relRMS vs PyTorch FP32"). */
@@ -42,6 +43,8 @@ export interface ModelCardSpec {
   license: string;
   citation: string;
   limitations: string[];
+  /** Model-Card-backed per-model sampling step operating envelope (populated for step-configurable generators). */
+  samplingEnvelope?: ModelSamplingEnvelope;
 }
 
 export const HOSTED_PORT_CARD_IDS = [
@@ -1510,6 +1513,15 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     ],
   },
 };
+
+for (const card of Object.values(MODEL_CARDS)) {
+  if (card.adapterId) {
+    const envelope = getModelStepPolicy(card.adapterId);
+    if (envelope) {
+      card.samplingEnvelope = envelope;
+    }
+  }
+}
 
 export function getActivePrecision(card: ModelCardSpec): PrecisionTierSpec {
   return card.precisions.find((p) => p.id === card.activePrecisionId) ?? card.precisions[0];

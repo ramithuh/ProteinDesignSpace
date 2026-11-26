@@ -4,6 +4,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()`.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { assertSafeStepCount, formatLowStepGeometryWarning } from '$lib/engine/step-policy';
 import { requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
@@ -163,7 +164,7 @@ createWorkerHarness({
     abortRequested = false;
     const p = ctx.params ?? {};
     const length = Math.max(20, Math.min(300, Math.round(Number(p.length ?? 80))));
-    const steps = Math.max(10, Math.min(200, Math.round(Number(p.steps ?? 100))));
+    const steps = assertSafeStepCount('frameflow', { ...p, steps: p.steps }, 100);
     const schedule = normalizeSchedule(p.schedule);
     const expRate = Math.max(1, Math.min(30, Number(p.expRate ?? 10)));
     const selfCondition = p.selfCondition !== false;
@@ -259,6 +260,8 @@ createWorkerHarness({
           }
         }
         const geom = computeGeometryStats(parsed.caCoords);
+        const stepGeomWarn = formatLowStepGeometryWarning('frameflow', p, geom);
+        if (stepGeomWarn) console.warn(stepGeomWarn);
         const runHash = fnv1a(
           JSON.stringify({ length, steps, schedule, expRate, selfCondition, seed: designSeed, precision }),
         );
@@ -286,6 +289,12 @@ createWorkerHarness({
           atomPresence: parsed.atomPresence,
           diagnostics: parsed.diagnostics,
           geometry: geom,
+          provenance: {
+            quantization: precision,
+            diffusionStepsScheduled: steps,
+            diffusionStepsRun: steps,
+            ...(stepGeomWarn ? { warnings: [stepGeomWarn] } : {}),
+          },
           designKey,
           designIndex: d,
         });

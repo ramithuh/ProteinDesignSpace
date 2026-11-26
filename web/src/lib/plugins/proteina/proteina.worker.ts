@@ -4,6 +4,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()`.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { assertSafeStepCount, formatLowStepGeometryWarning } from '$lib/engine/step-policy';
 import { requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
@@ -159,8 +160,8 @@ createWorkerHarness({
     abortRequested = false;
     const p = ctx.params ?? {};
     const length = Math.max(20, Math.min(300, Math.round(Number(p.length ?? 80))));
-    const steps = Math.max(10, Math.min(400, Math.round(Number(p.steps ?? 400))));
     const mode = normalizeMode(p.mode);
+    const steps = assertSafeStepCount('proteina', { ...p, mode, steps: p.steps }, 400);
     const noiseScale = Math.max(0.05, Math.min(1.0, Number(p.noiseScale ?? 0.45)));
     const selfCondition = p.selfCondition !== false;
     const seed = Math.round(Number(p.seed ?? 42));
@@ -247,6 +248,8 @@ createWorkerHarness({
           }
         }
         const geom = computeGeometryStats(parsed.caCoords);
+        const stepGeomWarn = formatLowStepGeometryWarning('proteina', p, geom);
+        if (stepGeomWarn) console.warn(stepGeomWarn);
         const runHash = fnv1a(
           JSON.stringify({ length, steps, mode, noiseScale, selfCondition, seed: designSeed, precision }),
         );
@@ -274,6 +277,12 @@ createWorkerHarness({
           atomPresence: parsed.atomPresence,
           diagnostics: parsed.diagnostics,
           geometry: geom,
+          provenance: {
+            quantization: precision,
+            diffusionStepsScheduled: steps,
+            diffusionStepsRun: steps,
+            ...(stepGeomWarn ? { warnings: [stepGeomWarn] } : {}),
+          },
           designKey,
           designIndex: d,
         });

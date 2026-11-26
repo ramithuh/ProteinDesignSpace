@@ -9,11 +9,14 @@
     validateTiedPositions,
     type NumericFieldSpec,
   } from '$lib/engine/param-validation';
+  import { resolveStepRule } from '$lib/engine/step-policy';
   import type { AdapterParamField, AdapterParamOption } from '$lib/engine/types';
 
   interface Props {
     fields: AdapterParamField[];
     params: Record<string, unknown>;
+    /** Optional adapter ID enabling Model-Card-backed mode-aware sampling step bounds. */
+    adapterId?: string;
     disabled?: boolean;
     /** Optional active mode ID (used to evaluate mode-scoped `warnBelow` guardrails). */
     activeMode?: string | null;
@@ -29,6 +32,7 @@
   let {
     fields,
     params,
+    adapterId = undefined,
     disabled = false,
     activeMode = undefined,
     optionOverrides = undefined,
@@ -60,10 +64,76 @@
     return null;
   }
 
+  function resolveStepRuleForField(field: AdapterParamField) {
+    if (!adapterId) return null;
+    const resolved = resolveStepRule(adapterId, params);
+    if (!resolved || resolved.envelope.paramKey !== field.key) return null;
+    return resolved.rule;
+  }
+
   function resolveNumericSpec(field: AdapterParamField): NumericFieldSpec {
-    const base = fieldToNumericSpec(field, resolveCurrentMode());
+    let spec = fieldToNumericSpec(field, resolveCurrentMode());
+    const stepRule = resolveStepRuleForField(field);
+    if (stepRule) {
+      const nextMin = Math.max(spec.min, stepRule.minSafeSteps);
+      const nextMax = Math.min(spec.max, stepRule.maxSteps);
+      const fixValue = Math.max(nextMin, Math.min(stepRule.upstreamDefault, nextMax));
+      const shouldPopulateWarnBelow =
+        !spec.warnBelow &&
+        (stepRule.recommendedMinSteps > stepRule.minSafeSteps || stepRule.recommendedMinSteps > 0);
+      spec = {
+        ...spec,
+        min: nextMin,
+        max: nextMax,
+        ...(shouldPopulateWarnBelow
+          ? {
+              warnBelow: {
+                threshold: stepRule.recommendedMinSteps,
+                message: stepRule.rationale,
+                fixValue,
+              },
+            }
+          : {}),
+      };
+    }
     const override = numericSpecOverrides?.[field.key];
-    return override ? { ...base, ...override } : base;
+    return override ? { ...spec, ...override } : spec;
+  }
+
+  function resolveNumericFixAction(
+    field: AdapterParamField,
+    numSpec: NumericFieldSpec,
+    curNumVal: number,
+  ): { value: number; isError: boolean; label: string } | null {
+    if (!Number.isFinite(curNumVal)) return null;
+    if (curNumVal < numSpec.min) {
+      const stepRule = resolveStepRuleForField(field);
+      const preferred =
+        stepRule !== null
+          ? Math.min(stepRule.upstreamDefault, numSpec.max)
+          : (numSpec.warnBelow?.fixValue ?? numSpec.min);
+      const target = Math.max(numSpec.min, Math.min(numSpec.max, preferred));
+      const isDefaultTarget =
+        (stepRule !== null && target === Math.min(stepRule.upstreamDefault, numSpec.max)) ||
+        (numSpec.warnBelow?.fixValue !== undefined && target === numSpec.warnBelow.fixValue);
+      return {
+        value: target,
+        isError: true,
+        label: isDefaultTarget ? `Reset to ${target}` : `Set ${target}`,
+      };
+    }
+    if (
+      numSpec.warnBelow &&
+      numSpec.warnBelow.fixValue !== undefined &&
+      curNumVal < numSpec.warnBelow.threshold
+    ) {
+      return {
+        value: numSpec.warnBelow.fixValue,
+        isError: false,
+        label: `Reset to ${numSpec.warnBelow.fixValue}`,
+      };
+    }
+    return null;
   }
 
   function resolveSelectOptions(field: AdapterParamField): AdapterParamOption[] {
@@ -127,6 +197,7 @@
   {#if field.kind === 'number' || field.kind === 'integer'}
     {@const numSpec = resolveNumericSpec(field)}
     {@const curNumVal = Number(params[field.key] ?? field.defaultValue ?? numSpec.defaultValue)}
+    {@const fixAction = resolveNumericFixAction(field, numSpec, curNumVal)}
     <label class="schema-field">
       <span class="label-row">
         <span>{labelWithUnit(field)}</span>
@@ -143,14 +214,15 @@
         value={curNumVal}
         onChange={(v) => onChange(field.key, v)}
       />
-      {#if numSpec.warnBelow && numSpec.warnBelow.fixValue !== undefined && Number.isFinite(curNumVal) && curNumVal < numSpec.warnBelow.threshold}
+      {#if fixAction}
         <button
           type="button"
           class="warn-fix-btn"
+          class:err-fix-btn={fixAction.isError}
           disabled={fieldDisabled}
-          onclick={() => onChange(field.key, numSpec.warnBelow!.fixValue)}
+          onclick={() => onChange(field.key, fixAction.value)}
         >
-          Reset to {numSpec.warnBelow.fixValue}
+          {fixAction.label}
         </button>
       {/if}
       {#if field.description}
@@ -492,6 +564,11 @@
     border: 1px solid var(--warn-border);
     border-radius: 4px;
     cursor: pointer;
+  }
+  .warn-fix-btn.err-fix-btn {
+    color: var(--err-text);
+    background: var(--err-bg);
+    border-color: var(--err-border);
   }
   .warn-fix-btn:hover:not(:disabled) {
     filter: brightness(1.06);

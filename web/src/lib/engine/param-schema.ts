@@ -7,6 +7,7 @@ import type {
   AdapterModeSpec,
   AdapterParamField,
 } from './types';
+import { validateStepCount } from './step-policy';
 
 export interface SchemaNumericSpec {
   min: number;
@@ -352,6 +353,7 @@ export function validateParamsWithSchema(
 
   // 2. Field-level validation over mode-applicable fields
   const fields = getVisibleParamFields(manifest, p);
+  const numericErrorKeys = new Set<string>();
   for (const field of fields) {
     const raw = p[field.key];
     if (raw === undefined) continue;
@@ -365,6 +367,7 @@ export function validateParamsWithSchema(
       const hasMax = typeof field.max === 'number';
       if (!Number.isFinite(val)) {
         errs.push(`"${label}": ${field.key} must be a valid number.`);
+        numericErrorKeys.add(field.key);
       } else if ((hasMin && val < field.min!) || (hasMax && val > field.max!)) {
         if (hasMin && hasMax) {
           errs.push(`"${label}": ${field.key} must be between ${field.min} and ${field.max}${unit}.`);
@@ -373,8 +376,10 @@ export function validateParamsWithSchema(
         } else {
           errs.push(`"${label}": ${field.key} must be <= ${field.max}${unit}.`);
         }
+        numericErrorKeys.add(field.key);
       } else if (field.kind === 'integer' && !Number.isInteger(val)) {
         errs.push(`"${label}": ${field.key} must be an integer.`);
+        numericErrorKeys.add(field.key);
       }
       continue;
     }
@@ -446,6 +451,12 @@ export function validateParamsWithSchema(
         }
       }
     }
+  }
+
+  // 3. Model-Card-backed mode-aware sampling step envelope check
+  const stepCheck = validateStepCount(manifest.id, p);
+  if (stepCheck && !stepCheck.ok && stepCheck.message && !numericErrorKeys.has(stepCheck.paramKey)) {
+    errs.push(`"${label}": ${stepCheck.message}`);
   }
 
   return errs;

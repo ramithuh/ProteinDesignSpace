@@ -675,13 +675,13 @@ describe('engine/flow-dsl', () => {
 
     // 4. Universal `steps=` alias maps cleanly to native step keys (`nsteps`, `numSteps`, `nSampleStep`, `steps`)
     const stepAliases = parseFlowDsl(
-      'a:rfd4:steps=45;b:boltzgen:steps=40;c:protpardelle:steps=55;d:rfdiffusion:steps=35;e:genie3:steps=80;f:rfd3:nsteps=60',
+      'a:rfd4:steps=55;b:boltzgen:steps=220;c:protpardelle:steps=250;d:rfdiffusion:steps=35;e:genie3:steps=80;f:rfd3:nsteps=60',
     );
     expect(stepAliases.ok, JSON.stringify(stepAliases.errors)).toBe(true);
     const byId = new Map(stepAliases.graph!.nodes.map((n) => [n.id, n.params]));
-    expect(byId.get('a')?.nsteps).toBe(45);
-    expect(byId.get('b')?.numSteps).toBe(40);
-    expect(byId.get('c')?.numSteps).toBe(55);
+    expect(byId.get('a')?.nsteps).toBe(55);
+    expect(byId.get('b')?.numSteps).toBe(220);
+    expect(byId.get('c')?.numSteps).toBe(250);
     expect(byId.get('d')?.numSteps).toBe(35);
     expect(byId.get('e')?.nSampleStep).toBe(80);
     expect(byId.get('f')?.steps).toBe(60);

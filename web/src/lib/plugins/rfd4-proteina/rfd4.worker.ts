@@ -8,6 +8,7 @@
 import { AA3_TO_AA1, parsePdbBackbone, type SourceResidueId } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { fetchCachedBytes } from '$lib/engine/opfs-cache';
+import { assertSafeStepCount, formatLowStepGeometryWarning } from '$lib/engine/step-policy';
 import {
   assertRfd4ConditionSelectorsMatch,
   extractRfd4DesignMetadata,
@@ -406,12 +407,13 @@ createWorkerHarness({
     const numDesigns = Number.isFinite(rawNumDesigns)
       ? Math.max(1, Math.min(16, Math.round(rawNumDesigns)))
       : 1;
+    const safeNsteps = assertSafeStepCount('rfd4-proteina', { ...p, nsteps: p.nsteps }, 60);
     // Keep explicit p.<key> reads intact for param-schema bidirectional coverage guards
     const rawParams: Record<string, unknown> = {
       mode: modeParam,
       length: p.length,
       numDesigns,
-      nsteps: p.nsteps,
+      nsteps: safeNsteps,
       recycleSchedule: p.recycleSchedule,
       earlyStop: effectiveEarlyStop,
       seed: p.seed,
@@ -855,6 +857,8 @@ createWorkerHarness({
         parsed.resNums,
         parsed.insCodes,
       );
+      const stepGeomWarn = formatLowStepGeometryWarning('rfd4-proteina', p, geometry);
+      if (stepGeomWarn) console.warn(stepGeomWarn);
       const chainLengths = computeChainLengths(parsed.chainIds);
       const candChainLengths =
         chainLengths.length > 0 && chainLengths.reduce((a, b) => a + b, 0) === finalSeq.length
@@ -931,6 +935,7 @@ createWorkerHarness({
           quantization: 'int8',
           earlyStopped,
           ...(degradedFallback ? { degradedFallback } : {}),
+          ...(stepGeomWarn ? { warnings: [stepGeomWarn] } : {}),
         },
         ...(designKey ? { designKey, designIndex, seed: itemSeed } : {}),
         ...designMeta,

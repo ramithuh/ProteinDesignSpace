@@ -4,6 +4,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()`.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { assertSafeStepCount, formatLowStepGeometryWarning } from '$lib/engine/step-policy';
 import { requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
@@ -316,8 +317,8 @@ createWorkerHarness({
     const isMotif = variant !== 'ld1';
     const rawContig = String(p.contig ?? '').trim();
     const length = Math.max(20, Math.min(300, Math.round(Number(p.length ?? 80))));
-    const steps = Math.max(10, Math.min(400, Math.round(Number(p.steps ?? 400))));
     const mode = normalizeMode(p.mode);
+    const steps = assertSafeStepCount('la-proteina', { ...p, mode, steps: p.steps }, 400);
     const seed = Math.round(Number(p.seed ?? 42));
     const precision = normalizePrecision(p.precision);
     const numDesigns = Math.max(1, Math.min(8, Math.round(Number(p.numDesigns ?? 1))));
@@ -430,6 +431,8 @@ createWorkerHarness({
         if (!pdbText) throw new Error('La-Proteina did not return PDB coordinates.');
         const parsed = parseStructureText(pdbText);
         const geom = computeGeometryStats(parsed.caCoords);
+        const stepGeomWarn = formatLowStepGeometryWarning('la-proteina', p, geom);
+        if (stepGeomWarn) console.warn(stepGeomWarn);
         const sequence = String(res.sequence ?? parsed.sequence ?? '');
 
         const runHash = fnv1a(
@@ -493,6 +496,12 @@ createWorkerHarness({
           atomPresence: parsed.atomPresence,
           diagnostics: parsed.diagnostics,
           geometry: geom,
+          provenance: {
+            quantization: precision,
+            diffusionStepsScheduled: steps,
+            diffusionStepsRun: steps,
+            ...(stepGeomWarn ? { warnings: [stepGeomWarn] } : {}),
+          },
           designKey,
           designIndex: d,
           ...(motifMeta ?? {}),

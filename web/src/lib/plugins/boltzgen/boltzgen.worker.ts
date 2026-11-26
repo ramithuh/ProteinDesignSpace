@@ -4,6 +4,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()` for standardized lifecycle, progress, and disposal.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { assertSafeStepCount, formatLowStepGeometryWarning } from '$lib/engine/step-policy';
 import {
   parseFixedPositionsAndChains,
   type OrderedStructureResidue,
@@ -258,7 +259,7 @@ createWorkerHarness({
     const precision = normalizePrecision(p.precision);
     const length = Math.max(12, Math.min(160, Math.round(Number(p.length ?? 48))));
     const numDesigns = Math.max(1, Math.min(4, Math.round(Number(p.numDesigns ?? 1))));
-    const numSteps = Math.max(3, Math.min(500, Math.round(Number(p.numSteps ?? 200))));
+    const numSteps = assertSafeStepCount('boltzgen', { ...p, numSteps: p.numSteps }, 200);
     const recyclingSteps = Math.max(0, Math.min(3, Math.round(Number(p.recyclingSteps ?? 3))));
     const hotspotsSpec = String(p.hotspots ?? '').trim();
     const motifOffset = Math.max(0, Math.round(Number(p.motifOffset ?? 10)));
@@ -385,6 +386,8 @@ createWorkerHarness({
         parsed.resNums,
         parsed.insCodes,
       );
+      const stepGeomWarn = formatLowStepGeometryWarning('boltzgen', p, geometry);
+      if (stepGeomWarn) console.warn(stepGeomWarn);
       const designKey = `design-${d + 1}`;
       const structId = `bg-${variant}-${taskMode}-${parsed.nResidues}aa-d${d + 1}-${runHash}`;
 
@@ -457,6 +460,7 @@ createWorkerHarness({
           diffusionStepsScheduled: numSteps,
           diffusionStepsRun: numSteps,
           recyclesRun: recyclingSteps,
+          ...(stepGeomWarn ? { warnings: [stepGeomWarn] } : {}),
         },
       };
       items.push(artifact);

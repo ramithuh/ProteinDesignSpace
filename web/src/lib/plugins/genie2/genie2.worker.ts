@@ -4,6 +4,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()`.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { assertSafeStepCount, formatLowStepGeometryWarning } from '$lib/engine/step-policy';
 import { requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { buildGenie2OptionalMotifs } from '$lib/protein-ops/motif-placement';
@@ -155,7 +156,7 @@ createWorkerHarness({
     const p = ctx.params ?? {};
     const template = ctx.inputs?.template as StructureArtifact | undefined;
     const length = Math.max(20, Math.min(256, Math.round(Number(p.length ?? 80))));
-    const steps = Math.max(10, Math.min(1000, Math.round(Number(p.steps ?? 1000))));
+    const steps = assertSafeStepCount('genie2', { ...p, steps: p.steps }, 1000);
     const scale = Math.max(0.1, Math.min(1.0, Number(p.scale ?? 0.6)));
     const seed = Math.round(Number(p.seed ?? 42));
     const precision = normalizePrecision(p.precision);
@@ -245,6 +246,8 @@ createWorkerHarness({
           }
         }
         const geom = computeGeometryStats(parsed.caCoords);
+        const stepGeomWarn = formatLowStepGeometryWarning('genie2', p, geom);
+        if (stepGeomWarn) console.warn(stepGeomWarn);
         const runHash = fnv1a(
           JSON.stringify({
             length,
@@ -281,6 +284,12 @@ createWorkerHarness({
           atomPresence: parsed.atomPresence,
           diagnostics: parsed.diagnostics,
           geometry: geom,
+          provenance: {
+            quantization: precision,
+            diffusionStepsScheduled: steps,
+            diffusionStepsRun: steps,
+            ...(stepGeomWarn ? { warnings: [stepGeomWarn] } : {}),
+          },
           designKey,
           designIndex: d,
           ...(motifMeta

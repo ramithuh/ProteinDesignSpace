@@ -53,6 +53,258 @@ export const ALLOWED_GPU_ADAPTER_IDS = new Set([
   'gnina',
 ]);
 
+/**
+ * Model-Card-backed per-model sampling step operating envelopes enforced on POST /api/run-node.
+ * Mirrors `MODEL_STEP_POLICIES` in `web/src/lib/engine/step-policy.ts` (parity-tested in
+ * `web/src/lib/__tests__/step-policy.test.ts`).
+ */
+export const SERVER_STEP_POLICIES = Object.freeze({
+  'la-proteina': {
+    displayName: 'La-Proteina',
+    paramKey: 'steps',
+    modeParamKey: 'mode',
+    defaultMode: 'sde',
+    rules: [
+      {
+        modes: ['sde'],
+        minSafeSteps: 200,
+        recommendedMinSteps: 350,
+        upstreamDefault: 400,
+        maxSteps: 400,
+        rationale:
+          'Euler-Maruyama SDE sampling fractures Cα backbones below 200 steps; 350–400 steps match upstream stability. Switch to ODE mode for fast low-step runs.',
+      },
+      {
+        minSafeSteps: 50,
+        recommendedMinSteps: 100,
+        upstreamDefault: 400,
+        maxSteps: 400,
+        rationale:
+          'Deterministic ODE velocity integration stays geometrically coherent down to 50 steps; ≥100 steps recommended.',
+      },
+    ],
+  },
+  protpardelle: {
+    displayName: 'ProtPardelle-1c',
+    paramKey: 'numSteps',
+    modeParamKey: 'taskMode',
+    defaultMode: 'unconditional',
+    rules: [
+      {
+        modes: ['partial'],
+        minSafeSteps: 50,
+        recommendedMinSteps: 200,
+        upstreamDefault: 200,
+        maxSteps: 500,
+        rationale:
+          'Partial diffusion only executes the final rewindSteps of the schedule; keep ≥50 total schedule steps.',
+      },
+      {
+        minSafeSteps: 200,
+        recommendedMinSteps: 200,
+        upstreamDefault: 200,
+        maxSteps: 500,
+        rationale:
+          'ProtPardelle EDM reverse diffusion requires ≥200 steps to avoid fractured backbones and steric clashes (upstream default: 200).',
+      },
+    ],
+  },
+  boltzgen: {
+    displayName: 'BoltzGen-1',
+    paramKey: 'numSteps',
+    rules: [
+      {
+        minSafeSteps: 200,
+        recommendedMinSteps: 200,
+        upstreamDefault: 200,
+        maxSteps: 500,
+        rationale:
+          'BoltzGen-1 EDM/AF3 diffusion requires ≥200 steps for coherent backbone geometry (upstream default: 200; design.yaml: 500).',
+      },
+    ],
+  },
+  'rfd4-proteina': {
+    displayName: 'RFD4-Proteina',
+    paramKey: 'nsteps',
+    rules: [
+      {
+        minSafeSteps: 50,
+        recommendedMinSteps: 58,
+        upstreamDefault: 60,
+        maxSteps: 120,
+        rationale:
+          'RFD4-Proteina flow matching converges reliably at ≥58 steps (upstream default: 60); below 50 steps frequently collapses sequence/backbone quality. Use Recycle=None for faster runs.',
+      },
+    ],
+  },
+  proteina: {
+    displayName: 'Proteina v1.2 (200M)',
+    paramKey: 'steps',
+    modeParamKey: 'mode',
+    defaultMode: 'sc',
+    rules: [
+      {
+        modes: ['sc'],
+        minSafeSteps: 50,
+        recommendedMinSteps: 350,
+        upstreamDefault: 400,
+        maxSteps: 400,
+        rationale:
+          'Proteina stochastic (SDE) mode stays structurally stable down to 50 steps, though 350–400 steps match upstream designability.',
+      },
+      {
+        minSafeSteps: 50,
+        recommendedMinSteps: 100,
+        upstreamDefault: 400,
+        maxSteps: 400,
+        rationale:
+          'Deterministic velocity-field (ODE) mode; ≥100 steps recommended for full quality.',
+      },
+    ],
+  },
+  genie2: {
+    displayName: 'Genie 2',
+    paramKey: 'steps',
+    rules: [
+      {
+        minSafeSteps: 1000,
+        recommendedMinSteps: 1000,
+        upstreamDefault: 1000,
+        maxSteps: 1000,
+        rationale:
+          'Genie 2 uses a fixed 1000-step cosine diffusion schedule; fewer steps are unsupported and yield distorted backbones (use Genie 3 or SiD-Protein for fast runs).',
+      },
+    ],
+  },
+  rfd3: {
+    displayName: 'RFdiffusion3',
+    paramKey: 'steps',
+    rules: [
+      {
+        minSafeSteps: 20,
+        recommendedMinSteps: 50,
+        upstreamDefault: 200,
+        maxSteps: 200,
+        rationale:
+          'RFdiffusion3 browser default is 50 steps (upstream: 200); fewer than 20 steps degrade backbone geometry.',
+      },
+    ],
+  },
+  rfdiffusion: {
+    displayName: 'RFdiffusion (Base)',
+    paramKey: 'numSteps',
+    rules: [
+      {
+        minSafeSteps: 20,
+        recommendedMinSteps: 50,
+        upstreamDefault: 50,
+        maxSteps: 50,
+        rationale:
+          'RFdiffusion full reverse schedule is 50 steps; fewer than 20 steps degrade backbone coherence.',
+      },
+    ],
+  },
+  frameflow: {
+    displayName: 'FrameFlow',
+    paramKey: 'steps',
+    rules: [
+      {
+        minSafeSteps: 20,
+        recommendedMinSteps: 50,
+        upstreamDefault: 100,
+        maxSteps: 200,
+        rationale:
+          'FrameFlow SE(3) Euler integration needs ≥20 steps (and dt*expRate ≤ 1.0 in exponential mode); 100 steps match upstream.',
+      },
+    ],
+  },
+  foldflow2: {
+    displayName: 'FoldFlow 2',
+    paramKey: 'steps',
+    rules: [
+      {
+        minSafeSteps: 20,
+        recommendedMinSteps: 50,
+        upstreamDefault: 50,
+        maxSteps: 100,
+        rationale:
+          'FoldFlow 2 SE(3) flow matching defaults to 50 steps; fewer than 20 steps degrade backbone geometry.',
+      },
+    ],
+  },
+  'sid-protein': {
+    displayName: 'SiD-Protein',
+    paramKey: 'steps',
+    rules: [
+      {
+        minSafeSteps: 1,
+        recommendedMinSteps: 4,
+        upstreamDefault: 16,
+        maxSteps: 32,
+        rationale:
+          'SiD-Protein is a distilled few-step sampler (1–32 steps supported; 16 matches upstream, ≥4 recommended for best geometry).',
+      },
+    ],
+  },
+});
+
+export function validateNodeStepPolicy(adapterId, params) {
+  if (!Object.prototype.hasOwnProperty.call(SERVER_STEP_POLICIES, adapterId)) {
+    return { ok: true };
+  }
+  const envelope = SERVER_STEP_POLICIES[adapterId];
+  let activeMode = null;
+  if (envelope.modeParamKey) {
+    const rawMode = params?.[envelope.modeParamKey];
+    const modeStr =
+      typeof rawMode === 'string' || typeof rawMode === 'number' || typeof rawMode === 'boolean'
+        ? String(rawMode).trim().toLowerCase()
+        : '';
+    activeMode = modeStr !== '' ? modeStr : (envelope.defaultMode ?? null);
+  }
+
+  let rule = envelope.rules[envelope.rules.length - 1];
+  for (const candidate of envelope.rules) {
+    if (!candidate.modes || candidate.modes.length === 0) {
+      rule = candidate;
+      break;
+    }
+    if (activeMode !== null && candidate.modes.some((m) => m.toLowerCase() === activeMode)) {
+      rule = candidate;
+      break;
+    }
+  }
+
+  const raw = params?.[envelope.paramKey];
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+    return { ok: true };
+  }
+
+  const modeTag = activeMode ? ` (${activeMode} mode)` : '';
+  const requested =
+    typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : Number.NaN;
+
+  if (!Number.isFinite(requested)) {
+    return {
+      ok: false,
+      error: `${envelope.displayName}${modeTag}: ${envelope.paramKey} must be a valid finite number (${rule.minSafeSteps}–${rule.maxSteps}).`,
+    };
+  }
+  if (requested < rule.minSafeSteps) {
+    return {
+      ok: false,
+      error: `${envelope.displayName}${modeTag}: ${envelope.paramKey}=${requested} is below the safe minimum (${rule.minSafeSteps}). ${rule.rationale}`,
+    };
+  }
+  if (requested > rule.maxSteps) {
+    return {
+      ok: false,
+      error: `${envelope.displayName}${modeTag}: ${envelope.paramKey}=${requested} exceeds the supported maximum (${rule.maxSteps}).`,
+    };
+  }
+  return { ok: true };
+}
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -1304,6 +1556,11 @@ export function createSelfhostServer(options = {}) {
           }
           if (node.params !== undefined && (typeof node.params !== 'object' || node.params === null || Array.isArray(node.params))) {
             sendJson(res, 400, { ok: false, error: 'node.params must be a JSON object.' });
+            return;
+          }
+          const stepPolicyCheck = validateNodeStepPolicy(adapterId, node.params);
+          if (!stepPolicyCheck.ok) {
+            sendJson(res, 400, { ok: false, error: stepPolicyCheck.error });
             return;
           }
           if (body.inputs !== undefined && (typeof body.inputs !== 'object' || body.inputs === null || Array.isArray(body.inputs))) {

@@ -6,6 +6,12 @@
     getModelCardForAdapter,
     type ModelCardSpec,
   } from '$lib/engine/model-cards';
+  import {
+    resolveStepRule,
+    validateStepCount,
+    type ModeStepRule,
+    type StepValidationResult,
+  } from '$lib/engine/step-policy';
 
   interface Props {
     adapterId: string;
@@ -53,6 +59,50 @@
     return stripped || raw;
   });
   const dialogTitleId = $derived(card ? `model-card-title-${card.id}` : 'model-card-title');
+
+  const envelopeAdapterId = $derived(
+    card?.samplingEnvelope?.adapterId ?? card?.adapterId ?? adapterId,
+  );
+  const resolvedStep = $derived.by(() => {
+    if (!card?.samplingEnvelope) return null;
+    return resolveStepRule(envelopeAdapterId, params);
+  });
+  const stepStatus = $derived.by((): StepValidationResult | null => {
+    if (!card?.samplingEnvelope || !params) return null;
+    return validateStepCount(envelopeAdapterId, params);
+  });
+  const baseCardTitle = $derived(
+    card && activePrecision
+      ? `${card.displayName} · ${activePrecision.label} (${formatSizeMB(activePrecision.approxSizeMB)}) — Inspect precision, measured PyTorch FP32 parity & provenance`
+      : '',
+  );
+  const pillTitle = $derived.by(() => {
+    if (!baseCardTitle) return '';
+    if (stepStatus && stepStatus.level !== 'ok' && stepStatus.message) {
+      const prefix =
+        stepStatus.level === 'error'
+          ? 'Step setting outside Model Card safe operating envelope'
+          : 'Step setting below Model Card recommended operating envelope';
+      return `${prefix}: ${stepStatus.message} — ${baseCardTitle}`;
+    }
+    return baseCardTitle;
+  });
+
+  function isRuleActive(rule: ModeStepRule): boolean {
+    if (!resolvedStep) return false;
+    return (
+      resolvedStep.rule === rule ||
+      (resolvedStep.rule.modeLabel === rule.modeLabel &&
+        resolvedStep.rule.minSafeSteps === rule.minSafeSteps &&
+        resolvedStep.rule.recommendedMinSteps === rule.recommendedMinSteps)
+    );
+  }
+
+  function formatRuleModeLabel(rule: ModeStepRule): string {
+    if (rule.modeLabel) return rule.modeLabel;
+    if (rule.modes && rule.modes.length > 0) return rule.modes.join(', ');
+    return 'All modes';
+  }
 
   function shortSha(sha: string | undefined): string {
     if (!sha) return '';
@@ -122,9 +172,11 @@
       class="mc-pill"
       class:mc-pill-compact={compact}
       class:mc-pill-hosted={card.status === 'weights-hosted'}
+      class:mc-pill-step-warn={stepStatus?.level === 'warn'}
+      class:mc-pill-step-err={stepStatus?.level === 'error'}
       aria-haspopup="dialog"
       aria-expanded={open}
-      title={`${card.displayName} · ${activePrecision.label} (${formatSizeMB(activePrecision.approxSizeMB)}) — Inspect precision, measured PyTorch FP32 parity & provenance`}
+      title={pillTitle}
       onclick={openModal}
     >
       <span class="mc-pill-dot" aria-hidden="true"></span>
@@ -246,6 +298,67 @@
               </table>
             </div>
           </section>
+
+          {#if card.samplingEnvelope}
+            {@const envelope = card.samplingEnvelope}
+            <section class="mc-sec">
+              <div class="mc-sec-title">Recommended Operating Envelope</div>
+              {#if stepStatus && stepStatus.level !== 'ok' && stepStatus.message}
+                <div
+                  class="mc-env-callout"
+                  class:is-warn={stepStatus.level === 'warn'}
+                  class:is-err={stepStatus.level === 'error'}
+                  role="status"
+                >
+                  <span class="mc-env-callout-badge">
+                    {stepStatus.level === 'error' ? 'OUTSIDE SAFE MIN' : 'BELOW RECOMMENDED'}
+                  </span>
+                  <span>{stepStatus.message}</span>
+                </div>
+              {/if}
+              <div class="mc-table-wrap">
+                <table class="mc-table">
+                  <thead>
+                    <tr>
+                      <th>Mode</th>
+                      <th title="Enforced across UI, ?flow=, and API">Safe Min</th>
+                      <th>Recommended</th>
+                      <th>Max</th>
+                      <th>Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each envelope.rules as rule, i (`env_${envelope.adapterId}_${rule.modeLabel ?? i}`)}
+                      {@const activeRow = isRuleActive(rule)}
+                      <tr class:is-active={activeRow}>
+                        <td class="mc-col-prec">
+                          <div class="mc-tier-name">
+                            <span>{formatRuleModeLabel(rule)}</span>
+                            {#if activeRow}
+                              <span class="mc-active-tag">ACTIVE</span>
+                            {/if}
+                          </div>
+                        </td>
+                        <td class="mc-col-size" title="Enforced across UI, ?flow=, and API">
+                          <div>{rule.minSafeSteps}</div>
+                          <div class="mc-env-sub">enforced</div>
+                        </td>
+                        <td class="mc-col-size">
+                          <div>&ge; {rule.recommendedMinSteps}</div>
+                          <div class="mc-env-sub">default {rule.upstreamDefault}</div>
+                        </td>
+                        <td class="mc-col-size">{rule.maxSteps}</td>
+                        <td class="mc-col-scope">{rule.rationale}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+              <p class="mc-env-footnote">
+                Safe Min for <code>{envelope.paramKey}</code> is enforced across UI, <code>?flow=</code>, and API.
+              </p>
+            </section>
+          {/if}
 
           {#if card.limitations.length > 0}
             <details class="mc-notes">
@@ -371,6 +484,24 @@
 
   .mc-pill-hosted .mc-pill-dot {
     background: var(--accent-bright);
+  }
+
+  .mc-pill-step-warn {
+    border-color: color-mix(in srgb, var(--warn-border) 75%, var(--border));
+  }
+
+  .mc-pill-step-warn .mc-pill-dot {
+    background: var(--warn-border);
+    box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--warn-border) 28%, transparent);
+  }
+
+  .mc-pill-step-err {
+    border-color: color-mix(in srgb, var(--err-strong) 80%, var(--border));
+  }
+
+  .mc-pill-step-err .mc-pill-dot {
+    background: var(--err-strong);
+    box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--err-strong) 30%, transparent);
   }
 
   .mc-pill-text {
@@ -722,6 +853,60 @@
 
   .mc-muted {
     color: var(--text-dim);
+  }
+
+  .mc-env-callout {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 7px 9px;
+    border-radius: 7px;
+    font-size: 11.2px;
+    line-height: 1.4;
+    border: 1px solid var(--border);
+  }
+
+  .mc-env-callout.is-warn {
+    color: var(--warn-text);
+    background: var(--warn-bg);
+    border-color: var(--warn-border);
+  }
+
+  .mc-env-callout.is-err {
+    color: var(--err-text);
+    background: var(--err-bg);
+    border-color: var(--err-border);
+  }
+
+  .mc-env-callout-badge {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.35px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    margin-top: 1px;
+    background: color-mix(in srgb, currentColor 14%, transparent);
+  }
+
+  .mc-env-sub {
+    margin-top: 2px;
+    font-size: 9.5px;
+    color: var(--text-dim);
+  }
+
+  .mc-env-footnote {
+    margin: 0;
+    font-size: 10.5px;
+    color: var(--text-dim);
+    line-height: 1.35;
+  }
+
+  .mc-env-footnote code {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    color: var(--text-muted);
   }
 
   .mc-limits {

@@ -4,6 +4,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()`.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { assertSafeStepCount, formatLowStepGeometryWarning } from '$lib/engine/step-policy';
 import { requestResilientWebGpuAdapter } from '$lib/engine/webgpu-device';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
@@ -287,7 +288,7 @@ createWorkerHarness({
     const mode = normalizeMode(p.mode);
     const precision = normalizePrecision(p.precision);
     const length = Math.max(16, Math.min(200, Math.round(Number(p.length ?? 80))));
-    const steps = Math.max(10, Math.min(200, Math.round(Number(p.steps ?? 50))));
+    const steps = assertSafeStepCount('rfd3', { ...p, steps: p.steps }, 50);
     const numDesigns = Math.max(1, Math.min(8, Math.round(Number(p.numDesigns ?? 1))));
     const seed = Math.max(0, Math.min(0xffffffff, Math.round(Number(p.seed ?? 42))));
 
@@ -478,6 +479,8 @@ createWorkerHarness({
           parsed.resNums,
           parsed.insCodes,
         );
+        const stepGeomWarn = formatLowStepGeometryWarning('rfd3', p, geom);
+        if (stepGeomWarn) console.warn(stepGeomWarn);
         const sequence = parsed.sequence;
         const resolvedLen = parsed.nResidues || length;
 
@@ -559,6 +562,12 @@ createWorkerHarness({
           atomPresence: parsed.atomPresence,
           diagnostics: parsed.diagnostics,
           geometry: geom,
+          provenance: {
+            quantization: precision,
+            diffusionStepsScheduled: steps,
+            diffusionStepsRun: steps,
+            ...(stepGeomWarn ? { warnings: [stepGeomWarn] } : {}),
+          },
           designKey,
           designIndex: d,
           ...(motifMeta ?? {}),

@@ -2454,6 +2454,7 @@
           <SchemaParamFields
             fields={mpnnAdvFields}
             params={node.params}
+            adapterId={node.adapterId}
             {disabled}
             optionOverrides={{ modelName: mpnnCheckpoints }}
             onChange={(key, value) => setParam(key, value)}
@@ -2529,6 +2530,7 @@
           <SchemaParamFields
             fields={scorerAdvFields}
             params={node.params}
+            adapterId={node.adapterId}
             {disabled}
             onChange={(key, value) => setParam(key, value)}
           />
@@ -2621,6 +2623,7 @@
         <SchemaParamFields
           fields={filteredPrimaryFields}
           params={node.params}
+          adapterId={node.adapterId}
           activeMode={schemaActiveMode?.id}
           {disabled}
           onChange={(key, value) => {
@@ -2688,6 +2691,7 @@
             <SchemaParamFields
               fields={schemaAdvancedFields}
               params={node.params}
+              adapterId={node.adapterId}
               activeMode={schemaActiveMode?.id}
               {disabled}
               onChange={(key, value) => setParam(key, value)}

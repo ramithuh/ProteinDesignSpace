@@ -4,6 +4,7 @@
 // Wrapped in Layer 1 `createWorkerHarness()` for standardized lifecycle, progress, and disposal.
 
 import { evictCachedUrls, makeCachedFetch } from '$lib/engine/opfs-cache';
+import { assertSafeStepCount, formatLowStepGeometryWarning } from '$lib/engine/step-policy';
 import { makeSequenceKey } from '$lib/engine/collections';
 import { buildMotifLineage } from '$lib/engine/conditioning';
 import {
@@ -213,7 +214,7 @@ createWorkerHarness({
     const precision = normalizePrecision(p.precision);
     const length = Math.max(20, Math.min(256, Math.round(Number(p.length ?? 80))));
     const numDesigns = Math.max(1, Math.min(8, Math.round(Number(p.numDesigns ?? 1))));
-    const numSteps = Math.max(20, Math.min(500, Math.round(Number(p.numSteps ?? 200))));
+    const numSteps = assertSafeStepCount('protpardelle', { ...p, taskMode, numSteps: p.numSteps }, 200);
     const sidechainMode = Boolean(p.sidechainMode ?? true) && ALLATOM_CHECKPOINTS.has(checkpoint);
     const motifSelection = String(p.motifSelection ?? '').trim();
     const motifGuidance = normalizeMotifGuidance(p.motifGuidance);
@@ -432,6 +433,8 @@ createWorkerHarness({
         parsed.resNums,
         parsed.insCodes,
       );
+      const stepGeomWarn = formatLowStepGeometryWarning('protpardelle', p, geometry);
+      if (stepGeomWarn) console.warn(stepGeomWarn);
       const designKey = `design-${d + 1}`;
       const structId = `pp-${checkpoint}-${sampleLen}aa-d${d + 1}-${runHash}`;
 
@@ -471,6 +474,7 @@ createWorkerHarness({
           quantization: precision,
           diffusionStepsScheduled: numSteps,
           diffusionStepsRun: effectiveStepsRun,
+          ...(stepGeomWarn ? { warnings: [stepGeomWarn] } : {}),
         },
       };
       items.push(artifact);
