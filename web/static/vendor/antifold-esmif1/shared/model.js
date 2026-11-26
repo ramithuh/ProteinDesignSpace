@@ -49,15 +49,35 @@ async function attention(ops,qx,kvx,p,padding,causal=false){
  const q=await ops.linear(qx,p+'.q_proj'),k=await ops.linear(kvx,p+'.k_proj'),v=await ops.linear(kvx,p+'.v_proj');
  return ops.linear(await ops.attention(q,k,v,padding,causal),p+'.out_proj');
 }
+export async function precomputeEncoderKV(ops,encoded,signal,onTensor){
+ const kv=[];
+ for(let i=0;i<8;i++){
+  signal?.throwIfAborted();
+  const p=`decoder.layers.${i}.encoder_attn`;
+  const k=await ops.linear(encoded.x,p+'.k_proj');onTensor?.(k);
+  const v=await ops.linear(encoded.x,p+'.v_proj');onTensor?.(v);
+  kv.push({k,v});
+ }
+ return kv;
+}
+async function crossAttention(ops,qx,encoded,layerIdx,p){
+ const cached=encoded.kv?.[layerIdx];
+ if(!cached)return attention(ops,qx,encoded.x,p,encoded.padding);
+ const q=await ops.linear(qx,p+'.q_proj');
+ return ops.linear(await ops.attention(q,cached.k,cached.v,encoded.padding,false),p+'.out_proj');
+}
 export async function decode(ops,encoded,prev,trace={},saveTraces=false,signal){
  const M=prev.length,save=(name,x)=>{if(saveTraces)trace[name]=x;return x;},pad=ops.tensor(Int32Array.from(prev,t=>t===1?1:0),[M,1]);
  let x=await ops.position(await ops.embed(ops.tensor(prev,[M,1]),'decoder.embed_tokens'),pad);save('decoder.input',x);
  for(let i=0;i<8;i++){
   signal?.throwIfAborted();const p=`decoder.layers.${i}`,n=await ops.norm(x,p+'.self_attn_layer_norm');
   x=await ops.add(x,await attention(ops,n,n,p+'.self_attn',pad,true));
-  x=await ops.add(x,await attention(ops,await ops.norm(x,p+'.encoder_attn_layer_norm'),encoded.x,p+'.encoder_attn',encoded.padding));
+  x=await ops.add(x,await crossAttention(ops,await ops.norm(x,p+'.encoder_attn_layer_norm'),encoded,i,p+'.encoder_attn'));
   x=await ops.add(x,await ops.linear(await ops.relu(await ops.linear(await ops.norm(x,p+'.final_layer_norm'),p+'.fc1')),p+'.fc2'));save(`decoder.${i}`,x);
-  ops.keep([x,pad,encoded.x,encoded.padding,...Object.values(trace)]);await ops.checkpoint();
+  const keep=[x,pad,encoded.padding,...Object.values(trace)];
+  if(encoded.x)keep.push(encoded.x);
+  if(encoded.kv)for(const {k,v}of encoded.kv)keep.push(k,v);
+  ops.keep(keep);await ops.checkpoint();
  }
  return save('logits',await ops.linear(await ops.norm(x,'decoder.layer_norm'),'decoder.output_projection'));
 }

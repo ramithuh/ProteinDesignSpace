@@ -48,6 +48,7 @@ const WASM_NUM_THREADS = resolveOrtWasmThreads(
 let model: ProteinMPNN | null = null;
 let loadedKey: string | null = null;
 let loadedBackendMode: 'auto' | 'wasm' = 'auto';
+let loadedWebGpuDevice: GPUDevice | null = null;
 // Resilient GPUDevice handed to ORT's WebGPU EP: kept across model switches, destroyed on dispose.
 let ortWebGpuDevice: GPUDevice | null = null;
 const deviceLostGuard = createDeviceLostGuard();
@@ -62,10 +63,12 @@ async function acquireOrtWebGpuDevice(): Promise<GPUDevice | null> {
     });
     ortWebGpuDevice = device;
     deviceLostGuard.watch(device, () => {
-      if (ortWebGpuDevice !== device) return;
-      ortWebGpuDevice = null;
+      if (ortWebGpuDevice === device) ortWebGpuDevice = null;
       // Sessions on the lost device are dead: force the next ensureModel to reload on a fresh one.
-      if (loadedBackendMode === 'auto') loadedKey = null;
+      if (loadedWebGpuDevice === device) {
+        loadedWebGpuDevice = null;
+        if (loadedBackendMode === 'auto') loadedKey = null;
+      }
     });
     return device;
   } catch {
@@ -102,11 +105,18 @@ async function ensureModel(
   const webGpuDevice = effectiveBackend === 'auto' ? await acquireOrtWebGpuDevice() : null;
   if (!webGpuDevice) effectiveBackend = 'wasm';
   const key = `${family}:${modelName}:${effectiveBackend}`;
-  if (model && loadedKey === key) return;
+  if (
+    model &&
+    loadedKey === key &&
+    (effectiveBackend === 'wasm' || (ortWebGpuDevice !== null && loadedWebGpuDevice === webGpuDevice))
+  ) {
+    return;
+  }
   if (model) {
     await model.dispose().catch(() => {});
     model = null;
     loadedKey = null;
+    loadedWebGpuDevice = null;
   }
 
   const url = modelManifestURL(family, modelName);
@@ -179,8 +189,10 @@ async function ensureModel(
   };
 
   model = await loadOnce(false);
-  loadedKey = key;
+  const liveOnAcquiredDevice = effectiveBackend === 'wasm' || ortWebGpuDevice === webGpuDevice;
+  loadedKey = liveOnAcquiredDevice ? key : null;
   loadedBackendMode = effectiveBackend;
+  loadedWebGpuDevice = effectiveBackend === 'auto' && liveOnAcquiredDevice ? webGpuDevice : null;
 }
 
 createWorkerHarness({
@@ -540,6 +552,7 @@ createWorkerHarness({
     }
     loadedKey = null;
     loadedBackendMode = 'auto';
+    loadedWebGpuDevice = null;
     // Sessions are released above; the device is ours (not ORT's) to destroy.
     deviceLostGuard.destroy(ortWebGpuDevice);
     ortWebGpuDevice = null;

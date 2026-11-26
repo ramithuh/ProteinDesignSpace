@@ -1,5 +1,5 @@
 import {loadWeights,prepareInput,regionMask,VOCAB,CANONICAL_TOKENS} from '../shared/index.js';
-import {encode,decode} from '../shared/model.js';
+import {encode,decode,precomputeEncoderKV} from '../shared/model.js';
 import {independentPlan,finishIndependent} from '../shared/sampling.js';
 import {GPUOps} from './ops.js?v=3';
 export async function requestWebGPU({useF16=false,allowSoftwareFallback=true}={}){
@@ -31,34 +31,84 @@ export async function createGVPTransformerEngine({baseUrl,variant='antifold',pre
  const {manifest}=await loadWeights(`${baseUrl.replace(/\/$/,'')}/${variant}/${precision}`,{read,cache,signal,onProgress,onTensor:(name,t)=>ops.upload(name,t)});
  if(manifest.model!==variant||manifest.precision!==precision)throw new Error('Requested model/precision does not match bundle');
  const enter=()=>{if(busy)throw new Error('Inference already running');ops.begin();busy=true;};
+ const contextMap=new WeakMap(),ownedContexts=new Set();
+ const sameFloats=(a,b)=>{if(a.length!==b.length)return false;for(let i=0;i<a.length;i++)if(a[i]!==b[i]&&!(Number.isNaN(a[i])&&Number.isNaN(b[i])))return false;return true;};
+ const resolveContext=(context,p)=>{
+  if(context==null)return null;
+  const data=contextMap.get(context);if(!data)throw new Error('Invalid encoder context');
+  if(data.destroyed||ops.destroyed)throw new Error('Encoder context destroyed');
+  if(data.N!==p.N||!sameFloats(data.coords,p.coords)||!sameFloats(data.confidence,p.confidence))throw new Error('Encoder context does not match input structure');
+  return data;
+ };
+ const resolveFixedToken=t=>typeof t==='number'?t:VOCAB.indexOf(t);
  const engine={manifest,adapterInfo:info,
- async predict(input,{returnIntermediates=false,signal,...options}={}){
-  signal?.throwIfAborted();const p=prepareInput(input,options);ops.admit(p.N,p.L);enter();const started=performance.now();
+ async prepareContext(input,{signal,...options}={}){
+  signal?.throwIfAborted();const p=prepareInput(input,options);ops.admit(p.N,p.L);enter();
+  const owned=[];let handle=null;
   try{
-   const trace={},enc=await encode(ops,p,trace,returnIntermediates,signal),logits=await decode(ops,enc,p.prev,trace,returnIntermediates,signal),stats=await outputStats(ops,logits,p);
+   const enc=await encode(ops,p,{},false,signal);
+   owned.push(ops.persist(enc.padding));
+   const kv=await precomputeEncoderKV(ops,enc,signal,t=>owned.push(ops.persist(t)));
+   signal?.throwIfAborted();
+   ops.submit();
+   const data={N:p.N,coords:Float32Array.from(p.coords),confidence:Float32Array.from(p.confidence),padding:enc.padding,kv,destroyed:false};
+   handle={
+    get destroyed(){return data.destroyed||ops.destroyed;},
+    destroy(){
+     if(data.destroyed)return;
+     data.destroyed=true;
+     ownedContexts.delete(handle);
+     if(!ops.destroyed){
+      ops.release(data.padding);
+      for(const pair of data.kv){ops.release(pair.k);ops.release(pair.v);}
+     }
+    },
+   };
+   contextMap.set(handle,data);ownedContexts.add(handle);
+   return handle;
+  }catch(err){
+   for(const t of owned)ops.release(t);
+   throw err;
+  }finally{
+   try{await ops.finish();}catch(finErr){handle?.destroy();throw finErr;}finally{busy=false;}
+  }
+ },
+ async predict(input,{returnIntermediates=false,signal,context,...options}={}){
+  signal?.throwIfAborted();const p=prepareInput(input,options),ctxData=resolveContext(context,p);ops.admit(p.N,p.L);enter();const started=performance.now();
+  try{
+   const trace={},enc=ctxData&&!returnIntermediates?{padding:ctxData.padding,kv:ctxData.kv}:await encode(ops,p,trace,returnIntermediates,signal),logits=await decode(ops,enc,p.prev,trace,returnIntermediates,signal),stats=await outputStats(ops,logits,p);
    const values=await ops.readMany({...(returnIntermediates?trace:{}),logits,packed:stats.packed,scores:stats.scores});signal?.throwIfAborted();if(values.logits.some(v=>!Number.isFinite(v)))throw new Error('Nonfinite GPU logits');
    const logProbabilities=new Float32Array(p.L),entropyPerplexity=new Float32Array(p.L),canonicalProbabilities=new Float32Array(p.L*20);for(let r=0;r<p.L;r++){logProbabilities[r]=values.packed[r*22];entropyPerplexity[r]=values.packed[r*22+1];canonicalProbabilities.set(values.packed.subarray(r*22+2,(r+1)*22),r*20);}
    const scores=values.scores;for(let i=0;i<4;i++)if(scores[i+4]===0)scores[i]=NaN;delete values.packed;delete values.scores;
    return {logits:values.logits,logProbabilities,entropyPerplexity,canonicalProbabilities,logLikelihood:scores[0],perplexity:scores[1],coordinateLogLikelihood:scores[2],coordinatePerplexity:scores[3],sequence:p.sequence,residues:p.residues,timingMs:performance.now()-started,...(returnIntermediates?{intermediates:values}:{})};
   }finally{try{await ops.finish();}finally{busy=false;}}
  },
- async sample(input,{uniforms,temperature=1,fixed={},length,signal,returnIntermediates=false,...options}={}){
+ async sample(input,{uniforms,temperature=1,fixed={},length,signal,returnIntermediates=false,context,...options}={}){
   signal?.throwIfAborted();const p=prepareInput(input,options);length??=p.targetChain?p.residues.findIndex(r=>!r||r.chain!==p.targetChain):p.L;if(length<0)length=p.L;if(options.regions){fixed={...fixed};const mask=regionMask(p.residues,{...p,...options});for(let i=0;i<length;i++)if(!mask[i]&&fixed[i]===undefined)fixed[i]=p.tokens[i];}if(!Number.isInteger(length)||length<1||length>p.L||uniforms?.length!==length||Array.from(uniforms).some(u=>!(u>=0&&u<1)))throw new Error('Supply one uniform draw in [0,1) per position');if(!(temperature>0&&Number.isFinite(temperature)))throw new Error('Invalid temperature');
   for(const [pos,t]of Object.entries(fixed))if(!Number.isInteger(+pos)||+pos<0||+pos>=length||(typeof t==='number'?t<0||t>=35||!Number.isInteger(t):!VOCAB.includes(t)))throw new Error('Invalid fixed position/token');
+  const ctxData=resolveContext(context,p);
+  let needsDecode=returnIntermediates;if(!needsDecode)for(let i=0;i<length;i++)if(fixed[i]===undefined){needsDecode=true;break;}
   ops.admit(p.N,Math.ceil(length/DECODE_BUCKET)*DECODE_BUCKET);enter();const started=performance.now();
   const arSampleWgsl=`var aa:array<u32,20>=array<u32,20>(${Array.from(CANONICAL_TOKENS,t=>t+'u').join(',')});let base=u32(x1[0]);let temp=x1[1];let uDraw=x1[2];var m=-3.402823e38;for(var j=0u;j<20u;j++){m=max(m,x0[base+aa[j]]);}var sum=0.0;for(var j=0u;j<20u;j++){sum+=exp((x0[base+aa[j]]-m)/temp);}var cumulative=0.0;var token=aa[19u];for(var j=0u;j<20u;j++){cumulative+=exp((x0[base+aa[j]]-m)/temp)/sum;if(uDraw<cumulative){token=aa[j];break;}}y[0]=f32(token);`;
   try{
-   const enc=await encode(ops,p,{},false,signal),tokens=new Int32Array(length+1);tokens[0]=33;const replayLogits=[];
+   let enc=null,encKeep=[];
+   if(needsDecode){
+    if(ctxData){enc={padding:ctxData.padding,kv:ctxData.kv};}
+    else{const rawEnc=await encode(ops,p,{},false,signal),kv=await precomputeEncoderKV(ops,rawEnc,signal);enc={padding:rawEnc.padding,kv};encKeep=[rawEnc.padding,...kv.flatMap(({k,v})=>[k,v])];ops.keep(encKeep);}
+   }
+   const tokens=new Int32Array(length+1);tokens[0]=33;const replayLogits=[];
    for(let i=0;i<length;i++){
-    signal?.throwIfAborted();const prev=new Int32Array(Math.ceil((i+1)/DECODE_BUCKET)*DECODE_BUCKET).fill(PAD);prev.set(tokens.subarray(0,i+1));const logits=await decode(ops,enc,prev,{},false,signal);
+    signal?.throwIfAborted();
+    if(fixed[i]!==undefined&&!returnIntermediates){tokens[i+1]=resolveFixedToken(fixed[i]);continue;}
+    const prev=new Int32Array(Math.ceil((i+1)/DECODE_BUCKET)*DECODE_BUCKET).fill(PAD);prev.set(tokens.subarray(0,i+1));const logits=await decode(ops,enc,prev,{},false,signal);
     const drawParams=ops.tensor(new Float32Array([i*35,temperature,uniforms[i]]),[3]);
     const sampled=await ops.elem([1,1],arSampleWgsl,[logits,drawParams]);
-    const values=await ops.readMany({sampled,...(returnIntermediates?{logits}:{})});signal?.throwIfAborted();tokens[i+1]=fixed[i]===undefined?values.sampled[0]:typeof fixed[i]==='number'?fixed[i]:VOCAB.indexOf(fixed[i]);if(returnIntermediates)replayLogits.push(...values.logits.subarray(i*35,(i+1)*35));ops.keep([enc.x,enc.padding]);
+    const values=await ops.readMany({sampled,...(returnIntermediates?{logits}:{})});signal?.throwIfAborted();tokens[i+1]=fixed[i]===undefined?values.sampled[0]:resolveFixedToken(fixed[i]);if(returnIntermediates)replayLogits.push(...values.logits.subarray(i*35,(i+1)*35));ops.keep(encKeep);
    }
    return {tokens:tokens.slice(1),sequence:Array.from(tokens.slice(1),t=>VOCAB[t]).join(''),timingMs:performance.now()-started,...(returnIntermediates?{logits:Float32Array.from(replayLogits)}:{})};
   }finally{try{await ops.finish();}finally{busy=false;}}
  },
- memoryUsage:()=>ops.memoryUsage(),destroy:()=>ops.destroy()};
+ memoryUsage:()=>ops.memoryUsage(),destroy:()=>{for(const ctx of [...ownedContexts])ctx.destroy();ops.destroy();}};
  engine.score=engine.predict;
  engine.sampleIndependent=async(input,options={})=>{
   const plan=independentPlan(input,options),result=await engine.predict(input,options);enter();

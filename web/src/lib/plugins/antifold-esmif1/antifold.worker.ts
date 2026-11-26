@@ -73,7 +73,16 @@ interface AntiFoldSampleResult {
   timingMs: number;
 }
 
+interface AntiFoldEncoderContext {
+  readonly destroyed?: boolean;
+  destroy(): void;
+}
+
 interface GvpEngine {
+  prepareContext?(
+    input: ParsedAntiFoldStructure,
+    options?: Record<string, unknown>,
+  ): Promise<AntiFoldEncoderContext>;
   predict(
     input: ParsedAntiFoldStructure,
     options?: Record<string, unknown>,
@@ -443,8 +452,10 @@ createWorkerHarness({
     const sampleOne = async (
       plan: ResolvedAntiFoldPlan,
       itemSeed: number,
+      encoderContext?: AntiFoldEncoderContext,
     ): Promise<{ sequence: string; score: number | null; globalScore: number | null }> => {
       const uniforms = generateUniforms(plan.sampleLength, itemSeed);
+      const contextOpt = encoderContext ? { context: encoderContext } : {};
       const sampleRes =
         samplingMode === 'autoregressive'
           ? await activeEngine.sample(plan.parsed, {
@@ -453,12 +464,14 @@ createWorkerHarness({
               uniforms,
               fixed: plan.fixed,
               length: plan.sampleLength,
+              ...contextOpt,
             })
           : await activeEngine.sampleIndependent(plan.parsed, {
               ...plan.combineOpts,
               temperature,
               uniforms,
               fixed: plan.fixed,
+              ...contextOpt,
             });
 
       const fullSequence = reconstructOriginalSequence(plan, sampleRes.sequence);
@@ -466,6 +479,7 @@ createWorkerHarness({
       const scored = await activeEngine.score(plan.parsed, {
         ...plan.combineOpts,
         sequence: combinedForScore,
+        ...contextOpt,
       });
       // Negative log-likelihood (lower is better, matching MPNN / Top-K conventions)
       const nll = Number.isFinite(scored.logLikelihood) ? -scored.logLikelihood : null;
@@ -473,6 +487,16 @@ createWorkerHarness({
         ? -scored.coordinateLogLikelihood
         : nll;
       return { sequence: fullSequence, score: nll, globalScore: coordNll };
+    };
+
+    const prepareBackboneContext = async (
+      plan: ResolvedAntiFoldPlan,
+    ): Promise<AntiFoldEncoderContext | undefined> => {
+      if (typeof activeEngine.prepareContext !== 'function') return undefined;
+      return await activeEngine.prepareContext(plan.parsed, {
+        ...plan.combineOpts,
+        signal: ctx.signal,
+      });
     };
 
     const collectionItems =
@@ -496,33 +520,38 @@ createWorkerHarness({
       );
 
       const candidates: SequenceCandidate[] = [];
-      for (let i = 0; i < numSequences; i++) {
-        if (ctx.signal.aborted) throw new Error('Workflow run cancelled');
-        ctx.progress(
-          'sample',
-          i / numSequences,
-          `${displayName} (${samplingMode}) designing seq ${i + 1}/${numSequences}...`,
-        );
+      const encoderContext = await prepareBackboneContext(plan);
+      try {
+        for (let i = 0; i < numSequences; i++) {
+          if (ctx.signal.aborted) throw new Error('Workflow run cancelled');
+          ctx.progress(
+            'sample',
+            i / numSequences,
+            `${displayName} (${samplingMode}) designing seq ${i + 1}/${numSequences}...`,
+          );
 
-        const res = await sampleOne(plan, seed + i);
-        const candChainLengths =
-          plan.originalChainLengths.length > 0 &&
-          plan.originalChainLengths.reduce((a, b) => a + b, 0) === res.sequence.length
-            ? plan.originalChainLengths
-            : undefined;
+          const res = await sampleOne(plan, seed + i, encoderContext);
+          const candChainLengths =
+            plan.originalChainLengths.length > 0 &&
+            plan.originalChainLengths.reduce((a, b) => a + b, 0) === res.sequence.length
+              ? plan.originalChainLengths
+              : undefined;
 
-        candidates.push({
-          id: `${modelLabel}-${i + 1}`,
-          sourceStructureId: structure.id,
-          sampleIndex: i,
-          sequence: res.sequence,
-          score: res.score,
-          globalScore: res.globalScore,
-          sourceModelId: modelLabel,
-          temperature,
-          seed: seed + i,
-          ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
-        });
+          candidates.push({
+            id: `${modelLabel}-${i + 1}`,
+            sourceStructureId: structure.id,
+            sampleIndex: i,
+            sequence: res.sequence,
+            score: res.score,
+            globalScore: res.globalScore,
+            sourceModelId: modelLabel,
+            temperature,
+            seed: seed + i,
+            ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
+          });
+        }
+      } finally {
+        encoderContext?.destroy();
       }
 
       candidates.sort((a, b) => (a.score ?? 99) - (b.score ?? 99));
@@ -633,42 +662,46 @@ createWorkerHarness({
       );
       for (const ch of plan.propagatedLockedChains) allPropagatedLocked.add(ch);
       const backboneCandidates: SequenceCandidate[] = [];
+      const encoderContext = await prepareBackboneContext(plan);
+      try {
+        for (let q = 0; q < subplan.items.length; q++) {
+          if (ctx.signal.aborted) throw new Error('Workflow run cancelled');
+          const item = subplan.items[q];
+          const itemSeed = deriveStableItemSeed(seed, 'mpnn', item.key);
+          ctx.progress(
+            'sample',
+            completedSeqs / totalPlanned,
+            `Backbone ${bIdx + 1}/${fanoutPlan.backboneCount} · ${displayName} seq ${q + 1}/${subplan.items.length}`,
+          );
 
-      for (let q = 0; q < subplan.items.length; q++) {
-        if (ctx.signal.aborted) throw new Error('Workflow run cancelled');
-        const item = subplan.items[q];
-        const itemSeed = deriveStableItemSeed(seed, 'mpnn', item.key);
-        ctx.progress(
-          'sample',
-          completedSeqs / totalPlanned,
-          `Backbone ${bIdx + 1}/${fanoutPlan.backboneCount} · ${displayName} seq ${q + 1}/${subplan.items.length}`,
-        );
+          const res = await sampleOne(plan, itemSeed, encoderContext);
+          completedSeqs++;
 
-        const res = await sampleOne(plan, itemSeed);
-        completedSeqs++;
+          const candChainLengths =
+            plan.originalChainLengths.length > 0 &&
+            plan.originalChainLengths.reduce((a, b) => a + b, 0) === res.sequence.length
+              ? plan.originalChainLengths
+              : undefined;
 
-        const candChainLengths =
-          plan.originalChainLengths.length > 0 &&
-          plan.originalChainLengths.reduce((a, b) => a + b, 0) === res.sequence.length
-            ? plan.originalChainLengths
-            : undefined;
-
-        backboneCandidates.push({
-          id: `d${subplan.designIndex + 1}-${modelLabel}-${item.sequenceIndex + 1}`,
-          key: item.key,
-          sequenceKey: item.key,
-          designKey: subplan.designKey,
-          designIndex: subplan.designIndex,
-          sourceStructureId: backbone.id,
-          sampleIndex: item.sequenceIndex,
-          sequence: res.sequence,
-          score: res.score,
-          globalScore: res.globalScore,
-          sourceModelId: modelLabel,
-          temperature,
-          seed: itemSeed,
-          ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
-        });
+          backboneCandidates.push({
+            id: `d${subplan.designIndex + 1}-${modelLabel}-${item.sequenceIndex + 1}`,
+            key: item.key,
+            sequenceKey: item.key,
+            designKey: subplan.designKey,
+            designIndex: subplan.designIndex,
+            sourceStructureId: backbone.id,
+            sampleIndex: item.sequenceIndex,
+            sequence: res.sequence,
+            score: res.score,
+            globalScore: res.globalScore,
+            sourceModelId: modelLabel,
+            temperature,
+            seed: itemSeed,
+            ...(candChainLengths ? { chainLengths: candChainLengths } : {}),
+          });
+        }
+      } finally {
+        encoderContext?.destroy();
       }
 
       backboneCandidates.sort((a, b) => {

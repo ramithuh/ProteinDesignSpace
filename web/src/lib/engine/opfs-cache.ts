@@ -158,7 +158,13 @@ function joinInflightLoad(
   if (onProgress) {
     load.listeners.add(onProgress);
     // A caller joining mid-download starts from the shared load's latest progress.
-    if (load.last) onProgress(load.last);
+    if (load.last) {
+      try {
+        onProgress(load.last);
+      } catch {
+        /* one caller's progress callback must not fail the shared load */
+      }
+    }
   }
   return new Promise<Uint8Array>((resolve, reject) => {
     const leave = () => {
@@ -231,13 +237,22 @@ async function loadCachedBytes(
   let storedOpfs = false;
   if (resp.body) {
     // Dedicated workers stream chunks straight to OPFS instead of holding them all on the JS heap.
-    const sink = await openOpfsStreamSink(cacheKey);
+    signal.throwIfAborted();
+    const sink = await openOpfsStreamSink(cacheKey, signal);
     const reader = resp.body.getReader();
     const chunks: Uint8Array[] = [];
     let loaded = 0;
+    const abortRead = () => {
+      // Begin sink teardown synchronously on abort so an immediate retry cannot race marker removal.
+      void sink?.abort().catch(() => {});
+      void reader.cancel(signal.reason).catch(() => {});
+    };
+    signal.addEventListener('abort', abortRead, { once: true });
     try {
       while (true) {
+        signal.throwIfAborted();
         const { done, value } = await reader.read();
+        signal.throwIfAborted();
         if (done) break;
         if (sink?.active) {
           const spilled = sink.write(value);
@@ -256,6 +271,8 @@ async function loadCachedBytes(
     } catch (err) {
       await sink?.abort();
       throw err;
+    } finally {
+      signal.removeEventListener('abort', abortRead);
     }
     if (sink?.active) {
       bytes = await sink.commit(loaded);
@@ -406,18 +423,73 @@ interface OpfsStreamSink {
   abort(): Promise<void>;
 }
 
+/** Per-entry OPFS sink teardown serialization so an aborted sink cannot delete a retry's `.incomplete` marker. */
+const OPFS_SINK_TEARDOWNS = new Map<string, Promise<void>>();
+
+function trackOpfsTeardown(safeName: string, fn: () => Promise<void>): Promise<void> {
+  const prev = OPFS_SINK_TEARDOWNS.get(safeName) ?? Promise.resolve();
+  const next = prev
+    .catch(() => {})
+    .then(fn)
+    .finally(() => {
+      if (OPFS_SINK_TEARDOWNS.get(safeName) === next) {
+        OPFS_SINK_TEARDOWNS.delete(safeName);
+      }
+    });
+  OPFS_SINK_TEARDOWNS.set(safeName, next);
+  return next;
+}
+
+async function awaitOpfsTeardown(safeName: string): Promise<void> {
+  while (OPFS_SINK_TEARDOWNS.has(safeName)) {
+    await OPFS_SINK_TEARDOWNS.get(safeName)?.catch(() => {});
+  }
+}
+
 /**
  * Open a streaming OPFS writer for `key` via `createSyncAccessHandle` (TVM `opfs_store.ts` pattern).
  * Returns null where sync access handles do not exist (main thread) or cannot be taken
  * (`NoModificationAllowedError` while another context holds the file), leaving the caller on the
  * buffered `createWritable()` / Cache API path.
  */
-async function openOpfsStreamSink(key: string): Promise<OpfsStreamSink | null> {
-  const dir = await getWeightsDir(true);
-  if (!dir) return null;
+async function openOpfsStreamSink(key: string, signal?: AbortSignal): Promise<OpfsStreamSink | null> {
   const safeName = sanitizeKey(key);
   const markerName = `${safeName}${INCOMPLETE_SUFFIX}`;
-  let handle: SyncAccessHandleLike;
+  if (OPFS_SINK_TEARDOWNS.has(safeName)) await awaitOpfsTeardown(safeName);
+  if (signal?.aborted) return null;
+  const dir = await getWeightsDir(true);
+  if (!dir || signal?.aborted) return null;
+  if (OPFS_SINK_TEARDOWNS.has(safeName)) await awaitOpfsTeardown(safeName);
+  if (signal?.aborted) return null;
+
+  let handle: SyncAccessHandleLike | null = null;
+  const setupTeardown: { resolve: (() => void) | null } = { resolve: null };
+  let setupDone = false;
+  const onSetupAbort = () => {
+    if (setupDone || setupTeardown.resolve) return;
+    let resolveDeferred!: () => void;
+    const deferred = new Promise<void>((r) => {
+      resolveDeferred = r;
+    });
+    setupTeardown.resolve = resolveDeferred;
+    trackOpfsTeardown(safeName, () => deferred);
+  };
+  signal?.addEventListener('abort', onSetupAbort, { once: true });
+
+  const discard = async () => {
+    if (handle) {
+      try {
+        handle.close();
+      } catch {
+        /* already closed */
+      }
+    }
+    await dir.removeEntry(safeName).catch(() => {});
+    await dir.removeEntry(markerName).catch(() => {});
+  };
+  const rollbackSetup = () =>
+    setupTeardown.resolve ? discard() : trackOpfsTeardown(safeName, discard);
+
   try {
     const fh = (await dir.getFileHandle(safeName, { create: true })) as unknown as {
       createSyncAccessHandle?: () => Promise<SyncAccessHandleLike>;
@@ -426,30 +498,32 @@ async function openOpfsStreamSink(key: string): Promise<OpfsStreamSink | null> {
     // Exclusive per file: fails with NoModificationAllowedError while another context streams it,
     // in which case that context's marker must be left alone.
     handle = await fh.createSyncAccessHandle();
+    if (signal?.aborted) {
+      await rollbackSetup();
+      return null;
+    }
+    // Mark the entry incomplete before its old bytes are truncated away.
+    await dir.getFileHandle(markerName, { create: true });
+    if (signal?.aborted) {
+      await rollbackSetup();
+      return null;
+    }
+    handle.truncate(0);
   } catch {
+    if (handle) {
+      await rollbackSetup();
+    }
     return null;
+  } finally {
+    setupDone = true;
+    signal?.removeEventListener('abort', onSetupAbort);
+    setupTeardown.resolve?.();
   }
 
+  const openedHandle = handle;
   let active = true;
   let offset = 0;
   let discarding: Promise<void> = Promise.resolve();
-  const discard = async () => {
-    try {
-      handle.close();
-    } catch {
-      /* already closed */
-    }
-    await dir.removeEntry(safeName).catch(() => {});
-    await dir.removeEntry(markerName).catch(() => {});
-  };
-  try {
-    // Mark the entry incomplete before its old bytes are truncated away.
-    await dir.getFileHandle(markerName, { create: true });
-    handle.truncate(0);
-  } catch {
-    await discard();
-    return null;
-  }
 
   return {
     get active() {
@@ -457,7 +531,7 @@ async function openOpfsStreamSink(key: string): Promise<OpfsStreamSink | null> {
     },
     write(chunk) {
       try {
-        const written = handle.write(chunk, { at: offset });
+        const written = openedHandle.write(chunk, { at: offset });
         if (written !== chunk.byteLength) {
           throw new Error(`Short OPFS write: ${written}/${chunk.byteLength} bytes`);
         }
@@ -469,11 +543,11 @@ async function openOpfsStreamSink(key: string): Promise<OpfsStreamSink | null> {
         const prefix = new Uint8Array(offset);
         let read = -1;
         try {
-          read = handle.read(prefix, { at: 0 });
+          read = openedHandle.read(prefix, { at: 0 });
         } catch {
           /* reported below */
         }
-        discarding = discard();
+        discarding = trackOpfsTeardown(safeName, discard);
         if (read !== offset) {
           throw new Error(`OPFS read-back failed after a write error: ${read}/${offset} bytes`);
         }
@@ -483,26 +557,26 @@ async function openOpfsStreamSink(key: string): Promise<OpfsStreamSink | null> {
     async commit(nbytes) {
       active = false;
       try {
-        handle.truncate(nbytes);
-        handle.flush();
-        const size = handle.getSize();
+        openedHandle.truncate(nbytes);
+        openedHandle.flush();
+        const size = openedHandle.getSize();
         if (size !== nbytes) throw new Error(`OPFS size mismatch: ${size}/${nbytes} bytes`);
         const out = new Uint8Array(nbytes);
-        const read = handle.read(out, { at: 0 });
+        const read = openedHandle.read(out, { at: 0 });
         if (read !== nbytes) throw new Error(`Short OPFS read: ${read}/${nbytes} bytes`);
-        handle.close();
+        openedHandle.close();
         // Complete from here on: drop the marker so later reads treat the entry as a hit.
-        await dir.removeEntry(markerName).catch(() => {});
+        await trackOpfsTeardown(safeName, () => dir.removeEntry(markerName).catch(() => {}));
         return out;
       } catch (err) {
-        await discard();
+        await trackOpfsTeardown(safeName, discard);
         throw err;
       }
     },
     async abort() {
       if (active) {
         active = false;
-        discarding = discard();
+        discarding = trackOpfsTeardown(safeName, discard);
       }
       // Also settles a discard started by a failed write, before the caller rewrites the entry.
       await discarding;
@@ -511,9 +585,10 @@ async function openOpfsStreamSink(key: string): Promise<OpfsStreamSink | null> {
 }
 
 async function readFromOpfs(key: string): Promise<Uint8Array | null> {
+  const safeName = sanitizeKey(key);
+  if (OPFS_SINK_TEARDOWNS.has(safeName)) await awaitOpfsTeardown(safeName);
   const dir = await getWeightsDir(false);
   if (!dir) return null;
-  const safeName = sanitizeKey(key);
   try {
     const incomplete = await dir.getFileHandle(`${safeName}${INCOMPLETE_SUFFIX}`).then(
       () => true,
@@ -535,9 +610,10 @@ async function clearIncompleteMarker(dir: FileSystemDirectoryHandle, safeName: s
 }
 
 async function writeToOpfs(key: string, bytes: Uint8Array): Promise<boolean> {
+  const safeName = sanitizeKey(key);
+  if (OPFS_SINK_TEARDOWNS.has(safeName)) await awaitOpfsTeardown(safeName);
   const dir = await getWeightsDir(true);
   if (!dir) return false;
-  const safeName = sanitizeKey(key);
   let writable: FileSystemWritableFileStream | null = null;
   try {
     const fh = await dir.getFileHandle(safeName, { create: true });

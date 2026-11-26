@@ -1028,6 +1028,8 @@ createWorkerHarness(withShardReleaseRecovery({
     if (numDesigns === 1) {
       // Legacy singleton path: exact seed, artifact ID, and singleton StructureArtifact semantics
       const { struct: structArtifact, candidate, designMeta } = await runOneDesign(0, 1, seed);
+      // A partial-diffusion / inverse-folding run built the encoder lazily; its shard bytes can go now.
+      releaseUploadedShardBytes();
       const seqSet: SequenceSet = {
         kind: 'SequenceSet',
         id: `rfd4-seq-${structArtifact.id}`,
