@@ -37,6 +37,7 @@ const IMMUTABLE_SHORT_CODES: Record<string, string> = {
   'top-k-filter': 'tk',
   'designability-scorer': 's',
   'structure-compare': 'c',
+  pulchra: 'pu',
 };
 
 describe('Phase 0 contract: golden share (#p=/#g=) and denovo: v1 YAML roundtrips', () => {

@@ -33,6 +33,7 @@ All neural inference executes locally in sequential, VRAM-isolated Dedicated Web
 | **Property** | **Dyna-1** | Millisecond conformational exchange & flexibility prediction | [`ramithuh/dyna1-webgpu`](https://huggingface.co/ramithuh/dyna1-webgpu) | MIT / ESM-3 Open |
 | **Docking** | **GNINA 1.3** | 3-model 3D CNN ensemble pose scoring, BFGS minimization, flexible-ligand MC docking & pocket scan | [`ramithuh/gnina-webgpu`](https://huggingface.co/ramithuh/gnina-webgpu) | Apache-2.0 / GPLv2 |
 | **Evaluation** | **Designability / 3D Compare** | Kabsch SVD `scRMSD`, `scTM`, Motif RMSD, pLDDT, ipSAE, up to 6-way 3D superposition | Built-in CPU | MIT |
+| **Structure** | **PULCHRA 3.06** | Cα / backbone trace → all-atom model (N/C/O, rotamer side chains, clash fixing, H-bond peptide optimization, sequence threading) | Built-in CPU (TypeScript port of [`euplotes/pulchra`](https://github.com/euplotes/pulchra)) | MIT |
 
 ---
 
@@ -63,6 +64,7 @@ All neural inference executes locally in sequential, VRAM-isolated Dedicated Web
 - **ESM-C & ESM-3** — EvolutionaryScale / Chan Zuckerberg Biohub · [`Biohub/esm`](https://github.com/Biohub/esm)
 - **Dyna-1** — Wayment-Steele et al. (2026), *Learning millisecond protein dynamics from what is missing in NMR spectra*, Nature · [`WaymentSteeleLab/Dyna-1`](https://github.com/WaymentSteeleLab/Dyna-1)
 - **GNINA 1.3** — McNutt, Li, Meli, Aggarwal & Koes (2025), *GNINA 1.3: the next increment in molecular docking with deep learning*, Journal of Cheminformatics 17, 28 · [`gnina/gnina`](https://github.com/gnina/gnina)
+- **PULCHRA 3.06** — Rotkiewicz & Skolnick (2008), *Fast procedure for reconstruction of full-atom protein models from reduced representations*, Journal of Computational Chemistry 29(9), 1460–1465 · [`euplotes/pulchra`](https://github.com/euplotes/pulchra) (MIT, © Piotr Rotkiewicz; license in `web/static/vendor/pulchra/LICENSE`)
 - **Structure Predictors (via LocalFold)**:
   - **AlphaFold 2 & AlphaFold 3** — Jumper et al. (2021), *Nature*; Abramson et al. (2024), *Nature* (Google DeepMind)
   - **Boltz-2** — Passaro et al. (2025) (MIT / Recursion)

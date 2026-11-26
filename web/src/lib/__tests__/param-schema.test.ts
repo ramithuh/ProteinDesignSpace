@@ -330,6 +330,7 @@ describe('declarative ParamSchema & modes single source of truth', () => {
       { adapterId: 'top-k-filter', file: 'src/lib/plugins/top-k-filter/cpu-runner.ts' },
       { adapterId: 'structure-compare', file: 'src/lib/plugins/structure-compare/cpu-runner.ts' },
       { adapterId: 'designability-scorer', file: 'src/lib/plugins/designability-scorer/cpu-runner.ts' },
+      { adapterId: 'pulchra', file: 'src/lib/plugins/pulchra/cpu-runner.ts' },
     ];
 
     for (const check of cpuChecks) {

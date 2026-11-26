@@ -81,7 +81,7 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
   },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
   { title: 'Property Prediction', ids: ['thermompnn', 'esmc', 'dyna1', 'gnina'] },
-  { title: 'Evaluation', ids: ['top-k-filter', 'designability-scorer', 'structure-compare'] },
+  { title: 'Evaluation', ids: ['top-k-filter', 'designability-scorer', 'structure-compare', 'pulchra'] },
 ];
 
 export const CONCISE_BLOCK_ROLES: Record<string, string> = {
@@ -112,6 +112,7 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   'top-k-filter': 'Rank and filter top-K sequences per backbone or globally before folding',
   'designability-scorer': 'Kabsch alignment, scRMSD, scTM & pLDDT pass rate',
   'structure-compare': 'Multi-model 3D Kabsch / motif overlay & pairwise RMSD',
+  pulchra: 'Cα / backbone trace → all-atom model (PULCHRA 3.06 backbone, rotamers & H-bonds)',
 };
 
 function buildSubGroupsForAdapter(adapterId: string): {

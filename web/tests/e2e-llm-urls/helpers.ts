@@ -26,7 +26,7 @@ export const TOOLS_DIR = resolve(REPO_ROOT, 'tools');
 
 export const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10] as const;
 
-export const ALL_27_ADAPTER_IDS = [
+export const ALL_28_ADAPTER_IDS = [
   'pdb-input',
   'sequence-input',
   'rfd4-proteina',
@@ -54,9 +54,10 @@ export const ALL_27_ADAPTER_IDS = [
   'top-k-filter',
   'structure-compare',
   'designability-scorer',
+  'pulchra',
 ] as const;
 
-export const ALL_27_SHORT_CODES: Record<string, string> = {
+export const ALL_28_SHORT_CODES: Record<string, string> = {
   'pdb-input': 'p',
   'sequence-input': 'q',
   'rfd4-proteina': 'r',
@@ -84,6 +85,7 @@ export const ALL_27_SHORT_CODES: Record<string, string> = {
   'top-k-filter': 'tk',
   'designability-scorer': 's',
   'structure-compare': 'c',
+  pulchra: 'pu',
 };
 
 // Type-safe dynamic loader for uncreated M1/M2 engine modules (`flow-dsl.ts`, `llms-txt.ts`)
@@ -459,7 +461,7 @@ export function findEvaluationDocPath(): string | null {
 
 /**
  * Helper to construct a minimal valid `WorkflowGraph` for a single adapter (plus required upstream if needed)
- * so all 27 adapters can be exercised in round-trip tests.
+ * so all 28 adapters can be exercised in round-trip tests.
  */
 export function buildMinimalRunnableGraphForAdapter(adapterId: string): WorkflowGraph {
   const manifest = registryNs.ADAPTER_REGISTRY[adapterId];

@@ -266,6 +266,15 @@
       linkLabel: 'sokrypton/ColabFold',
     },
     {
+      name: 'PULCHRA 3.06',
+      role: 'All-Atom Reconstruction from Cα Traces',
+      detail:
+        'Backbone and side-chain rebuilding from reduced models (Rotkiewicz & Skolnick, J. Comput. Chem. 2008), ported to TypeScript with parity to the native C reference.',
+      license: 'MIT',
+      url: 'https://github.com/euplotes/pulchra',
+      linkLabel: 'euplotes/pulchra',
+    },
+    {
       name: 'ipSAE',
       role: 'Multi-Chain Interface Quality Scoring',
       detail:

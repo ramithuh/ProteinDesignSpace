@@ -1,15 +1,16 @@
-// Layer 3 Model Plugins Barrel — Single Registration Entrypoint (ALL 27 ADAPTERS NATIVE!).
-// Adding model #28 = 1 cohesive folder under `src/lib/plugins/<id>/` + 1 entry in `NATIVE_PLUGINS`.
+// Layer 3 Model Plugins Barrel — Single Registration Entrypoint (ALL 28 ADAPTERS NATIVE!).
+// Adding model #29 = 1 cohesive folder under `src/lib/plugins/<id>/` + 1 entry in `NATIVE_PLUGINS`.
 
 import { PluginRegistry, setActivePluginRegistry, type DomainPack, type ModelPlugin } from '$lib/kernel';
 import { proteinBiopolymerDomainPack } from '$lib/domains/protein-biopolymer';
 
-// Batch 3A: cpu-ts utilities (5)
+// Batch 3A: cpu-ts utilities (6)
 import { pdbInputPlugin } from './pdb-input';
 import { sequenceInputPlugin } from './sequence-input';
 import { topKFilterPlugin } from './top-k-filter';
 import { structureComparePlugin } from './structure-compare';
 import { designabilityScorerPlugin } from './designability-scorer';
+import { pulchraPlugin } from './pulchra';
 
 // Batch 3B: ort-webgpu (1)
 import { webProteinMpnnPlugin } from './web-protein-mpnn';
@@ -44,15 +45,16 @@ import { genie3Plugin } from './genie3';
 import { localfoldAf2Plugin } from './localfold-af2';
 
 /**
- * All 27 native Layer 3 ModelPlugins (zero legacy-bridged adapters remain!).
+ * All 28 native Layer 3 ModelPlugins (zero legacy-bridged adapters remain!).
  */
 export const NATIVE_PLUGINS: readonly ModelPlugin[] = [
-  // 5 cpu-ts utilities
+  // 6 cpu-ts utilities
   pdbInputPlugin,
   sequenceInputPlugin,
   topKFilterPlugin,
   structureComparePlugin,
   designabilityScorerPlugin,
+  pulchraPlugin,
   // 1 ort-webgpu
   webProteinMpnnPlugin,
   // 14 wgsl-custom generators & inverse-folders

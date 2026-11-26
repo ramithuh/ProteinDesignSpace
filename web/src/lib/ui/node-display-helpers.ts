@@ -466,6 +466,14 @@ export function formatNodeParamSummary(
     case 'designability-scorer': {
       return `scRMSD < ${num(p.scRmsdThreshold, 2.0).toFixed(1)} Å · pLDDT ≥ ${num(p.plddtThreshold, 70)}`;
     }
+    case 'pulchra': {
+      const parts = [p.reconstructSidechains === false ? 'Backbone' : 'All-atom'];
+      if (p.optimizeCa === true) parts.push(`Cα refine ≤${num(p.maxCaShift, 0.5).toFixed(1)} Å`);
+      if (p.optimizeHbonds === true) parts.push('H-bonds');
+      if (p.fixClashes === false) parts.push('no clash fix');
+      if (p.outputHydrogens === true) parts.push('+H');
+      return parts.join(' · ');
+    }
     default:
       return '';
   }

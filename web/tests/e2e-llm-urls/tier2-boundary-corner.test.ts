@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
-  ALL_27_ADAPTER_IDS,
+  ALL_28_ADAPTER_IDS,
   BUILD_DIR,
   ORIGINAL_MAIN_DIR,
   REPO_ROOT,
@@ -578,10 +578,10 @@ describe('Tier 2 â€” Boundary, Corner & Invalid-Input Cases (55 cases across F1â
   // F6: /llms.txt Quality, Accuracy & Size Boundaries (5 cases)
   // =========================================================================
   describe('F6: /llms.txt accuracy, safety & size boundaries', () => {
-    it('T2-F6-01: /llms.txt covers exact 27 live adapters and does not advertise stale removed IDs', async () => {
+    it('T2-F6-01: /llms.txt covers exact 28 live adapters and does not advertise stale removed IDs', async () => {
       const { implemented, text } = await generateLiveLlmsTxt();
       expect(implemented).toBe(true);
-      expect(ALL_27_ADAPTER_IDS).toHaveLength(27);
+      expect(ALL_28_ADAPTER_IDS).toHaveLength(28);
       for (const staleId of ['rfd4-conditioner', 'colabfold', 'rfdiffusion4']) {
         expect(text!).not.toContain(staleId);
       }

@@ -81,6 +81,7 @@ export const ADAPTER_TO_SHORT: Record<string, string> = {
   'top-k-filter': 'tk',
   'designability-scorer': 's',
   'structure-compare': 'c',
+  pulchra: 'pu',
 };
 
 export const SHORT_TO_ADAPTER: Record<string, string> = Object.fromEntries(
@@ -226,6 +227,8 @@ export const FLOW_MODEL_ALIASES: Record<string, FlowAliasResolution> = {
   cmp: { adapterId: 'structure-compare' },
   superpose: { adapterId: 'structure-compare' },
   '3d-compare': { adapterId: 'structure-compare' },
+  'pulchra-3.06': { adapterId: 'pulchra' },
+  allatom: { adapterId: 'pulchra' },
 };
 
 for (const opt of LOCALFOLD_MODEL_OPTIONS) {

@@ -79,5 +79,8 @@ web/static/vendor/foldflow2/weights/
 web/static/vendor/sid-protein/weights/
 !web/static/vendor/gnina/
 web/static/vendor/gnina/weights/
+!web/static/vendor/pulchra/
+# PULCHRA statistical tables (1.6 MB, packed by tools/pack-pulchra-tables.mjs) are source data, not weights.
+!web/static/vendor/pulchra/pulchra-tables.bin
 .upstream-tmp/
 .promo-studio/

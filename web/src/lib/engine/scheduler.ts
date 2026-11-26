@@ -38,6 +38,7 @@ import {
 import { topKFilterPlugin } from '$lib/plugins/top-k-filter';
 import { structureComparePlugin } from '$lib/plugins/structure-compare';
 import { designabilityScorerPlugin } from '$lib/plugins/designability-scorer';
+import { pulchraPlugin } from '$lib/plugins/pulchra';
 import type {
   AdapterManifest,
   ArtifactRef,
@@ -65,6 +66,7 @@ const BUILTIN_CPU_PLUGINS: Readonly<Record<string, ModelPlugin>> = {
   'top-k-filter': topKFilterPlugin,
   'structure-compare': structureComparePlugin,
   'designability-scorer': designabilityScorerPlugin,
+  pulchra: pulchraPlugin,
 };
 
 function resolveManifestForAdapter(
