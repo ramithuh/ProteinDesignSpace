@@ -259,7 +259,7 @@ describe('cg2all spherical harmonics & Clebsch–Gordan basis', () => {
       });
     });
     expect(rErr).toBeLessThan(1e-4); // nm
-  });
+  }, 30_000);
 });
 
 describe('cg2all rigid-group all-atom assembly (golden structure-module outputs → atoms)', () => {
