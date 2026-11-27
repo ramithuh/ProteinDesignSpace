@@ -32,7 +32,7 @@
   import {
     formatGistShareParam,
     loadGistSession,
-    serializeGistSession,
+    serializeGistSessionCompressed,
     type LoadedGistSession,
     type SerializedGistSession,
   } from '$lib/engine/gist-session';
@@ -163,8 +163,11 @@
   let splitMode = $state<'horizontal' | 'vertical'>('horizontal');
   let splitPct = $state<number>(65);
   let verticalSplitPct = $state<number>(48);
+  let rightPaneViewerPct = $state<number>(48);
   let draggingSplit = $state(false);
+  let draggingRightSplit = $state(false);
   let splitWrapEl: HTMLDivElement | null = $state(null);
+  let rightPaneEl: HTMLElement | null = $state(null);
   let splitMoveRafId: number | null = null;
   let pendingSplitClientX: number | null = null;
   let pendingSplitClientY: number | null = null;
@@ -744,22 +747,36 @@
     draggingSplit = true;
   }
 
+  function startRightSplitDrag(ev: PointerEvent) {
+    if (splitMode !== 'horizontal') return;
+    ev.preventDefault();
+    draggingRightSplit = true;
+  }
+
   function persistSplitSizes() {
     try {
       localStorage.setItem('denovo-split-h-pct', String(splitPct));
       localStorage.setItem('denovo-split-v-pct', String(verticalSplitPct));
+      localStorage.setItem('denovo-split-right-v-pct', String(rightPaneViewerPct));
     } catch {
       /* ignore */
     }
   }
 
   function handleWindowPointerMove(ev: PointerEvent) {
-    if (!draggingSplit || !splitWrapEl) return;
+    if ((!draggingSplit || !splitWrapEl) && (!draggingRightSplit || !rightPaneEl)) return;
     pendingSplitClientX = ev.clientX;
     pendingSplitClientY = ev.clientY;
     if (splitMoveRafId !== null) return;
     splitMoveRafId = requestAnimationFrame(() => {
       splitMoveRafId = null;
+      if (draggingRightSplit && rightPaneEl) {
+        const rect = rightPaneEl.getBoundingClientRect();
+        if (pendingSplitClientY === null || rect.height <= 0) return;
+        const rawPct = ((pendingSplitClientY - rect.top) / rect.height) * 100;
+        rightPaneViewerPct = Math.min(78, Math.max(20, Math.round(rawPct * 10) / 10));
+        return;
+      }
       if (!draggingSplit || !splitWrapEl) return;
       const rect = splitWrapEl.getBoundingClientRect();
       if (splitMode === 'horizontal') {
@@ -781,8 +798,9 @@
     }
     pendingSplitClientX = null;
     pendingSplitClientY = null;
-    if (draggingSplit) {
+    if (draggingSplit || draggingRightSplit) {
       draggingSplit = false;
+      draggingRightSplit = false;
       persistSplitSizes();
     }
   }
@@ -1328,6 +1346,10 @@
       const savedVPct = Number(localStorage.getItem('denovo-split-v-pct'));
       if (Number.isFinite(savedVPct) && savedVPct >= 24 && savedVPct <= 76) {
         verticalSplitPct = savedVPct;
+      }
+      const savedRightVPct = Number(localStorage.getItem('denovo-split-right-v-pct'));
+      if (Number.isFinite(savedRightVPct) && savedRightVPct >= 20 && savedRightVPct <= 78) {
+        rightPaneViewerPct = savedRightVPct;
       }
       firstRunAck = localStorage.getItem('denovo-first-run-ack') === '1';
     } catch {
@@ -2642,7 +2664,7 @@
     }
   }
 
-  function openGistPopover() {
+  async function openGistPopover() {
     sysMenuOpen = false;
     moreMenuOpen = false;
     shareMenuOpen = false;
@@ -2653,17 +2675,17 @@
     }
     gistSnapshot = null;
     gistSnapshotError = null;
+    gistMenuOpen = true;
     try {
       const plainGraph = $state.snapshot(graph) as WorkflowGraph;
       const plainOutputs = $state.snapshot(outputsByNode) as Record<
         string,
         Record<string, CanonicalArtifact>
       >;
-      gistSnapshot = serializeGistSession(plainGraph, plainOutputs);
+      gistSnapshot = await serializeGistSessionCompressed(plainGraph, plainOutputs);
     } catch (err) {
       gistSnapshotError = err instanceof Error ? err.message : String(err);
     }
-    gistMenuOpen = true;
   }
 
   async function openSharePopover() {
@@ -4634,7 +4656,7 @@
   class="workbench-split"
     class:horizontal={splitMode === 'horizontal'}
     class:vertical={splitMode === 'vertical'}
-    class:dragging={draggingSplit}
+    class:dragging={draggingSplit || draggingRightSplit}
     bind:this={splitWrapEl}
     style={splitMode === 'horizontal'
       ? `--left-pane: ${splitPct}%;`
@@ -4840,6 +4862,7 @@
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
         class="split-handle"
+        class:is-active={draggingSplit}
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize graph and output panes"
@@ -4856,6 +4879,7 @@
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
         class="split-handle is-vertical"
+        class:is-active={draggingSplit}
         role="separator"
         aria-orientation="horizontal"
         aria-label="Resize graph and output panes vertically"
@@ -4882,6 +4906,10 @@
       class="results-grid"
       class:stacked-pane={splitMode === 'horizontal'}
       class:is-studio-open={studioOpen}
+      bind:this={rightPaneEl}
+      style={splitMode === 'horizontal' && !studioOpen
+        ? `--viewer-pane: ${rightPaneViewerPct}%;`
+        : undefined}
     >
       <div class="viewer-col" class:is-expanded={expandedPane === 'viewer'} data-tour="viewer-panel">
         <div class="viewer-bar">
@@ -5232,6 +5260,25 @@
           </div>
         {/if}
       </div>
+
+      {#if splitMode === 'horizontal' && !studioOpen && expandedPane === 'none'}
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div
+          class="split-handle is-vertical right-pane-split-handle"
+          class:is-active={draggingRightSplit}
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize 3D viewer and inspector panes vertically"
+          title="Drag to resize 3D viewer and inspector · Double-click to reset"
+          onpointerdown={startRightSplitDrag}
+          ondblclick={() => {
+            rightPaneViewerPct = 48;
+            persistSplitSizes();
+          }}
+        >
+          <div class="split-bar"></div>
+        </div>
+      {/if}
 
       <div class="right-panel" class:is-expanded={expandedPane === 'inspector'} data-tour="inspector-panel">
         {#if studioOpen && selectedNode}
@@ -6418,13 +6465,13 @@
     width: 56px;
     height: 3px;
   }
-  .split-handle:hover .split-bar,
-  .workbench-split.dragging .split-bar {
+  .split-handle:not(.is-vertical):hover .split-bar,
+  .split-handle:not(.is-vertical).is-active .split-bar {
     background: var(--accent);
     height: 72px;
   }
   .split-handle.is-vertical:hover .split-bar,
-  .workbench-split.vertical.dragging .split-handle.is-vertical .split-bar {
+  .split-handle.is-vertical.is-active .split-bar {
     background: var(--accent);
     width: 88px;
     height: 3px;
@@ -6709,17 +6756,36 @@
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    gap: 10px;
-    overflow-y: auto;
+    gap: 0;
+    overflow: hidden;
     padding-right: 2px;
   }
   .results-grid.stacked-pane > * {
     width: 100%;
     min-width: 0;
   }
-  .results-grid.stacked-pane .right-panel {
+  .results-grid.stacked-pane > .viewer-col {
+    flex: 0 0 var(--viewer-pane, 48%);
+    min-height: 170px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .results-grid.stacked-pane > .viewer-col .viewer-stage {
     flex: 1;
-    min-height: 240px;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .results-grid.stacked-pane > .viewer-col .viewer-stage > :global(.mol-card) {
+    flex: 1;
+    min-height: 0;
+    height: 100% !important;
+  }
+  .results-grid.stacked-pane .right-panel {
+    flex: 1 1 0;
+    min-height: 140px;
+    overflow: hidden;
   }
   .results-grid.stacked-pane .right-body {
     max-height: none;
@@ -6749,6 +6815,19 @@
     }
     .results-grid.stacked-pane {
       height: auto;
+      gap: 10px;
+      overflow: visible;
+    }
+    .results-grid.stacked-pane > .viewer-col {
+      flex: none;
+      min-height: 0;
+      overflow: visible;
+    }
+    .results-grid.stacked-pane > .viewer-col .viewer-stage > :global(.mol-card) {
+      height: 350px !important;
+    }
+    .results-grid.stacked-pane .right-panel {
+      flex: none;
       overflow: visible;
     }
     .results-grid.stacked-pane .right-body {

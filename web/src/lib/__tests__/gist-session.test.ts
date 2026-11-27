@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   buildGistShareUrl,
   deserializeGistSession,
+  deserializeGistSessionAsync,
   extractGistQueryParam,
   formatGistShareParam,
   GIST_SESSION_FILENAME,
@@ -12,6 +13,7 @@ import {
   loadGistSession,
   parseGistReference,
   serializeGistSession,
+  serializeGistSessionCompressed,
 } from '$lib/engine/gist-session';
 import { defaultParamsForAdapter } from '$lib/engine/graph-utils';
 import { ExecutionScheduler } from '$lib/engine/scheduler';
@@ -704,5 +706,54 @@ describe('gist-session: UI & zero-local-storage invariants', () => {
     expect(pageSrc).toContain('applyGistQueryParam');
     expect(pageSrc).toContain('hydrateGistSession');
     expect(pageSrc).toContain('seedMemoFromOutputs');
+  });
+
+  it('strips redundant cifText / collection[0] text and round-trips gzip+base64 compressed sessions', async () => {
+    const graph: WorkflowGraph = {
+      id: 'gz-test',
+      name: 'Compressed Test',
+      description: '',
+      nodes: [
+        { id: 'gen_1', adapterId: 'rfd4-proteina', label: 'RFD4', params: {}, position: { x: 0, y: 0 } },
+      ],
+      edges: [],
+    };
+    const hugeCif = 'data_BIG\n' + '# '.repeat(4000) + '\n';
+    const samplePdb = generateSampleHelixBundlePdb();
+    const item1 = makeStructureArtifact('d1', samplePdb, { cifText: hugeCif });
+    const item2 = makeStructureArtifact('d2', samplePdb, { cifText: hugeCif });
+    const batch: StructureArtifact = {
+      ...item1,
+      id: 'batch-2',
+      collection: {
+        kind: 'Collection',
+        schema: 'denovo.collection/v1',
+        id: 'col-2',
+        familyKey: 'fam-2',
+        collectionKind: 'independent-candidates',
+        requestedCount: 2,
+        complete: true,
+        items: [item1, item2],
+        keys: ['d1', 'd2'],
+      },
+    };
+
+    const plain = serializeGistSession(graph, { gen_1: { structure: batch } });
+    // Redundant cifText was stripped when pdbText is present
+    expect(plain.json).not.toContain('data_BIG');
+
+    const compressed = await serializeGistSessionCompressed(graph, { gen_1: { structure: batch } });
+    expect(compressed.bytes).toBeLessThan(plain.bytes);
+    const outer = JSON.parse(compressed.json) as { schema: string; encoding: string; data: string };
+    expect(outer.schema).toBe(GIST_SESSION_SCHEMA);
+    expect(outer.encoding).toBe('gzip+base64');
+
+    const restored = await deserializeGistSessionAsync(compressed.json);
+    const restoredStruct = restored.outputs.gen_1?.structure as StructureArtifact;
+    expect(restoredStruct.pdbText).toContain('ATOM');
+    expect(restoredStruct.caCoords).toBeInstanceOf(Float32Array);
+    expect(restoredStruct.caCoords.length).toBe(item1.caCoords.length);
+    expect(restoredStruct.collection?.items.length).toBe(2);
+    expect(restoredStruct.collection?.items[1].caCoords.length).toBe(item2.caCoords.length);
   });
 });

@@ -163,6 +163,18 @@ export function pickDefaultPeekSlot(slots: PeekSlot[]): string | null {
   const outWithData = slots.filter((s) => s.direction === 'out' && s.artifact !== null && isActive(s));
   if (outWithData.length > 0) {
     outWithData.sort((a, b) => getPortTypePriority(b.portType) - getPortTypePriority(a.portType));
+    // When a node emits a multi-design StructureArtifact collection alongside a single-design
+    // ResidueTrack (e.g. Dyna-1 scoring 5 RFD4 designs), default to `structure` so the user
+    // immediately sees the All designs / Design 1..N switcher instead of only Design 1's 1D track.
+    if (outWithData[0].portType === 'ResidueTrack') {
+      const multiStructSlot = outWithData.find(
+        (s) =>
+          s.artifact?.kind === 'StructureArtifact' &&
+          Array.isArray(s.artifact.collection?.items) &&
+          s.artifact.collection.items.length > 1,
+      );
+      if (multiStructSlot) return multiStructSlot.id;
+    }
     return outWithData[0].id;
   }
   const inWithData = slots.filter((s) => s.direction === 'in' && s.artifact !== null && isActive(s));

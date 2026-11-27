@@ -4,7 +4,7 @@
 import { decodeWireValue, encodeWireValue } from './remote-codec';
 import { validateGraph } from './graph-utils';
 import { normalizeWorkflowGraph } from './share';
-import { parsePdbBackbone, parseStructureText } from '$lib/protein-ops/pdb';
+import { parseStructureText } from '$lib/protein-ops/pdb';
 import type {
   CanonicalArtifact,
   FoldedCandidate,
@@ -259,13 +259,37 @@ function hasStructureText(art: { pdbText?: unknown; cifText?: unknown }): boolea
   );
 }
 
+const GIST_COMPRESSION_ENCODING = 'gzip+base64' as const;
+
 function stripStructureArtifact(art: StructureArtifact): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  const canRederive = hasStructureText(art);
+  const hasPdb = typeof art.pdbText === 'string' && art.pdbText.trim().length > 0;
+  const hasCif = typeof art.cifText === 'string' && art.cifText.trim().length > 0;
+  const canRederive = hasPdb || hasCif;
+  const hasCollectionItems =
+    isPlainObject(art.collection) &&
+    Array.isArray(art.collection.items) &&
+    art.collection.items.length > 0;
 
   for (const [key, val] of Object.entries(art as unknown as Record<string, unknown>)) {
     if (FORBIDDEN_KEYS.has(key) || val === undefined) continue;
-    if (canRederive && (key === 'caCoords' || key === 'backbone4Coords')) {
+    if (
+      canRederive &&
+      (key === 'caCoords' ||
+        key === 'backbone4Coords' ||
+        key === 'sourceResidues' ||
+        key === 'atomPresence' ||
+        key === 'chainIds' ||
+        key === 'insCodes')
+    ) {
+      continue;
+    }
+    // Drop redundant mmCIF text (which carries large RCSB dictionary headers) whenever pdbText is present
+    if (hasPdb && key === 'cifText') {
+      continue;
+    }
+    // Avoid duplicating item[0]'s coordinate text at the collection wrapper top level
+    if (hasCollectionItems && (key === 'pdbText' || key === 'cifText')) {
       continue;
     }
     if (key === 'collection' && isPlainObject(val) && Array.isArray(val.items)) {
@@ -291,11 +315,15 @@ function stripFoldedStructure(art: FoldedStructure): Record<string, unknown> {
     if (key === 'folds' && Array.isArray(val)) {
       out.folds = val.map((fold) => {
         if (!isPlainObject(fold)) return fold;
+        const hasPdb = typeof fold.pdbText === 'string' && fold.pdbText.trim().length > 0;
         const canRederive = hasStructureText(fold as { pdbText?: unknown; cifText?: unknown });
         const nextFold: Record<string, unknown> = {};
         for (const [fk, fv] of Object.entries(fold)) {
           if (FORBIDDEN_KEYS.has(fk) || fv === undefined) continue;
           if (canRederive && (fk === 'caCoords' || fk === 'backbone4Coords')) {
+            continue;
+          }
+          if (hasPdb && fk === 'cifText') {
             continue;
           }
           nextFold[fk] = fv;
@@ -389,9 +417,126 @@ export function serializeGistSession(
   };
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function compressGzipBase64(text: string): Promise<string | null> {
+  if (typeof CompressionStream === 'undefined') return null;
+  const rawBytes = new TextEncoder().encode(text);
+  const cs = new CompressionStream('gzip');
+  const writer = cs.writable.getWriter();
+  await writer.write(rawBytes);
+  await writer.close();
+  const reader = cs.readable.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytesToBase64(merged);
+}
+
+async function decompressGzipBase64(b64: string, maxBytes: number): Promise<string> {
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('This browser does not support DecompressionStream("gzip") to load compressed Gist sessions.');
+  }
+  const compressed = base64ToBytes(b64);
+  const ds = new DecompressionStream('gzip');
+  const writer = ds.writable.getWriter();
+  const writePromise = writer.write(compressed as unknown as BufferSource).then(() => writer.close());
+  const reader = ds.readable.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel('Decompressed Gist payload exceeds maximum allowed size').catch(() => {});
+          throw new Error(
+            `Decompressed Gist payload exceeds maximum allowed size (${(maxBytes / 1024 / 1024).toFixed(1)} MiB).`,
+          );
+        }
+        chunks.push(value);
+      }
+    }
+    await writePromise;
+  } finally {
+    reader.releaseLock();
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+
+/**
+ * Serialize a WorkflowGraph + computed node outputs into a compact gzip+base64
+ * `denovo.gist-session/v1` JSON envelope so multi-design sessions stay well under
+ * GitHub's `gist.github.com` web form size limit.
+ */
+export async function serializeGistSessionCompressed(
+  graph: WorkflowGraph,
+  nodeOutputs: Record<string, Record<string, CanonicalArtifact>>,
+): Promise<SerializedGistSession> {
+  const base = serializeGistSession(graph, nodeOutputs);
+  try {
+    const gzB64 = await compressGzipBase64(base.json);
+    if (gzB64) {
+      const envelope = JSON.stringify({
+        schema: GIST_SESSION_SCHEMA,
+        encoding: GIST_COMPRESSION_ENCODING,
+        data: gzB64,
+      });
+      const envBytes = new TextEncoder().encode(envelope).byteLength;
+      if (envBytes < base.bytes) {
+        return {
+          ...base,
+          json: envelope,
+          bytes: envBytes,
+        };
+      }
+    }
+  } catch {
+    // Fall back cleanly to uncompressed JSON if CompressionStream fails
+  }
+  return base;
+}
+
 function parseCoordinatesFromText(pdbText?: string, cifText?: string) {
   if (typeof pdbText === 'string' && pdbText.trim().length > 0) {
-    return parsePdbBackbone(pdbText);
+    return parseStructureText(pdbText);
   }
   if (typeof cifText === 'string' && cifText.trim().length > 0) {
     return parseStructureText(cifText);
@@ -401,18 +546,6 @@ function parseCoordinatesFromText(pdbText?: string, cifText?: string) {
 
 function rehydrateStructureArtifact(raw: Record<string, unknown>): StructureArtifact {
   const art = { ...raw } as unknown as StructureArtifact;
-  const parsed = parseCoordinatesFromText(art.pdbText, art.cifText);
-  if (parsed) {
-    art.caCoords = parsed.caCoords;
-    art.backbone4Coords = parsed.backbone4Coords;
-  } else {
-    if (!(art.caCoords instanceof Float32Array)) {
-      art.caCoords = new Float32Array(0);
-    }
-    if (!(art.backbone4Coords instanceof Float32Array)) {
-      art.backbone4Coords = new Float32Array(0);
-    }
-  }
 
   if (art.collection && isPlainObject(art.collection) && Array.isArray(art.collection.items)) {
     art.collection = {
@@ -423,7 +556,30 @@ function rehydrateStructureArtifact(raw: Record<string, unknown>): StructureArti
           : (item as StructureArtifact),
       ),
     };
+    const first = art.collection.items[0];
+    if (first && !hasStructureText(art)) {
+      if (typeof first.pdbText === 'string' && first.pdbText) art.pdbText = first.pdbText;
+      if (typeof first.cifText === 'string' && first.cifText) art.cifText = first.cifText;
+    }
   }
+
+  const parsed = parseCoordinatesFromText(art.pdbText, art.cifText);
+  if (parsed) {
+    art.caCoords = parsed.caCoords;
+    art.backbone4Coords = parsed.backbone4Coords;
+    if (!art.sourceResidues) art.sourceResidues = parsed.sourceResidues;
+    if (!art.atomPresence) art.atomPresence = parsed.atomPresence;
+    if (!art.chainIds) art.chainIds = parsed.chainIds;
+    if (!art.insCodes) art.insCodes = parsed.insCodes;
+  } else {
+    if (!(art.caCoords instanceof Float32Array)) {
+      art.caCoords = new Float32Array(0);
+    }
+    if (!(art.backbone4Coords instanceof Float32Array)) {
+      art.backbone4Coords = new Float32Array(0);
+    }
+  }
+
   return art;
 }
 
@@ -540,6 +696,37 @@ export function deserializeGistSession(rawText: string): GistSessionPayload {
     graph,
     outputs,
   };
+}
+
+/**
+ * Async deserializer supporting both plain JSON `denovo.gist-session/v1` payloads and
+ * `encoding: "gzip+base64"` compressed envelopes (with bounded decompression against zip bombs).
+ */
+export async function deserializeGistSessionAsync(
+  rawText: string,
+  maxDecompressedBytes = DEFAULT_MAX_GIST_BYTES * 4,
+): Promise<GistSessionPayload> {
+  if (typeof rawText !== 'string' || !rawText.trim()) {
+    throw new Error('Gist session payload is empty.');
+  }
+  let outer: unknown;
+  try {
+    outer = JSON.parse(rawText);
+  } catch {
+    throw new Error('Invalid JSON in Gist session payload.');
+  }
+  if (
+    isPlainObject(outer) &&
+    outer.schema === GIST_SESSION_SCHEMA &&
+    outer.encoding === GIST_COMPRESSION_ENCODING
+  ) {
+    if (typeof outer.data !== 'string' || !outer.data.trim()) {
+      throw new Error('Malformed compressed Gist session payload.');
+    }
+    const innerText = await decompressGzipBase64(outer.data, maxDecompressedBytes);
+    return deserializeGistSession(innerText);
+  }
+  return deserializeGistSession(rawText);
 }
 
 async function readBoundedResponseText(
@@ -672,7 +859,7 @@ export async function loadGistSession(
       }
       if (rawResp.ok) {
         const { text, bytes } = await readBoundedResponseText(rawResp, maxBytes, opts.signal);
-        const session = deserializeGistSession(text);
+        const session = await deserializeGistSessionAsync(text, Math.max(maxBytes * 4, DEFAULT_MAX_GIST_BYTES * 2));
         return { session, ref, sourceUrl: rawUrl, bytes };
       }
       // Fall back to GitHub API only when raw URL isn't found (e.g. non-standard filename)
@@ -744,7 +931,7 @@ export async function loadGistSession(
       throw new Error(`HTTP ${rawResp.status} fetching truncated Gist raw_url.`);
     }
     const { text: rawText, bytes } = await readBoundedResponseText(rawResp, maxBytes, opts.signal);
-    const session = deserializeGistSession(rawText);
+    const session = await deserializeGistSessionAsync(rawText, Math.max(maxBytes * 4, DEFAULT_MAX_GIST_BYTES * 2));
     return { session, ref, sourceUrl: entry.raw_url, bytes };
   }
 
@@ -754,6 +941,6 @@ export async function loadGistSession(
       `Gist payload (${(contentBytes / 1024 / 1024).toFixed(1)} MiB) exceeds maximum allowed size (${(maxBytes / 1024 / 1024).toFixed(1)} MiB).`,
     );
   }
-  const session = deserializeGistSession(entry.content);
+  const session = await deserializeGistSessionAsync(entry.content, Math.max(maxBytes * 4, DEFAULT_MAX_GIST_BYTES * 2));
   return { session, ref, sourceUrl: apiUrl, bytes: contentBytes };
 }

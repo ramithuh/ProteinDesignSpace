@@ -261,13 +261,35 @@ describe('peek helpers', () => {
     expect(pickDefaultPeekSlot(thermoSlotsOrderA)).toBe('out:mutations');
     expect(pickDefaultPeekSlot(thermoSlotsOrderB)).toBe('out:mutations');
 
-    // Dyna-1 prefers ResidueTrack over StructureArtifact and SequenceSet
+    // Dyna-1 prefers ResidueTrack on single structures, but switches to StructureArtifact
+    // when emitting a multi-design collection so the Design 1..N switcher is immediately visible.
     const dynaSlots = [
       { id: 'out:structure', direction: 'out' as const, portName: 'structure', portType: 'StructureArtifact' as const, required: true, wired: true, artifact: struct },
       { id: 'out:sequences', direction: 'out' as const, portName: 'sequences', portType: 'SequenceSet' as const, required: true, wired: true, artifact: seqs },
       { id: 'out:track', direction: 'out' as const, portName: 'track', portType: 'ResidueTrack' as const, required: true, wired: true, artifact: track },
     ];
     expect(pickDefaultPeekSlot(dynaSlots)).toBe('out:track');
+
+    const multiStruct: StructureArtifact = {
+      ...struct,
+      collection: {
+        kind: 'Collection',
+        schema: 'denovo.collection/v1',
+        id: 'dyna1-col-test',
+        familyKey: 'dyna1-test',
+        collectionKind: 'independent-candidates',
+        requestedCount: 2,
+        complete: true,
+        items: [struct, { ...struct, id: 's2', label: 's2' }],
+        keys: ['s1', 's2'],
+      },
+    };
+    const multiDynaSlots = [
+      { id: 'out:structure', direction: 'out' as const, portName: 'structure', portType: 'StructureArtifact' as const, required: true, wired: true, artifact: multiStruct },
+      { id: 'out:sequences', direction: 'out' as const, portName: 'sequences', portType: 'SequenceSet' as const, required: true, wired: true, artifact: seqs },
+      { id: 'out:track', direction: 'out' as const, portName: 'track', portType: 'ResidueTrack' as const, required: true, wired: true, artifact: track },
+    ];
+    expect(pickDefaultPeekSlot(multiDynaSlots)).toBe('out:structure');
 
     // De novo generators (RFD4 / Genie 3) preserve 3D StructureArtifact above SequenceSet
     const genSlots = [
