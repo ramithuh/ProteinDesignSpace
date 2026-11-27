@@ -43,6 +43,8 @@ export type AtomGranularity = 'ca-only' | 'backbone4' | 'all-atom';
 
 export interface ArtifactProvenance {
   quantization?: 'fp32' | 'fp16' | 'int8' | 'int5';
+  /** Precision weights are stored in on the GPU when it differs from at-rest `quantization`. */
+  gpuWeightPrecision?: 'fp16' | 'fp32';
   languageModelQuantization?: 'int3';
   confidenceHead?: string;
   diffusionStepsScheduled?: number;

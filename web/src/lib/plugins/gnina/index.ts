@@ -1,6 +1,7 @@
 // Layer 3 Native ModelPlugin — gnina (GNINA 1.3 Ligand Docking & Affinity)
 
 import { ADAPTER_REGISTRY } from '$lib/engine/registry';
+import { resolveGninaLigandSource } from '$lib/protein-ops/gnina-prep';
 import { getLegacyModelCardForAdapter } from '$lib/engine/model-cards';
 import { PROTEIN_DOMAIN_ID } from '$lib/domains/protein-biopolymer';
 import type { KernelAdapterManifest, KernelModelCardSpec, ModelPlugin } from '$lib/kernel';
@@ -88,14 +89,13 @@ export const gninaPlugin: ModelPlugin = {
   },
   display: {
     formatCanvasSummary: (params) => {
-      const tm = String(params.taskMode ?? 'score');
+      const { taskMode: tm, ligandCode, dockLigandCcd: ccd, source } = resolveGninaLigandSource(params);
       const prec = String(params.precision ?? 'fp16').toUpperCase();
-      const lig = String(params.ligandCode ?? '').trim().toUpperCase();
-      const ligTag = lig ? ` · ${lig}` : '';
+      const lig = ligandCode.toUpperCase();
+      const ligTag = source === 'external' ? ' · SDF' : lig ? ` · ${lig}` : '';
       if (tm === 'dock') {
         const exh = Number(params.exhaustiveness ?? 8);
         const modes = Number(params.numModes ?? 5);
-        const ccd = String(params.dockLigandCcd ?? '').trim().toUpperCase();
         const dockLigTag = ccd ? ` · ${ccd}` : ligTag;
         return `Dock (exh=${exh}, ${modes}p)${dockLigTag} · ${prec}`;
       }

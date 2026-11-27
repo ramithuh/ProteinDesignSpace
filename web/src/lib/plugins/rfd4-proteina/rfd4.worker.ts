@@ -237,8 +237,9 @@ async function ensureLoaded(ctx: WorkerRunContext, needEncoder: boolean) {
 
   if (!generator) {
     ctx.progress('init', 0.96, 'Uploading RFD4-Proteina weights to GPU...');
-    // Match upstream web.rfd4-proteina.org: always use packed FP16 weights ({ half: true })
-    // for half the VRAM, 2-3x faster kernels, and exact parity with upstream WebGPU CI gates.
+    // Block-64 INT8 shards are dequantized on the host and repacked as FP16 for the GPU
+    // (`{ half: true }`, matching upstream web.rfd4-proteina.org). Biases/LayerNorm stay f32;
+    // f16 intermediates are used only when the device supports `shader-f16`.
     generator = await rfd4Mod.Rfd4pGeneratorGpu.create(
       gpuDevice,
       shardedBundle.tensors ?? shardedBundle,
@@ -988,6 +989,7 @@ createWorkerHarness(withShardReleaseRecovery({
         atomGranularity: 'all-atom',
         provenance: {
           quantization: 'int8',
+          gpuWeightPrecision: 'fp16',
           earlyStopped,
           ...(degradedFallback ? { degradedFallback } : {}),
           ...(stepGeomWarn ? { warnings: [stepGeomWarn] } : {}),

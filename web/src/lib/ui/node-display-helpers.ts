@@ -1,14 +1,37 @@
 import { getBenchmarkById } from '$lib/engine/benchmarks';
+import { resolveGninaLigandSource } from '$lib/protein-ops/gnina-prep';
 import { resolveEffectiveMaxSequences } from '$lib/engine/batch-flow';
 import { parseFixedPositionsAndChains } from '$lib/engine/mpnn-spec';
 import { LOCALFOLD_MODEL_OPTIONS, MPNN_VARIANT_OPTIONS, RFD4_BENCHMARK_OPTIONS } from '$lib/engine/registry';
 import { computeUploadDigest, isValidSha256Hex, validateSequenceText } from '$lib/engine/param-validation';
 import type {
+  ArtifactProvenance,
   CanonicalArtifact,
   MutationMatrixArtifact,
   StructureArtifact,
   WorkflowGraph,
 } from '$lib/engine/types';
+
+/** Format weight quantization / GPU precision provenance badge (e.g. `INT8 · FP16 GPU`). */
+export function formatProvenanceQuantChip(
+  provenance?: ArtifactProvenance,
+  foldModelId?: string,
+): string | null {
+  if (provenance?.quantization) {
+    const q = provenance.quantization.toUpperCase();
+    if (provenance.languageModelQuantization) {
+      return `${q} fold · ${provenance.languageModelQuantization.toUpperCase()} ESM-C`;
+    }
+    if (provenance.gpuWeightPrecision && provenance.gpuWeightPrecision !== provenance.quantization) {
+      return `${q} · ${provenance.gpuWeightPrecision.toUpperCase()} GPU`;
+    }
+    return q;
+  }
+  if (foldModelId && foldModelId.toLowerCase().includes('-int5')) {
+    return 'INT5';
+  }
+  return null;
+}
 
 const INVERSE_FOLD_ADAPTERS = new Set([
   'web-protein-mpnn',
@@ -355,14 +378,13 @@ export function formatNodeParamSummary(
       return `${modeLbl} · ${prec} · ${capTag}`;
     }
     case 'gnina': {
-      const tm = String(p.taskMode ?? 'score');
+      const { taskMode: tm, ligandCode, dockLigandCcd: ccd, source } = resolveGninaLigandSource(p);
       const prec = String(p.precision ?? 'fp16').toUpperCase();
-      const lig = String(p.ligandCode ?? '').trim().toUpperCase();
-      const ligTag = lig ? ` · ${lig}` : '';
+      const lig = ligandCode.toUpperCase();
+      const ligTag = source === 'external' ? ' · SDF' : lig ? ` · ${lig}` : '';
       if (tm === 'dock') {
         const exh = num(p.exhaustiveness, 8);
         const modes = num(p.numModes, 5);
-        const ccd = String(p.dockLigandCcd ?? '').trim().toUpperCase();
         const dockLigTag = ccd ? ` · ${ccd}` : ligTag;
         return `Dock (exh=${exh}, ${modes}p)${dockLigTag} · ${prec}`;
       }

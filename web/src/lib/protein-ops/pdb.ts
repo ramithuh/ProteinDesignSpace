@@ -1400,6 +1400,7 @@ function mmcifToPdbWithChainMap(
     occ: number;
     bFactor: number;
     elem: string;
+    charge: number;
     isPolymer: boolean;
   }
 
@@ -1428,6 +1429,7 @@ function mmcifToPdbWithChainMap(
   let iOcc = -1;
   let iB = -1;
   let iElem = -1;
+  let iCharge = -1;
 
   let firstModelNum: string | null = null;
   const modelOrder: string[] = [];
@@ -1491,6 +1493,7 @@ function mmcifToPdbWithChainMap(
       iOcc = cols.indexOf('occupancy');
       iB = cols.indexOf('B_iso_or_equiv');
       iElem = cols.indexOf('type_symbol');
+      iCharge = cols.indexOf('pdbx_formal_charge');
       colMapReady = true;
     }
 
@@ -1532,6 +1535,8 @@ function mmcifToPdbWithChainMap(
     const bParsed = iB >= 0 ? parseFloat(get(iB)) : 0.0;
     const bFactor = Number.isFinite(bParsed) ? bParsed : 0.0;
     const elem = inferPdbElement(cifVal(iElem), atomName, group === 'HETATM', comp);
+    const chargeRaw = iCharge >= 0 ? parseInt(cifVal(iCharge), 10) : 0;
+    const charge = Number.isFinite(chargeRaw) ? Math.max(-9, Math.min(9, chargeRaw)) : 0;
     const isPolymer = group === 'ATOM' || comp === 'MSE';
 
     const row: CifAtomRow = {
@@ -1547,6 +1552,7 @@ function mmcifToPdbWithChainMap(
       occ,
       bFactor,
       elem,
+      charge,
       isPolymer,
     };
 
@@ -1682,11 +1688,17 @@ function mmcifToPdbWithChainMap(
       const compField3 = pad(r.comp.slice(0, 3), 3);
       const rec = r.group === 'HETATM' ? 'HETATM' : 'ATOM  ';
       const elem2 = pad(r.elem.slice(0, 2).toUpperCase(), 2);
+      const charge2 =
+        r.charge > 0
+          ? `${Math.min(9, r.charge)}+`
+          : r.charge < 0
+            ? `${Math.min(9, Math.abs(r.charge))}-`
+            : '  ';
 
       outLines.push(
         `${rec}${pad(String(atomSerial), 5)} ${atomField4} ${compField3} ${projChain}${resSeq4}${ins1}   ` +
           `${formatPdbCoord8(r.x)}${formatPdbCoord8(r.y)}${formatPdbCoord8(r.z)}` +
-          `${formatPdbBFactor6(r.occ)}${formatPdbBFactor6(r.bFactor)}          ${elem2}  `,
+          `${formatPdbBFactor6(r.occ)}${formatPdbBFactor6(r.bFactor)}          ${elem2}${charge2}`,
       );
       serial++;
 
@@ -2158,18 +2170,28 @@ export function cropRawAllAtomStructure(
   const seenKeptReconO = new Set<string>();
   const headerOut: string[] = [];
   const bodyOut: string[] = [];
+  const conectRaw: string[] = [];
   const pdbPrimaryAtomKeys = new Set<string>();
   const pdbPending: Array<{ outIdx: number; atomKey: string; rKey: string }> = [];
   const availPdbChains = new Map<string, { min: number | null; max: number | null }>();
   let kept = 0;
   let seenAtom = false;
+  let pastFirstModel = false;
   for (const line of lines) {
     if (line.startsWith('REMARK 250 RECONSTRUCTED_O ')) {
       const keys = line.slice('REMARK 250 RECONSTRUCTED_O '.length).trim().split(/\s+/).filter(Boolean);
       for (const k of keys) inputReconOKeys.add(k);
       continue;
     }
-    if (line.startsWith('ENDMDL') && seenAtom) break;
+    if (line.startsWith('CONECT')) {
+      conectRaw.push(line);
+      continue;
+    }
+    if (line.startsWith('ENDMDL') && seenAtom) {
+      pastFirstModel = true;
+      continue;
+    }
+    if (pastFirstModel) continue;
     if (line.startsWith('ATOM  ') || line.startsWith('HETATM')) {
       seenAtom = true;
       const altLoc = line[16] ?? ' ';
@@ -2260,7 +2282,32 @@ export function cropRawAllAtomStructure(
   for (let k = 0; k < keptReconOKeys.length; k += 8) {
     reconRemarks.push(`REMARK 250 RECONSTRUCTED_O ${keptReconOKeys.slice(k, k + 8).join(' ')}`);
   }
-  const out = [...headerOut, ...reconRemarks, ...bodyOut, 'END'];
+  const conectOut: string[] = [];
+  if (conectRaw.length > 0) {
+    const retainedSerials = new Set<number>();
+    for (const line of bodyOut) {
+      if (line.startsWith('ATOM  ') || line.startsWith('HETATM')) {
+        const s = Number(line.slice(6, 11).trim());
+        if (Number.isFinite(s) && s > 0) retainedSerials.add(s);
+      }
+    }
+    for (const line of conectRaw) {
+      const serials =
+        line
+          .slice(6)
+          .match(/.{1,5}/g)
+          ?.map((s) => Number(s.trim()))
+          .filter((n) => Number.isFinite(n) && n > 0) ?? [];
+      if (serials.length < 2) continue;
+      const anchor = serials[0];
+      if (!retainedSerials.has(anchor)) continue;
+      const keptPartners = serials.slice(1).filter((p) => retainedSerials.has(p));
+      if (keptPartners.length === 0) continue;
+      const formatted = [anchor, ...keptPartners].map((n) => String(n).padStart(5, ' ')).join('');
+      conectOut.push(`CONECT${formatted}`);
+    }
+  }
+  const out = [...headerOut, ...reconRemarks, ...bodyOut, ...conectOut, 'END'];
   return { text: out.join('\n') + '\n', format: 'pdb', keptAtomLines: kept };
 }
 

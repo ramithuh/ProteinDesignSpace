@@ -131,7 +131,19 @@
   }
 
   function formatQuantChip(meta?: CompareBranchMeta): string | null {
-    if (meta?.provenance?.quantization) return meta.provenance.quantization.toUpperCase();
+    if (meta?.provenance?.quantization) {
+      const q = meta.provenance.quantization.toUpperCase();
+      if (meta.provenance.languageModelQuantization) {
+        return `${q} fold · ${meta.provenance.languageModelQuantization.toUpperCase()} ESM-C`;
+      }
+      if (
+        meta.provenance.gpuWeightPrecision &&
+        meta.provenance.gpuWeightPrecision !== meta.provenance.quantization
+      ) {
+        return `${q} · ${meta.provenance.gpuWeightPrecision.toUpperCase()} GPU`;
+      }
+      return q;
+    }
     if (meta?.foldModelId?.toLowerCase().includes('-int5')) return 'INT5';
     return null;
   }

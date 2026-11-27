@@ -20,7 +20,8 @@ import { evaluateProteinOnlyStructurePolicy } from '$lib/protein-ops/hetatm-poli
 import {
   extractHoloReceptorAndLigands,
   findPocketResidues,
-  parsePocketResidueTokens,
+  parsePocketResidueTokensStrict,
+  resolveGninaLigandSource,
 } from '$lib/protein-ops/gnina-prep';
 import { getBenchmarkById } from './benchmarks';
 import { sanitizeEvoDiffFixedSequence, validateSequenceText } from './param-validation';
@@ -3314,11 +3315,9 @@ export function compileNodeInputPreview(
     };
   } else if (node.adapterId === 'gnina') {
     const structure = resolvedInputs.structure as StructureArtifact | undefined;
-    const taskMode = String(node.params.taskMode ?? 'score');
+    const { taskMode, ligandCode, ligandSdf, dockLigandCcd, source: ligandSource } =
+      resolveGninaLigandSource(node.params);
     const precision = String(node.params.precision ?? 'fp16');
-    const ligandCode = String(node.params.ligandCode ?? '').trim();
-    const ligandSdf = String(node.params.ligandSdf ?? '').trim();
-    const dockLigandCcd = String(node.params.dockLigandCcd ?? '').trim().toUpperCase();
     const pocketResiduesSpec = String(node.params.pocketResidues ?? '').trim();
     const exhaustiveness = Math.max(1, Math.min(16, Math.round(Number(node.params.exhaustiveness ?? 8))));
     const numModes = Math.max(1, Math.min(9, Math.round(Number(node.params.numModes ?? 5))));
@@ -3370,6 +3369,7 @@ export function compileNodeInputPreview(
           {
             taskMode,
             precision,
+            ligandSource,
             ligandCode: ligandCode || 'auto',
             ...(taskMode === 'dock'
               ? { dockLigandCcd: dockLigandCcd || null, pocketResidues: pocketResiduesSpec || null, exhaustiveness, numModes, sortBy, autoboxAdd, seed }
@@ -3388,13 +3388,23 @@ export function compileNodeInputPreview(
       const prep = extractHoloReceptorAndLigands(rawText, {
         ligandCode: ligandCode || undefined,
         includeMetals,
+        cifText: structure.cifText,
       });
+
+      if (!prep.receptorPdb.trim()) {
+        pushIssue({
+          severity: 'error',
+          source: 'compiler',
+          message: `GNINA 1.3 found no protein receptor atoms in "${structure.label}".`,
+        });
+      }
 
       const pocketSet = new Set<string>();
       let explicitPocketKeys: string[] = [];
       if (taskMode === 'dock') {
         if (pocketResiduesSpec && prep.receptorPdb.trim()) {
-          explicitPocketKeys = parsePocketResidueTokens(pocketResiduesSpec, prep.receptorPdb);
+          const strictPocket = parsePocketResidueTokensStrict(pocketResiduesSpec, prep.receptorPdb);
+          explicitPocketKeys = strictPocket.keys;
           for (const key of explicitPocketKeys) {
             const parts = key.split('/');
             if (parts.length >= 2) {
@@ -3402,7 +3412,13 @@ export function compileNodeInputPreview(
               pocketSet.add(`${parts[0]}${parts[1]}${ins}`);
             }
           }
-          if (explicitPocketKeys.length === 0) {
+          if (strictPocket.unmatched.length > 0) {
+            pushIssue({
+              severity: 'error',
+              source: 'compiler',
+              message: `Pocket Box Residues "${pocketResiduesSpec}" contained unmatched token(s): ${strictPocket.unmatched.join(', ')} in "${structure.label}".`,
+            });
+          } else if (explicitPocketKeys.length === 0) {
             pushIssue({
               severity: 'error',
               source: 'compiler',
@@ -3413,7 +3429,12 @@ export function compileNodeInputPreview(
           const pocket = findPocketResidues(prep.receptorPdb, prep.selectedLigand.atoms, 5.0, 24);
           for (const r of pocket) pocketSet.add(r.residueId);
         }
-      } else if (taskMode === 'pocket-scan' && prep.selectedLigand && prep.receptorPdb.trim()) {
+      } else if (
+        taskMode === 'pocket-scan' &&
+        ligandSource === 'holo' &&
+        prep.selectedLigand &&
+        prep.receptorPdb.trim()
+      ) {
         const pocket = findPocketResidues(
           prep.receptorPdb,
           prep.selectedLigand.atoms,
@@ -3423,7 +3444,7 @@ export function compileNodeInputPreview(
         for (const r of pocket) pocketSet.add(r.residueId);
       }
 
-      const hasDockSource = taskMode === 'dock' && Boolean(dockLigandCcd);
+      const hasDockSource = ligandSource === 'rcsb-ccd';
       if (!ligandSdf && !hasDockSource && !prep.selectedLigand) {
         pushIssue({
           severity: 'error',
@@ -3542,7 +3563,9 @@ export function compileNodeInputPreview(
           taskMode === 'dock'
             ? `GNINA 1.3 · Dock ${targetLigLabel} · ${dockBoxDesc} · exh=${exhaustiveness}`
             : taskMode === 'pocket-scan'
-              ? `GNINA 1.3 · Pocket Scan (${pocketSet.size} res ≤ ${pocketRadius.toFixed(1)} Å) · ${targetLigLabel}`
+              ? ligandSource === 'external'
+                ? `GNINA 1.3 · Pocket Scan (≤ ${pocketRadius.toFixed(1)} Å around external pose, resolved at run) · ${targetLigLabel}`
+                : `GNINA 1.3 · Pocket Scan (${pocketSet.size} res ≤ ${pocketRadius.toFixed(1)} Å) · ${targetLigLabel}`
               : `GNINA 1.3 · ${modeLabel} (${precision.toUpperCase()}) · ${targetLigLabel}`,
         compiledSummary: {
           taskMode,

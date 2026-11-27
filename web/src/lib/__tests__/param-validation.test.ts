@@ -19,6 +19,7 @@ import {
 import { parseTiedPositions } from '../engine/mpnn-spec';
 import { generateSampleHelixBundlePdb } from '../protein-ops/pdb';
 import { defaultParamsForAdapter } from '../engine/graph-utils';
+import { formatProvenanceQuantChip } from '../ui/node-display-helpers';
 
 describe('parameter validation & numeric sanitization', () => {
   it('rejects fractional count parameters but preserves continuous parameters', () => {
@@ -546,6 +547,15 @@ describe('parameter validation & numeric sanitization', () => {
     expect(rfd4Src).toContain("template?.bfactorSemantics ?? 'none'");
     expect(rfd4Src).toContain("atomGranularity: 'all-atom'");
     expect(rfd4Src).toContain("quantization: 'int8'");
+    expect(rfd4Src).toContain("gpuWeightPrecision: 'fp16'");
+    expect(rfd4Src).toContain('{ half: true }');
+    expect(formatProvenanceQuantChip({ quantization: 'int8', gpuWeightPrecision: 'fp16' })).toBe('INT8 · FP16 GPU');
+    expect(formatProvenanceQuantChip({ quantization: 'fp16' })).toBe('FP16');
+    expect(formatProvenanceQuantChip({ quantization: 'fp16', gpuWeightPrecision: 'fp16' })).toBe('FP16');
+    expect(formatProvenanceQuantChip({ quantization: 'int5', languageModelQuantization: 'int3' })).toBe(
+      'INT5 fold · INT3 ESM-C',
+    );
+    expect(formatProvenanceQuantChip(undefined, 'esmfold2-int5')).toBe('INT5');
     expect(rfd4Src).toContain('degradedFallback');
     expect(rfd4Src).toContain('designMeta.lockedChains');
     expect(rfd4Src).toContain('designMeta.chainRoles');

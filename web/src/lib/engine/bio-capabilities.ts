@@ -4,6 +4,7 @@
 // Layer 2: Runtime pre-dispatch artifact validation (called in scheduler.ts before launching GPU workers).
 
 import { resolveEffectiveMaxSequences } from './batch-flow';
+import { resolveGninaLigandSource } from '$lib/protein-ops/gnina-prep';
 import { esmfold2Chains, esmfold2ParamIssue } from './localfold-esmfold2';
 import { parseCandidateProteinChains } from './localfold-msa';
 import { ADAPTER_REGISTRY, LOCALFOLD_MODEL_OPTIONS } from './registry';
@@ -3290,12 +3291,12 @@ export function validateBioCapabilities(
     // GNINA 1.3: requires a wired all-atom structure and either a holo organic ligand, RCSB CCD (dock), or pasted SDF/MOL2
     if (node.adapterId === 'gnina') {
       const structEdge = graph.edges.find((e) => e.toNode === node.id && e.toPort === 'structure');
-      const taskMode = String(node.params.taskMode ?? 'score');
-      const hasExternalLig = String(node.params.ligandSdf ?? '').trim().length > 0;
-      const dockCcd = taskMode === 'dock' ? String(node.params.dockLigandCcd ?? '').trim().toUpperCase() : '';
-      const hasDockCcd = dockCcd.length > 0;
+      const { taskMode, dockLigandCcd: dockCcd, ligandCode, source: ligandSource } =
+        resolveGninaLigandSource(node.params);
+      const hasExternalLig = ligandSource === 'external';
+      const hasDockCcd = ligandSource === 'rcsb-ccd';
       const hasPocketSpec = String(node.params.pocketResidues ?? '').trim().length > 0;
-      const requestedCode = String(node.params.ligandCode ?? '').trim().toUpperCase();
+      const requestedCode = ligandCode.toUpperCase();
       if (taskMode === 'dock' && !hasExternalLig && hasDockCcd) {
         if (!/^[A-Z0-9]{1,5}$/.test(dockCcd)) {
           issues.push({
@@ -4168,6 +4169,19 @@ export function validateRuntimeNodeInputs(
         warnings.push(
           `Upstream structure has ${cov.missingBackboneCount} residue(s) missing backbone atoms; ${consumerName} requires full backbone coordinates.`,
         );
+      }
+      if (node.adapterId === 'gnina') {
+        const items =
+          struct.collection?.items && struct.collection.items.length > 0
+            ? struct.collection.items
+            : [struct];
+        for (const item of items) {
+          if (item.atomGranularity === 'ca-only' || item.atomGranularity === 'backbone4') {
+            throw new Error(
+              `GNINA 1.3 requires all-atom receptor coordinates (including side chains), but "${item.label}" is ${item.atomGranularity}.`,
+            );
+          }
+        }
       }
     }
   }

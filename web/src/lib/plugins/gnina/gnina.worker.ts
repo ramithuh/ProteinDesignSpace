@@ -23,6 +23,7 @@ import {
   extractHoloReceptorAndLigands,
   findPocketResidues,
   parsePocketResidueTokensStrict,
+  resolveGninaLigandSource,
 } from '$lib/protein-ops/gnina-prep';
 import { parseStructureText } from '$lib/protein-ops/pdb';
 import {
@@ -45,19 +46,11 @@ declare const self: DedicatedWorkerGlobalScope;
 const DEFAULT_BASE_URL = 'https://huggingface.co/ramithuh/gnina-webgpu/resolve/main/default';
 
 type Precision = 'int8' | 'fp16' | 'fp32';
-type TaskMode = 'score' | 'pocket-scan' | 'minimize' | 'dock';
-
 function normalizePrecision(raw: unknown): Precision {
   if (raw == null || String(raw).trim() === '') return 'fp16';
   const val = String(raw).trim().toLowerCase();
   if (val === 'int8' || val === 'fp16' || val === 'fp32') return val;
   throw new Error(`Unsupported GNINA precision "${String(raw)}" (supported: int8, fp16, fp32).`);
-}
-
-function normalizeTaskMode(raw: unknown): TaskMode {
-  const val = String(raw ?? 'score').trim().toLowerCase();
-  if (val === 'pocket-scan' || val === 'minimize' || val === 'dock') return val;
-  return 'score';
 }
 
 async function fetchRcsbCcdIdealSdf(ccdRaw: string, signal?: AbortSignal): Promise<string> {
@@ -237,10 +230,13 @@ createWorkerHarness({
   async run(ctx) {
     const p = ctx.params ?? {};
     const precision = normalizePrecision(p.precision);
-    const taskMode = normalizeTaskMode(p.taskMode);
-    const ligandCode = String(p.ligandCode ?? '').trim();
-    const ligandSdf = String(p.ligandSdf ?? '').trim();
-    const dockLigandCcd = String(p.dockLigandCcd ?? '').trim().toUpperCase();
+    const { taskMode, ligandCode, ligandSdf, dockLigandCcd, source: ligandSource } =
+      resolveGninaLigandSource({
+        taskMode: p.taskMode,
+        ligandCode: p.ligandCode,
+        ligandSdf: p.ligandSdf,
+        dockLigandCcd: p.dockLigandCcd,
+      });
     const pocketResiduesSpec = String(p.pocketResidues ?? '').trim();
     const autoboxAdd = Math.max(2.0, Math.min(12.0, Number(p.autoboxAdd ?? 4.0)));
     const exhaustiveness = Math.max(1, Math.min(16, Math.round(Number(p.exhaustiveness ?? 8))));
@@ -273,8 +269,8 @@ createWorkerHarness({
       }
     }
 
-    const useExternal = ligandSdf.length > 0;
-    const useRcsbCcd = taskMode === 'dock' && !useExternal && dockLigandCcd.length > 0;
+    const useExternal = ligandSource === 'external';
+    const useRcsbCcd = ligandSource === 'rcsb-ccd';
     let rcsbCcdSdf: string | null = null;
     if (useRcsbCcd) {
       ctx.progress('init', 0.04, `Fetching 3D ideal SDF for CCD "${dockLigandCcd}" from RCSB...`);
@@ -286,6 +282,7 @@ createWorkerHarness({
       const prep = extractHoloReceptorAndLigands(rawStructText, {
         ligandCode: ligandCode || undefined,
         includeMetals,
+        cifText: item.cifText,
       });
       if (!prep.receptorPdb.trim()) {
         throw new Error(`GNINA 1.3 found no protein receptor atoms in "${item.label}".`);
@@ -775,6 +772,7 @@ createWorkerHarness({
         taskMode,
         precision,
         selectedLigandName,
+        selectedLigandBondSource: prep.selectedLigandBondSource ?? '',
         externalLigandHash,
         includeMetals,
         minimizeIterations: taskMode === 'minimize' ? minimizeIterations : 0,

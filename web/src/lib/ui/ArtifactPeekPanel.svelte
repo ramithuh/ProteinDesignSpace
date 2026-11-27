@@ -210,10 +210,14 @@
 
   function formatQuantChip(provenance?: ArtifactProvenance, foldModelId?: string): string | null {
     if (provenance?.quantization) {
+      const q = provenance.quantization.toUpperCase();
       if (provenance.languageModelQuantization) {
-        return `${provenance.quantization.toUpperCase()} fold · ${provenance.languageModelQuantization.toUpperCase()} ESM-C`;
+        return `${q} fold · ${provenance.languageModelQuantization.toUpperCase()} ESM-C`;
       }
-      return provenance.quantization.toUpperCase();
+      if (provenance.gpuWeightPrecision && provenance.gpuWeightPrecision !== provenance.quantization) {
+        return `${q} · ${provenance.gpuWeightPrecision.toUpperCase()} GPU`;
+      }
+      return q;
     }
     if (foldModelId && foldModelId.toLowerCase().includes('-int5')) {
       return 'INT5';
@@ -1939,8 +1943,8 @@
           Cα-only
         </span>
       {/if}
-      {#if activeStruct.provenance?.quantization}
-        <span class="stat-chip" title="Weight quantization">{activeStruct.provenance.quantization.toUpperCase()}</span>
+      {#if formatQuantChip(activeStruct.provenance)}
+        <span class="stat-chip" title="Weight quantization">{formatQuantChip(activeStruct.provenance)}</span>
       {/if}
       {#if activeStruct.provenance?.msaMode}
         <span class="stat-chip cond-key">

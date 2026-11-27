@@ -19,9 +19,12 @@ import {
   computePoseHeavyRmsd,
   extractHoloReceptorAndLigands,
   findPocketResidues,
+  parseChemCompBonds,
+  parseCifLigandOverlay,
   parsePocketResidueTokens,
+  resolveGninaLigandSource,
 } from '$lib/protein-ops/gnina-prep';
-import { parsePdbBackbone, parseStructureText } from '$lib/protein-ops/pdb';
+import { cropRawAllAtomStructure, parsePdbBackbone, parseStructureText } from '$lib/protein-ops/pdb';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { resolveUncertaintyColorArgFromValues } from '$lib/viewer/bfactor-domain';
 import { defaultParamsForAdapter, validateGraph } from '$lib/engine/graph-utils';
@@ -1463,5 +1466,325 @@ describe('Issue #93: GNINA raw-PDB bond-order heuristic, valence budgets & donor
     expect(countPolarHydrogensForAtom(molGuaP, 1)).toBe(2);
     expect(countPolarHydrogensForAtom(molGuaP, 2)).toBe(2);
     expect(countPolarHydrogensForAtom(molGuaP, 3)).toBe(2);
+  });
+
+  it('Issue #105 Tier 1: parses _chem_comp_bond (#-safe, wrapped, single-row), overlays formal charges & 4-5 char comp_id, and preserves DHZ rotors under compression', () => {
+    const cifText = [
+      'data_dhz_test',
+      'loop_',
+      '_atom_site.group_PDB',
+      '_atom_site.id',
+      '_atom_site.type_symbol',
+      '_atom_site.label_atom_id',
+      '_atom_site.label_comp_id',
+      '_atom_site.label_asym_id',
+      '_atom_site.label_seq_id',
+      '_atom_site.Cartn_x',
+      '_atom_site.Cartn_y',
+      '_atom_site.Cartn_z',
+      '_atom_site.occupancy',
+      '_atom_site.B_iso_or_equiv',
+      '_atom_site.pdbx_formal_charge',
+      '_atom_site.auth_seq_id',
+      '_atom_site.auth_comp_id',
+      '_atom_site.auth_asym_id',
+      '_atom_site.auth_atom_id',
+      '_atom_site.pdbx_PDB_model_num',
+      'ATOM   1 N N   ALA A 1 0.000 0.000 0.000 1.00 20.00 0 1 ALA A N 1',
+      'ATOM   2 C CA  ALA A 1 1.458 0.000 0.000 1.00 20.00 0 1 ALA A CA 1',
+      'ATOM   3 C C   ALA A 1 2.000 1.420 0.000 1.00 20.00 0 1 ALA A C 1',
+      'ATOM   4 O O   ALA A 1 1.250 2.400 0.000 1.00 20.00 0 1 ALA A O 1',
+      'HETATM 5 N N1  A1LU6 B 1 10.000 10.000 10.000 1.00 20.00 0 1 A1LU6 B N1 1',
+      'HETATM 6 C C2  A1LU6 B 1 11.350 10.000 10.000 1.00 20.00 0 1 A1LU6 B C2 1',
+      'HETATM 7 O O2  A1LU6 B 1 12.020  8.950 10.000 1.00 20.00 -1 1 A1LU6 B O2 1',
+      'HETATM 8 N N3  A1LU6 B 1 12.020 11.200 10.000 1.00 20.00 0 1 A1LU6 B N3 1',
+      'HETATM 9 C C4  A1LU6 B 1 11.350 12.400 10.000 1.00 20.00 0 1 A1LU6 B C4 1',
+      'HETATM 10 C C5 A1LU6 B 1 10.000 12.400 10.000 1.00 20.00 0 1 A1LU6 B C5 1',
+      'HETATM 11 C C6 A1LU6 B 1  9.320 11.200 10.000 1.00 20.00 0 1 A1LU6 B C6 1',
+      'HETATM 12 C "C1\'" A1LU6 B 1  9.250  8.750 10.000 1.00 20.00 0 1 A1LU6 B "C1\'" 1',
+      '# #',
+      'loop_',
+      '_chem_comp_bond.comp_id',
+      '_chem_comp_bond.atom_id_1',
+      '_chem_comp_bond.atom_id_2',
+      '_chem_comp_bond.value_order',
+      '_chem_comp_bond.pdbx_aromatic_flag',
+      'A1LU6 N1 C2 SING N # inline comment',
+      'A1LU6 C2 O2 DOUB N',
+      'A1LU6 C2 N3 SING N',
+      'A1LU6 N3 C4 DOUB N',
+      'A1LU6 C4 C5 SING N',
+      'A1LU6 C5 C6 DOUB N',
+      'A1LU6 C6 N1 SING N',
+      'A1LU6 N1 "C1\'"',
+      '  SING N',
+      '# #',
+    ].join('\n');
+
+    const bondsMap = parseChemCompBonds(cifText);
+    expect(bondsMap.get('A1LU6')?.length).toBe(8);
+    expect(bondsMap.get('A1LU6')?.some((b) => b.atom2 === "C1'" && b.order === 1)).toBe(true);
+
+    // Single-row `_chem_comp_bond.<col> <val>` form
+    const singleRowCif = [
+      'data_single',
+      '_chem_comp_bond.comp_id TINY',
+      '_chem_comp_bond.atom_id_1 C1',
+      '_chem_comp_bond.atom_id_2 O1',
+      '_chem_comp_bond.value_order DOUB',
+      '_chem_comp_bond.pdbx_aromatic_flag N',
+      '#',
+    ].join('\n');
+    expect(parseChemCompBonds(singleRowCif).get('TINY')).toEqual([
+      { atom1: 'C1', atom2: 'O1', order: 2, aromatic: false },
+    ]);
+
+    // PDB has 3-char truncated comp_id "A1L" and blank formal charge, while cifText has full "A1LU6" & -1
+    const pdbLines = [
+      'ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 20.00           N  ',
+      'ATOM      2  CA  ALA A   1       1.458   0.000   0.000  1.00 20.00           C  ',
+      'ATOM      3  C   ALA A   1       2.000   1.420   0.000  1.00 20.00           C  ',
+      'ATOM      4  O   ALA A   1       1.250   2.400   0.000  1.00 20.00           O  ',
+      formatSynthHetatm(5, 'N1', 'A1L', 10.0, 10.0, 10.0, 'N'),
+      formatSynthHetatm(6, 'C2', 'A1L', 11.35, 10.0, 10.0, 'C'),
+      formatSynthHetatm(7, 'O2', 'A1L', 12.02, 8.95, 10.0, 'O'),
+      formatSynthHetatm(8, 'N3', 'A1L', 12.02, 11.2, 10.0, 'N'),
+      formatSynthHetatm(9, 'C4', 'A1L', 11.35, 12.4, 10.0, 'C'),
+      formatSynthHetatm(10, 'C5', 'A1L', 10.0, 12.4, 10.0, 'C'),
+      formatSynthHetatm(11, 'C6', 'A1L', 9.32, 11.2, 10.0, 'C'),
+      formatSynthHetatm(12, "C1'", 'A1L', 9.25, 8.75, 10.0, 'C'),
+      'END',
+    ].join('\n');
+
+    const prep = extractHoloReceptorAndLigands(pdbLines, { cifText, ligandCode: 'A1LU6' });
+    expect(prep.selectedLigand?.compId).toBe('A1LU6');
+    expect(prep.selectedLigandBondSource).toBe('chem_comp_bond');
+    expect(prep.selectedLigandSdf).toContain('M  CHG  1   3  -1');
+    const parsed = parseSdfV2000(prep.selectedLigandSdf!);
+    expect(parsed.bonds.length).toBe(8);
+  });
+
+  it('Issue #105 Tier 1: preserves NH donors on Imidazole (NH at idx 0) and detects full aromaticity on fused Anthracene Clar', () => {
+    // Imidazole with NH (N1) at atom index 0 (which triggers structure.js:156,165 if not reordered)
+    const r = 1.15;
+    const imiCoords = Array.from({ length: 5 }, (_, k) => {
+      const a = (k * 2 * Math.PI) / 5;
+      return [r * Math.cos(a), r * Math.sin(a), 0] as const;
+    });
+    const imiPdb = [
+      formatSynthHetatm(1, 'N1', 'IMD', imiCoords[0][0], imiCoords[0][1], 0, 'N'),
+      formatSynthHetatm(2, 'C2', 'IMD', imiCoords[1][0], imiCoords[1][1], 0, 'C'),
+      formatSynthHetatm(3, 'N3', 'IMD', imiCoords[2][0], imiCoords[2][1], 0, 'N'),
+      formatSynthHetatm(4, 'C4', 'IMD', imiCoords[3][0], imiCoords[3][1], 0, 'C'),
+      formatSynthHetatm(5, 'C5', 'IMD', imiCoords[4][0], imiCoords[4][1], 0, 'C'),
+      'END',
+    ].join('\n');
+    const imiCif = [
+      'data_imd',
+      'loop_',
+      '_chem_comp_bond.comp_id',
+      '_chem_comp_bond.atom_id_1',
+      '_chem_comp_bond.atom_id_2',
+      '_chem_comp_bond.value_order',
+      '_chem_comp_bond.pdbx_aromatic_flag',
+      'IMD N1 C2 SING Y',
+      'IMD C2 N3 DOUB Y',
+      'IMD N3 C4 SING Y',
+      'IMD C4 C5 DOUB Y',
+      'IMD C5 N1 SING Y',
+      '#',
+    ].join('\n');
+    const prepImi = extractHoloReceptorAndLigands(imiPdb, { cifText: imiCif, ligandCode: 'IMD' });
+    expect(prepImi.selectedLigandBondSource).toBe('chem_comp_bond');
+    const [molImi] = gninaParseLigands(prepImi.selectedLigandSdf!, 'sdf');
+    // N1 must retain its 1 polar NH donor (not zeroed by order=4!), and all 5 ring atoms are aromatic
+    expect(countPolarHydrogensByEl(molImi, 'N')).toBe(1);
+    const aromImi = molImi.atoms.filter(
+      (a: { el: string; channel: number }) => a.el === 'C' && (a.channel === 16 || a.channel === 17),
+    ).length;
+    expect(aromImi).toBe(3);
+
+    // Negative validation: missing bridge bond in template (mappedComps > geomComps) falls back to distance
+    const brokenCif = [
+      'data_broken',
+      'loop_',
+      '_chem_comp_bond.comp_id',
+      '_chem_comp_bond.atom_id_1',
+      '_chem_comp_bond.atom_id_2',
+      '_chem_comp_bond.value_order',
+      '_chem_comp_bond.pdbx_aromatic_flag',
+      'IMD N1 C2 SING N',
+      'IMD N3 C4 DOUB N',
+      'IMD C4 C5 SING N',
+      '#',
+    ].join('\n');
+    const prepBroken = extractHoloReceptorAndLigands(imiPdb, { cifText: brokenCif, ligandCode: 'IMD' });
+    expect(prepBroken.selectedLigandBondSource).toBe('distance_fallback');
+
+    // Negative validation: swapped adjacent/1,3 atom names at 0.8x rejected by ratio/median guard
+    const swappedPdb = [
+      formatSynthHetatm(1, 'N1', 'IMD', imiCoords[0][0] * 0.8, imiCoords[0][1] * 0.8, 0, 'N'),
+      formatSynthHetatm(2, 'N3', 'IMD', imiCoords[1][0] * 0.8, imiCoords[1][1] * 0.8, 0, 'N'),
+      formatSynthHetatm(3, 'C2', 'IMD', imiCoords[2][0] * 0.8, imiCoords[2][1] * 0.8, 0, 'C'),
+      formatSynthHetatm(4, 'C4', 'IMD', imiCoords[3][0] * 0.8, imiCoords[3][1] * 0.8, 0, 'C'),
+      formatSynthHetatm(5, 'C5', 'IMD', imiCoords[4][0] * 0.8, imiCoords[4][1] * 0.8, 0, 'C'),
+      'END',
+    ].join('\n');
+    const prepSwapped = extractHoloReceptorAndLigands(swappedPdb, { cifText: imiCif, ligandCode: 'IMD' });
+    expect(prepSwapped.selectedLigandBondSource).toBe('distance_fallback');
+  });
+
+  it('Issue #105 Tier 2 & 3: complete CONECT skips distance overlay, ENDMDL preserves trailing CONECT, crop preserves CONECT safely, and compressed DHZ preserves 17 bonds & 2 rotors', () => {
+    // Realistic 16-heavy-atom DHZ (3,4-dihydrozebularine) geometry
+    const dhzCoords: Array<[string, string, number, number, number]> = [
+      ['N1', 'N', 0.0, 0.0, 0.0],
+      ['C2', 'C', 1.38, 0.0, 0.0],
+      ['O2', 'O', 2.02, -1.05, 0.0],
+      ['N3', 'N', 2.02, 1.22, 0.0],
+      ['C4', 'C', 1.38, 2.48, 0.25],
+      ['O4', 'O', 2.02, 3.55, -0.35],
+      ['C5', 'C', -0.05, 2.42, -0.15],
+      ['C6', 'C', -0.72, 1.24, -0.08],
+      ["C1'", 'C', -0.72, -1.28, 0.15],
+      ["O4'", 'O', -2.12, -1.12, 0.35],
+      ["C4'", 'C', -2.72, -2.42, 0.55],
+      ["C3'", 'C', -1.58, -3.42, 0.42],
+      ["O3'", 'O', -1.85, -4.52, 1.25],
+      ["C2'", 'C', -0.38, -2.56, 0.85],
+      ["O2'", 'O', 0.82, -3.22, 0.55],
+      ["C5'", 'C', -3.82, -2.68, -0.45],
+      ["O5'", 'O', -4.85, -1.72, -0.35],
+    ];
+    // Trim to 16 heavy atoms? Wait: DHZ has 17 heavy atoms? No, 16 heavy atoms + 17 bonds (2 rings).
+    // Remove O4 from DHZ? Wait: zebularine has 16 heavy atoms (no O4), 3,4-dihydrozebularine has O4 -> 17 heavy atoms & 18 bonds.
+    // Use 16-heavy-atom zebularine-like core (remove O4) for exact 16 atoms / 17 bonds / 2 rotors (N1-C1' and C4'-C5').
+    const dhz16 = dhzCoords.filter(([nm]) => nm !== 'O4');
+    const makeScaledDhzPdb = (scaleFactor: number, withConect = false, withEndmdl = false) => {
+      const cx = dhz16.reduce((s, a) => s + a[2], 0) / dhz16.length;
+      const cy = dhz16.reduce((s, a) => s + a[3], 0) / dhz16.length;
+      const cz = dhz16.reduce((s, a) => s + a[4], 0) / dhz16.length;
+      const lines = [
+        ...(withEndmdl ? ['MODEL        1'] : []),
+        'ATOM      1  N   ALA A   1      20.000  20.000  20.000  1.00 20.00           N  ',
+        'ATOM      2  CA  ALA A   1      21.458  20.000  20.000  1.00 20.00           C  ',
+        'ATOM      3  C   ALA A   1      22.000  21.420  20.000  1.00 20.00           C  ',
+        'ATOM      4  O   ALA A   1      21.250  22.400  20.000  1.00 20.00           O  ',
+        ...dhz16.map(([nm, el, x, y, z], idx) =>
+          formatSynthHetatm(
+            10 + idx,
+            nm,
+            'DHZ',
+            cx + (x - cx) * scaleFactor,
+            cy + (y - cy) * scaleFactor,
+            cz + (z - cz) * scaleFactor,
+            el,
+          ),
+        ),
+        ...(withEndmdl ? ['ENDMDL'] : []),
+      ];
+      if (withConect) {
+        const pairs: Array<[number, number]> = [
+          [10, 11], [11, 12], [11, 13], [13, 14], [14, 15], [15, 16], [16, 10],
+          [10, 17], [17, 18], [18, 19], [19, 20], [20, 21], [20, 22], [22, 23],
+          [22, 17], [19, 24], [24, 25],
+        ];
+        for (const [a, b] of pairs) {
+          lines.push(`CONECT${String(a).padStart(5)}${String(b).padStart(5)}`);
+        }
+      }
+      lines.push('END');
+      return lines.join('\n');
+    };
+
+    // Tier 3 compressed DHZ at 1.0x, 0.8x, 0.7x without CONECT or cifText
+    for (const f of [1.0, 0.8, 0.7]) {
+      const prep = extractHoloReceptorAndLigands(makeScaledDhzPdb(f, false), { ligandCode: 'DHZ' });
+      expect(prep.selectedLigandBondSource).toBe('distance_fallback');
+      const parsed = assertValidSdfValenceBudgets(prep.selectedLigandSdf!);
+      expect(parsed.bonds.length).toBe(17);
+      const [mol] = gninaParseLigands(prep.selectedLigandSdf!, 'sdf');
+      expect(mol.rotors).toBe(2);
+      expect(countPolarHydrogensByEl(mol, 'O')).toBe(3); // C2'-OH, C3'-OH, C5'-OH stay single bonds
+    }
+
+    // Tier 2 complete CONECT after ENDMDL under 0.75x compression skips distance overlay
+    const prepConect = extractHoloReceptorAndLigands(makeScaledDhzPdb(0.75, true, true), {
+      ligandCode: 'DHZ',
+    });
+    expect(prepConect.selectedLigandBondSource).toBe('conect_complete');
+    const parsedConect = parseSdfV2000(prepConect.selectedLigandSdf!);
+    expect(parsedConect.bonds.length).toBe(17);
+    const [molConect] = gninaParseLigands(prepConect.selectedLigandSdf!, 'sdf');
+    expect(molConect.rotors).toBe(2);
+
+    // cropRawAllAtomStructure preserves CONECT past ENDMDL iff anchor & >= 1 partner remain
+    const cropped = cropRawAllAtomStructure(makeScaledDhzPdb(1.0, true, true), 'A1, DHZ');
+    expect(cropped.text).toContain('CONECT   10   11');
+    // Cropping to only chain A drops all DHZ CONECT lines
+    const croppedNoLig = cropRawAllAtomStructure(makeScaledDhzPdb(1.0, true, true), 'A1');
+    expect(croppedNoLig.text).not.toContain('CONECT');
+  });
+
+  it('Issue #107: GNINA preview mirrors worker ligand precedence (SDF > dock CCD > holo), strict pockets, and backbone4 rejection', () => {
+    const sdf = 'LIG\n\n\n  0  0  0  0  0  0  0  0  0  0999 V2000\nM  END\n$$$$';
+    expect(resolveGninaLigandSource({ taskMode: 'score', dockLigandCcd: 'btn' })).toMatchObject({
+      taskMode: 'score',
+      source: 'holo',
+      dockLigandCcd: '',
+    });
+    expect(resolveGninaLigandSource({ taskMode: ' Dock ', dockLigandCcd: 'btn' })).toMatchObject({
+      taskMode: 'dock',
+      source: 'rcsb-ccd',
+      dockLigandCcd: 'BTN',
+    });
+    expect(
+      resolveGninaLigandSource({ taskMode: 'dock', dockLigandCcd: 'BTN', ligandSdf: sdf }),
+    ).toMatchObject({
+      taskMode: 'dock',
+      source: 'external',
+      dockLigandCcd: '',
+    });
+
+    const mk = (params: Record<string, unknown>, wired = true): WorkflowGraph => ({
+      id: 'g107',
+      name: 'g107',
+      nodes: [
+        { id: 'pdb_1', adapterId: 'pdb-input', label: 'Holo', params: defaultParamsForAdapter('pdb-input') },
+        {
+          id: 'gnina_1',
+          adapterId: 'gnina',
+          label: 'GNINA 1.3',
+          params: { ...defaultParamsForAdapter('gnina'), ...params },
+        },
+      ],
+      edges: wired ? [{ fromNode: 'pdb_1', fromPort: 'structure', toNode: 'gnina_1', toPort: 'structure' }] : [],
+    });
+
+    const holo = { pdb_1: { structure: makeStructArtifact(MINI_HOLO_PDB, 'Holo') } };
+    for (const params of [
+      { taskMode: 'score', dockLigandCcd: 'BTN' },
+      { taskMode: 'dock', dockLigandCcd: 'BTN', ligandSdf: sdf },
+    ]) {
+      const p = compileNodeInputPreview(mk(params, false), 'gnina_1', {});
+      expect(p.payload.compiledSummary.ligandCode).toBe('auto');
+      expect(p.payload.rawSpecText).not.toContain('BTN');
+    }
+
+    const ligs = (params: Record<string, unknown>) =>
+      compileNodeInputPreview(mk(params), 'gnina_1', holo).entities.includedLigands;
+    expect(ligs({ taskMode: 'dock', dockLigandCcd: 'BTN', ligandSdf: sdf })).not.toContain('BTN');
+    expect(ligs({ taskMode: 'dock', dockLigandCcd: 'BTN' })).toContain('BTN');
+
+    const errs = (params: Record<string, unknown>, s = holo) =>
+      compileNodeInputPreview(mk(params), 'gnina_1', s)
+        .issues.filter((i) => i.severity === 'error')
+        .map((i) => i.message)
+        .join('\n');
+    expect(errs({ taskMode: 'dock', pocketResidues: 'A10, A999' })).toContain('A999');
+
+    const bb4 = {
+      pdb_1: { structure: { ...holo.pdb_1.structure, atomGranularity: 'backbone4' as const } },
+    };
+    expect(errs({ taskMode: 'score' }, bb4)).toMatch(/all-atom/);
   });
 });
