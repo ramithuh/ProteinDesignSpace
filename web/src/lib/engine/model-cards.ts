@@ -474,14 +474,15 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     upstreamRepo: 'https://github.com/huhlim/cg2all',
     upstreamCommit: 'a00b8816736c08852944f147e39164d0f5e1834e',
     weightsRepo: 'https://huggingface.co/ramithuh/cg2all-webgpu',
-    license: 'Apache-2.0',
+    weightsRevision: 'ab35079b1fab667ec00a23f6a6cf3fd863cb01e1',
+    license: 'Apache-2.0 (code) · MIT (SE3Transformer) · CC-BY-4.0 (weights, Zenodo 8393343)',
     citation:
       'Heo & Feig (2024) One particle per residue is sufficient to describe all-atom protein structures, Structure 32(1):97–111.e6.',
     limitations: [
       'Only the Cα-trace checkpoints (CalphaBasedModel and its FIX variant, Zenodo 8393343) are ported; Martini, PRIMO, backbone and residue-centre CG inputs are not.',
       'Histidine is always built as HSD (Nδ tautomer) for reproducibility; upstream cg2all picks HSD or HSE at random.',
       'Residues without a CHARMM template (non-standard amino acids) keep their input atoms unchanged; residues lacking a Cα are passed through.',
-      'Weights are served from the ramithuh/cg2all-webgpu main branch (revision pin pending upload); parity was measured on a software WebGPU adapter, not hardware GPUs.',
+      'Weights are served from ramithuh/cg2all-webgpu (pinned revision ab35079b1fab667ec00a23f6a6cf3fd863cb01e1); parity was measured on a software WebGPU adapter and Node 22 CPU path pending hardware GPU verification.',
     ],
   },
 

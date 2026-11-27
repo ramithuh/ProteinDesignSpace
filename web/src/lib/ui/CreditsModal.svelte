@@ -278,8 +278,8 @@
       name: 'cg2all',
       role: 'Neural Cα → All-Atom Backmapping',
       detail:
-        'SE(3)-Transformer CalphaBasedModel that predicts backbone frames and torsions for rigid-group all-atom assembly (Heo & Feig, Structure 2024), ported to WebGPU with parity to the PyTorch reference.',
-      license: 'Apache-2.0',
+        'SE(3)-Transformer CalphaBasedModel that predicts backbone frames and torsions for rigid-group all-atom assembly (Heo & Feig, Structure 2024), ported to WebGPU (ramithuh/cg2all-webgpu @ ab35079b1fab667ec00a23f6a6cf3fd863cb01e1) with parity to the PyTorch reference.',
+      license: 'Apache-2.0 (code) · MIT (SE3Transformer) · CC-BY-4.0 (weights, Zenodo 8393343)',
       url: 'https://github.com/huhlim/cg2all',
       linkLabel: 'huhlim/cg2all',
     },

@@ -4053,7 +4053,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     estimatedVramMB: 96,
     approxWeightsMB: 8.1,
     precisionWeightsMB: { fp16: 8.1, int8: 4.8 },
-    licenseNote: 'Apache-2.0 (huhlim/cg2all CalphaBasedModel · WebGPU port ramithuh/cg2all-webgpu)',
+    licenseNote: 'Apache-2.0 (code) · MIT (SE3Transformer) · CC-BY-4.0 (weights, Zenodo 8393343 · ramithuh/cg2all-webgpu @ ab35079b1fab667ec00a23f6a6cf3fd863cb01e1)',
     description:
       'Neural Cα-trace → all-atom backmapping with the cg2all CalphaBasedModel (Heo & Feig 2024): a 6-layer rotation-equivariant graph transformer predicts per-residue backbone frames and torsion angles that place every heavy atom (and optional CHARMM hydrogens) by rigid-group assembly. Keeps chain IDs, numbering and B-factors; a connected sequence set is threaded onto the trace first.',
     inputs: {

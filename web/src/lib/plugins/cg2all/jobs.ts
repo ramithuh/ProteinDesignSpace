@@ -5,10 +5,18 @@
 import { fnv1a } from '$lib/kernel';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
 import { parseStructureText } from '$lib/protein-ops/pdb';
-import type { AtomGranularity, SequenceCandidate, SequenceSet, StructureArtifact } from '$lib/engine/types';
+import type {
+  AtomGranularity,
+  ChainMolecularKind,
+  SequenceCandidate,
+  SequenceSet,
+  StructureArtifact,
+  StructureMolecularContext,
+} from '$lib/engine/types';
 
 export type Cg2allVariant = 'ca' | 'ca-fix';
 export type Cg2allPrecision = 'fp16' | 'int8';
+export type Cg2allCpuFallbackReason = 'unavailable' | 'device-lost';
 
 export interface Cg2allOptions {
   variant: Cg2allVariant;
@@ -89,11 +97,81 @@ function granularity(pdbText: string): AtomGranularity {
   return 'backbone4';
 }
 
+function buildCg2allMolecularContext(
+  parent: StructureArtifact,
+  parsed: ReturnType<typeof parseStructureText>,
+  pdbText: string,
+  options: Cg2allOptions,
+): StructureMolecularContext | undefined {
+  const preservedHetResNames = new Set<string>();
+  const hetChainSet = new Set<string>();
+  let hasOutputProteinH = false;
+  for (const line of pdbText.split('\n')) {
+    if (line.startsWith('HETATM') && line.length >= 20) {
+      const resName = line.slice(17, 20).trim().toUpperCase();
+      if (resName) preservedHetResNames.add(resName);
+      if (line.length >= 22) hetChainSet.add((line[21] ?? '').trim() || 'A');
+    } else if (options.outputHydrogens && line.startsWith('ATOM  ') && line.length >= 16) {
+      const elem = line.slice(76, 78).trim().toUpperCase();
+      const atomName = line.slice(12, 16).trim().toUpperCase();
+      if (elem === 'H' || elem === 'D' || /^[0-9]?H/.test(atomName)) {
+        hasOutputProteinH = true;
+      }
+    }
+  }
+
+  const ligandSet = new Set<string>(options.preserveLigands ? parsed.diagnostics.ligandNames : []);
+  if (options.preserveLigands && parent.molecularContext?.ligands?.length) {
+    for (const lig of parent.molecularContext.ligands) {
+      if (preservedHetResNames.has(lig.toUpperCase())) ligandSet.add(lig);
+    }
+  }
+  const ligands = ligandSet.size > 0 ? [...ligandSet] : undefined;
+  const nucleicAcidChains =
+    options.preserveLigands && parsed.diagnostics.hasNucleicAcids
+      ? [...parsed.diagnostics.nucleicAcidChains]
+      : undefined;
+
+  const proteinChainSet = new Set(parsed.chainIds);
+  const nucleicChainSet = new Set(nucleicAcidChains ?? []);
+  let chainTypes: Record<string, ChainMolecularKind> | undefined;
+  if (parent.molecularContext?.chainTypes) {
+    const kept: Record<string, ChainMolecularKind> = {};
+    for (const [ch, kind] of Object.entries(parent.molecularContext.chainTypes)) {
+      if (kind === 'dna' || kind === 'rna') {
+        if (options.preserveLigands && nucleicChainSet.has(ch)) kept[ch] = kind;
+      } else if (kind === 'ligand') {
+        if (options.preserveLigands && hetChainSet.has(ch)) kept[ch] = kind;
+      } else if (
+        proteinChainSet.has(ch) ||
+        Object.entries(parent.chainIdMap ?? {}).some(([proj, orig]) => orig === ch && proteinChainSet.has(proj))
+      ) {
+        kept[ch] = kind;
+      }
+    }
+    if (Object.keys(kept).length > 0) chainTypes = kept;
+  }
+
+  const hasExplicitHydrogens =
+    hasOutputProteinH ||
+    (Boolean(parent.molecularContext?.hasExplicitHydrogens) &&
+      Boolean(ligands?.length || nucleicAcidChains?.length));
+
+  if (!chainTypes && !ligands && !nucleicAcidChains && !hasExplicitHydrogens) return undefined;
+  return {
+    ...(chainTypes ? { chainTypes } : {}),
+    ...(ligands ? { ligands } : {}),
+    ...(nucleicAcidChains ? { nucleicAcidChains } : {}),
+    ...(hasExplicitHydrogens ? { hasExplicitHydrogens: true } : {}),
+  };
+}
+
 export function buildCg2allArtifact(
   job: Cg2allJob,
   result: Cg2allConversion,
   options: Cg2allOptions,
   backend: 'webgpu' | 'cpu',
+  fallbackReason: Cg2allCpuFallbackReason = 'unavailable',
 ): StructureArtifact {
   const { parent, candidate } = job;
   const parsed = parseStructureText(result.pdbText);
@@ -103,7 +181,14 @@ export function buildCg2allArtifact(
   const tag = options.variant === 'ca-fix' ? 'cg2all FIX' : 'cg2all';
   const label = candidate ? `${parent.label} · ${candidate.id} (${tag})` : `${parent.label} (${tag})`;
   const warnings = [...result.warnings];
-  if (backend === 'cpu') warnings.push('cg2all ran on the CPU JS fallback (WebGPU unavailable).');
+  if (backend === 'cpu') {
+    warnings.push(
+      fallbackReason === 'device-lost'
+        ? 'cg2all fell back to the CPU JS engine after a WebGPU device loss.'
+        : 'cg2all ran on the CPU JS fallback (WebGPU unavailable).',
+    );
+  }
+  const molecularContext = buildCg2allMolecularContext(parent, parsed, result.pdbText, options);
   return {
     kind: 'StructureArtifact',
     id,
@@ -125,7 +210,7 @@ export function buildCg2allArtifact(
     diagnostics: parsed.diagnostics,
     atomGranularity: granularity(result.pdbText),
     bfactorSemantics: parent.bfactorSemantics ?? 'none',
-    ...(parent.molecularContext?.chainTypes ? { molecularContext: { chainTypes: { ...parent.molecularContext.chainTypes } } } : {}),
+    ...(molecularContext ? { molecularContext } : {}),
     ...(parent.designKey !== undefined ? { designKey: parent.designKey } : {}),
     ...(parent.designIndex !== undefined ? { designIndex: parent.designIndex } : {}),
     ...(parent.seed !== undefined ? { seed: parent.seed } : {}),

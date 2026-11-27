@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ADAPTER_REGISTRY } from '$lib/engine/registry';
 import { ADAPTER_TO_SHORT, SHORT_TO_ADAPTER, decodeFlowQuery, encodeGraphToFlow, parseFlowDsl } from '$lib/engine/flow-dsl';
 import { CATALOG_ITEMS } from '$lib/engine/catalog';
@@ -499,11 +499,15 @@ describe('cg2all plugin #29 registration', () => {
     expect(defaultParamsForAdapter('cg2all')).toEqual({ variant: 'ca', precision: 'fp16', outputHydrogens: false, preserveLigands: true });
     expect(cg2allPlugin.planner?.plannerRole).toBe('optimizer');
     expect(cg2allPlugin.cachePolicy.usesSharedOpfsStore).toBe(true);
-    expect(CATALOG_ITEMS.find((c) => c.id === 'cg2all')?.group).toBe('Evaluation');
+    expect(CATALOG_ITEMS.find((c) => c.id === 'cg2all')?.group).toBe('Refinement / Backmapping');
+    expect(cg2allPlugin.catalog.categoryId).toBe('refinement');
     const card = getModelCardForAdapter('cg2all', { precision: 'int8' })!;
     expect(card.adapterId).toBe('cg2all');
     expect(card.activePrecisionId).toBe('int8');
-    expect(card.license).toBe('Apache-2.0');
+    expect(card.weightsRepo).toBe('https://huggingface.co/ramithuh/cg2all-webgpu');
+    expect(card.weightsRevision).toBe('ab35079b1fab667ec00a23f6a6cf3fd863cb01e1');
+    expect(card.license).toContain('Apache-2.0 (code)');
+    expect(card.license).toContain('CC-BY-4.0 (weights, Zenodo 8393343)');
     expect(formatNodeParamSummary('cg2all', { variant: 'ca-fix', precision: 'int8', outputHydrogens: true })).toBe('Fixed Cα · INT8 · +H');
     expect(cg2allPlugin.display?.formatCanvasSummary?.({ precision: 'fp16' })).toBe('Cα refined · FP16');
     const serverMod = createRequire(import.meta.url)(resolve(process.cwd(), '../server/selfhost-server.mjs')) as {
@@ -585,6 +589,350 @@ describe('cg2all plugin #29 registration', () => {
     expect(est(['structure']).outputCardinality).toEqual({ structure: 3 });
     expect(est(['structure', 'sequences']).outputCardinality).toEqual({ structure: 9 });
     expect(est(['structure']).estimatedDownloadMB).toBe(4.8);
+  });
+});
+
+describe('cg2all QA regressions (P0 / P1 / P2)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.doUnmock('http://cg2all-test.local/vendor/cg2all/webgpu/index.js?v=1');
+    vi.doUnmock('http://cg2all-test.local/vendor/cg2all/cpu/index.js?v=1');
+    vi.resetModules();
+  });
+
+  const makeCaLine = (serial: number, resName: string, chain: string, resNum: number, x: number, y: number, z: number, altLoc = ' ') =>
+    `ATOM  ${String(serial).padStart(5)}  CA ${altLoc}${resName.padStart(3)} ${chain}${String(resNum).padStart(4)}    ` +
+    `${x.toFixed(3).padStart(8)}${y.toFixed(3).padStart(8)}${z.toFixed(3).padStart(8)}  1.00  0.00           C`;
+
+  it('P0-2: keeps B-only, C-only, and first-observed altloc residues while letting priority-0 (space/A/1) supersede', () => {
+    const pdb = [
+      makeCaLine(1, 'ALA', 'A', 1, 0.0, 0.0, 0.0, 'B'),
+      makeCaLine(2, 'GLY', 'A', 2, 3.8, 0.0, 0.0, 'C'),
+      makeCaLine(3, 'SER', 'A', 3, 7.6, 1.0, 0.0, 'B'),
+      makeCaLine(4, 'SER', 'A', 3, 99.0, 99.0, 99.0, 'C'), // second non-primary altloc ignored
+      makeCaLine(5, 'VAL', 'A', 4, 50.0, 50.0, 50.0, 'B'),
+      makeCaLine(6, 'VAL', 'A', 4, 11.4, 0.0, 1.0, 'A'), // out-of-order A supersedes B
+      makeCaLine(7, 'PTR', 'A', 5, 15.2, 1.0, 1.0, 'B'), // UNK residue with altLoc B only
+      'TER',
+      'END',
+    ].join('\n');
+
+    const trace = shared.parseCaTrace(pdb);
+    expect(trace.residues).toHaveLength(5);
+    expect(trace.residues.map((r: any) => r.resName)).toEqual(['ALA', 'GLY', 'SER', 'VAL', 'PTR']);
+    expect(trace.residues[0].ca).toEqual([0, 0, 0]);
+    expect(trace.residues[1].ca).toEqual([3.8, 0, 0]);
+    expect(trace.residues[2].ca).toEqual([7.6, 1, 0]); // kept first observed 'B', not 'C'
+    expect(trace.residues[3].ca).toEqual([11.4, 0, 1]); // 'A' superseded 'B'
+    expect(trace.residues[4].lines).toHaveLength(1);
+  });
+
+  it('P0-3: filters SSBOND pairs for CYS-CYS both on parseCaTrace and after sequence threading', () => {
+    const c = FIXTURE.cases.crambin46;
+    // 1. Mutate residue 3 in the input PDB to ALA while leaving stale SSBOND 3-40
+    const nonCysInput = c.pdb.replace(/^(ATOM\s+\d+\s+\S+\s+)CYS(\s+A\s+3\b)/gm, '$1ALA$2');
+    const nonCysTrace = shared.parseCaTrace(nonCysInput);
+    expect(nonCysTrace.ssbonds).toEqual([[3, 31], [15, 25]]);
+    expect(nonCysTrace.warnings.some((w: string) => /Ignored SSBOND.*requires CYS/.test(w))).toBe(true);
+
+    // 2. Thread residue 3 (index 2) from CYS -> ALA on valid crambin46 trace
+    const seqMut = parseStructureText(c.pdb).sequence.split('');
+    seqMut[2] = 'A';
+    const threaded = shared.prepareInput(c.pdb, { sequence: seqMut.join('') });
+    expect(threaded.trace.ssbonds).toEqual([[3, 31], [15, 25]]);
+    expect(threaded.ssbonds).toEqual([[3, 31], [15, 25]]);
+    expect(threaded.warnings.some((w: string) => /Ignored SSBOND.*after sequence threading/.test(w))).toBe(true);
+    const ssEdges = Array.from({ length: threaded.e }, (_, k) => threaded.edgeFeat[4 * k + 1]).reduce(
+      (a: number, b: number) => a + b,
+      0,
+    );
+    expect(ssEdges).toBe(4); // only 2 disulfides × 2 directions
+
+    const res = shared.assemble(threaded, { s: c.ca.s, v: c.ca.v }, { hydrogens: true });
+    expect(res.pdbText.split('\n').filter((l: string) => l.startsWith('SSBOND'))).toHaveLength(2);
+    // Former partner CYS 40 is now unpaired and keeps its thiol hydrogen (HG in PDB naming), while bonded CYS 4 lacks HG
+    const res40Atoms = res.pdbText
+      .split('\n')
+      .filter((l: string) => l.startsWith('ATOM') && Number(l.slice(22, 26)) === 40)
+      .map((l: string) => l.slice(12, 16).trim());
+    const res4Atoms = res.pdbText
+      .split('\n')
+      .filter((l: string) => l.startsWith('ATOM') && Number(l.slice(22, 26)) === 4)
+      .map((l: string) => l.slice(12, 16).trim());
+    expect(res40Atoms).toContain('HG');
+    expect(res4Atoms).not.toContain('HG');
+
+    // 3. Direct build.residueAtoms / build.toPdb guard if trace.residues was mutated manually
+    const staleTrace = shared.parseCaTrace(c.pdb);
+    staleTrace.residues[2].resName = 'ALA';
+    const stalePrep = shared.prepareFromTrace(staleTrace);
+    const directRes = shared.assemble(stalePrep, { s: c.ca.s, v: c.ca.v }, { hydrogens: true });
+    expect(directRes.pdbText.split('\n').filter((l: string) => l.startsWith('SSBOND'))).toHaveLength(2);
+  });
+
+  it('P1-4: rejects blank, NaN, or non-finite Cα coordinates instead of coercing to 0.0', () => {
+    const blankCoords = 'ATOM      1  CA  ALA A   1\nEND\n';
+    const nanCoords = 'ATOM      1  CA  ALA A   1         NaN   1.000   2.000  1.00  0.00           C\nEND\n';
+    const infCoords = 'ATOM      1  CA  ALA A   1       1.000   2.000Infinity  1.00  0.00           C\nEND\n';
+    for (const bad of [blankCoords, nanCoords, infCoords]) {
+      expect(() => shared.parseCaTrace(bad)).toThrow(/^cg2all: Cα record/);
+    }
+    // Missing optional B-factor / occupancy columns still succeed cleanly
+    const noBf = 'ATOM      1  CA  ALA A   1       1.000   2.000   3.000\nEND\n';
+    expect(shared.parseCaTrace(noBf).residues[0].ca).toEqual([1, 2, 3]);
+    expect(shared.parseCaTrace(noBf).residues[0].bfactor).toBe(0);
+  });
+
+  it('P1-5: emits an axis-rotation warning for L === 2 and collinear Cα chains', () => {
+    const twoResPdb = [
+      makeCaLine(1, 'ALA', 'A', 1, 0, 0, 0),
+      makeCaLine(2, 'GLY', 'A', 2, 3.8, 0, 0),
+      'TER\nEND\n',
+    ].join('\n');
+    const prep2 = shared.prepareInput(twoResPdb);
+    expect(prep2.warnings.some((w: string) => /L === 2.*unconstrained/i.test(w))).toBe(true);
+
+    const collinear4Pdb = [
+      makeCaLine(1, 'ALA', 'B', 1, 0, 0, 0),
+      makeCaLine(2, 'GLY', 'B', 2, 3.8, 0, 0),
+      makeCaLine(3, 'VAL', 'B', 3, 7.6, 0, 0),
+      makeCaLine(4, 'LEU', 'B', 4, 11.4, 0, 0),
+      'TER\nEND\n',
+    ].join('\n');
+    const prep4 = shared.prepareInput(collinear4Pdb);
+    expect(prep4.warnings.some((w: string) => /collinear.*unconstrained/i.test(w))).toBe(true);
+
+    const net = model.buildNetwork(syntheticTensors(5));
+    const out = model.forwardCpu(net, prep4);
+    const conv = { ...shared.assemble(prep4, out), prepared: prep4 };
+    const parent = {
+      kind: 'StructureArtifact',
+      id: 'col4',
+      label: 'col4',
+      sourceModelId: 'pdb-input',
+      length: 4,
+      caCoords: new Float32Array(12),
+      backbone4Coords: new Float32Array(48),
+      pdbText: collinear4Pdb,
+      geometry: computeGeometryStats(new Float32Array(12)),
+    } as unknown as StructureArtifact;
+    const art = buildCg2allArtifact({ parent }, conv, cg2allOptionsFromParams({}), 'webgpu');
+    expect(art.provenance?.warnings?.some((w) => /collinear.*unconstrained/i.test(w))).toBe(true);
+  });
+
+  it('P1-6: populates molecularContext (ligands, nucleicAcidChains, hasExplicitHydrogens, chainTypes) accurately', () => {
+    const c = FIXTURE.cases.twochain;
+    const holoPdb = [
+      ...c.pdb.split('\n').filter((l) => !l.startsWith('END')),
+      "ATOM    501  P    DG D   1      20.000  20.000  20.000  1.00  0.00           P",
+      "ATOM    502  O5'  DG D   1      21.000  20.500  20.000  1.00  0.00           O",
+      'TER',
+      'END',
+    ].join('\n');
+    const prep = shared.prepareInput(holoPdb);
+    const keepConv = { ...shared.assemble(prep, { s: c.ca.s, v: c.ca.v }, { hydrogens: true, ligands: true }), prepared: prep };
+    const dropConv = { ...shared.assemble(prep, { s: c.ca.s, v: c.ca.v }, { hydrogens: false, ligands: false }), prepared: prep };
+
+    const parsedParent = parseStructureText(holoPdb);
+    const parent = {
+      kind: 'StructureArtifact',
+      id: 'holo-twochain',
+      label: 'Holo TwoChain',
+      sourceModelId: 'pdb-input',
+      length: parsedParent.nResidues,
+      caCoords: parsedParent.caCoords,
+      backbone4Coords: parsedParent.backbone4Coords,
+      pdbText: holoPdb,
+      molecularContext: {
+        chainTypes: { A: 'protein', B: 'protein', D: 'dna', C: 'ligand' },
+        ligands: ['ZN'],
+        nucleicAcidChains: ['D'],
+        hasExplicitHydrogens: true,
+      },
+      geometry: computeGeometryStats(parsedParent.caCoords, parsedParent.chainIds),
+    } as unknown as StructureArtifact;
+
+    const keptArt = buildCg2allArtifact(
+      { parent },
+      keepConv,
+      cg2allOptionsFromParams({ outputHydrogens: true, preserveLigands: true }),
+      'webgpu',
+    );
+    expect(keptArt.molecularContext?.ligands).toEqual(['ZN']);
+    expect(keptArt.molecularContext?.nucleicAcidChains).toEqual(['D']);
+    expect(keptArt.molecularContext?.hasExplicitHydrogens).toBe(true);
+    expect(keptArt.molecularContext?.chainTypes).toEqual({ A: 'protein', B: 'protein', D: 'dna', C: 'ligand' });
+
+    const droppedArt = buildCg2allArtifact(
+      { parent },
+      dropConv,
+      cg2allOptionsFromParams({ outputHydrogens: false, preserveLigands: false }),
+      'webgpu',
+    );
+    expect(droppedArt.molecularContext?.ligands).toBeUndefined();
+    expect(droppedArt.molecularContext?.nucleicAcidChains).toBeUndefined();
+    expect(droppedArt.molecularContext?.hasExplicitHydrogens).toBeUndefined();
+    expect(droppedArt.molecularContext?.chainTypes).toEqual({ A: 'protein', B: 'protein' });
+  });
+
+  it('P1-7: emits a provenance warning for intra-chain Cα–Cα gaps in (4.5, 10.0] Å', () => {
+    const gapPdb = [
+      makeCaLine(1, 'ALA', 'A', 1, 0.0, 0.0, 0.0),
+      makeCaLine(2, 'GLY', 'A', 2, 3.8, 0.0, 0.0),
+      makeCaLine(3, 'VAL', 'A', 3, 6.2, 2.9, 0.0),
+      // 7.5 Å intra-chain gap to residue 6 (within cg2all's 10 Å cutoff)
+      makeCaLine(4, 'LEU', 'A', 6, 13.7, 2.9, 0.0),
+      makeCaLine(5, 'SER', 'A', 7, 17.5, 2.9, 0.0),
+      'TER\nEND\n',
+    ].join('\n');
+    const prep = shared.prepareInput(gapPdb);
+    expect(prep.warnings.some((w: string) => /\(4\.5, 10\.0\] Å.*7\.5 Å.*10 Å \(1\.0 nm\) cutoff/.test(w))).toBe(true);
+
+    const net = model.buildNetwork(syntheticTensors(9));
+    const conv = { ...shared.assemble(prep, model.forwardCpu(net, prep)), prepared: prep };
+    const parent = {
+      kind: 'StructureArtifact',
+      id: 'gap-test',
+      label: 'gap-test',
+      sourceModelId: 'pdb-input',
+      length: 5,
+      caCoords: new Float32Array(15),
+      backbone4Coords: new Float32Array(60),
+      pdbText: gapPdb,
+      geometry: computeGeometryStats(new Float32Array(15)),
+    } as unknown as StructureArtifact;
+    const art = buildCg2allArtifact({ parent }, conv, cg2allOptionsFromParams({}), 'webgpu');
+    expect(art.provenance?.warnings?.some((w) => /\(4\.5, 10\.0\] Å/.test(w))).toBe(true);
+  });
+
+  it('P2-9 & P2-10: evicts cached HTML manifest errors and recomputes cpu-js REMARK + device-loss warning on GPU→CPU fallback', async () => {
+    const c = FIXTURE.cases.helix16;
+    const prepared = shared.prepareInput(c.pdb);
+    const validConv = { ...shared.assemble(prepared, { s: c.ca.s, v: c.ca.v }), prepared };
+
+    const validManifest = new TextEncoder().encode(
+      JSON.stringify({ format: 'cg2all-webgpu/v1', fixAtom: false, files: [{ name: 'weights.bin', bytes: 4, sha256: '' }], tensors: [] }),
+    );
+    const htmlManifest = new TextEncoder().encode('<!DOCTYPE html><html>Captive Portal</html>');
+    const cacheStore = new Map<string, Response>([
+      ['https://huggingface.co/ramithuh/cg2all-webgpu/resolve/main/ca/fp16/manifest.json', new Response(htmlManifest, { status: 200 })],
+    ]);
+    const deletedUrls: string[] = [];
+    const fakeCache = {
+      match: async (url: string) => cacheStore.get(url)?.clone(),
+      put: async (url: string, resp: Response) => {
+        cacheStore.set(url, resp);
+      },
+      delete: async (url: string) => {
+        deletedUrls.push(url);
+        return cacheStore.delete(url);
+      },
+    };
+    vi.stubGlobal('caches', { open: async () => fakeCache });
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).endsWith('manifest.json')) return new Response(validManifest, { status: 200 });
+      return new Response(new Uint8Array(4), { status: 200 });
+    }));
+
+    let resolveLost!: (info: unknown) => void;
+    const fakeDevice = {
+      lost: new Promise((r) => (resolveLost = r)),
+      destroy() {},
+    };
+    vi.stubGlobal('navigator', {
+      gpu: {
+        requestAdapter: async () => ({
+          features: new Set<string>(['shader-f16']),
+          limits: {
+            maxBufferSize: 1 << 30,
+            maxStorageBufferBindingSize: 1 << 30,
+            maxStorageBuffersPerShaderStage: 8,
+            maxComputeWorkgroupStorageSize: 32768,
+            maxComputeInvocationsPerWorkgroup: 1024,
+          },
+          requestDevice: async () => fakeDevice,
+        }),
+      },
+    });
+
+    const gpuConvertCalls: string[][] = [];
+    const cpuConvertCalls: string[][] = [];
+    vi.doMock('http://cg2all-test.local/vendor/cg2all/webgpu/index.js?v=1', () => ({
+      async loadWeights(_baseUrl: string, opts: { read: (name: string) => Promise<Uint8Array> }) {
+        const raw = await opts.read('manifest.json');
+        const manifest = JSON.parse(new TextDecoder().decode(raw));
+        return { manifest, tensors: new Map() };
+      },
+      async createCg2allEngine() {
+        return { backend: 'webgpu', predict: async () => ({}), destroy() {} };
+      },
+      async convert(_engine: unknown, _pdb: string, opts: { remarks?: string[] }) {
+        gpuConvertCalls.push(opts.remarks ?? []);
+        resolveLost({ reason: 'destroyed', message: 'GPU device lost' });
+        throw new Error('WebGPU device lost (destroyed): GPU device lost');
+      },
+    }));
+    vi.doMock('http://cg2all-test.local/vendor/cg2all/cpu/index.js?v=1', () => ({
+      async loadWeights(_baseUrl: string, opts: { read: (name: string) => Promise<Uint8Array> }) {
+        const raw = await opts.read('manifest.json');
+        const manifest = JSON.parse(new TextDecoder().decode(raw));
+        return { manifest, tensors: new Map() };
+      },
+      async createCg2allCpuEngine() {
+        return { backend: 'cpu', predict: async () => ({}), destroy() {} };
+      },
+      async convert(_engine: unknown, _pdb: string, opts: { remarks?: string[] }) {
+        cpuConvertCalls.push(opts.remarks ?? []);
+        const remarkLines = (opts.remarks ?? []).map((r) => `REMARK   1 ${r}`).join('\n');
+        return { ...validConv, pdbText: `${remarkLines}\n${validConv.pdbText}` };
+      },
+    }));
+
+    const messages: Array<Record<string, unknown>> = [];
+    const scope = {
+      postMessage: (m: Record<string, unknown>) => messages.push(m),
+      location: { origin: 'http://cg2all-test.local' },
+      onmessage: null as null | ((ev: { data: unknown }) => Promise<void>),
+    };
+    vi.stubGlobal('self', scope);
+    vi.resetModules();
+    await import('$lib/plugins/cg2all/cg2all.worker');
+
+    const parsedParent = parseStructureText(c.pdb);
+    const parent = {
+      kind: 'StructureArtifact',
+      id: 'hlx-worker',
+      label: 'Helix 16',
+      sourceModelId: 'pdb-input',
+      length: parsedParent.nResidues,
+      caCoords: parsedParent.caCoords,
+      backbone4Coords: parsedParent.backbone4Coords,
+      pdbText: c.pdb,
+      geometry: computeGeometryStats(parsedParent.caCoords),
+    } as unknown as StructureArtifact;
+
+    await scope.onmessage!({
+      data: {
+        id: 1,
+        type: 'run',
+        params: { variant: 'ca', precision: 'fp16', outputHydrogens: false, preserveLigands: true },
+        inputs: { structure: parent },
+      },
+    });
+
+    const reply = messages.find((m) => m.id === 1 && (m.type === 'result' || m.type === 'error')) as any;
+    expect(reply?.type, String(reply?.message ?? '')).toBe('result');
+    expect(deletedUrls.some((u) => u.endsWith('manifest.json'))).toBe(true);
+    expect(gpuConvertCalls).toHaveLength(2);
+    expect(gpuConvertCalls[0][0]).toContain('webgpu)');
+    expect(cpuConvertCalls).toHaveLength(1);
+    expect(cpuConvertCalls[0][0]).toContain('cpu-js)');
+
+    const outArt = reply.outputs.structure as StructureArtifact;
+    expect(outArt.pdbText).toContain('REMARK   1 cg2all CalphaBasedModel (fp16, cpu-js)');
+    expect(outArt.provenance?.degradedFallback).toBe('cpu-js');
+    expect(outArt.provenance?.warnings?.join(' ')).toMatch(/device loss/i);
+    expect(outArt.provenance?.warnings?.join(' ')).not.toMatch(/WebGPU unavailable/i);
   });
 });
 

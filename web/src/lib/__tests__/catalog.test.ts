@@ -231,8 +231,9 @@ describe('engine/catalog & biologist terminology', () => {
     ]);
 
     const refCat = CATALOG_CATEGORIES.find((c) => c.id === 'refinement')!;
-    expect(refCat.subGroups.flatMap((g) => g.items).map((i) => i.key)).toEqual(['pulchra']);
+    expect(refCat.subGroups.flatMap((g) => g.items).map((i) => i.key)).toEqual(['pulchra', 'cg2all']);
     expect(filterCatalogCategories('pulchra')[0].matchingSubItems.map((s) => s.key)).toEqual(['pulchra']);
+    expect(filterCatalogCategories('cg2all')[0].matchingSubItems.map((s) => s.key)).toEqual(['cg2all']);
     expect(filterCatalogCategories('backmapping')[0].category.id).toBe('refinement');
 
     expect(filterCatalogCategories('ligandmpnn')[0].matchingSubItems.map((s) => s.key)).toEqual([

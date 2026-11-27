@@ -20,6 +20,7 @@ import {
   structureItems,
   wrapCg2allOutputs,
   type Cg2allConversion,
+  type Cg2allCpuFallbackReason,
   type Cg2allPrecision,
   type Cg2allVariant,
 } from './jobs';
@@ -92,7 +93,11 @@ function releaseEngine(): void {
   loadedKey = null;
 }
 
-async function loadModule(ctx: WorkerRunContext, backend: Backend): Promise<Cg2allSharedModule> {
+async function loadModule(
+  ctx: WorkerRunContext,
+  backend: Backend,
+  fallbackReason?: Cg2allCpuFallbackReason,
+): Promise<Cg2allSharedModule> {
   if (backend === 'webgpu') {
     if (!gpuMod) {
       ctx.progress('init', 0.02, 'Loading cg2all WebGPU modules...');
@@ -102,7 +107,13 @@ async function loadModule(ctx: WorkerRunContext, backend: Backend): Promise<Cg2a
     return gpuMod;
   }
   if (!cpuMod) {
-    ctx.progress('init', 0.02, 'WebGPU unavailable — loading cg2all CPU fallback...');
+    ctx.progress(
+      'init',
+      0.02,
+      fallbackReason === 'device-lost'
+        ? 'WebGPU device lost — loading cg2all CPU fallback...'
+        : 'WebGPU unavailable — loading cg2all CPU fallback...',
+    );
     const url = new URL(`/vendor/cg2all/cpu/index.js?v=${VENDOR_VERSION}`, self.location.origin).href;
     cpuMod = (await import(/* @vite-ignore */ url)) as Cg2allCpuModule;
   }
@@ -114,6 +125,7 @@ async function ensureEngine(
   variant: Cg2allVariant,
   precision: Cg2allPrecision,
   backend: Backend,
+  fallbackReason?: Cg2allCpuFallbackReason,
 ): Promise<{ engine: Cg2allEngine; mod: Cg2allSharedModule; fixAtom: boolean }> {
   const key = `${variant}/${precision}/${backend}`;
   // `gpu` is cleared when its device is lost, even mid-load, so a cache hit always runs on a live device.
@@ -121,7 +133,7 @@ async function ensureEngine(
     return { engine, mod: (backend === 'webgpu' ? gpuMod : cpuMod)!, fixAtom: variant === 'ca-fix' };
   }
   releaseEngine();
-  const mod = await loadModule(ctx, backend);
+  const mod = await loadModule(ctx, backend, fallbackReason);
   const envBaseUrl = (import.meta.env.VITE_CG2ALL_WEIGHTS_URL as string | undefined)?.trim();
   const rootUrl = (envBaseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
   const baseUrl = `${rootUrl}/${variant}/${precision}`;
@@ -161,7 +173,12 @@ async function ensureEngine(
         : await (mod as Cg2allCpuModule).createCg2allCpuEngine({ weights });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (!retried && anyFromCache && fetchedUrls.length > 0 && /checksum|truncated|manifest|mismatch/i.test(msg)) {
+      if (
+        !retried &&
+        anyFromCache &&
+        fetchedUrls.length > 0 &&
+        (err instanceof SyntaxError || /checksum|truncated|manifest|mismatch|json|syntaxerror|unexpected token/i.test(msg))
+      ) {
         await evictCachedUrls(fetchedUrls);
         return await loadOnce(true);
       }
@@ -196,16 +213,24 @@ createWorkerHarness({
     const jobs = planCg2allJobs(structureItems(structure), sequences);
 
     let backend: Backend = webGpuAvailable() ? 'webgpu' : 'cpu';
+    let cpuFallbackReason: Cg2allCpuFallbackReason | undefined = backend === 'cpu' ? 'unavailable' : undefined;
     let gpuRecoveries = 0;
     const acquire = async () => {
       try {
-        return await ensureEngine(ctx, options.variant, options.precision, backend);
+        return await ensureEngine(ctx, options.variant, options.precision, backend, cpuFallbackReason);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (backend === 'cpu' || /HTTP \d+|fetch|network|checksum|truncated|manifest|abort/i.test(msg)) throw err;
+        if (
+          backend === 'cpu' ||
+          err instanceof SyntaxError ||
+          /HTTP \d+|fetch|network|checksum|truncated|manifest|json|syntaxerror|unexpected token|abort/i.test(msg)
+        ) {
+          throw err;
+        }
         // No usable adapter/device: run the pure-JS engine instead.
         backend = 'cpu';
-        return await ensureEngine(ctx, options.variant, options.precision, backend);
+        cpuFallbackReason = isWebGpuDeviceLostError(err) || gpuRecoveries > 0 ? 'device-lost' : 'unavailable';
+        return await ensureEngine(ctx, options.variant, options.precision, backend, cpuFallbackReason);
       }
     };
     let active = await acquire();
@@ -220,15 +245,16 @@ createWorkerHarness({
         `Backmapping all-atom model ${i + 1}/${jobs.length}${backend === 'cpu' ? ' (CPU fallback)' : ''}...`,
       );
       const text = inputPdbText(job.parent);
-      const convertOpts = {
-        ...(job.candidate ? { sequence: job.candidate.sequence } : {}),
-        fixAtom: active.fixAtom,
-        hydrogens: options.outputHydrogens,
-        ligands: options.preserveLigands,
-        remarks: [`cg2all ${options.variant === 'ca-fix' ? 'CalphaBasedModel-FIX' : 'CalphaBasedModel'} (${options.precision}, ${backend})`],
-      };
       let result: Cg2allConversion;
       for (;;) {
+        const backendLabel = backend === 'cpu' ? 'cpu-js' : 'webgpu';
+        const convertOpts = {
+          ...(job.candidate ? { sequence: job.candidate.sequence } : {}),
+          fixAtom: active.fixAtom,
+          hydrogens: options.outputHydrogens,
+          ligands: options.preserveLigands,
+          remarks: [`cg2all ${options.variant === 'ca-fix' ? 'CalphaBasedModel-FIX' : 'CalphaBasedModel'} (${options.precision}, ${backendLabel})`],
+        };
         try {
           result = await active.mod.convert(active.engine, text, convertOpts);
           break;
@@ -236,11 +262,14 @@ createWorkerHarness({
           if (backend !== 'webgpu' || !isWebGpuDeviceLostError(err)) throw err;
           // Fail fast on device loss: rebuild once on a fresh device, then fall back to the CPU engine.
           releaseEngine();
-          if (gpuRecoveries++ >= 1) backend = 'cpu';
+          if (gpuRecoveries++ >= 1) {
+            backend = 'cpu';
+            cpuFallbackReason = 'device-lost';
+          }
           active = await acquire();
         }
       }
-      outputs.push(buildCg2allArtifact(job, result, options, backend));
+      outputs.push(buildCg2allArtifact(job, result, options, backend, cpuFallbackReason));
       atoms += result.atomCount;
     }
     ctx.progress('infer', 1, `Rebuilt ${outputs.length} all-atom model(s), ${atoms} atoms`);

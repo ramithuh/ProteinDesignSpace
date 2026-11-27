@@ -35,6 +35,20 @@ function parseFloatField(line, a, b) {
   return Number.isFinite(v) ? v : 0;
 }
 
+function parseCoordField(line, a, b) {
+  const raw = line.slice(a, b).trim();
+  if (!raw) return Number.NaN;
+  const v = Number(raw);
+  return Number.isFinite(v) ? v : Number.NaN;
+}
+
+/** Keep only disulfide pairs where both endpoints are distinct CYS residues. */
+export function filterCysSsbonds(residues, ssbonds) {
+  return (ssbonds ?? []).filter(
+    ([i, j]) => i !== j && residues[i]?.resName === 'CYS' && residues[j]?.resName === 'CYS',
+  );
+}
+
 /**
  * Parse a PDB into the residue list cg2all sees.
  * @param {string} pdbText
@@ -56,6 +70,7 @@ export function parseCaTrace(pdbText) {
   let terSeen = true;
   let current = null;
   let currentKey = '';
+  let currentMeta = null;
   let modelCount = 0;
 
   const flush = () => {
@@ -64,6 +79,7 @@ export function parseCaTrace(pdbText) {
     else if (current) ligandLines.push(...current.lines);
     current = null;
     currentKey = '';
+    currentMeta = null;
   };
 
   for (const rawLine of String(pdbText ?? '').split(/\r?\n/)) {
@@ -99,9 +115,10 @@ export function parseCaTrace(pdbText) {
       if (!WATER_NAMES.has(resName)) ligandLines.push(rawLine);
       continue;
     }
-    if (altLoc !== ' ' && altLoc !== 'A' && altLoc !== '1') continue;
-    const key = `${chainId}|${resNum}|${insCode}|${resName}`;
-    if (key !== currentKey) {
+    const altPrio = altLoc === ' ' || altLoc === 'A' || altLoc === '1' ? 0 : 1;
+    const canonicalName = canonicalResidueName(resName);
+    const key = `${chainId}|${resNum}|${insCode}`;
+    const openCurrent = () => {
       flush();
       if (terSeen || chainId !== lastChainId) {
         chainIndex++;
@@ -113,18 +130,57 @@ export function parseCaTrace(pdbText) {
         chainId: chainId === ' ' ? '' : chainId,
         resNum: Number.isFinite(resNum) ? resNum : 0,
         insCode,
-        resName: canonicalResidueName(resName),
+        resName: canonicalName,
         inputName: resName,
         ca: null,
         bfactor: 0,
         lines: [],
       };
       currentKey = key;
+      currentMeta = { resAltPrio: altPrio, resAltLoc: altLoc, caAltPrio: Infinity, atomsByName: new Map() };
+    };
+    if (key !== currentKey) {
+      openCurrent();
+    } else if (resName !== current.inputName) {
+      if (altPrio < currentMeta.resAltPrio) {
+        current.resName = canonicalName;
+        current.inputName = resName;
+        current.ca = null;
+        current.bfactor = 0;
+        current.lines = [];
+        currentMeta = { resAltPrio: altPrio, resAltLoc: altLoc, caAltPrio: Infinity, atomsByName: new Map() };
+      } else if (altLoc !== ' ' || currentMeta.resAltLoc !== ' ') {
+        continue;
+      } else {
+        openCurrent();
+      }
     }
-    current.lines.push(rawLine);
-    if (atomName === 'CA' && !current.ca) {
-      current.ca = [parseFloatField(line, 30, 38), parseFloatField(line, 38, 46), parseFloatField(line, 46, 54)];
-      current.bfactor = parseFloatField(line, 60, 66);
+    if (atomName === 'CA') {
+      const x = parseCoordField(line, 30, 38);
+      const y = parseCoordField(line, 38, 46);
+      const z = parseCoordField(line, 46, 54);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+        const loc = `${current.chainId || '_'}${current.resNum}${current.insCode}`;
+        throw new Error(`cg2all: Cα record for ${current.inputName} ${loc} has missing or non-finite coordinates`);
+      }
+      if (!current.ca || altPrio < currentMeta.caAltPrio) {
+        current.ca = [x, y, z];
+        current.bfactor = parseFloatField(line, 60, 66);
+        currentMeta.caAltPrio = altPrio;
+      }
+    }
+    const prevAtom = currentMeta.atomsByName.get(atomName);
+    if (!prevAtom) {
+      currentMeta.atomsByName.set(atomName, { prio: altPrio, altLoc, idx: current.lines.length });
+      current.lines.push(rawLine);
+    } else if (altPrio < prevAtom.prio) {
+      current.lines[prevAtom.idx] = rawLine;
+      prevAtom.prio = altPrio;
+      prevAtom.altLoc = altLoc;
+    } else if (altLoc !== prevAtom.altLoc) {
+      continue;
+    } else {
+      current.lines.push(rawLine);
     }
   }
   flush();
@@ -145,6 +201,12 @@ export function parseCaTrace(pdbText) {
     const j = find(b);
     if (i < 0 || j < 0 || i === j) {
       warnings.push(`Ignored SSBOND ${a.join('')}-${b.join('')}: residue not found in the Cα trace`);
+      continue;
+    }
+    if (residues[i].resName !== 'CYS' || residues[j].resName !== 'CYS') {
+      warnings.push(
+        `Ignored SSBOND ${a.join('')}-${b.join('')}: requires CYS at both endpoints (${residues[i].resName}-${residues[j].resName})`,
+      );
       continue;
     }
     const pair = i < j ? [i, j] : [j, i];
@@ -205,6 +267,24 @@ export function threadSequence(trace, seq) {
       r.inputName = name === 'HSD' ? 'HIS' : name;
       r.lines = [];
     }
+  }
+  if (trace.ssbonds?.length) {
+    const kept = [];
+    for (const pair of trace.ssbonds) {
+      const [i, j] = pair;
+      const a = trace.residues[i];
+      const b = trace.residues[j];
+      if (i !== j && a?.resName === 'CYS' && b?.resName === 'CYS') {
+        kept.push(pair);
+      } else {
+        const labelA = a ? `${a.chainId || ' '}${a.resNum}${a.insCode}` : String(i);
+        const labelB = b ? `${b.chainId || ' '}${b.resNum}${b.insCode}` : String(j);
+        trace.warnings.push(
+          `Ignored SSBOND ${labelA}-${labelB} after sequence threading: requires CYS at both endpoints (${a?.resName ?? '?'}-${b?.resName ?? '?'})`,
+        );
+      }
+    }
+    trace.ssbonds = kept;
   }
   return trace;
 }

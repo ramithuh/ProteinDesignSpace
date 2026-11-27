@@ -31,7 +31,7 @@ export const cg2allPlugin: ModelPlugin = {
     shortCode: 'cg',
   },
   catalog: {
-    categoryId: 'score',
+    categoryId: 'refinement',
     conciseRole: 'Neural Cα trace → all-atom model (cg2all equivariant transformer, rigid-group side chains)',
     searchKeywords: [
       'cg2all',

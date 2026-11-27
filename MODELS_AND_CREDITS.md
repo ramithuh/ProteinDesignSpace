@@ -34,7 +34,7 @@ All neural inference executes locally in sequential, VRAM-isolated Dedicated Web
 | **Docking** | **GNINA 1.3** | 3-model 3D CNN ensemble pose scoring, BFGS minimization, flexible-ligand MC docking & pocket scan | [`ramithuh/gnina-webgpu`](https://huggingface.co/ramithuh/gnina-webgpu) | Apache-2.0 / GPLv2 |
 | **Evaluation** | **Designability / 3D Compare** | Kabsch SVD `scRMSD`, `scTM`, Motif RMSD, pLDDT, ipSAE, up to 6-way 3D superposition | Built-in CPU | MIT |
 | **Structure** | **PULCHRA 3.06** | Cα / backbone trace → all-atom model (N/C/O, rotamer side chains, clash fixing, H-bond peptide optimization, sequence threading) | Built-in CPU (TypeScript port of [`euplotes/pulchra`](https://github.com/euplotes/pulchra)) | MIT |
-| **Structure** | **cg2all (CalphaBasedModel)** | Neural Cα trace → all-atom backmapping (SE(3)-Transformer frames & torsions, rigid-group heavy atoms + optional H, fixed-Cα variant, sequence threading) | [`ramithuh/cg2all-webgpu`](https://huggingface.co/ramithuh/cg2all-webgpu) | Apache-2.0 / MIT (SE3Transformer) |
+| **Structure** | **cg2all (CalphaBasedModel)** | Neural Cα trace → all-atom backmapping (SE(3)-Transformer frames & torsions, rigid-group heavy atoms + optional H, fixed-Cα variant, sequence threading) | [`ramithuh/cg2all-webgpu`](https://huggingface.co/ramithuh/cg2all-webgpu) (`ab35079b1fab667ec00a23f6a6cf3fd863cb01e1`) | Apache-2.0 (code) · MIT (SE3Transformer) · CC-BY-4.0 (weights, Zenodo 8393343) |
 
 ---
 
@@ -66,7 +66,7 @@ All neural inference executes locally in sequential, VRAM-isolated Dedicated Web
 - **Dyna-1** — Wayment-Steele et al. (2026), *Learning millisecond protein dynamics from what is missing in NMR spectra*, Nature · [`WaymentSteeleLab/Dyna-1`](https://github.com/WaymentSteeleLab/Dyna-1)
 - **GNINA 1.3** — McNutt, Li, Meli, Aggarwal & Koes (2025), *GNINA 1.3: the next increment in molecular docking with deep learning*, Journal of Cheminformatics 17, 28 · [`gnina/gnina`](https://github.com/gnina/gnina)
 - **PULCHRA 3.06** — Rotkiewicz & Skolnick (2008), *Fast procedure for reconstruction of full-atom protein models from reduced representations*, Journal of Computational Chemistry 29(9), 1460–1465 · [`euplotes/pulchra`](https://github.com/euplotes/pulchra) (MIT, © Piotr Rotkiewicz; license in `web/static/vendor/pulchra/LICENSE`)
-- **cg2all** — Heo & Feig (2024), *One particle per residue is sufficient to describe all-atom protein structures*, Structure 32(1), 97–111 · [`huhlim/cg2all`](https://github.com/huhlim/cg2all) (Apache-2.0, CalphaBasedModel / -FIX checkpoints from Zenodo 8393343) with the [`huhlim/SE3Transformer`](https://github.com/huhlim/SE3Transformer) fork of NVIDIA's SE(3)-Transformer (MIT); licenses in `web/static/vendor/cg2all/LICENSE`
+- **cg2all** — Heo & Feig (2024), *One particle per residue is sufficient to describe all-atom protein structures*, Structure 32(1), 97–111 · [`huhlim/cg2all`](https://github.com/huhlim/cg2all) (Apache-2.0 code; CalphaBasedModel / -FIX checkpoints CC-BY-4.0 from Zenodo 8393343; WebGPU weights [`ramithuh/cg2all-webgpu`](https://huggingface.co/ramithuh/cg2all-webgpu) @ `ab35079b1fab667ec00a23f6a6cf3fd863cb01e1`) with the [`huhlim/SE3Transformer`](https://github.com/huhlim/SE3Transformer) fork of NVIDIA's SE(3)-Transformer (MIT); licenses in `web/static/vendor/cg2all/LICENSE`
 - **Structure Predictors (via LocalFold)**:
   - **AlphaFold 2 & AlphaFold 3** — Jumper et al. (2021), *Nature*; Abramson et al. (2024), *Nature* (Google DeepMind)
   - **Boltz-2** — Passaro et al. (2025) (MIT / Recursion)

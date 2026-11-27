@@ -184,7 +184,13 @@ function applyPatch(atoms, patch) {
  */
 export function residueAtoms(R, residueType, residues, ssbonds) {
   const n = residueType.length;
-  const disulfide = new Set(ssbonds.flat());
+  const disulfide = new Set();
+  for (const [i, j] of ssbonds ?? []) {
+    if (i !== j && AMINO_ACIDS[residueType[i]] === 'CYS' && AMINO_ACIDS[residueType[j]] === 'CYS') {
+      disulfide.add(i);
+      disulfide.add(j);
+    }
+  }
   const out = new Array(n).fill(null);
   for (let i = 0; i < n; i++) {
     const rt = residueType[i];
@@ -239,7 +245,10 @@ function reserial(line, serial) {
 export function toPdb(trace, atomsByResidue, opts = {}) {
   const { hydrogens = false, ligands = true, standardNames = true, remarks = [] } = opts;
   const lines = remarks.map((r) => `REMARK   1 ${r}`.slice(0, 80));
-  trace.ssbonds.forEach(([i, j], k) => {
+  const ssbonds = (trace.ssbonds ?? []).filter(
+    ([i, j]) => i !== j && trace.residues[i]?.resName === 'CYS' && trace.residues[j]?.resName === 'CYS',
+  );
+  ssbonds.forEach(([i, j], k) => {
     const a = trace.residues[i];
     const b = trace.residues[j];
     lines.push(
