@@ -282,7 +282,7 @@
     if (!cfg.serverUrl.trim()) {
       return Boolean(sameOriginHostDetected?.ok || cfg.apiToken.trim());
     }
-    // Cross-origin custom URL: only auto-probe when a token is already present (e.g. same-tab refresh)
+    // Cross-origin custom URL: only auto-probe once a token has been entered (it is held in memory only)
     // so pasting a URL never triggers a premature browser Local Network Access prompt before token entry.
     return Boolean(cfg.apiToken.trim());
   }
@@ -3924,7 +3924,7 @@
                 </div>
               {:else}
                 <label class="pop-field">
-                  <span>API Token{computeBackend.serverUrl.trim() ? ' (session only)' : ''}</span>
+                  <span>API Token{computeBackend.serverUrl.trim() ? ' (not saved)' : ''}</span>
                   <input
                     type="password"
                     value={computeBackend.apiToken}

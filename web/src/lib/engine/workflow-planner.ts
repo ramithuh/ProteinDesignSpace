@@ -4175,7 +4175,9 @@ function extractPromptSequences(prompt: string): string[] {
 }
 
 function extractPromptOmitAminoAcids(prompt: string): string | null {
-  const omitMatch = /\bomit(?:ting)?\s+(?:amino\s+acids?\s+)?([ACDEFGHIKLMNPQRSTVWY](?:\s*(?:,|and|or|\s)\s*[ACDEFGHIKLMNPQRSTVWY])*)\b/i.exec(
+  // Separator is `,`/`and`/`or` with optional spaces, or bare whitespace. Spelling the bare-space
+  // case as `\s+` (not `\s*\s\s*`) keeps each separator to one parse (CodeQL js/redos).
+  const omitMatch = /\bomit(?:ting)?\s+(?:amino\s+acids?\s+)?([ACDEFGHIKLMNPQRSTVWY](?:(?:\s*(?:,|and|or)\s*|\s+)[ACDEFGHIKLMNPQRSTVWY])*)\b/i.exec(
     prompt,
   );
   if (omitMatch) {

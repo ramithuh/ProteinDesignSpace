@@ -34,10 +34,24 @@ const dna = r => ['DA', 'DC', 'DG', 'DT', 'DN'].includes(r);
 const rna = r => ['A', 'C', 'G', 'U', 'N'].includes(r);
 const polar = new Set(['SER', 'THR', 'ASN', 'GLN', 'TYR', 'CYS', 'HIS', 'LYS', 'ARG', 'ASP', 'GLU']);
 
+// Compact residue ids ("A12", "B-3", "A10-20"), split exactly as /^([A-Za-z0-9]+?)(-?\d+)(?:-(-?\d+))?$/
+// would (shortest chain wins) but without its overlapping chain/number quantifiers, which backtrack
+// quadratically. The chain runs to its last letter (or is one digit), or additionally takes the
+// digits before a negative start when only that parses ("A1-2-3" -> A1, -2..3).
+const COMPACT_RESIDUE = /^(?:([A-Za-z0-9]*[A-Za-z]|\d)(-?\d+)|([A-Za-z0-9]*[A-Za-z]\d+|\d\d+)(-\d+))$/;
+const COMPACT_RESIDUE_RANGE = /^(?:([A-Za-z0-9]*[A-Za-z]|\d)(-?\d+)(?:-(-?\d+))?|([A-Za-z0-9]*[A-Za-z]\d+|\d\d+)(-\d+)-(-?\d+))$/;
+
+function compactResidue(text, range) {
+  const m = (range ? COMPACT_RESIDUE_RANGE : COMPACT_RESIDUE).exec(text);
+  if (!m) return null;
+  const n = range ? 3 : 2;
+  return m[1] !== undefined ? m.slice(0, n + 1) : [m[0], ...m.slice(n + 1)];
+}
+
 function residueMatch(selection, key) {
   if (selection === key) return true;
-  const k = /^([^:]+):(-?\d+)$/.exec(key) ?? /^([A-Za-z0-9]+?)(-?\d+)$/.exec(key);
-  const m = /^([^:]+):(-?\d+)(?:-(-?\d+))?$/.exec(selection) ?? /^([A-Za-z0-9]+?)(-?\d+)(?:-(-?\d+))?$/.exec(selection);
+  const k = /^([^:]+):(-?\d+)$/.exec(key) ?? compactResidue(key, false);
+  const m = /^([^:]+):(-?\d+)(?:-(-?\d+))?$/.exec(selection) ?? compactResidue(selection, true);
   return Boolean(m && k && m[1] === k[1] && +k[2] >= +m[2] && +k[2] <= +(m[3] ?? m[2]));
 }
 

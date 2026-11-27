@@ -1127,15 +1127,17 @@ export function resolveMotifSourceResidues(
 /**
  * Wrap a path selection string in RFD4 `sel(...)`, automatically choosing double quotes when
  * atom names contain single-quote primes (e.g. ribose `O2'`, `O3'`, `O4'`) so RFD4's query
- * tokenizer never truncates at the prime character.
+ * tokenizer never truncates at the prime character. That tokenizer reads `\x` as `x` inside
+ * either quote style, so backslashes are escaped first and can never consume a closing quote.
  */
 function wrapRfd4Sel(selPath: string): string {
   const trimmed = selPath.trim();
   if (trimmed.includes('sel(')) return trimmed;
-  if (trimmed.includes("'")) {
-    return `sel("${trimmed.replace(/"/g, '\\"')}")`;
+  const escaped = trimmed.replace(/\\/g, '\\\\');
+  if (escaped.includes("'")) {
+    return `sel("${escaped.replace(/"/g, '\\"')}")`;
   }
-  return `sel('${trimmed}')`;
+  return `sel('${escaped}')`;
 }
 
 const TIP_ATOMS_BY_RESNAME: Record<string, readonly string[]> = {

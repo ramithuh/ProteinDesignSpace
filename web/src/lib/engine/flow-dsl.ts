@@ -1377,15 +1377,21 @@ function isIntraParamSemicolon(
   const nextNodeHead = (splitEdgeChain(nextSemiChunk)[0] ?? '').trim();
   if (!nextNodeHead) return false;
 
+  // Residue tokens below are `[A-Za-z0-9]+(?:-\d+|\d)`: the same strings as `[A-Za-z0-9]+-?\d+`,
+  // but with a single parse, so repeating them cannot backtrack exponentially (CodeQL js/redos).
   if (activeKey === 'tiedPositions') {
     const firstPair = splitParamPairs(nextNodeHead)[0]?.trim() ?? '';
-    return /^[A-Za-z0-9]+-?\d+(?:=[A-Za-z0-9]+-?\d+)+$/.test(firstPair);
+    return /^[A-Za-z0-9]+(?:-\d+|\d)(?:=[A-Za-z0-9]+(?:-\d+|\d))+$/.test(firstPair);
   }
 
   // Isolate up to any `,nextKey=` parameter boundary on the same node
   const firstParamChunk = splitParamPairs(nextNodeHead)[0]?.trim() ?? '';
+  // The atom list accepts exactly the strings of `X(?:\s*,\s*X)*` with X = `[A-Za-z0-9,'*]+`.
+  // Because `,` is both an atom character and the separator, that form has exponentially many
+  // parses of `a,b,c,…`; this is an unambiguous equivalent in which each comma run is consumed
+  // by exactly one loop step.
   const atomMapMatch =
-    /^([A-Za-z0-9]+-?\d+(?:--?\d+)?)\s*:\s*([A-Za-z0-9,'*]+(?:\s*,\s*[A-Za-z0-9,'*]+)*)$/.exec(
+    /^([A-Za-z0-9]+(?:-\d+|\d)(?:--?\d+)?)\s*:\s*([A-Za-z0-9,'*](?:[A-Za-z0-9'*]|\s+,\s*[A-Za-z0-9,'*]|,(?:\s*,)*\s*[A-Za-z0-9'*])*(?:,(?:\s*,)*)?)$/.exec(
       firstParamChunk,
     );
   if (atomMapMatch) {

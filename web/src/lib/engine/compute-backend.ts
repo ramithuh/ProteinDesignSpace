@@ -1,6 +1,6 @@
 // Pluggable compute backend routing & SSE client for self-hosted host-GPU WebGPU execution.
 // Hardened:
-//   - Never persists apiToken in localStorage (in-memory session only, strips legacy stored tokens)
+//   - Never persists apiToken in localStorage/sessionStorage (in memory only, purges legacy stored tokens)
 //   - Enforces HTTPS outside loopback, rejects URL credentials/redirects
 //   - Clamps Host GPU folding residue ceiling to server's advertised maxFoldResidues
 //   - Uses server-issued { jobId, cancelToken } capability tokens for cancellation
@@ -17,7 +17,7 @@ export interface ComputeBackendConfig {
   mode: ComputeRoutingMode;
   /** Base URL of self-hosted server (empty string = same origin when served by selfhost-server.mjs). */
   serverUrl: string;
-  /** Optional Bearer API token (kept in memory only; never saved to localStorage). */
+  /** Optional Bearer API token (kept in memory only; never saved to localStorage or sessionStorage). */
   apiToken: string;
   /** In 'hybrid' mode, models whose active weight download exceeds this MB threshold run on host GPU. */
   hybridThresholdMB: number;
@@ -51,7 +51,7 @@ export interface RemoteServerHealth {
 }
 
 export const COMPUTE_BACKEND_STORAGE_KEY = 'denovo.computeBackend.v1';
-const COMPUTE_SESSION_TOKEN_KEY = 'denovo.computeBackend.sessionToken.v1';
+const LEGACY_COMPUTE_SESSION_TOKEN_KEY = 'denovo.computeBackend.sessionToken.v1';
 export const DEFAULT_HYBRID_THRESHOLD_MB = 40;
 export const DEFAULT_HOST_MAX_FOLD_RESIDUES = 2048;
 export const MIN_CUSTOM_FOLD_RESIDUES = 512;
@@ -164,41 +164,18 @@ export function resolveRemoteBackendOrigin(serverUrl: string): string {
   return check.ok ? check.origin : normalizeServerBaseUrl(serverUrl).toLowerCase();
 }
 
-function readCrossOriginSessionToken(serverUrl: string): string {
-  if (!serverUrl.trim() || typeof sessionStorage === 'undefined') return '';
-  try {
-    const raw = sessionStorage.getItem(COMPUTE_SESSION_TOKEN_KEY);
-    if (!raw) return '';
-    const parsed = JSON.parse(raw) as { origin?: string; token?: string };
-    const expectedOrigin = resolveRemoteBackendOrigin(serverUrl);
-    if (parsed.origin === expectedOrigin && typeof parsed.token === 'string') {
-      return parsed.token;
-    }
-    return '';
-  } catch {
-    return '';
-  }
-}
-
-function writeCrossOriginSessionToken(serverUrl: string, apiToken: string): void {
+/** Remove the tab-scoped Bearer token that earlier builds kept in sessionStorage. */
+function purgeLegacySessionToken(): void {
   if (typeof sessionStorage === 'undefined') return;
   try {
-    const trimmedUrl = normalizeServerBaseUrl(serverUrl);
-    const trimmedTok = apiToken.trim();
-    if (!trimmedUrl || !trimmedTok) {
-      sessionStorage.removeItem(COMPUTE_SESSION_TOKEN_KEY);
-      return;
-    }
-    sessionStorage.setItem(
-      COMPUTE_SESSION_TOKEN_KEY,
-      JSON.stringify({ origin: resolveRemoteBackendOrigin(trimmedUrl), token: trimmedTok }),
-    );
+    sessionStorage.removeItem(LEGACY_COMPUTE_SESSION_TOKEN_KEY);
   } catch {
-    /* ignore storage quota / private mode */
+    /* ignore storage access errors (private mode / disabled storage) */
   }
 }
 
 export function loadComputeBackendConfig(): ComputeBackendConfig {
+  purgeLegacySessionToken();
   const base = defaultComputeBackendConfig();
   if (typeof localStorage === 'undefined') return base;
   try {
@@ -213,9 +190,9 @@ export function loadComputeBackendConfig(): ComputeBackendConfig {
     const cfg: ComputeBackendConfig = {
       mode,
       serverUrl,
-      // M5: Never hydrate reusable Bearer tokens from localStorage;
-      // cross-origin refreshes may reuse tab-scoped sessionStorage (cleared on tab close).
-      apiToken: readCrossOriginSessionToken(serverUrl),
+      // M5: Bearer tokens live in memory only and are never hydrated from Web Storage
+      // (same-origin hosts keep sessions via the HttpOnly cookie; cross-origin hosts re-prompt).
+      apiToken: '',
       hybridThresholdMB:
         Number.isFinite(threshold) && threshold >= 0 && threshold <= 2000
           ? Math.round(threshold)
@@ -233,10 +210,9 @@ export function loadComputeBackendConfig(): ComputeBackendConfig {
 }
 
 export function saveComputeBackendConfig(cfg: ComputeBackendConfig): void {
-  writeCrossOriginSessionToken(cfg.serverUrl, cfg.apiToken);
   if (typeof localStorage === 'undefined') return;
   try {
-    // M5: Persist non-secret routing preferences only — apiToken is never saved to localStorage
+    // M5: Persist non-secret routing preferences only — apiToken is never saved to Web Storage
     localStorage.setItem(
       COMPUTE_BACKEND_STORAGE_KEY,
       JSON.stringify({

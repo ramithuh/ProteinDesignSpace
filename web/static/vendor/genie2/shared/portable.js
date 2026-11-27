@@ -21,8 +21,8 @@ export function scalarJS(source) {
       /\b(abs|sqrt|sin|cos|pow|exp|log|max|min|floor|ceil)\(/g,
       "Math.$1(",
     )
-    .replace(/\bfma\(/g, "rfFma(")
-    .replace(/\brfdiv\(/g, "rfdiv(");
+    .replace(/\bfma\(/g, "rfFma(");
+  // `rfdiv(` needs no rewrite: the CPU kernel prelude defines a JS `rfdiv` with the same name.
 }
 export function portable(o, shape, inputs, source) {
   return o.kernel(shape, inputs, scalarJS(source), source);

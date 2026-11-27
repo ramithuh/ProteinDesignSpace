@@ -184,11 +184,32 @@ function abortable(promise, signal) {
   });
 }
 
+// Split JSON that JSON.parse already accepted into string, punctuation and bare-literal tokens
+// (the tokens of /"(?:[^"\\]|\\.)*"|[{}\[\]:,]|[^\s{}\[\]:,]+/g) with one forward scan, so the
+// cost is linear by construction instead of resting on how a regex engine backtracks.
+function jsonTokens(text) {
+  const tokens = [];
+  for (let i = 0; i < text.length;) {
+    const c = text[i];
+    let j = i + 1;
+    if (c === '"') {
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      j++;
+    } else if (!'{}[]:,'.includes(c)) {
+      if (/\s/.test(c)) { i = j; continue; }
+      while (j < text.length && !/[\s{}\[\]:,]/.test(text[j])) j++;
+    }
+    tokens.push(text.slice(i, j));
+    i = j;
+  }
+  return tokens;
+}
+
 // JSON.parse alone silently accepts duplicate keys. Walk the validated JSON token
 // stream, comparing decoded keys (including Unicode escapes) at every object level.
 function parseUniqueJSON(text) {
   const result = JSON.parse(text);
-  const tokens = text.match(/"(?:[^"\\]|\\.)*"|[{}\[\]:,]|[^\s{}\[\]:,]+/g) ?? [];
+  const tokens = jsonTokens(text);
   let i = 0;
   function value() {
     const t = tokens[i++];

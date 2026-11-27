@@ -433,15 +433,20 @@ function isLoopbackRemoteAddress(addr) {
   return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
 }
 
-function sha256Buf(str) {
-  return crypto.createHash('sha256').update(String(str), 'utf8').digest();
-}
-
+/**
+ * Constant-time comparison of a client-supplied value `a` against the server-held secret `b`.
+ * `timingSafeEqual` always runs over `b`'s length (comparing `b` with itself when the lengths
+ * differ), so timing reveals neither content nor where a mismatch occurs, and no fast hash of
+ * the secret is ever computed.
+ */
 function constantTimeEquals(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0 || b.length === 0) {
     return false;
   }
-  return crypto.timingSafeEqual(sha256Buf(a), sha256Buf(b));
+  const provided = Buffer.from(a, 'utf8');
+  const expected = Buffer.from(b, 'utf8');
+  const sameLength = provided.length === expected.length;
+  return crypto.timingSafeEqual(sameLength ? provided : expected, expected) && sameLength;
 }
 
 function formatShortGpuName(rawName) {
@@ -676,6 +681,21 @@ function sendJson(res, status, payload) {
     });
   }
   res.end(JSON.stringify(payload));
+}
+
+/**
+ * Reply to a failed API request. Only errors this server raised on purpose with a 4xx
+ * `statusCode` (body limits, malformed JSON, ...) echo their message; anything else is logged
+ * here and answered with `fallbackMessage`, so stack traces and internal paths stay server-side.
+ */
+function sendRequestError(res, err, fallbackStatus, fallbackMessage) {
+  const status = err instanceof Error ? err.statusCode : undefined;
+  if (Number.isInteger(status) && status >= 400 && status < 500) {
+    sendJson(res, status, { ok: false, error: err.message });
+    return;
+  }
+  console.error('[denovo-selfhost] API request failed:', err);
+  sendJson(res, fallbackStatus, { ok: false, error: fallbackMessage });
 }
 
 function setSecurityHeaders(res, isHtml) {
@@ -1423,8 +1443,7 @@ export function createSelfhostServer(options = {}) {
           try {
             body = await readJsonBody(req, MAX_CONTROL_BODY_BYTES);
           } catch (err) {
-            const code = typeof err?.statusCode === 'number' ? err.statusCode : 400;
-            sendJson(res, code, { ok: false, error: err instanceof Error ? err.message : String(err) });
+            sendRequestError(res, err, 400, 'Invalid request body.');
             return;
           }
           if (!apiToken) {
@@ -1501,8 +1520,7 @@ export function createSelfhostServer(options = {}) {
             const out = await cancelJobAuthorized(jobId, cancelToken);
             sendJson(res, out.status, out.ok ? { ok: true, cancelled: out.cancelled } : { ok: false, error: out.error });
           } catch (err) {
-            const code = typeof err?.statusCode === 'number' ? err.statusCode : 400;
-            sendJson(res, code, { ok: false, error: err instanceof Error ? err.message : String(err) });
+            sendRequestError(res, err, 400, 'Cancel request failed.');
           }
           return;
         }
@@ -1520,8 +1538,7 @@ export function createSelfhostServer(options = {}) {
             }
             sendJson(res, 200, { ok: true });
           } catch (err) {
-            const code = typeof err?.statusCode === 'number' ? err.statusCode : 500;
-            sendJson(res, code, { ok: false, error: err instanceof Error ? err.message : String(err) });
+            sendRequestError(res, err, 500, 'Failed to release host GPU.');
           }
           return;
         }
@@ -1540,8 +1557,7 @@ export function createSelfhostServer(options = {}) {
           try {
             body = await readJsonBody(req, maxBodyBytes);
           } catch (err) {
-            const code = typeof err?.statusCode === 'number' ? err.statusCode : 400;
-            sendJson(res, code, { ok: false, error: err instanceof Error ? err.message : String(err) });
+            sendRequestError(res, err, 400, 'Invalid request body.');
             return;
           }
 
