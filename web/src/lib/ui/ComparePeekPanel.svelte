@@ -1,5 +1,6 @@
 <script lang="ts">
   import PaePlot from '$lib/viewer/PaePlot.svelte';
+  import ResidueTrackPlot from '$lib/viewer/ResidueTrackPlot.svelte';
   import {
     computePairwiseSequenceDiff,
     exportJoinedCollectionCsv,
@@ -52,6 +53,8 @@
     onFocusSingle: (nodeId: string) => void;
     onRunUpToNode?: (nodeId: string) => void;
     onDownloadText?: (text: string, filename: string) => void;
+    /** Click on a per-residue track position → focus that residue on the branch's own 3D model. */
+    onSelectResidue?: (nodeId: string, positionIndex: number, residueId: string) => void;
     onNotify?: (message: string, tone?: 'ok' | 'error') => void;
     onExitCompare: () => void;
   }
@@ -72,11 +75,15 @@
     onFocusSingle,
     onRunUpToNode = undefined,
     onDownloadText = undefined,
+    onSelectResidue = undefined,
     onNotify = undefined,
     onExitCompare,
   }: Props = $props();
 
   let branches = $derived(comparison.branches);
+  let trackBranches = $derived(
+    branches.filter((b) => (b.residueTrack?.values?.length ?? 0) > 0),
+  );
 
   function isFiniteNum(v: unknown): v is number {
     return typeof v === 'number' && Number.isFinite(v);
@@ -884,6 +891,29 @@
     </div>
   {/if}
 
+  {#if trackBranches.length > 0}
+    <div class="track-list" aria-label="Per-residue tracks">
+      {#each trackBranches as b (b.nodeId)}
+        {@const track = b.residueTrack!}
+        <div class="track-item">
+          <div class="pae-lbl">
+            <span class="badge-dot sm" style="background: {b.colorCss}">{b.badge}</span>
+            <span>{b.label}</span>
+            <span class="track-q">{track.label ?? track.quantity}{track.unit ? ` · ${track.unit}` : ''}</span>
+          </div>
+          <ResidueTrackPlot
+            {track}
+            height={130}
+            {onDownloadText}
+            onSelectResidue={onSelectResidue
+              ? (positionIndex, residueId) => onSelectResidue(b.nodeId, positionIndex, residueId)
+              : undefined}
+          />
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   {#if paeBranches.length > 0}
     <div class="pae-grid">
       {#each paeBranches as b (b.nodeId)}
@@ -1371,6 +1401,25 @@
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10.5px;
     color: var(--text-secondary);
+  }
+  .track-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+  .track-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .track-q {
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   }
   .cmp-tip {
     margin: 2px 0 0;

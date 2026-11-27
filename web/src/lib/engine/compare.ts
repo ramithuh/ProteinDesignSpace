@@ -12,7 +12,7 @@ import {
   type GeometryStats,
   type KabschResult,
 } from '$lib/protein-ops/kabsch';
-import { parseStructureText } from '$lib/protein-ops/pdb';
+import { parseStructureText, type ParsedStructure } from '$lib/protein-ops/pdb';
 import { computeIpsae, sliceProteinPae } from '$lib/protein-ops/ipsae';
 import {
   joinKeyedCollections,
@@ -26,11 +26,22 @@ import {
 import { ADAPTER_REGISTRY } from './registry';
 import { resolveFoldConfidence, selectFoldRepresentative } from './bio-capabilities';
 import { analyzeSequence, type SequenceAnalysis } from './peek';
+import {
+  TRACK_NOUN,
+  branchRepresentsStructure,
+  findIdenticalTrackGroups,
+  isTrackSemantics,
+  type TrackMergeGroup,
+} from './compare-identity';
 import type {
+  AtomGranularity,
+  BfactorSemantics,
   CanonicalArtifact,
   CollectionKind,
   DesignabilityMetrics,
   FoldedStructure,
+  MutationMatrixArtifact,
+  ResidueTrackArtifact,
   SequenceSet,
   StructureArtifact,
   TrajectoryFramesArtifact,
@@ -76,6 +87,32 @@ export const REFERENCE_BACKBONE_COLOR = {
   hex: 0x94a3b8,
 };
 
+export type CompareColorMode = 'by-model' | 'plddt' | 'track';
+
+/** One selectable track on a merged cartoon (Dyna-1 + ThermoMPNN on the same backbone). */
+export interface MergedTrackOption {
+  nodeId: string;
+  modelId: string;
+  badge: string;
+  label: string;
+  semantics: BfactorSemantics;
+}
+
+/** How a viewer model stands in for identical branches that were merged into it. */
+export interface ViewerMergeInfo {
+  groupId: string;
+  /** `primary` = the visible cartoon with the legend chip; `secondary` = an alternative track kept hidden. */
+  role: 'primary' | 'secondary';
+  /** Labels of plain branches (and the `Designed` ghost) dropped because this model already shows them. */
+  absorbedLabels: string[];
+  /** e.g. `Dyna-1 flexibility painted on Design Backbone`. */
+  caption: string;
+  rmsd: number;
+  evidence: 'lineage' | 'geometry';
+  tracks: MergedTrackOption[];
+  activeTrackNodeId: string | null;
+}
+
 export interface ViewerModelSpec {
   id: string;
   nodeId: string | null;
@@ -86,9 +123,14 @@ export interface ViewerModelSpec {
   colorCss: string;
   alpha: number;
   colorByPlddt?: boolean;
+  /** Paint this model by its per-residue track B-factors (Track color mode). */
+  colorByTrack?: boolean;
+  /** Semantic meaning of this model's B-factors (drives track coloring & hover units). */
+  bfactorSemantics?: BfactorSemantics;
   isReference?: boolean;
   visible: boolean;
   metricSummary?: string;
+  mergedFrom?: ViewerMergeInfo;
 }
 
 export interface CompareBranchSummary {
@@ -115,6 +157,19 @@ export interface CompareBranchSummary {
   nativeMotifCoords?: number[][] | null;
   benchmarkId?: string | null;
   hasNonProtein3D?: boolean;
+  /** Semantic meaning of the rendered B-factors (track-bearing when Dyna-1 / ΔΔG / LLR / GNINA). */
+  bfactorSemantics?: BfactorSemantics | null;
+  parentStructureId?: string | null;
+  /** Per-residue 1D track emitted by the same node (ResidueTrack, or MutationMatrix mean per position). */
+  residueTrack?: ResidueTrackArtifact | null;
+  atomGranularity?: AtomGranularity | null;
+  /** Chain IDs parsed from the rendered text (cifText || pdbText). */
+  renderedChainIds?: string[] | null;
+  /** Non-protein content of the rendered text (identity guard for holo / docked poses). */
+  ligandNames?: string[] | null;
+  nucleicAcidChains?: string[] | null;
+  /** Polymer `ATOM` record count of the rendered text (identity guard for Cα-only vs rebuilt). */
+  renderedAtomCount?: number | null;
   length: number | null;
   sequenceId: string | null;
   candidateKey?: string | null;
@@ -152,6 +207,8 @@ export interface CompareBranchSummary {
 export type CompareBranchMetrics = CompareBranchSummary;
 
 export interface PairwiseAgreement {
+  nodeIdA?: string;
+  nodeIdB?: string;
   labelA: string;
   labelB: string;
   badgeA: string;
@@ -188,6 +245,26 @@ export interface ComparisonState {
   candidateKeys: string[];
   /** Keyed join rows across all compared branches, explicitly flagging missing members. */
   pairedCandidates: JoinedCollectionRow<BranchCandidateRef>[];
+  /** Color mode actually applied (`null` request → `track` when any track branch exists). */
+  effectiveColorMode: CompareColorMode;
+  /** Distinct per-residue track semantics among renderable branches (gates the `Track` button). */
+  trackSemantics: BfactorSemantics[];
+  /** Identical-structure merge groups applied to `models` (Overlay only). */
+  mergeGroups: CompareMergeGroup[];
+  /** Model ID that absorbed the synthetic `ref-designed` ghost, or `null`. */
+  ghostAbsorbedBy: string | null;
+  /** Number of models hidden or dropped by merging (`· N merged` in the viewer label). */
+  mergedModelCount: number;
+  /** Number of models that WOULD merge in Overlay (non-zero while split, to offer re-merging). */
+  mergeableModelCount: number;
+}
+
+export interface CompareMergeGroup extends TrackMergeGroup {
+  /** Model shown for the group (the active track). */
+  primaryModelId: string;
+  /** `branch-<nodeId>` for every member (hide / solo toggle all of them together). */
+  memberModelIds: string[];
+  caption: string;
 }
 
 interface ChainSegment {
@@ -846,6 +923,80 @@ function branchesShareCandidateIdentity(
   return { hasSharedKey, hasSharedSequence };
 }
 
+function countRenderedPolymerAtoms(text: string): number {
+  let count = 0;
+  const re = /^ATOM[ \t]/gm;
+  while (re.exec(text) !== null) count++;
+  return count;
+}
+
+/** Identity-guard fields describing exactly what the viewer will draw for `text`. */
+function renderedIdentityFields(
+  parsed: ParsedStructure,
+  text: string,
+): Pick<
+  CompareBranchSummary,
+  'renderedChainIds' | 'ligandNames' | 'nucleicAcidChains' | 'renderedAtomCount'
+> {
+  return {
+    renderedChainIds: parsed.chainIds,
+    ligandNames: parsed.diagnostics.ligandNames ?? [],
+    nucleicAcidChains: parsed.diagnostics.nucleicAcidChains ?? [],
+    renderedAtomCount: countRenderedPolymerAtoms(text),
+  };
+}
+
+function inferAtomGranularity(parsed: ParsedStructure): AtomGranularity | null {
+  const presence = parsed.atomPresence ?? [];
+  if (presence.length > 0 && presence.every((p) => p.hasCA && !p.hasN && !p.hasC)) {
+    return 'ca-only';
+  }
+  return null;
+}
+
+function wrapMeanPerPositionTrack(mm: MutationMatrixArtifact): ResidueTrackArtifact {
+  return {
+    kind: 'ResidueTrack',
+    id: `${mm.id}-mean-per-position`,
+    label: `${mm.label ?? mm.sourceModelId} · mean per position`,
+    sourceModelId: mm.sourceModelId,
+    ...(mm.parentStructureId ? { parentStructureId: mm.parentStructureId } : {}),
+    quantity: mm.metric,
+    ...(mm.unit ? { unit: mm.unit } : {}),
+    residues: mm.residues,
+    residueIds: mm.residueIds,
+    values: mm.meanPerPosition!,
+  };
+}
+
+/**
+ * Pick the per-residue 1D track matching what the 3D model is painted with. ESM-C paints the
+ * mean non-WT LLR (`llr-fitness`), so its `MutationMatrix.meanPerPosition` wins over the
+ * sibling `wt-log-prob` ResidueTrack; otherwise prefer an emitted ResidueTrack, then any
+ * matrix mean. Tracks whose length doesn't match the selected candidate are dropped.
+ */
+function resolveBranchResidueTrack(
+  values: readonly CanonicalArtifact[],
+  expected: { length: number; sequence?: string | null },
+): ResidueTrackArtifact | null {
+  const mm = values.find((a): a is MutationMatrixArtifact => a.kind === 'MutationMatrix');
+  const track = values.find((a): a is ResidueTrackArtifact => a.kind === 'ResidueTrack');
+  const hasMean = Boolean(mm?.meanPerPosition && mm.meanPerPosition.length > 0);
+  let chosen: ResidueTrackArtifact | null = null;
+  if (mm && hasMean && mm.metric === 'llr-fitness') {
+    chosen = wrapMeanPerPositionTrack(mm);
+  } else if (track && track.values && track.values.length > 0) {
+    chosen = track;
+  } else if (mm && hasMean) {
+    chosen = wrapMeanPerPositionTrack(mm);
+  }
+  if (!chosen || expected.length <= 0 || chosen.values.length !== expected.length) return null;
+  const expSeq = (expected.sequence ?? '').trim().toUpperCase();
+  const trackSeq = (chosen.residues ?? '').trim().toUpperCase();
+  if (expSeq && trackSeq && trackSeq.length === expSeq.length && trackSeq !== expSeq) return null;
+  return chosen;
+}
+
 function extractBranch(
   graph: WorkflowGraph,
   nodeId: string,
@@ -886,6 +1037,14 @@ function extractBranch(
     nativeMotifCoords: null,
     benchmarkId: null,
     hasNonProtein3D: false,
+    bfactorSemantics: null,
+    parentStructureId: null,
+    residueTrack: null,
+    atomGranularity: null,
+    renderedChainIds: null,
+    ligandNames: null,
+    nucleicAcidChains: null,
+    renderedAtomCount: null,
     length: null,
     sequenceId: null,
     candidateKey: overrideSelection?.candidateKey ?? null,
@@ -962,6 +1121,7 @@ function extractBranch(
       designedPdb: designedDisplay,
       pdbText: row.alignedFoldPdb,
       cifText: null,
+      ...renderedIdentityFields(parsed, row.alignedFoldPdb),
       caCoords: parsed.caCoords,
       resNums: parsed.resNums,
       chainIds: parsed.chainIds,
@@ -1071,6 +1231,7 @@ function extractBranch(
       designedPdb: null,
       pdbText: f.pdbText,
       cifText: null,
+      ...renderedIdentityFields(parsed, f.pdbText),
       caCoords: parsed.caCoords,
       resNums: parsed.resNums,
       chainIds: effectiveChainIds,
@@ -1139,6 +1300,7 @@ function extractBranch(
         structureId: traj.id,
         pdbText: parsed.nResidues > 0 ? parsed.pdbText : text,
         cifText: isMmcifText(text) ? text : null,
+        ...renderedIdentityFields(parsed, text),
         caCoords: parsed.caCoords,
         resNums: parsed.resNums,
         chainIds: parsed.chainIds,
@@ -1181,11 +1343,18 @@ function extractBranch(
     let resNums: number[] | null = null;
     let parsedChainIds: string[] | null = struct.chainIds ?? null;
     let parsedChainLengths: number[] | null = struct.chainLengths ?? null;
+    let identity: ReturnType<typeof renderedIdentityFields> | null = null;
+    let inferredGranularity: AtomGranularity | null = null;
     try {
-      const parsed = parseStructureText(struct.pdbText || struct.cifText || '');
+      // Parse the text the viewer actually renders (cifText wins) so identity checks see
+      // re-normalized receptors (e.g. GNINA) rather than a stale copied pdbText.
+      const parsed = parseStructureText(displayStructText);
       resNums = parsed.resNums;
+      identity = renderedIdentityFields(parsed, displayStructText);
+      inferredGranularity = inferAtomGranularity(parsed);
       if (!parsedChainIds || parsedChainIds.length !== struct.length) {
-        parsedChainIds = parsed.chainIds;
+        // Projected 1-char IDs match `chainRoles` keys even when the rendered mmCIF uses auth IDs.
+        parsedChainIds = parsed.projectedChainIds ?? parsed.chainIds;
       }
       if (!parsedChainLengths || parsedChainLengths.length === 0) {
         parsedChainLengths = parsed.diagnostics.chainLengths;
@@ -1215,6 +1384,14 @@ function extractBranch(
       nativeMotifCoords: struct.nativeMotifCoords ?? null,
       benchmarkId: struct.benchmarkId ?? null,
       hasNonProtein3D,
+      ...(identity ?? {}),
+      bfactorSemantics: struct.bfactorSemantics ?? null,
+      parentStructureId: struct.parentStructureId ?? null,
+      residueTrack: resolveBranchResidueTrack(values, {
+        length: struct.length,
+        sequence: struct.sequence,
+      }),
+      atomGranularity: struct.atomGranularity ?? inferredGranularity,
       length: struct.length,
       sequenceId: struct.label,
       candidateKey: struct.representativeSelection?.selectedKey ?? struct.id,
@@ -1297,6 +1474,11 @@ function extractBranch(
       globalScore,
       seqRecoveryPct: seqAnalysis.recoveryPct,
       seqAnalysis,
+      // 1D-only: a sequence branch never enables 3D Track mode (bfactorSemantics stays null).
+      residueTrack: resolveBranchResidueTrack(values, {
+        length: trimmedCandSeq.length,
+        sequence: trimmedCandSeq,
+      }),
     };
   }
 
@@ -1904,13 +2086,18 @@ export function buildComparisonState(
   outputsByNode: Record<string, Record<string, CanonicalArtifact>>,
   opts: {
     layout: 'overlay' | 'side-by-side';
-    colorMode: 'by-model' | 'plddt';
+    /** `null` / omitted = auto (`track` when any branch carries a per-residue track, else `by-model`). */
+    colorMode?: CompareColorMode | null;
     alignKabsch?: boolean;
     branchCandidateIdx?: Record<string, number>;
     hiddenModelIds?: ReadonlySet<string>;
     pairingMode?: ComparisonPairingMode;
     selectedCandidateKey?: string | null;
     referenceNodeId?: string | null;
+    /** Merge branches that render the exact same structure into one cartoon (Overlay only; default `true`). */
+    mergeIdentical?: boolean;
+    /** Active track per merge group ID (`merge-<nodeId>`) when several tracks share one backbone. */
+    activeTrackNodeIds?: Readonly<Record<string, string>>;
   },
 ): ComparisonState {
   const capped = selectedNodeIds.slice(0, COMPARE_PALETTE.length);
@@ -2163,6 +2350,8 @@ export function buildComparisonState(
           cachedAlignToAnchor.set(a.nodeId, outcome);
         }
         allPairwise.push({
+          nodeIdA: a.nodeId,
+          nodeIdB: b.nodeId,
           labelA: a.label,
           labelB: b.label,
           badgeA: a.badge,
@@ -2186,6 +2375,97 @@ export function buildComparisonState(
     }
   }
   const pairwise = allPairwise[0] ?? null;
+
+  // Track color mode: an explicit request falls back to by-model when no track branch remains.
+  const trackSemantics: BfactorSemantics[] = [];
+  for (const b of renderable) {
+    if (isTrackSemantics(b.bfactorSemantics) && !trackSemantics.includes(b.bfactorSemantics)) {
+      trackSemantics.push(b.bfactorSemantics);
+    }
+  }
+  const requestedColorMode = opts.colorMode ?? null;
+  const effectiveColorMode: CompareColorMode =
+    requestedColorMode === null || requestedColorMode === 'track'
+      ? trackSemantics.length > 0
+        ? 'track'
+        : 'by-model'
+      : requestedColorMode;
+
+  // Identical-structure merging (Overlay only): painted copies of the same backbone collapse onto
+  // one cartoon. Geometry is always required; lineage is only recorded as evidence. Candidates are
+  // detected even when merging is switched off so the UI can offer to re-merge.
+  const mergeEligible = effectiveLayout === 'overlay';
+  const mergeActive = mergeEligible && opts.mergeIdentical !== false;
+  const identityGroups = mergeEligible
+    ? findIdenticalTrackGroups(renderable, allPairwise, {
+        requireRawCoords: !wantKabsch,
+        activeTrackNodeIds: opts.activeTrackNodeIds,
+      })
+    : [];
+
+  // The synthetic `ref-designed` ghost is redundant when a selected branch already draws that
+  // exact designed structure (same artifact, or a painted child with unchanged coordinates).
+  const designedRepresentatives = new Map<string, 'id' | 'lineage'>();
+  if (mergeEligible && hasSharedDesigned && metricBranches[0]?.designedPdb) {
+    let designedParsed: ParsedStructure | null = null;
+    try {
+      designedParsed = parseStructureText(metricBranches[0].designedPdb);
+    } catch {
+      designedParsed = null;
+    }
+    const designedTarget = {
+      structureId: metricBranches[0].structureId,
+      caCoords: designedParsed?.caCoords ?? null,
+      length: designedParsed?.nResidues ?? null,
+    };
+    for (const b of renderable) {
+      if (b.kind === 'metrics') continue;
+      const how = branchRepresentsStructure(b, designedTarget);
+      if (how) designedRepresentatives.set(b.nodeId, how);
+    }
+  }
+  const mergeableModelCount =
+    identityGroups.reduce((n, g) => n + g.memberNodeIds.length - 1, 0) +
+    (designedRepresentatives.size > 0 ? 1 : 0);
+  const appliedGroups = mergeActive ? identityGroups : [];
+  const appliedRepresentatives = mergeActive
+    ? designedRepresentatives
+    : new Map<string, 'id' | 'lineage'>();
+
+  const modelColoring = (
+    b: CompareBranchSummary,
+  ): Pick<
+    ViewerModelSpec,
+    'colorHex' | 'colorCss' | 'alpha' | 'colorByPlddt' | 'colorByTrack' | 'bfactorSemantics'
+  > => {
+    const sem = isTrackSemantics(b.bfactorSemantics) ? b.bfactorSemantics : undefined;
+    if (effectiveColorMode === 'track') {
+      if (sem) {
+        return {
+          colorHex: b.colorHex,
+          colorCss: b.colorCss,
+          alpha: 1.0,
+          colorByPlddt: false,
+          colorByTrack: true,
+          bfactorSemantics: sem,
+        };
+      }
+      return {
+        colorHex: REFERENCE_BACKBONE_COLOR.hex,
+        colorCss: REFERENCE_BACKBONE_COLOR.css,
+        alpha: effectiveLayout === 'overlay' ? 0.45 : 1.0,
+        colorByPlddt: false,
+        colorByTrack: false,
+      };
+    }
+    return {
+      colorHex: b.colorHex,
+      colorCss: b.colorCss,
+      alpha: 1.0,
+      colorByPlddt: effectiveColorMode === 'plddt' && (b.kind === 'metrics' || b.kind === 'fold'),
+      ...(sem ? { bfactorSemantics: sem } : {}),
+    };
+  };
 
   const models: ViewerModelSpec[] = [];
   let sharedReferenceLabel: string | null = null;
@@ -2211,6 +2491,8 @@ export function buildComparisonState(
       if (wantKabsch) {
         kabschAligned = true;
       }
+    }
+    if (hasSharedDesigned && metricBranches[0].designedPdb && appliedRepresentatives.size === 0) {
       models.push({
         id: 'ref-designed',
         nodeId: null,
@@ -2227,11 +2509,14 @@ export function buildComparisonState(
     for (const b of renderable) {
       let structText = b.cifText || b.pdbText!;
       const canAlign = Boolean(b.caCoords && (b.length ?? 0) >= 3);
+      // A painted child with unchanged coordinates already sits in the designed frame
+      // regardless of whether visual merging/ghost absorption is toggled on.
       const isExternalPinnedRef =
         hasSharedDesigned &&
         pinnedRefSet.has(b.nodeId) &&
         Boolean(metricBranches[0]) &&
-        b.structureId !== metricBranches[0].structureId;
+        b.structureId !== metricBranches[0].structureId &&
+        designedRepresentatives.get(b.nodeId) !== 'lineage';
       // If Kabsch align is enabled: align non-anchor models onto anchor when not in a shared
       // pre-aligned frame, or align an external pinned reference onto the shared frame.
       if (
@@ -2268,10 +2553,7 @@ export function buildComparisonState(
         badge: b.badge,
         label: b.label,
         pdbText: structText,
-        colorHex: b.colorHex,
-        colorCss: b.colorCss,
-        alpha: 1.0,
-        colorByPlddt: opts.colorMode === 'plddt' && (b.kind === 'metrics' || b.kind === 'fold'),
+        ...modelColoring(b),
         visible: !hidden.has(`branch-${b.nodeId}`),
         metricSummary: formatMetricBits(b),
       });
@@ -2302,19 +2584,26 @@ export function buildComparisonState(
         badge: b.badge,
         label: b.label,
         pdbText: shiftedText,
-        colorHex: b.colorHex,
-        colorCss: b.colorCss,
-        alpha: 1.0,
-        colorByPlddt: opts.colorMode === 'plddt' && (b.kind === 'metrics' || b.kind === 'fold'),
+        ...modelColoring(b),
         visible: !hidden.has(`branch-${b.nodeId}`),
         metricSummary: formatMetricBits(b),
       });
     }
   }
 
+  const { models: mergedModels, mergeGroups, ghostAbsorbedBy } = applyIdentityMerges(
+    models,
+    branches,
+    appliedGroups,
+    appliedRepresentatives,
+    hidden,
+  );
+  const mergedModelCount =
+    mergeGroups.reduce((n, g) => n + g.memberNodeIds.length - 1, 0) + (ghostAbsorbedBy ? 1 : 0);
+
   return {
     branches,
-    models,
+    models: mergedModels,
     effectiveLayout,
     forcedSideBySide,
     kabschAligned,
@@ -2327,7 +2616,163 @@ export function buildComparisonState(
     selectedCandidateKey,
     candidateKeys: joined.keys,
     pairedCandidates: joined.rows,
+    effectiveColorMode,
+    trackSemantics,
+    mergeGroups,
+    ghostAbsorbedBy,
+    mergedModelCount,
+    mergeableModelCount,
   };
+}
+
+function mergedCaption(
+  sem: BfactorSemantics | null | undefined,
+  onto: readonly string[],
+  otherTracks: readonly string[],
+): string {
+  const noun = isTrackSemantics(sem) ? TRACK_NOUN[sem] : 'Track';
+  if (onto.length > 0) return `${noun} painted on ${onto.join(' + ')}`;
+  if (otherTracks.length > 0) return `${noun} · shares backbone with ${otherTracks.join(' + ')}`;
+  return noun;
+}
+
+/**
+ * Collapse identical branches onto one cartoon: the active track model stays visible, other
+ * tracks of the group stay in the scene hidden (instant switching, eye/solo still work), and
+ * plain members plus a redundant `ref-designed` ghost are dropped.
+ */
+function applyIdentityMerges(
+  models: ViewerModelSpec[],
+  branches: readonly CompareBranchSummary[],
+  groups: readonly TrackMergeGroup[],
+  designedRepresentatives: ReadonlyMap<string, 'id' | 'lineage'>,
+  hidden: ReadonlySet<string>,
+): { models: ViewerModelSpec[]; mergeGroups: CompareMergeGroup[]; ghostAbsorbedBy: string | null } {
+  const branchById = new Map(branches.map((b) => [b.nodeId, b]));
+  const modelIdOf = (nodeId: string) => `branch-${nodeId}`;
+  const dropped = new Set<string>();
+  const patches = new Map<string, Partial<ViewerModelSpec>>();
+  const mergeGroups: CompareMergeGroup[] = [];
+
+  for (const g of groups) {
+    const present = g.memberNodeIds.filter((id) => models.some((m) => m.id === modelIdOf(id)));
+    if (present.length < 2 || !present.includes(g.activeTrackNodeId)) continue;
+    const memberModelIds = g.memberNodeIds.map(modelIdOf);
+    const absorbedLabels = g.absorbedNodeIds.map((id) => branchById.get(id)?.label ?? id);
+    // Hide/solo toggle every member together, so the active track's flag speaks for the group.
+    const groupHidden = hidden.has(modelIdOf(g.activeTrackNodeId));
+    const tracks: MergedTrackOption[] = g.trackNodeIds.map((id) => {
+      const b = branchById.get(id)!;
+      return {
+        nodeId: id,
+        modelId: modelIdOf(id),
+        badge: b.badge,
+        label: b.label,
+        semantics: b.bfactorSemantics as BfactorSemantics,
+      };
+    });
+    const captionFor = (trackId: string): string =>
+      mergedCaption(
+        branchById.get(trackId)?.bfactorSemantics,
+        absorbedLabels,
+        tracks.filter((t) => t.nodeId !== trackId).map((t) => t.label),
+      );
+    const primaryModelId = modelIdOf(g.activeTrackNodeId);
+    for (const id of g.absorbedNodeIds) dropped.add(modelIdOf(id));
+    for (const t of tracks) {
+      const isActive = t.nodeId === g.activeTrackNodeId;
+      patches.set(t.modelId, {
+        visible: isActive && !groupHidden,
+        mergedFrom: {
+          groupId: g.id,
+          role: isActive ? 'primary' : 'secondary',
+          absorbedLabels: [...absorbedLabels],
+          caption: captionFor(t.nodeId),
+          rmsd: g.rmsd,
+          evidence: g.evidence,
+          tracks,
+          activeTrackNodeId: g.activeTrackNodeId,
+        },
+      });
+    }
+    mergeGroups.push({
+      ...g,
+      primaryModelId,
+      memberModelIds,
+      caption: captionFor(g.activeTrackNodeId),
+    });
+  }
+
+  // Ghost absorption: prefer a visible (non-dropped) representative, then any representative.
+  let ghostAbsorbedBy: string | null = null;
+  if (designedRepresentatives.size > 0) {
+    const reps = [...designedRepresentatives.keys()].map(modelIdOf);
+    const resolveShown = (modelId: string): string | null => {
+      if (!dropped.has(modelId)) {
+        const patch = patches.get(modelId);
+        if (!patch?.mergedFrom || patch.mergedFrom.role === 'primary') return modelId;
+      }
+      const g = mergeGroups.find((mg) => mg.memberModelIds.includes(modelId));
+      return g ? g.primaryModelId : null;
+    };
+    for (const r of reps) {
+      const shown = resolveShown(r);
+      if (shown && models.some((m) => m.id === shown)) {
+        ghostAbsorbedBy = shown;
+        break;
+      }
+    }
+    if (ghostAbsorbedBy) {
+      const absorber = ghostAbsorbedBy;
+      const patch = patches.get(absorber) ?? {};
+      const base = models.find((m) => m.id === absorber)!;
+      const prev = patch.mergedFrom;
+      const absorbedLabels = [...(prev?.absorbedLabels ?? []), 'Designed'];
+      const sem = base.bfactorSemantics;
+      patch.mergedFrom = {
+        groupId: prev?.groupId ?? `merge-ghost-${base.nodeId ?? absorber}`,
+        role: 'primary',
+        absorbedLabels,
+        caption: isTrackSemantics(sem)
+          ? mergedCaption(
+              sem,
+              absorbedLabels,
+              (prev?.tracks ?? []).filter((t) => t.modelId !== absorber).map((t) => t.label),
+            )
+          : `${base.label} · shown in place of the Designed backbone`,
+        rmsd: prev?.rmsd ?? 0,
+        evidence: prev?.evidence ?? 'lineage',
+        tracks: prev?.tracks ?? [],
+        activeTrackNodeId: prev?.activeTrackNodeId ?? null,
+      };
+      patches.set(absorber, patch);
+      const g = mergeGroups.find((mg) => mg.primaryModelId === absorber);
+      if (g) g.caption = patch.mergedFrom.caption;
+    }
+  }
+
+  if (dropped.size === 0 && patches.size === 0) {
+    return { models, mergeGroups, ghostAbsorbedBy };
+  }
+  const out: ViewerModelSpec[] = [];
+  for (const m of models) {
+    if (dropped.has(m.id)) continue;
+    const patch = patches.get(m.id);
+    out.push(patch ? { ...m, ...patch } : m);
+  }
+  return { models: out, mergeGroups, ghostAbsorbedBy };
+}
+
+/** Model ID that currently draws `nodeId` (its merge group's active track when merged), or `null`. */
+export function resolveCompareDisplayModelId(
+  state: Pick<ComparisonState, 'models' | 'mergeGroups'>,
+  nodeId: string,
+): string | null {
+  const own = `branch-${nodeId}`;
+  const group = state.mergeGroups.find((g) => g.memberModelIds.includes(own));
+  if (group) return group.primaryModelId;
+  if (state.models.some((m) => m.id === own)) return own;
+  return null;
 }
 
 export interface SequencePairDiff {

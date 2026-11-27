@@ -12,6 +12,7 @@ import {
   parseStructureText,
 } from '$lib/protein-ops/pdb';
 import { buildComparisonState, joinKeyedCollections } from '$lib/engine/compare';
+import { isTrackSemantics } from '$lib/engine/compare-identity';
 import { filterCatalog, filterCatalogCategories } from '$lib/engine/catalog';
 import { ADAPTER_REGISTRY } from '$lib/engine/registry';
 import { defaultParamsForAdapter } from '$lib/engine/graph-utils';
@@ -961,15 +962,19 @@ describe('M3 §2.5d, §2.5g, §2.5h & Bio P0-4: Badges, Catalog Search & Upstrea
 describe('M3 Iteration 2 regressions: llr-fitness viewer/legend, tooltip narrow overflow, mmCIF semicolon/chain/element, Shift-select SequenceSet, param NaN guard', () => {
   it('wires llr-fitness into useSemanticUncertainty in both renderScene and renderMultiModels and both legend blocks', () => {
     const viewerSrc = readWebFile('src/lib/viewer/MolSuperposeViewer.svelte');
+    // Both render paths share the single isTrackSemantics() helper (which includes llr-fitness)
     const useSemanticMatches = viewerSrc.match(
-      /const useSemanticUncertainty =[\s\S]*?styleOpts\.bfactorSemantics === 'ddg-stability' \|\|\s*\(styleOpts\.bfactorSemantics as string\) === 'llr-fitness';/g,
+      /const useSemanticUncertainty = isTrackSemantics\(styleOpts\.bfactorSemantics\);/g,
     );
     expect(useSemanticMatches).toHaveLength(2);
+    expect(isTrackSemantics('llr-fitness')).toBe(true);
+    // No inline four-way semantics checks remain
+    expect(viewerSrc).not.toMatch(/=== 'gnina-contrib' \|\|/);
+    expect(viewerSrc).not.toMatch(/\(bfactorSemantics as string\) === 'llr-fitness'/);
 
-    const llrLegendMatches = viewerSrc.match(
-      /\{:else if \(bfactorSemantics as string\) === 'llr-fitness'\}[\s\S]*?Deleterious[\s\S]*?Beneficial \(LLR\)/g,
-    );
-    expect(llrLegendMatches).toHaveLength(2);
+    // Both legend placements render the one shared snippet with the llr-fitness labels
+    expect(viewerSrc.match(/\{@render bfactorLegend\(/g)).toHaveLength(2);
+    expect(viewerSrc).toMatch(/'llr-fitness': \{[\s\S]*?Deleterious[\s\S]*?Beneficial \(LLR\)/);
     expect(viewerSrc).toContain('LLR fitness scale: Deleterious to Beneficial');
   });
 

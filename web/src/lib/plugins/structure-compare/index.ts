@@ -40,7 +40,7 @@ export const structureComparePlugin: ModelPlugin = {
       const layout = String(params.layout ?? 'overlay');
       return layout === 'side-by-side' ? 'Side-by-Side' : '3D Overlay';
     },
-    displayOnlyParamKeys: ['layout', 'colorMode', 'alignKabsch'],
+    displayOnlyParamKeys: ['layout', 'colorMode', 'alignKabsch', 'mergeIdentical'],
     compareEligible: true,
   },
   preflight: () => ({

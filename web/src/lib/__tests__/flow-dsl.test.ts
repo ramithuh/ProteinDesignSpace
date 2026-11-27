@@ -421,7 +421,7 @@ describe('engine/flow-dsl', () => {
         expectedCanonLen: 82,
         expectedGUrlLen: 221,
         expectedYamlUrlLen: 585,
-        expectedJsonUrlLen: 2930,
+        expectedJsonUrlLen: 2960,
         prompt:
           'Load PDB 1UBQ, run RFdiffusion3 (length 80) and RFD4-Proteina (length 80) in parallel, and compare both structures in 3D Compare.',
         expectedPromptUrlLen: 198,
@@ -447,7 +447,7 @@ describe('engine/flow-dsl', () => {
         expectedCanonLen: 219,
         expectedGUrlLen: 349,
         expectedYamlUrlLen: 1029,
-        expectedJsonUrlLen: 3784,
+        expectedJsonUrlLen: 3814,
         prompt:
           'Scaffold motif A16-35 from PDB 1PRW with RFD4-Proteina (contig 10-20,A16-35,10-20), design 2 sequences with LASErMPNN, fold with RoseTTAFold3, score scRMSD, and compare LASErMPNN packed structure (reference) vs RF3 fold in 3D Compare.',
         expectedPromptUrlLen: 335,

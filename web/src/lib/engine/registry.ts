@@ -3940,8 +3940,10 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         options: [
           { value: 'by-model', label: 'Distinct color per input' },
           { value: 'plddt', label: 'pLDDT confidence' },
+          { value: 'track', label: 'Per-residue track (Dyna-1 / ΔΔG / LLR / GNINA)' },
         ],
-        description: 'Color each connected structure/motif distinctly or by per-residue pLDDT.',
+        description:
+          'Color each connected structure/motif distinctly, by per-residue pLDDT, or by its painted per-residue track (other inputs muted gray).',
       },
       {
         key: 'alignKabsch',
@@ -3950,6 +3952,15 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
         tier: 'primary',
         defaultValue: true,
         description: 'Align structures onto the reference/first model using Full or Motif Substructure Kabsch.',
+      },
+      {
+        key: 'mergeIdentical',
+        label: 'Merge identical structures',
+        kind: 'boolean',
+        tier: 'advanced',
+        defaultValue: true,
+        description:
+          'In Overlay, show inputs with identical coordinates (e.g. a Dyna-1 / ThermoMPNN painted copy and its parent backbone) as one cartoon instead of z-fighting duplicates.',
       },
     ],
   },

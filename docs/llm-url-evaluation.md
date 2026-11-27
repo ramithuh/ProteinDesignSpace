@@ -39,9 +39,9 @@ All character lengths below are measured directly against `encodeGraphToFlow`, `
 | Workflow | `?flow=` (Short / Hand) | `?flow=` (Aliases) | `?flow=` (`encodeGraphToFlow`) | `?g=` (`deflate-raw`) | `?p=` (`preset-diff`) | `?recipe=` (YAML) | `?recipe=` (Compact JSON) | `?prompt=` (NL) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | **W1. Linear 3-step** | **41** | 48 | **31** | 142 (4.6×) | N/A | 353 (11.4×) | 1,984 (64.0×) | 165 |
-| **W2. RFD3 vs. RFD4 compare** | **78** | 93 | **82** | 221 (2.8×) | N/A | 585 (7.5×) | 2,930 (37.6×) | 198 |
+| **W2. RFD3 vs. RFD4 compare** | **78** | 93 | **82** | 221 (2.8×) | N/A | 585 (7.5×) | 2,960 (37.9×) | 198 |
 | **W3. Fan-out/in + scRMSD** | **58** | 70 | **63** | 205 (3.5×) | N/A* | 543 (9.4×) | 2,707 (46.7×) | 239 |
-| **W4. Motif + LASErMPNN + RF3 + ports** | **209** | 215 | **219** | 349 (1.7×) | N/A | 1,029 (4.9×) | 3,784 (18.1×) | 335 |
+| **W4. Motif + LASErMPNN + RF3 + ports** | **209** | 215 | **219** | 349 (1.7×) | N/A | 1,029 (4.9×) | 3,814 (18.2×) | 335 |
 
 *\*When a graph exactly matches one of the 8 built-in `WORKFLOW_PRESETS` (for example `rfd4-mpnn-refold` with `gen.length=90` and `mpnn.numSequences=4`), `?p=` achieves **72 chars** (`https://denovo.run/?p=rfd4-mpnn-refold&gen.length=90&mpnn.numSequences=4`), whereas canonical `encodeGraphToFlow` is **150 chars** because the preset carries explicit non-default `earlyStop=true` and custom labels. However, `?p=` cannot express any custom topology outside those 8 presets.*
 

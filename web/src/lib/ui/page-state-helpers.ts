@@ -246,11 +246,17 @@ export function classifyParamUndoAction(
   return 'push';
 }
 
-const COMPARE_DISPLAY_ONLY_PARAM_KEYS = new Set(['layout', 'colorMode', 'alignKabsch']);
+/** Must stay in parity with `structureComparePlugin.display.displayOnlyParamKeys`. */
+export const COMPARE_DISPLAY_ONLY_PARAM_KEYS: ReadonlySet<string> = new Set([
+  'layout',
+  'colorMode',
+  'alignKabsch',
+  'mergeIdentical',
+]);
 
 /**
  * Return `true` when editing `structure-compare` only changes display-only parameters
- * (`layout`, `colorMode`, `alignKabsch`), which must not invalidate cached outputs.
+ * (`layout`, `colorMode`, `alignKabsch`, `mergeIdentical`), which must not invalidate cached outputs.
  */
 export function isCompareDisplayOnlyParamChange(
   prevNode: Pick<WorkflowNode, 'adapterId' | 'params'> | undefined,

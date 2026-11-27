@@ -461,7 +461,10 @@ export function formatNodeParamSummary(
       const layout = String(p.layout ?? 'overlay');
       const align = p.alignKabsch !== false;
       const color = String(p.colorMode ?? 'by-model');
-      return `${layout === 'side-by-side' ? 'Side-by-side' : 'Overlay'}${align ? ' · Kabsch' : ''}${color === 'plddt' ? ' · pLDDT' : ''}`;
+      const colorTag = color === 'plddt' ? ' · pLDDT' : color === 'track' ? ' · Track' : '';
+      // Merging only applies in Overlay; flag the non-default split state
+      const splitTag = layout !== 'side-by-side' && p.mergeIdentical === false ? ' · Split' : '';
+      return `${layout === 'side-by-side' ? 'Side-by-side' : 'Overlay'}${align ? ' · Kabsch' : ''}${colorTag}${splitTag}`;
     }
     case 'designability-scorer': {
       return `scRMSD < ${num(p.scRmsdThreshold, 2.0).toFixed(1)} Å · pLDDT ≥ ${num(p.plddtThreshold, 70)}`;

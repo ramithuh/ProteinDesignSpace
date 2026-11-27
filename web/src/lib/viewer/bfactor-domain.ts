@@ -160,3 +160,23 @@ export function resolveUncertaintyColorArgFromValues(
   }
   return { color: 'uncertainty' };
 }
+
+/**
+ * Pool B-factor values per semantics across several structures and resolve ONE color argument per
+ * semantics, so every painted model of a kind shares a scale (same color = same value everywhere).
+ */
+export function poolUncertaintyColorArgs<S extends BfactorSemantics>(
+  entries: Iterable<{ semantics: S; values: ArrayLike<number> }>,
+): Map<S, UncertaintyColorArg> {
+  const pooled = new Map<S, number[]>();
+  for (const { semantics, values } of entries) {
+    const bucket = pooled.get(semantics) ?? [];
+    for (let i = 0; i < values.length; i++) bucket.push(values[i]);
+    pooled.set(semantics, bucket);
+  }
+  const out = new Map<S, UncertaintyColorArg>();
+  for (const [semantics, values] of pooled) {
+    out.set(semantics, resolveUncertaintyColorArgFromValues(values, semantics));
+  }
+  return out;
+}

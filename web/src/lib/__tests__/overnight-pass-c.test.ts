@@ -78,10 +78,19 @@ describe('Overnight Pass C — #60: ESM-C 3D Mol* llr-fitness domain & heatmap p
 
   it('uses reversed red->white->blue gradient on both llr-fitness legend pills in MolSuperposeViewer', () => {
     const viewerSrc = readWebFile('src/lib/viewer/MolSuperposeViewer.svelte');
-    const revMatches = viewerSrc.match(
-      /\{:else if \(bfactorSemantics as string\) === 'llr-fitness'\}\s*<span>Deleterious<\/span>\s*<span class="bfactor-grad is-reversed" aria-hidden="true"><\/span>\s*<span>Beneficial \(LLR\)<\/span>/g,
+    // One shared legend snippet: llr-fitness is Deleterious (left, red) -> Beneficial (right, blue), reversed ramp
+    expect(viewerSrc).toMatch(
+      /'llr-fitness': \{\s*lo: 'Deleterious',\s*hi: 'Beneficial \(LLR\)',[\s\S]*?reversed: true,/,
     );
-    expect(revMatches).toHaveLength(2);
+    expect(viewerSrc.match(/\{#snippet bfactorLegend\(/g)).toHaveLength(1);
+    expect(viewerSrc).toContain(
+      '<span class="bfactor-grad" class:is-reversed={spec.reversed} aria-hidden="true"></span>',
+    );
+    // Rendered in both the compare HUD pill and the single-structure bottom legend
+    expect(viewerSrc).toContain('{@render bfactorLegend(sem, trackDomainsBySemantics[sem], true)}');
+    expect(viewerSrc).toContain(
+      '{@render bfactorLegend(legendSemantics[0], trackDomainsBySemantics[legendSemantics[0]], false)}',
+    );
     expect(viewerSrc).toMatch(
       /\.bfactor-grad\.is-reversed\s*\{[\s\S]*?linear-gradient\(90deg,\s*#dc2626\s+0%,\s*#f8fafc\s+50%,\s*#2563eb\s+100%\)/,
     );

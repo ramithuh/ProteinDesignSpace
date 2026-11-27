@@ -4,10 +4,15 @@
   import type { Scene } from 'molstar/lib/mol-gl/scene';
   import { Vec3 } from 'molstar/lib/mol-math/linear-algebra/3d/vec3';
   import type { ViewerModelSpec } from '$lib/engine/compare';
+  import { isTrackSemantics, type TrackSemantics } from '$lib/engine/compare-identity';
   import { expandResidueTokenList } from '$lib/engine/residue-tokens';
   import type { ResidueHighlightLayer } from '$lib/engine/studio-types';
   import type { AtomGranularity, BfactorSemantics } from '$lib/engine/types';
-  import { resolveUncertaintyColorArgFromValues } from './bfactor-domain';
+  import {
+    poolUncertaintyColorArgs,
+    resolveUncertaintyColorArgFromValues,
+    type UncertaintyColorArg,
+  } from './bfactor-domain';
   import { pruneFalseNucleicMonomers } from './molstar-sanitize';
   import { resolveViewerSpinState } from './viewer-spin';
 
@@ -45,6 +50,8 @@
     hoveredToken?: string | null;
     /** Residue token to smoothly focus the camera onto (e.g. 'A54', 'H100A'). */
     focusToken?: string | null;
+    /** Multi-model mode: restrict `focusToken` to this model spec ID (falls back to any visible model). */
+    focusModelId?: string | null;
     emptyMessage?: string;
     emptyActionLabel?: string;
     onEmptyAction?: () => void;
@@ -60,6 +67,10 @@
     }) => void;
     onToggleModelVisibility?: (modelId: string) => void;
     onSoloModel?: (modelId: string) => void;
+    /** Switch which painted track a merged cartoon shows (instant: only visibility changes). */
+    onSelectTrack?: (groupId: string, nodeId: string) => void;
+    /** Split merged identical structures back into separate models (or re-merge). */
+    onToggleMergeIdentical?: () => void;
     onNotify?: (message: string, tone?: 'ok' | 'error') => void;
   }
 
@@ -87,12 +98,15 @@
     highlightLayers = undefined,
     hoveredToken = null,
     focusToken = null,
+    focusModelId = null,
     emptyMessage = undefined,
     emptyActionLabel = undefined,
     onEmptyAction = undefined,
     onResidueClick = undefined,
     onToggleModelVisibility = undefined,
     onSoloModel = undefined,
+    onSelectTrack = undefined,
+    onToggleMergeIdentical = undefined,
     onNotify = undefined,
   }: Props = $props();
 
@@ -121,9 +135,15 @@
     atomName: string;
     isNonPolymer: boolean;
     bFactor: number | null;
+    /** Mol* `Model.id` under the cursor (resolves per-model B-factor units in compare mode). */
+    modelId: string | null;
   }
 
   let hoveredResidue = $state<HoveredResidueInfo | null>(null);
+  // Mol* Model.id -> B-factor semantics of the rendered model ('none' suppresses the readout)
+  let modelSemanticsById = new Map<string, BfactorSemantics | undefined>();
+  // Structure state ref -> ViewerModelSpec.id (multi-model focus / hover targeting)
+  let structSpecIds = new Map<string, string>();
 
   let hoveredResidueLabel = $derived.by((): string => {
     const h = hoveredResidue;
@@ -141,7 +161,9 @@
   let hoveredMetricText = $derived.by((): string | null => {
     const h = hoveredResidue;
     if (!h || h.isNonPolymer || h.bFactor === null || !Number.isFinite(h.bFactor)) return null;
-    const sem = bfactorSemantics as string | undefined;
+    const sem = ((h.modelId ? modelSemanticsById.get(h.modelId) : undefined) ?? bfactorSemantics) as
+      | string
+      | undefined;
     if (sem === 'dynamics-prob') return `${h.bFactor.toFixed(2)} p(exch)`;
     if (sem === 'ddg-stability') {
       return `${h.bFactor >= 0 ? '+' : ''}${h.bFactor.toFixed(2)} kcal/mol`;
@@ -152,7 +174,11 @@
     if (sem === 'gnina-contrib') {
       return `${h.bFactor >= 0 ? '+' : ''}${h.bFactor.toFixed(2)} ΔCNN_VS`;
     }
-    if (sem === 'plddt') return `pLDDT ${h.bFactor.toFixed(1)}`;
+    if (sem === 'plddt' || sem === 'plddt-0-100') return `pLDDT ${h.bFactor.toFixed(1)}`;
+    if (sem === 'plddt-0-1') {
+      const scaled = h.bFactor <= 1.01 ? h.bFactor * 100 : h.bFactor;
+      return `pLDDT ${scaled.toFixed(1)}`;
+    }
     return null;
   });
   let trajModelRef = $state<string | null>(null);
@@ -259,12 +285,7 @@
   let cameraMode = $state<'perspective' | 'orthographic'>('perspective');
   let localSpinSpeed = $state<number | null>(null);
   let effectiveSpinSpeed = $derived(localSpinSpeed ?? spinSpeed);
-  let isSemanticBfactor = $derived(
-    bfactorSemantics === 'dynamics-prob' ||
-      bfactorSemantics === 'ddg-stability' ||
-      bfactorSemantics === 'gnina-contrib' ||
-      (bfactorSemantics as string) === 'llr-fitness',
-  );
+  let isSemanticBfactor = $derived(isTrackSemantics(bfactorSemantics));
   let plddtAllowed = $derived(
     bfactorSemantics !== 'none' &&
       bfactorSemantics !== 'crystal-b' &&
@@ -275,18 +296,15 @@
   let sceneRenderEpoch = $state(0);
   let overpaintSeq = 0;
   let lastAppliedOverpaintKey = '';
+  // Numeric color domain per track semantics from the last render (pooled across all painted models)
+  let trackDomainsBySemantics = $state<Record<string, [number, number]>>({});
 
   /**
-   * Build a Mol* `'uncertainty'` (B-factor continuous ramp) color argument, adapting the
-   * numeric domain to the observed polymer Cα B-factors so both raw (`0..1` dynamics prob,
-   * signed `ΔΔG` kcal/mol) and `0..100`-scaled structures display full blue↔white↔red contrast
-   * without being skewed by untouched crystal waters (`HOH`), ligands, or peptide caps (`ACE`).
+   * Collect polymer Cα B-factors (falling back to all polymer, then all atoms) so color domains
+   * are not skewed by untouched crystal waters (`HOH`), ligands, or peptide caps (`ACE`).
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function resolveUncertaintyColorArg(
-    struct: any,
-    semantics?: BfactorSemantics | 'llr-fitness',
-  ): Record<string, unknown> {
+  function collectPolymerBfactors(struct: any): number[] {
     try {
       const units = struct?.data?.units;
       const caValues: number[] = [];
@@ -324,13 +342,20 @@
           }
         }
       }
-      const chosen =
-        caValues.length > 0 ? caValues : polyValues.length > 0 ? polyValues : allValues;
-      return resolveUncertaintyColorArgFromValues(chosen, semantics);
+      return caValues.length > 0 ? caValues : polyValues.length > 0 ? polyValues : allValues;
     } catch {
-      /* fallback to default Mol* uncertainty ramp */
+      return [];
     }
-    return { color: 'uncertainty' };
+  }
+
+  /**
+   * Build a Mol* `'uncertainty'` (B-factor continuous ramp) color argument, adapting the
+   * numeric domain to the observed polymer Cα B-factors so both raw (`0..1` dynamics prob,
+   * signed `ΔΔG` kcal/mol) and `0..100`-scaled structures display full blue↔white↔red contrast.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function resolveUncertaintyColorArg(struct: any, semantics?: BfactorSemantics): UncertaintyColorArg {
+    return resolveUncertaintyColorArgFromValues(collectPolymerBfactors(struct), semantics);
   }
 
   function hasMultiplePdbChains(pdbText: string): boolean {
@@ -627,6 +652,7 @@
           } catch {
             bFactor = null;
           }
+          const hoveredModelId = loc.unit?.model?.id;
           hoveredResidue = {
             compId,
             aa1: COMP_TO_AA1[compId] ?? null,
@@ -636,6 +662,7 @@
             atomName,
             isNonPolymer: rawEntityType !== 'polymer',
             bFactor,
+            modelId: typeof hoveredModelId === 'string' ? hoveredModelId : null,
           };
         });
 
@@ -802,6 +829,7 @@
           const ligRepr = await ctx.builders.structure.representation.addRepresentation(ligComp, {
             type: 'ball-and-stick',
             color: 'element-symbol',
+            typeParams: { alpha: opts.alpha ?? 1.0 },
           });
           if (ligRepr?.ref) refs.push(ligRepr.ref);
           else if (ligComp.ref) refs.push(ligComp.ref);
@@ -818,6 +846,7 @@
           const nonStdRepr = await ctx.builders.structure.representation.addRepresentation(nonStdComp, {
             type: 'ball-and-stick',
             color: 'element-symbol',
+            typeParams: { alpha: opts.alpha ?? 1.0 },
           });
           if (nonStdRepr?.ref) refs.push(nonStdRepr.ref);
           else if (nonStdComp.ref) refs.push(nonStdComp.ref);
@@ -842,6 +871,7 @@
             const npRepr = await ctx.builders.structure.representation.addRepresentation(nonPolyComp, {
               type: 'ball-and-stick',
               color: 'element-symbol',
+              typeParams: { alpha: opts.alpha ?? 1.0 },
             });
             if (npRepr?.ref) refs.push(npRepr.ref);
             else if (nonPolyComp.ref) refs.push(nonPolyComp.ref);
@@ -856,6 +886,7 @@
           const ionRepr = await ctx.builders.structure.representation.addRepresentation(ionComp, {
             type: 'spacefill',
             color: 'element-symbol',
+            typeParams: { alpha: opts.alpha ?? 1.0 },
           });
           if (ionRepr?.ref) refs.push(ionRepr.ref);
           else if (ionComp.ref) refs.push(ionComp.ref);
@@ -868,6 +899,7 @@
           const sparseRepr = await ctx.builders.structure.representation.addRepresentation(struct, {
             type: 'ball-and-stick',
             color: 'element-symbol',
+            typeParams: { alpha: opts.alpha ?? 1.0 },
           });
           if (sparseRepr?.ref) refs.push(sparseRepr.ref);
         } catch {
@@ -1034,11 +1066,15 @@
         ]);
         if (destroyed || mySeq !== loadSeq) return;
         const hasOverlay = Boolean(sDesigned && dPdb && sRefold && rPdb && !useTraj);
-        const useSemanticUncertainty =
-          styleOpts.bfactorSemantics === 'dynamics-prob' ||
-          styleOpts.bfactorSemantics === 'gnina-contrib' ||
-          styleOpts.bfactorSemantics === 'ddg-stability' ||
-          (styleOpts.bfactorSemantics as string) === 'llr-fitness';
+        const useSemanticUncertainty = isTrackSemantics(styleOpts.bfactorSemantics);
+        const nextSemantics = new Map<string, BfactorSemantics | undefined>();
+        const nextDomains: Record<string, [number, number]> = {};
+        const recordDomain = (arg: Record<string, unknown>) => {
+          const domain = (arg as UncertaintyColorArg).colorParams?.domain;
+          if (isTrackSemantics(styleOpts.bfactorSemantics) && arg.color === 'uncertainty' && domain) {
+            nextDomains[styleOpts.bfactorSemantics] = domain;
+          }
+        };
 
         // 1. Designed structure (or multi-model trajectory)
         if (sDesigned && (useTraj && tPdb ? tPdb : dPdb)) {
@@ -1100,6 +1136,12 @@
                       ? { color: 'chain-id' }
                       : { color: 'uniform', colorParams: { value: Color(0x60a5fa) } };
           const designedAlpha = hasOverlay ? 0.45 : 1.0;
+          recordDomain(designedColorArg);
+          const designedModelId = model.data?.id;
+          if (typeof designedModelId === 'string') {
+            // Overlay ghost B-factors are not the refold's pLDDT: suppress the hover metric
+            nextSemantics.set(designedModelId, hasOverlay ? 'none' : styleOpts.bfactorSemantics);
+          }
           await ctx.builders.structure.representation.addRepresentation(struct, {
             type: styleOpts.rep,
             ...designedColorArg,
@@ -1144,6 +1186,11 @@
                   : styleOpts.plddtAllowed
                     ? { color: 'plddt-confidence' }
                     : { color: 'uniform', colorParams: { value: Color(0x60a5fa) } };
+          recordDomain(refoldColorArg);
+          const refoldModelId = model.data?.id;
+          if (typeof refoldModelId === 'string') {
+            nextSemantics.set(refoldModelId, styleOpts.bfactorSemantics);
+          }
           await ctx.builders.structure.representation.addRepresentation(struct, {
             type: styleOpts.rep,
             ...refoldColorArg,
@@ -1163,6 +1210,9 @@
           (sDesigned && (useTraj && tPdb ? tPdb : dPdb)) || (sRefold && rPdb && !useTraj),
         );
         const liveStructs = ctx.managers?.structure?.hierarchy?.current?.structures?.length ?? 0;
+        modelSemanticsById = nextSemantics;
+        structSpecIds = new Map();
+        trackDomainsBySemantics = nextDomains;
         applyPostprocessing(illustrative, spinState.disableOcclusion);
         if (savedCam && liveStructs > 0) {
           ctx.canvas3d?.camera?.setState(savedCam, 0);
@@ -1283,11 +1333,81 @@
     }),
   );
   let effectiveSpin = $derived(spinState.effectiveSpin);
-  let showSemanticBfactorLegend = $derived(
-    hasAnyStructure &&
-      isSemanticBfactor &&
-      (colorScheme === 'auto' || colorScheme === 'uncertainty'),
+  // Distinct track semantics whose color ramp is actually on screen. Compare models carry their own
+  // semantics: only visible painted ones count (Track mode under Auto, or any track model under
+  // B-factor / Uncertainty); single-structure / multi-design views fall back to the prop.
+  let legendSemantics = $derived.by((): TrackSemantics[] => {
+    if (!hasAnyStructure || (colorScheme !== 'auto' && colorScheme !== 'uncertainty')) return [];
+    if (models && models.some((m) => m.bfactorSemantics !== undefined)) {
+      const out: TrackSemantics[] = [];
+      for (const m of models) {
+        if (!m.visible || !isTrackSemantics(m.bfactorSemantics)) continue;
+        const painted = colorScheme === 'uncertainty' || Boolean(m.colorByTrack);
+        if (painted && !out.includes(m.bfactorSemantics)) out.push(m.bfactorSemantics);
+      }
+      return out;
+    }
+    return isTrackSemantics(bfactorSemantics) ? [bfactorSemantics] : [];
+  });
+  let showSemanticBfactorLegend = $derived(legendSemantics.length > 0);
+  // Alternative tracks of a merged cartoon stay in the scene hidden but get no chip of their own
+  let legendModels = $derived(
+    (models ?? []).filter((m) => m.mergedFrom?.role !== 'secondary'),
   );
+
+  const BFACTOR_LEGEND_LABELS: Record<
+    TrackSemantics,
+    { lo: string; hi: string; aria: string; reversed: boolean }
+  > = {
+    'dynamics-prob': {
+      lo: 'Rigid',
+      hi: 'Flexible',
+      aria: 'Dynamics probability B-factor scale: Rigid 0.0 to Flexible 1.0',
+      reversed: false,
+    },
+    'ddg-stability': {
+      lo: 'Stabilizing',
+      hi: 'Destabilizing (ΔΔG)',
+      aria: 'Stability B-factor scale: Stabilizing to Destabilizing (ΔΔG)',
+      reversed: false,
+    },
+    'llr-fitness': {
+      lo: 'Deleterious',
+      hi: 'Beneficial (LLR)',
+      aria: 'LLR fitness scale: Deleterious to Beneficial',
+      reversed: true,
+    },
+    'gnina-contrib': {
+      lo: 'Unfavorable',
+      hi: 'Favorable (ΔCNN_VS)',
+      aria: 'GNINA pocket contribution scale: Unfavorable to Favorable (ΔCNN_VS)',
+      reversed: true,
+    },
+  };
+
+  function formatLegendEnd(v: number, signed: boolean): string {
+    const abs = Math.abs(v);
+    const txt = abs >= 10 ? abs.toFixed(0) : abs.toFixed(1);
+    if (v < 0 && Number(txt) !== 0) return `−${txt}`;
+    return signed && v > 0 ? `+${txt}` : txt;
+  }
+
+  /** Numeric [left, right] legend endpoints (reversed ramps are drawn reversed, so min is always left). */
+  function legendEnds(sem: TrackSemantics, domain: [number, number] | undefined): [string, string] | null {
+    const d = domain ?? (sem === 'dynamics-prob' ? ([0, 1] as [number, number]) : undefined);
+    if (!d) return null;
+    const signed = sem !== 'dynamics-prob';
+    return [
+      formatLegendEnd(Math.min(d[0], d[1]), signed),
+      formatLegendEnd(Math.max(d[0], d[1]), signed),
+    ];
+  }
+
+  function trackSwatchBackground(sem: BfactorSemantics | undefined): string {
+    return isTrackSemantics(sem) && BFACTOR_LEGEND_LABELS[sem].reversed
+      ? 'linear-gradient(90deg, #dc2626, #f8fafc, #2563eb)'
+      : 'linear-gradient(90deg, #2563eb, #f8fafc, #dc2626)';
+  }
 
   function applySpin(
     on: boolean,
@@ -1331,6 +1451,7 @@
     await enqueueSceneRender(async () => {
       if (destroyed || mySeq !== loadSeq) return;
       modelRefs = new Map();
+      structSpecIds = new Map();
       trajModelRef = null;
       if (specs.length === 0) {
         if (plugin) await plugin.clear();
@@ -1354,13 +1475,17 @@
         ]);
         if (destroyed || mySeq !== loadSeq) return;
 
-        const useSemanticUncertainty =
-          styleOpts.bfactorSemantics === 'dynamics-prob' ||
-          styleOpts.bfactorSemantics === 'gnina-contrib' ||
-          styleOpts.bfactorSemantics === 'ddg-stability' ||
-          (styleOpts.bfactorSemantics as string) === 'llr-fitness';
+        const useSemanticUncertainty = isTrackSemantics(styleOpts.bfactorSemantics);
 
-        const nextRefs = new Map<string, string[]>();
+        // Pass 1: create every structure and pool polymer Cα B-factors per track semantics across
+        // ALL painted models (including hidden alternative tracks of a merged cartoon), so one
+        // shared scale means the same color is the same value in every structure and switching
+        // tracks needs no reload.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const built: Array<{ m: ViewerModelSpec; struct: any; sem: BfactorSemantics | undefined }> = [];
+        const pooledEntries: Array<{ semantics: TrackSemantics; values: number[] }> = [];
+        const nextSemantics = new Map<string, BfactorSemantics | undefined>();
+        const nextStructSpecIds = new Map<string, string>();
         for (const m of specs) {
           const fmt = /^\s*(data_|loop_|_atom_site\.)/m.test(m.pdbText) ? 'mmcif' : 'pdb';
           const data = await ctx.builders.data.rawData({
@@ -1376,20 +1501,54 @@
             name: 'model',
             params: {},
           });
+          if (destroyed || mySeq !== loadSeq) return;
+          const modelUuid = model.data?.id;
+          if (typeof modelUuid === 'string') {
+            nextSemantics.set(
+              modelUuid,
+              m.bfactorSemantics ?? (m.colorByPlddt ? 'plddt-0-100' : undefined),
+            );
+          }
+          if (struct?.ref) nextStructSpecIds.set(struct.ref, m.id);
+          if (
+            isTrackSemantics(m.bfactorSemantics) &&
+            (m.colorByTrack || styleOpts.color === 'uncertainty')
+          ) {
+            pooledEntries.push({ semantics: m.bfactorSemantics, values: collectPolymerBfactors(struct) });
+          }
+          built.push({ m, struct, sem: m.bfactorSemantics ?? styleOpts.bfactorSemantics });
+        }
+
+        const pooledArgs: Map<string, UncertaintyColorArg> = poolUncertaintyColorArgs(pooledEntries);
+        const nextDomains: Record<string, [number, number]> = {};
+        for (const [sem, arg] of pooledArgs) {
+          if (arg.colorParams?.domain) nextDomains[sem] = arg.colorParams.domain;
+        }
+
+        // Pass 2: per-representation themes, so painted track models and muted companions share one scene
+        const nextRefs = new Map<string, string[]>();
+        for (const { m, struct, sem } of built) {
+          const trackColorArg = (): UncertaintyColorArg =>
+            (isTrackSemantics(sem) ? pooledArgs.get(sem) : undefined) ??
+            resolveUncertaintyColorArg(struct, sem);
+          // pLDDT coloring would misread Dyna-1 / ΔΔG / LLR / GNINA B-factors as confidence
           const effectiveColor =
-            styleOpts.color === 'plddt-confidence' && !styleOpts.plddtAllowed
+            styleOpts.color === 'plddt-confidence' &&
+            (!styleOpts.plddtAllowed || isTrackSemantics(m.bfactorSemantics))
               ? 'auto'
               : styleOpts.color;
           const modelColorArg =
             effectiveColor === 'uncertainty'
-              ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+              ? trackColorArg()
               : effectiveColor !== 'auto'
                 ? { color: effectiveColor }
-                : useSemanticUncertainty && (m.colorByPlddt || specs.length === 1)
-                  ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
-                  : m.colorByPlddt && styleOpts.plddtAllowed
-                    ? { color: 'plddt-confidence' }
-                    : { color: 'uniform', colorParams: { value: Color(m.colorHex) } };
+                : m.colorByTrack && isTrackSemantics(sem)
+                  ? trackColorArg()
+                  : useSemanticUncertainty && (m.colorByPlddt || specs.length === 1)
+                    ? resolveUncertaintyColorArg(struct, styleOpts.bfactorSemantics)
+                    : m.colorByPlddt && styleOpts.plddtAllowed
+                      ? { color: 'plddt-confidence' }
+                      : { color: 'uniform', colorParams: { value: Color(m.colorHex) } };
           const repr = await ctx.builders.structure.representation.addRepresentation(struct, {
             type: styleOpts.rep,
             ...modelColorArg,
@@ -1419,6 +1578,9 @@
         if (destroyed || mySeq !== loadSeq) return;
         const liveStructs = ctx.managers?.structure?.hierarchy?.current?.structures?.length ?? 0;
         modelRefs = nextRefs;
+        modelSemanticsById = nextSemantics;
+        structSpecIds = nextStructSpecIds;
+        trackDomainsBySemantics = nextDomains;
         applyPostprocessing(illustrative, spinState.disableOcclusion);
         if (savedCam && liveStructs > 0) {
           ctx.canvas3d?.camera?.setState(savedCam, 0);
@@ -1549,8 +1711,17 @@
     return queries.length === 1 ? queries[0] : MS.struct.combinator.merge(queries);
   }
 
+  /**
+   * Resolve a residue token to Mol* loci, skipping hidden compare models and (when `modelId`
+   * names a rendered model) targeting that model only, so click-to-focus lands on the right
+   * structure in Side-by-Side and merged multi-track overlays.
+   */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async function resolveTokenLoci(ctx: any, token: string): Promise<any | null> {
+  async function resolveTokenLoci(
+    ctx: any,
+    token: string,
+    opts: { modelId?: string | null } = {},
+  ): Promise<any | null> {
     const trimmed = token.trim();
     let target: { chain: string; seqId: number; insCode: string } | null = null;
     const colon = /^([A-Za-z0-9_]+):(-?\d+)([A-Za-z]?)$/.exec(trimmed);
@@ -1590,9 +1761,17 @@
     const expr = buildResiduesExpression(MS, [target]);
     if (!expr) return null;
 
+    const specs = untrack(() => models) ?? [];
+    const hiddenSpecIds = new Set(specs.filter((m) => !m.visible).map((m) => m.id));
+    const renderedSpecIds = new Set(structSpecIds.values());
+    const targetSpecId = opts.modelId && renderedSpecIds.has(opts.modelId) ? opts.modelId : null;
+
     for (const sRef of structs) {
       const structData = sRef?.cell?.obj?.data;
       if (!structData) continue;
+      const specId = structSpecIds.get(sRef?.cell?.transform?.ref);
+      if (specId && hiddenSpecIds.has(specId)) continue;
+      if (targetSpecId && specId !== targetSpecId) continue;
       const sel = Script.getStructureSelection(expr, structData);
       const loci = StructureSelection.toLociWithSourceUnits(sel);
       if (loci && !Loci.isEmpty(loci)) {
@@ -1727,13 +1906,14 @@
   // Smooth camera focus when focusToken changes
   $effect(() => {
     const tok = focusToken;
+    const targetModelId = focusModelId;
     const ctx = plugin;
     const epoch = sceneRenderEpoch;
     if (!ctx || epoch === 0 || !tok) return;
     let cancelled = false;
     (async () => {
       try {
-        const loci = await resolveTokenLoci(ctx, tok);
+        const loci = await resolveTokenLoci(ctx, tok, { modelId: targetModelId });
         if (cancelled || destroyed || !loci) return;
         ctx.managers?.camera?.focusLoci?.(loci, { durationMs: 250 });
       } catch {
@@ -1745,15 +1925,24 @@
     };
   });
 
-  // Structural signature for multi-model mode (excludes `visible` so eye/solo toggles never reload or reset camera)
+  // Structural signature for multi-model mode (excludes `visible` so eye/solo toggles never reload or
+  // reset camera, and excludes color/alpha/semantics so By Model | pLDDT | Track keeps the camera)
   let multiRenderKey = $derived.by((): string | null => {
     if (models === null) return null;
     return models
+      .map((m) => `${m.id}|${m.pdbText.length}|${hashStructureSample(m.pdbText)}`)
+      .join('||');
+  });
+
+  // Per-model appearance signature (part of the style key: re-renders with the camera preserved)
+  let multiStyleKey = $derived.by((): string => {
+    if (models === null) return '';
+    return models
       .map(
         (m) =>
-          `${m.id}|${m.colorHex}|${m.alpha}|${m.colorByPlddt ? 1 : 0}|${m.pdbText.length}|${hashStructureSample(m.pdbText)}`,
+          `${m.id}:${m.colorHex}:${m.alpha}:${m.colorByPlddt ? 1 : 0}:${m.colorByTrack ? 1 : 0}:${m.bfactorSemantics ?? ''}`,
       )
-      .join('||');
+      .join(',');
   });
 
   // Re-render full scene ONLY when (structureKey + styleKey) actually changes
@@ -1772,7 +1961,7 @@
     const styleKey = `${styleOpts.rep}|${styleOpts.color}|${styleOpts.sidechains ? 1 : 0}|${styleOpts.surfaceOverlay ? 1 : 0}|${styleOpts.ligands ? 1 : 0}|${styleOpts.plddtAllowed ? 1 : 0}|${styleOpts.bfactorSemantics ?? ''}`;
     if (multiRenderKey !== null) {
       const mKey = `multi:${canonical ? 1 : 0}:${multiRenderKey}`;
-      const fullKey = `${mKey}##${styleKey}`;
+      const fullKey = `${mKey}##${styleKey}##${multiStyleKey}`;
       if (fullKey === lastRenderedKey && !initError) return;
       const sameStructure = lastStructureKey === mKey;
       const snapshot = untrack(() => models ?? []);
@@ -1911,6 +2100,18 @@
   });
 </script>
 
+{#snippet bfactorLegend(sem: TrackSemantics, domain: [number, number] | undefined, inHud: boolean)}
+  {@const spec = BFACTOR_LEGEND_LABELS[sem]}
+  {@const ends = legendEnds(sem, domain)}
+  <div class:legend={!inHud} class:bfactor-legend={!inHud} class:bfactor-pill={inHud} aria-label={spec.aria}>
+    <span>{spec.lo}</span>
+    {#if ends}<span class="bfactor-end">{ends[0]}</span>{/if}
+    <span class="bfactor-grad" class:is-reversed={spec.reversed} aria-hidden="true"></span>
+    {#if ends}<span class="bfactor-end">{ends[1]}</span>{/if}
+    <span>{spec.hi}</span>
+  </div>
+{/snippet}
+
 <div class="mol-card" style="height: {typeof height === 'number' ? `${height}px` : height}">
   {#if label || (atomGranularity === 'ca-only' && hasAnyStructure) || (showSemanticBfactorLegend && models && models.length > 0)}
     <div class="hud-top-left" class:has-style-menu={hasAnyStructure}>
@@ -1926,32 +2127,9 @@
         </div>
       {/if}
       {#if showSemanticBfactorLegend && models && models.length > 0}
-        <div
-          class="bfactor-pill"
-          aria-label={bfactorSemantics === 'dynamics-prob'
-            ? 'Dynamics probability B-factor scale: Rigid 0.0 to Flexible 1.0'
-            : (bfactorSemantics as string) === 'llr-fitness'
-              ? 'LLR fitness scale: Deleterious to Beneficial'
-              : 'Stability B-factor scale: Stabilizing to Destabilizing (ΔΔG)'}
-        >
-          {#if bfactorSemantics === 'dynamics-prob'}
-            <span>Rigid 0.0</span>
-            <span class="bfactor-grad" aria-hidden="true"></span>
-            <span>Flexible 1.0</span>
-          {:else if (bfactorSemantics as string) === 'llr-fitness'}
-            <span>Deleterious</span>
-            <span class="bfactor-grad is-reversed" aria-hidden="true"></span>
-            <span>Beneficial (LLR)</span>
-          {:else if bfactorSemantics === 'gnina-contrib'}
-            <span>Unfavorable</span>
-            <span class="bfactor-grad is-reversed" aria-hidden="true"></span>
-            <span>Favorable (ΔCNN_VS)</span>
-          {:else}
-            <span>Stabilizing</span>
-            <span class="bfactor-grad" aria-hidden="true"></span>
-            <span>Destabilizing (ΔΔG)</span>
-          {/if}
-        </div>
+        {#each legendSemantics as sem (sem)}
+          {@render bfactorLegend(sem, trackDomainsBySemantics[sem], true)}
+        {/each}
       {/if}
     </div>
   {/if}
@@ -2058,18 +2236,20 @@
   {/if}
   {#if models && models.length > 0}
     <div class="compare-legend" role="group" aria-label="Compared 3D structures">
-      {#each models as m (m.id)}
-        <div class="cmp-chip" class:is-hidden={!m.visible}>
+      {#each legendModels as m (m.id)}
+        {@const merge = m.mergedFrom}
+        <div class="cmp-chip" class:is-hidden={!m.visible} class:is-merged={Boolean(merge)}>
           <button
             type="button"
             class="cmp-chip-main"
-            title={m.visible ? `Hide ${m.label}` : `Show ${m.label}`}
+            title={`${m.visible ? 'Hide' : 'Show'} ${merge ? merge.caption : m.label}`}
             onclick={() => onToggleModelVisibility?.(m.id)}
           >
             <span
               class="cmp-swatch"
               class:ref={m.isReference}
-              style="background: {m.colorCss}; opacity: {m.visible ? 1 : 0.35}"
+              class:is-track={Boolean(m.colorByTrack)}
+              style="background: {m.colorByTrack ? trackSwatchBackground(m.bfactorSemantics) : m.colorCss}; opacity: {m.visible ? 1 : 0.35}"
             ></span>
             {#if m.badge}
               <span class="cmp-badge">{m.badge}</span>
@@ -2079,7 +2259,40 @@
               <span class="cmp-stat">{m.metricSummary}</span>
             {/if}
           </button>
-          {#if onSoloModel && !m.isReference && models.length > 1}
+          {#if merge && merge.tracks.length > 1 && onSelectTrack}
+            <span class="cmp-track-switch" role="group" aria-label="Painted track on merged cartoon">
+              {#each merge.tracks as t (t.nodeId)}
+                <button
+                  type="button"
+                  class:active={t.nodeId === merge.activeTrackNodeId}
+                  aria-pressed={t.nodeId === merge.activeTrackNodeId}
+                  title={`Show ${t.label} on this backbone`}
+                  onclick={() => onSelectTrack?.(merge.groupId, t.nodeId)}
+                >
+                  {t.badge}
+                </button>
+              {/each}
+            </span>
+          {/if}
+          {#if merge}
+            <span
+              class="cmp-merge-tag"
+              title={`${merge.caption} — identical structures merged (${merge.evidence === 'lineage' ? 'linked by structure lineage' : 'matched by geometry'})`}
+            >
+              ⧉ merged · {merge.rmsd.toFixed(2)} Å · {merge.evidence}
+            </span>
+            {#if onToggleMergeIdentical}
+              <button
+                type="button"
+                class="split-btn"
+                title="Show the merged identical structures as separate models"
+                onclick={() => onToggleMergeIdentical?.()}
+              >
+                Split
+              </button>
+            {/if}
+          {/if}
+          {#if onSoloModel && !m.isReference && legendModels.length > 1}
             <button
               type="button"
               class="solo-btn"
@@ -2093,32 +2306,7 @@
       {/each}
     </div>
   {:else if showSemanticBfactorLegend}
-    <div
-      class="legend bfactor-legend"
-      aria-label={bfactorSemantics === 'dynamics-prob'
-        ? 'Dynamics probability B-factor scale: Rigid 0.0 to Flexible 1.0'
-        : (bfactorSemantics as string) === 'llr-fitness'
-          ? 'LLR fitness scale: Deleterious to Beneficial'
-          : 'Stability B-factor scale: Stabilizing to Destabilizing (ΔΔG)'}
-    >
-      {#if bfactorSemantics === 'dynamics-prob'}
-        <span>Rigid 0.0</span>
-        <span class="bfactor-grad" aria-hidden="true"></span>
-        <span>Flexible 1.0</span>
-      {:else if (bfactorSemantics as string) === 'llr-fitness'}
-        <span>Deleterious</span>
-        <span class="bfactor-grad is-reversed" aria-hidden="true"></span>
-        <span>Beneficial (LLR)</span>
-      {:else if bfactorSemantics === 'gnina-contrib'}
-        <span>Unfavorable</span>
-        <span class="bfactor-grad is-reversed" aria-hidden="true"></span>
-        <span>Favorable (ΔCNN_VS)</span>
-      {:else}
-        <span>Stabilizing</span>
-        <span class="bfactor-grad" aria-hidden="true"></span>
-        <span>Destabilizing (ΔΔG)</span>
-      {/if}
-    </div>
+    {@render bfactorLegend(legendSemantics[0], trackDomainsBySemantics[legendSemantics[0]], false)}
   {:else if designedPdb && refoldPdb && showDesigned && showRefold && !showTrajectory}
     <div class="legend">
       <span class="swatch designed"></span> Designed
@@ -2329,6 +2517,46 @@
   .cmp-swatch.ref {
     border: 1px dashed rgba(255, 255, 255, 0.5);
   }
+  .cmp-swatch.is-track {
+    width: 14px;
+    border-radius: 999px;
+  }
+  .cmp-track-switch {
+    display: inline-flex;
+    border-left: 1px solid var(--border-subtle);
+  }
+  .cmp-track-switch button,
+  .split-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 3px 5px;
+    cursor: pointer;
+  }
+  .cmp-track-switch button.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .cmp-track-switch button:hover:not(.active),
+  .split-btn:hover {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+  }
+  .cmp-merge-tag {
+    border-left: 1px solid var(--border-subtle);
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    padding: 3px 6px;
+    white-space: nowrap;
+  }
+  .split-btn {
+    border-left: 1px solid var(--border-subtle);
+    font-weight: 600;
+  }
   .cmp-badge {
     font-weight: 700;
     color: var(--text-primary);
@@ -2394,6 +2622,10 @@
   }
   .bfactor-grad.is-reversed {
     background: linear-gradient(90deg, #dc2626 0%, #f8fafc 50%, #2563eb 100%);
+  }
+  .bfactor-end {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
   .empty {
     position: absolute;

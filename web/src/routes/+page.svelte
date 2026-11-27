@@ -38,8 +38,11 @@
     COMPARE_PALETTE,
     buildComparisonState,
     buildMultiDesignViewerModels,
+    resolveCompareDisplayModelId,
+    type CompareColorMode,
     type ComparisonPairingMode,
   } from '$lib/engine/compare';
+  import { expandMergedModelIds } from '$lib/engine/compare-identity';
   import { estimateRunRequirements, type RunPreflightSummary } from '$lib/engine/run-preflight';
   import type { PlannedWorkflowResult } from '$lib/engine/workflow-planner';
   import type {
@@ -144,6 +147,8 @@
   let studioFocusToken = $state<string | null>(null);
   let studioActiveBrush = $state<StudioBrushOption | null>(null);
   let viewerFocusToken = $state<string | null>(null);
+  // Compare mode: model spec ID the focus token targets (the clicked branch's own structure)
+  let viewerFocusModelId = $state<string | null>(null);
   let selectedDesignKey = $state<string>('all');
   let multiDesignViewMode = $state<'grid' | 'overlay' | 'single'>('grid');
   let multiDesignHiddenIds = $state<string[]>([]);
@@ -480,8 +485,12 @@
     selectedNodeIds.length >= 2 || (Boolean(activeCompareNode) && activeCompareInputIds.length >= 1),
   );
   let compareLayout = $state<'overlay' | 'side-by-side'>('overlay');
-  let compareColorMode = $state<'by-model' | 'plddt'>('by-model');
+  // null = auto: Track when any compared branch carries a per-residue track, else By Model
+  let compareColorMode = $state<CompareColorMode | null>(null);
   let compareAlignKabsch = $state(true);
+  let compareMergeIdentical = $state(true);
+  // Active painted track per merge group (`merge-<nodeId>`) when several tracks share one backbone
+  let compareActiveTrackByGroup = $state<Record<string, string>>({});
   let comparePairingMode = $state<ComparisonPairingMode | undefined>(undefined);
   let compareSelectedCandidateKey = $state<string | null>(null);
   let hiddenCompareModelIds = $state<string[]>([]);
@@ -507,7 +516,10 @@
     comparePairingMode = undefined;
     compareSelectedCandidateKey = null;
     branchCandidateIdx = {};
+    compareMergeIdentical = true;
+    compareActiveTrackByGroup = {};
     viewerFocusToken = null;
+    viewerFocusModelId = null;
   }
 
   function handleSelectNodes(ids: string[]) {
@@ -517,9 +529,12 @@
     comparePairingMode = undefined;
     compareSelectedCandidateKey = null;
     branchCandidateIdx = {};
+    compareMergeIdentical = true;
+    compareActiveTrackByGroup = {};
     selectedPeekSlotId = null;
     selectedEdgeId = null;
     viewerFocusToken = null;
+    viewerFocusModelId = null;
     if (selectedNodeIds.length >= 2) {
       rightPanelTab = 'peek';
     } else if (selectedNodeIds.length === 1) {
@@ -527,16 +542,27 @@
     }
   }
 
+  // Hide / solo act on a whole merged group, so switching its active track never desyncs visibility
   function toggleCompareModelVisibility(modelId: string) {
+    const groupIds = expandMergedModelIds(modelId, comparisonState?.mergeGroups ?? []);
     if (hiddenCompareModelIds.includes(modelId)) {
-      hiddenCompareModelIds = hiddenCompareModelIds.filter((id) => id !== modelId);
+      hiddenCompareModelIds = hiddenCompareModelIds.filter((id) => !groupIds.includes(id));
     } else {
-      hiddenCompareModelIds = [...hiddenCompareModelIds, modelId];
+      hiddenCompareModelIds = [
+        ...hiddenCompareModelIds.filter((id) => !groupIds.includes(id)),
+        ...groupIds,
+      ];
     }
   }
 
   function soloCompareModel(modelId: string) {
-    const allIds = comparisonState?.models.map((m) => m.id) ?? [];
+    const groups = comparisonState?.mergeGroups ?? [];
+    const allIds = [
+      ...new Set([
+        ...(comparisonState?.models.map((m) => m.id) ?? []),
+        ...groups.flatMap((g) => g.memberModelIds),
+      ]),
+    ];
     const refWasHidden = hiddenCompareModelIds.includes('ref-designed');
     if (modelId === 'ref-designed') {
       const nonRef = allIds.filter((id) => id !== 'ref-designed');
@@ -547,7 +573,8 @@
       hiddenCompareModelIds = alreadySolo ? [] : nonRef;
       return;
     }
-    const others = allIds.filter((id) => id !== modelId && id !== 'ref-designed');
+    const soloIds = expandMergedModelIds(modelId, groups);
+    const others = allIds.filter((id) => !soloIds.includes(id) && id !== 'ref-designed');
     const alreadySolo =
       others.length > 0 &&
       others.every((id) => hiddenCompareModelIds.includes(id)) &&
@@ -557,6 +584,16 @@
     } else {
       hiddenCompareModelIds = refWasHidden ? ['ref-designed', ...others] : others;
     }
+  }
+
+  function selectCompareTrack(groupId: string, nodeId: string) {
+    const group = comparisonState?.mergeGroups.find((g) => g.id === groupId);
+    if (!group || !group.trackNodeIds.includes(nodeId)) return;
+    // Carry the group's current hidden state over to the newly active track
+    const groupHidden = hiddenCompareModelIds.includes(group.primaryModelId);
+    const rest = hiddenCompareModelIds.filter((id) => !group.memberModelIds.includes(id));
+    hiddenCompareModelIds = groupHidden ? [...rest, ...group.memberModelIds] : rest;
+    compareActiveTrackByGroup = { ...compareActiveTrackByGroup, [groupId]: nodeId };
   }
   let runTargetIds = $state<string[]>([]);
   let showRecipe = $state(false);
@@ -1526,14 +1563,38 @@
     selectedEdgeId = slot?.direction === 'in' ? (slot.edgeId ?? null) : null;
   }
 
-  function handleSelectPerResidue(positionIndex: number, residueId: string) {
-    const tok = resolveResidueFocusToken(
-      positionIndex,
-      residueId,
-      peekPerResidue,
-      perResidueDisplayStructure,
-    );
+  function handleSelectPerResidue(
+    positionIndex: number,
+    residueId: string,
+    source?: { nodeId: string },
+  ) {
+    let tok: string | null;
+    let focusModelId: string | null = null;
+    if (source && isCompareMode && comparisonState) {
+      // Compare: resolve against the clicked branch's own track & structure, then target the
+      // model that draws it (its merge group's active track when merged)
+      const branch = comparisonState.branches.find((b) => b.nodeId === source.nodeId);
+      const branchStruct =
+        Object.values(outputsByNode[source.nodeId] ?? {}).find(
+          (a): a is StructureArtifact => a.kind === 'StructureArtifact',
+        ) ?? null;
+      tok = resolveResidueFocusToken(
+        positionIndex,
+        residueId,
+        branch?.residueTrack ?? null,
+        branchStruct,
+      );
+      focusModelId = resolveCompareDisplayModelId(comparisonState, source.nodeId);
+    } else {
+      tok = resolveResidueFocusToken(
+        positionIndex,
+        residueId,
+        peekPerResidue,
+        perResidueDisplayStructure,
+      );
+    }
     if (!tok) return;
+    viewerFocusModelId = focusModelId;
     if (studioOpen) {
       studioFocusToken = null;
       queueMicrotask(() => {
@@ -1779,10 +1840,20 @@
       }
     }
     if (hiddenCompareModelIds.length > 0) {
-      if (nextSelected.length < 2) {
+      const explicitCompareNode =
+        nextSelected.length === 1 && nextById.get(nextSelected[0])?.adapterId === 'structure-compare'
+          ? nextById.get(nextSelected[0])!
+          : null;
+      const compareIds = explicitCompareNode
+        ? reconciledNext.edges
+            .filter((e) => e.toNode === explicitCompareNode.id)
+            .map((e) => e.fromNode)
+            .filter((id, idx, arr) => nextById.has(id) && arr.indexOf(id) === idx)
+        : nextSelected;
+      if (compareIds.length < 2) {
         hiddenCompareModelIds = [];
       } else {
-        const selectedSet = new Set(nextSelected);
+        const selectedSet = new Set(compareIds);
         const pruned = hiddenCompareModelIds.filter((modelId) => {
           if (modelId === 'ref-designed') return true;
           if (modelId.startsWith('branch-')) {
@@ -1791,7 +1862,7 @@
           }
           return nextById.has(modelId) && selectedSet.has(modelId);
         });
-        const allBranchesHidden = nextSelected.every((nid) => pruned.includes(`branch-${nid}`));
+        const allBranchesHidden = compareIds.every((nid) => pruned.includes(`branch-${nid}`));
         hiddenCompareModelIds = allBranchesHidden ? [] : pruned;
       }
     }
@@ -3570,21 +3641,24 @@
         : 'overlay'
       : compareLayout,
   );
-  let effectiveCompareColorMode = $derived<'by-model' | 'plddt'>(
-    activeCompareNode
-      ? String(activeCompareNode.params.colorMode ?? 'by-model') === 'plddt'
-        ? 'plddt'
-        : 'by-model'
-      : compareColorMode,
-  );
+  // Requested color mode (`null` = auto); `comparisonState.effectiveColorMode` is what is applied
+  let effectiveCompareColorMode = $derived.by((): CompareColorMode | null => {
+    if (!activeCompareNode) return compareColorMode;
+    const raw = String(activeCompareNode.params.colorMode ?? 'by-model');
+    return raw === 'plddt' || raw === 'track' ? raw : 'by-model';
+  });
   let effectiveCompareAlignKabsch = $derived<boolean>(
     activeCompareNode ? activeCompareNode.params.alignKabsch !== false : compareAlignKabsch,
+  );
+  let effectiveCompareMergeIdentical = $derived<boolean>(
+    activeCompareNode ? activeCompareNode.params.mergeIdentical !== false : compareMergeIdentical,
   );
 
   function setActiveCompareOption(patch: {
     layout?: 'overlay' | 'side-by-side';
-    colorMode?: 'by-model' | 'plddt';
+    colorMode?: CompareColorMode;
     alignKabsch?: boolean;
+    mergeIdentical?: boolean;
   }) {
     if (activeCompareNode) {
       updateNodeParams(activeCompareNode.id, {
@@ -3595,6 +3669,7 @@
       if (patch.layout !== undefined) compareLayout = patch.layout;
       if (patch.colorMode !== undefined) compareColorMode = patch.colorMode;
       if (patch.alignKabsch !== undefined) compareAlignKabsch = patch.alignKabsch;
+      if (patch.mergeIdentical !== undefined) compareMergeIdentical = patch.mergeIdentical;
     }
   }
 
@@ -3623,6 +3698,8 @@
       pairingMode: comparePairingMode,
       selectedCandidateKey: compareSelectedCandidateKey,
       referenceNodeId: activeCompareRefNodeId ?? undefined,
+      mergeIdentical: effectiveCompareMergeIdentical,
+      activeTrackNodeIds: compareActiveTrackByGroup,
     });
   });
 
@@ -3662,10 +3739,12 @@
       : comparisonState.effectiveLayout === 'side-by-side'
         ? 'Side-by-side'
         : 'Overlay (raw)';
+    const mergedTag =
+      comparisonState.mergedModelCount > 0 ? ` · ${comparisonState.mergedModelCount} merged` : '';
     if (comparisonState.pairwise) {
-      return `Compare ${comparisonState.branches.length} blocks · ${alignTag} · ${comparisonState.pairwise.badgeA}↔${comparisonState.pairwise.badgeB} RMSD ${comparisonState.pairwise.rmsd.toFixed(2)} Å`;
+      return `Compare ${comparisonState.branches.length} blocks · ${alignTag} · ${comparisonState.pairwise.badgeA}↔${comparisonState.pairwise.badgeB} RMSD ${comparisonState.pairwise.rmsd.toFixed(2)} Å${mergedTag}`;
     }
-    return `Compare ${comparisonState.branches.length} blocks · ${alignTag}`;
+    return `Compare ${comparisonState.branches.length} blocks · ${alignTag}${mergedTag}`;
   });
 
   // Reset row index when switching between different scorer branches
@@ -4683,7 +4762,7 @@
               <button
                 type="button"
                 class="seg-btn"
-                class:active={effectiveCompareColorMode === 'by-model'}
+                class:active={comparisonState.effectiveColorMode === 'by-model'}
                 onclick={() => setActiveCompareOption({ colorMode: 'by-model' })}
               >
                 By Model
@@ -4691,11 +4770,22 @@
               <button
                 type="button"
                 class="seg-btn"
-                class:active={effectiveCompareColorMode === 'plddt'}
+                class:active={comparisonState.effectiveColorMode === 'plddt'}
                 onclick={() => setActiveCompareOption({ colorMode: 'plddt' })}
               >
                 pLDDT
               </button>
+              {#if comparisonState.trackSemantics.length > 0}
+                <button
+                  type="button"
+                  class="seg-btn"
+                  class:active={comparisonState.effectiveColorMode === 'track'}
+                  title="Paint Dyna-1 / ΔΔG / LLR / GNINA per-residue tracks on a shared scale; other models are muted gray"
+                  onclick={() => setActiveCompareOption({ colorMode: 'track' })}
+                >
+                  Track
+                </button>
+              {/if}
             </div>
             {@const isSideBySide = comparisonState.effectiveLayout === 'side-by-side'}
             {@const sharedPreAligned = Boolean(comparisonState.sharedReferenceLabel) && !isSideBySide}
@@ -4718,6 +4808,20 @@
               />
               {sharedPreAligned ? 'Kabsch align (shared)' : 'Kabsch align'}
             </label>
+            {#if !isSideBySide && comparisonState.mergeableModelCount > 0}
+              <label
+                title="Show structures with identical coordinates (e.g. a Dyna-1 / ThermoMPNN painted copy and its parent backbone) as one cartoon instead of z-fighting duplicates"
+              >
+                <input
+                  type="checkbox"
+                  checked={effectiveCompareMergeIdentical}
+                  onchange={(e) => {
+                    setActiveCompareOption({ mergeIdentical: e.currentTarget.checked });
+                  }}
+                />
+                Merge identical
+              </label>
+            {/if}
             <label><input type="checkbox" bind:checked={illustrative} /> Illustrative</label>
             <label
               class:disabled-opt={isCanonicalViewerLayout || isSpinPausedForRun}
@@ -4940,6 +5044,7 @@
             highlightLayers={!isCompareMode && studioInputViewerActive ? studioPreview?.highlightLayers : undefined}
             hoveredToken={studioOpen ? studioHoveredToken : null}
             focusToken={studioOpen ? studioFocusToken : viewerFocusToken}
+            focusModelId={isCompareMode && !studioOpen ? viewerFocusModelId : null}
             emptyMessage={isCompareMode ? compareEmptyMessage : isMultiDesignAll3d ? undefined : viewerEmptyMessage}
             emptyActionLabel={!isCompareMode && !isMultiDesignAll3d && isPeekingSequenceSlot && !showSeqParentBackbone && contextStructure
               ? 'Preview parent backbone'
@@ -4954,6 +5059,10 @@
               ? toggleMultiDesignModelVisibility
               : toggleCompareModelVisibility}
             onSoloModel={isMultiDesignAll3d ? soloMultiDesignModel : soloCompareModel}
+            onSelectTrack={isCompareMode ? selectCompareTrack : undefined}
+            onToggleMergeIdentical={isCompareMode
+              ? () => setActiveCompareOption({ mergeIdentical: !effectiveCompareMergeIdentical })
+              : undefined}
             onNotify={(msg, tone) => showToastMessage(msg, tone === 'error' ? 4000 : 2400, tone ?? 'ok')}
           />
         </div>
@@ -5219,6 +5328,8 @@
               onFocusSingle={(nodeId) => handleSelectNode(nodeId)}
               onRunUpToNode={(id) => runWorkflow(false, id)}
               onDownloadText={downloadText}
+              onSelectResidue={(nodeId, positionIndex, residueId) =>
+                handleSelectPerResidue(positionIndex, residueId, { nodeId })}
               onNotify={(msg, tone) => showToastMessage(msg, tone === 'error' ? 3600 : 2200, tone ?? 'ok')}
               onExitCompare={() => setSingleSelection(selectedNodeId)}
             />
