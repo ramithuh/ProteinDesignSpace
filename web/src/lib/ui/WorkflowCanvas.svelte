@@ -66,6 +66,11 @@
     onApplyPlannedGraph?: (next: WorkflowGraph, summary: string, isAiDraft?: boolean) => void;
     onDraftPreviewChange?: (draft: PlannedWorkflowResult | null) => void;
     onToast?: (message: string, tone?: 'ok' | 'error') => void;
+    runDisabled?: boolean;
+    runStepLabel?: string;
+    runTitle?: string;
+    onRun?: () => void;
+    onCancel?: () => void;
   }
 
   let {
@@ -95,6 +100,11 @@
     onApplyPlannedGraph = undefined,
     onDraftPreviewChange = undefined,
     onToast = undefined,
+    runDisabled = false,
+    runStepLabel = '▶ Run',
+    runTitle = 'Run workflow (R or ⌘↵ / Ctrl+Enter)',
+    onRun = undefined,
+    onCancel = undefined,
   }: Props = $props();
 
   let canvasHintDismissed = $state(false);
@@ -1192,7 +1202,7 @@
     />
   {/if}
 
-  <!-- Floating Top-Right: Utility controls (Wire legend & Clear) -->
+  <!-- Floating Top-Right: Canvas utilities (Wire legend & Clear) + Run / Cancel CTA -->
   <div class="canvas-tools canvas-overlay">
     <button
       bind:this={wireBtnEl}
@@ -1220,6 +1230,36 @@
     >
       {clearConfirmPending ? 'Clear? Confirm' : 'Clear'}
     </button>
+    {#if onRun}
+      <span class="c-tools-sep" aria-hidden="true"></span>
+      {#if isRunning && onCancel}
+        <button
+          type="button"
+          class="c-btn-cancel"
+          onclick={onCancel}
+          title="Cancel active run and preserve completed steps"
+        >
+          ■ Cancel
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="c-btn-run"
+        class:is-running={isRunning}
+        data-tour="run-btn"
+        disabled={runDisabled}
+        onclick={onRun}
+        title={runTitle}
+      >
+        {#if isRunning}
+          <span class="run-pulse"></span>
+          {runStepLabel}
+        {:else}
+          ▶ Run
+          <kbd class="run-kbd">R</kbd>
+        {/if}
+      </button>
+    {/if}
   </div>
 
   {#if wireLegendOpen}
@@ -1465,7 +1505,7 @@
     font-size: 11px;
     color: var(--text-muted);
     white-space: nowrap;
-    max-width: calc(100% - 130px);
+    max-width: calc(100% - 250px);
     overflow: hidden;
   }
   .canvas-tips kbd {
@@ -1816,6 +1856,99 @@
     color: var(--err-strong);
     background: var(--err-bg);
     font-weight: 600;
+  }
+  .c-tools-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--border-strong);
+    opacity: 0.7;
+    margin: 0 1px;
+    flex-shrink: 0;
+  }
+  .c-btn-cancel {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--err-bg);
+    color: var(--err-strong);
+    border: 1px solid var(--err-border);
+    padding: 5px 9px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    white-space: nowrap;
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+  }
+  .c-btn-cancel:hover {
+    background: var(--err-strong);
+    color: #fff;
+  }
+  .c-btn-run {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #2563eb;
+    color: #fff;
+    border: 1px solid #3b82f6;
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.28);
+  }
+  .c-btn-run:hover:not(:disabled) {
+    background: #1d4ed8;
+  }
+  .c-btn-run:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .c-btn-run.is-running:disabled {
+    opacity: 0.92;
+    background: #b45309;
+    border-color: #f59e0b;
+    box-shadow: 0 2px 8px rgba(180, 83, 9, 0.28);
+  }
+  .c-btn-run .run-kbd {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.85);
+    background: rgba(255, 255, 255, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 3px;
+    padding: 0 4px;
+    line-height: 1.4;
+  }
+  .c-btn-run .run-pulse {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #fde68a;
+    animation: c-run-dot-pulse 1.2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  @keyframes c-run-dot-pulse {
+    0%,
+    100% {
+      opacity: 0.45;
+      transform: scale(0.85);
+    }
+    50% {
+      opacity: 1;
+      transform: scale(1.15);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .c-btn-run .run-pulse {
+      animation: none;
+    }
   }
   .wire-popover {
     position: absolute;

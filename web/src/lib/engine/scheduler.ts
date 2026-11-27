@@ -821,6 +821,119 @@ export class ExecutionScheduler {
     set.add(cacheKey);
   }
 
+  private computeNodeInputKeyParts(
+    graph: WorkflowGraph,
+    node: WorkflowNode,
+    manifest: AdapterManifest,
+    outputsByNode: Record<string, Record<string, CanonicalArtifact>>,
+    nodeProvenanceById: Record<string, string>,
+  ): {
+    inputs: Record<string, CanonicalArtifact>;
+    multiInputs: Record<string, CanonicalArtifact[]>;
+    cacheKey: string;
+    effectiveProv: string;
+    missingRequiredUpstream: boolean;
+  } {
+    const inputs: Record<string, CanonicalArtifact> = {};
+    const multiInputs: Record<string, CanonicalArtifact[]> = {};
+    const inputIds: Record<string, string | string[]> = {};
+    const upstreamProv: Record<string, string | string[]> = {};
+    let missingRequiredUpstream = false;
+
+    for (const edge of graph.edges) {
+      if (edge.toNode !== node.id) continue;
+      const up = outputsByNode[edge.fromNode]?.[edge.fromPort];
+      if (!up) {
+        missingRequiredUpstream = true;
+        continue;
+      }
+      const upProv = nodeProvenanceById[edge.fromNode] ?? 'local';
+      const isMulti = Boolean(manifest.inputs[edge.toPort]?.multiple);
+      if (!isMulti || !inputs[edge.toPort]) {
+        inputs[edge.toPort] = up;
+      }
+      if (isMulti) {
+        const prevList = multiInputs[edge.toPort];
+        multiInputs[edge.toPort] = prevList ? [...prevList, up] : [up];
+        const prev = inputIds[edge.toPort];
+        inputIds[edge.toPort] = Array.isArray(prev) ? [...prev, up.id] : [up.id];
+        const prevP = upstreamProv[edge.toPort];
+        upstreamProv[edge.toPort] = Array.isArray(prevP) ? [...prevP, upProv] : [upProv];
+      } else {
+        inputIds[edge.toPort] = up.id;
+        upstreamProv[edge.toPort] = upProv;
+      }
+    }
+
+    const ownProv = this.executionProvenanceResolver?.(node) ?? 'local';
+    const hasNonLocalUpstream = Object.values(upstreamProv).some((p) =>
+      Array.isArray(p) ? p.some((x) => x !== 'local') : p !== 'local',
+    );
+    const effectiveProv =
+      ownProv !== 'local' || hasNonLocalUpstream
+        ? hasNonLocalUpstream
+          ? `${ownProv}|${fnv1a(canonicalJsonStringify(upstreamProv))}`
+          : ownProv
+        : 'local';
+
+    const cacheKey = fnv1a(
+      canonicalJsonStringify({
+        adapter: node.adapterId,
+        params: normalizeParamsForComputation(node.adapterId, node.params, this.pluginRegistry),
+        inputIds,
+        ...(effectiveProv !== 'local' ? { backend: effectiveProv } : {}),
+      }),
+    );
+
+    return { inputs, multiInputs, cacheKey, effectiveProv, missingRequiredUpstream };
+  }
+
+  /**
+   * Seed in-memory LRU memo from externally hydrated session outputs (e.g. loaded Gist session)
+   * without touching browser storage or launching GPU workers.
+   */
+  seedMemoFromOutputs(
+    graph: WorkflowGraph,
+    outputsByNode: Record<string, Record<string, CanonicalArtifact>>,
+  ): number {
+    let order: WorkflowNode[];
+    try {
+      order = topoSort(graph);
+    } catch {
+      return 0;
+    }
+    const seededOutputs: Record<string, Record<string, CanonicalArtifact>> = {};
+    const nodeProvenanceById: Record<string, string> = {};
+    let seededCount = 0;
+
+    for (const node of order) {
+      const manifest = resolveManifestForAdapter(node.adapterId, this.pluginRegistry);
+      const rawOuts = outputsByNode[node.id];
+      if (!manifest || !rawOuts) continue;
+
+      const { cacheKey, effectiveProv, missingRequiredUpstream } = this.computeNodeInputKeyParts(
+        graph,
+        node,
+        manifest,
+        seededOutputs,
+        nodeProvenanceById,
+      );
+      if (missingRequiredUpstream) continue;
+
+      try {
+        const validated = validateAdapterOutputs(node, rawOuts, this.pluginRegistry);
+        nodeProvenanceById[node.id] = effectiveProv;
+        seededOutputs[node.id] = validated;
+        this.setMemoEntry(cacheKey, validated);
+        this.recordNodeMemoKey(node.id, cacheKey);
+        seededCount++;
+      } catch {
+        /* skip incomplete or non-conforming hydrated outputs */
+      }
+    }
+    return seededCount;
+  }
+
   private deleteMemoKey(key: string): void {
     if (!this.memo.has(key)) return;
     const prevBytes = this.memoEntryBytes.get(key) ?? 0;
@@ -1650,55 +1763,15 @@ export class ExecutionScheduler {
         };
         this.emitRunState();
 
-        // Gather upstream inputs (preserving all upstream IDs on multi-input fan-in ports for cache keys)
-        const inputs: Record<string, CanonicalArtifact> = {};
-        const multiInputs: Record<string, CanonicalArtifact[]> = {};
-        const inputIds: Record<string, string | string[]> = {};
-        const upstreamProv: Record<string, string | string[]> = {};
-        for (const edge of graph.edges) {
-          if (edge.toNode !== node.id) continue;
-          const up = outputsByNode[edge.fromNode]?.[edge.fromPort];
-          if (up) {
-            const upProv = nodeProvenanceById[edge.fromNode] ?? 'local';
-            const isMulti = Boolean(manifest.inputs[edge.toPort]?.multiple);
-            if (!isMulti || !inputs[edge.toPort]) {
-              inputs[edge.toPort] = up;
-            }
-            if (isMulti) {
-              const prevList = multiInputs[edge.toPort];
-              multiInputs[edge.toPort] = prevList ? [...prevList, up] : [up];
-              const prev = inputIds[edge.toPort];
-              inputIds[edge.toPort] = Array.isArray(prev) ? [...prev, up.id] : [up.id];
-              const prevP = upstreamProv[edge.toPort];
-              upstreamProv[edge.toPort] = Array.isArray(prevP) ? [...prevP, upProv] : [upProv];
-            } else {
-              inputIds[edge.toPort] = up.id;
-              upstreamProv[edge.toPort] = upProv;
-            }
-          }
-        }
-
-        // Content-addressed memoization key (canonicalized key order + propagated compute provenance boundary, M6)
-        const ownProv = this.executionProvenanceResolver?.(node) ?? 'local';
-        const hasNonLocalUpstream = Object.values(upstreamProv).some((p) =>
-          Array.isArray(p) ? p.some((x) => x !== 'local') : p !== 'local',
+        // Gather upstream inputs & compute content-addressed memoization key (M6 provenance boundary)
+        const { inputs, multiInputs, cacheKey, effectiveProv } = this.computeNodeInputKeyParts(
+          graph,
+          node,
+          manifest,
+          outputsByNode,
+          nodeProvenanceById,
         );
-        const effectiveProv =
-          ownProv !== 'local' || hasNonLocalUpstream
-            ? hasNonLocalUpstream
-              ? `${ownProv}|${fnv1a(canonicalJsonStringify(upstreamProv))}`
-              : ownProv
-            : 'local';
         nodeProvenanceById[node.id] = effectiveProv;
-
-        const cacheKey = fnv1a(
-          canonicalJsonStringify({
-            adapter: node.adapterId,
-            params: normalizeParamsForComputation(node.adapterId, node.params, this.pluginRegistry),
-            inputIds,
-            ...(effectiveProv !== 'local' ? { backend: effectiveProv } : {}),
-          }),
-        );
 
         let nodeOutputs: Record<string, CanonicalArtifact>;
         let elapsedMs = 0;

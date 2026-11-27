@@ -189,11 +189,15 @@ describe('Overnight Pass C — #88: Workbench shell & guard polish', () => {
     expect(errors.length).toBeGreaterThan(0);
 
     const pageSrc = readWebFile('src/routes/+page.svelte');
+    const canvasSrc = readWebFile('src/lib/ui/WorkflowCanvas.svelte');
     expect(pageSrc).toContain("let bioErrorIssues = $derived(bioIssues.filter((i) => i.severity === 'error'));");
     expect(pageSrc).toContain('let hasBioErrors = $derived(bioErrorIssues.length > 0);');
-    // Run CTA disabled on hasBioErrors with informative tooltip
+    // Run CTA disabled on hasBioErrors with informative tooltip (rendered in WorkflowCanvas)
     expect(pageSrc).toMatch(
-      /data-tour="run-btn"[\s\S]*?disabled=\{isRunning \|\| validationErrors\.length > 0 \|\| hasInvalidNumeric \|\| hasBioErrors\}[\s\S]*?Biological compatibility error:/,
+      /runDisabled=\{isRunning \|\| validationErrors\.length > 0 \|\| hasInvalidNumeric \|\| hasBioErrors\}[\s\S]*?Biological compatibility error:/,
+    );
+    expect(canvasSrc).toMatch(
+      /data-tour="run-btn"[\s\S]*?disabled=\{runDisabled\}/,
     );
     // runWorkflow itself also guards against severity === 'error' bio issues on targetGraph
     expect(pageSrc).toMatch(

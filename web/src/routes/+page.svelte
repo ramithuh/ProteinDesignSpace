@@ -30,6 +30,13 @@
     serializeWorkflowJson,
   } from '$lib/engine/share';
   import {
+    formatGistShareParam,
+    loadGistSession,
+    serializeGistSession,
+    type LoadedGistSession,
+    type SerializedGistSession,
+  } from '$lib/engine/gist-session';
+  import {
     clearAllModelCaches,
     createIndexedDbCheckpointStore,
     getCacheStats,
@@ -64,6 +71,7 @@
   import ComparePeekPanel, { type CompareBranchMeta } from '$lib/ui/ComparePeekPanel.svelte';
   import CreditsModal from '$lib/ui/CreditsModal.svelte';
   import FeedbackPopover from '$lib/ui/FeedbackPopover.svelte';
+  import GistSessionPopover from '$lib/ui/GistSessionPopover.svelte';
   import type { FeedbackCategory } from '$lib/og/feedback-api';
   import ExamplesGalleryModal from '$lib/ui/ExamplesGalleryModal.svelte';
   import PaperWalkthroughOverlay from '$lib/ui/PaperWalkthroughOverlay.svelte';
@@ -295,6 +303,7 @@
   function handleHeaderComputeClick(target: 'local' | 'remote') {
     moreMenuOpen = false;
     shareMenuOpen = false;
+    gistMenuOpen = false;
     closeFeedbackPopover();
     const current: 'local' | 'remote' = computeBackend.mode === 'local' ? 'local' : 'remote';
     const switching = target !== current;
@@ -352,6 +361,9 @@
   let sysPopAlignLeft = $state(false);
   let moreMenuOpen = $state(false);
   let shareMenuOpen = $state(false);
+  let gistMenuOpen = $state(false);
+  let gistSnapshot = $state<SerializedGistSession | null>(null);
+  let gistSnapshotError = $state<string | null>(null);
   let feedbackMenuOpen = $state(false);
   let feedbackCategory = $state<FeedbackCategory>('idea');
   let feedbackMessage = $state('');
@@ -370,6 +382,7 @@
   let sysWrapEl: HTMLDivElement | null = $state(null);
   let moreWrapEl: HTMLDivElement | null = $state(null);
   let shareWrapEl: HTMLDivElement | null = $state(null);
+  let gistWrapEl: HTMLDivElement | null = $state(null);
   let feedbackWrapEl: HTMLDivElement | null = $state(null);
   let brandBtnEl: HTMLButtonElement | null = $state(null);
   let cacheClearBtnEl: HTMLButtonElement | null = $state(null);
@@ -777,8 +790,9 @@
   function clearStaleUrlHash() {
     if (typeof window === 'undefined') return;
     const hasSharedQuery = isSharedWorkflowHash(window.location.search);
-    if (window.location.hash || hasSharedQuery) {
-      const nextSearch = hasSharedQuery ? '' : window.location.search;
+    const hasGistQuery = new URLSearchParams(window.location.search).has('gist');
+    if (window.location.hash || hasSharedQuery || hasGistQuery) {
+      const nextSearch = hasSharedQuery || hasGistQuery ? '' : window.location.search;
       window.history.replaceState(null, '', `${window.location.pathname}${nextSearch}`);
     }
   }
@@ -841,6 +855,9 @@
     sysMenuOpen = false;
     moreMenuOpen = false;
     shareMenuOpen = false;
+    gistMenuOpen = false;
+    gistSnapshot = null;
+    gistSnapshotError = null;
     closeFeedbackPopover();
     sharePopoverState = null;
     showRecipe = false;
@@ -889,6 +906,9 @@
     }
     if (shareMenuOpen && !shareWrapEl?.contains(target)) {
       shareMenuOpen = false;
+    }
+    if (gistMenuOpen && !gistWrapEl?.contains(target)) {
+      gistMenuOpen = false;
     }
     if (feedbackMenuOpen && !feedbackWrapEl?.contains(target)) {
       closeFeedbackPopover();
@@ -958,11 +978,12 @@
         studioActiveBrush = null;
         return;
       }
-      if (sysMenuOpen || moreMenuOpen || shareMenuOpen || feedbackMenuOpen) {
+      if (sysMenuOpen || moreMenuOpen || shareMenuOpen || gistMenuOpen || feedbackMenuOpen) {
         ev.preventDefault();
         sysMenuOpen = false;
         moreMenuOpen = false;
         shareMenuOpen = false;
+        gistMenuOpen = false;
         closeFeedbackPopover();
         cancelCacheClearConfirm();
         return;
@@ -1102,6 +1123,139 @@
     }
   }
 
+  function focusTerminalOutputNode(outsMap: Record<string, Record<string, CanonicalArtifact>>) {
+    const lastCompare = [...graph.nodes]
+      .reverse()
+      .find((n) => n.adapterId === 'structure-compare' && outsMap[n.id]);
+    const scorersWithData = graph.nodes.filter(
+      (n) => n.adapterId === 'designability-scorer' && outsMap[n.id],
+    );
+    const foldsWithData = graph.nodes.filter(
+      (n) => n.adapterId === 'localfold-af2' && outsMap[n.id],
+    );
+    const lastScorer = [...graph.nodes]
+      .reverse()
+      .find((n) => n.adapterId === 'designability-scorer' && outsMap[n.id]);
+    const lastFold = [...graph.nodes]
+      .reverse()
+      .find((n) => n.adapterId === 'localfold-af2' && outsMap[n.id]);
+    const last3DGenerator = [...graph.nodes]
+      .reverse()
+      .find(
+        (n) =>
+          (n.adapterId === 'genie3' || n.adapterId === 'rfd4-proteina') &&
+          outsMap[n.id]?.structure,
+      );
+    const lastWithOutput = [...graph.nodes]
+      .reverse()
+      .find((n) => outsMap[n.id] && Object.keys(outsMap[n.id]).length > 0);
+    if (lastCompare) {
+      setSingleSelection(lastCompare.id);
+      selectedPeekSlotId = null;
+      selectedEdgeId = null;
+    } else if (scorersWithData.length >= 2) {
+      // Forked benchmark (e.g. AF2 vs RoseTTAFold3): auto-open multi-branch 3D comparison!
+      handleSelectNodes(scorersWithData.slice(0, COMPARE_PALETTE.length).map((n) => n.id));
+    } else if (foldsWithData.length >= 2 && scorersWithData.length === 0) {
+      // Parallel pure-folding benchmark (e.g. AF3 vs AF2 vs ESMFold2): auto-open 3D Compare!
+      handleSelectNodes(foldsWithData.slice(0, COMPARE_PALETTE.length).map((n) => n.id));
+    } else if (lastScorer) {
+      setSingleSelection(lastScorer.id);
+      selectedPeekSlotId = null;
+      selectedEdgeId = null;
+    } else if (lastFold) {
+      setSingleSelection(lastFold.id);
+      selectedPeekSlotId = null;
+      selectedEdgeId = null;
+    } else if (last3DGenerator) {
+      setSingleSelection(last3DGenerator.id);
+      selectedPeekSlotId = null;
+      selectedEdgeId = null;
+    } else if (lastWithOutput) {
+      setSingleSelection(lastWithOutput.id);
+      selectedPeekSlotId = null;
+      selectedEdgeId = null;
+    }
+  }
+
+  function hydrateGistSession(loaded: LoadedGistSession, opts?: { preserveUrl?: boolean }) {
+    loadFullWorkflowGraph(loaded.session.graph, {
+      clearOutputs: true,
+      preserveHash: true,
+    });
+    if (!opts?.preserveUrl && typeof window !== 'undefined') {
+      const param = formatGistShareParam(loaded.ref);
+      window.history.replaceState(null, '', `${window.location.pathname}?gist=${param}`);
+    }
+    const nextOutputs: Record<string, Record<string, CanonicalArtifact>> = {};
+    const nextStates: Record<string, NodeProgressEvent> = {};
+    for (const node of graph.nodes) {
+      const outs = loaded.session.outputs[node.id];
+      if (!outs || Object.keys(outs).length === 0) continue;
+      nextOutputs[node.id] = outs;
+      nextStates[node.id] = {
+        nodeId: node.id,
+        status: 'cached',
+        progress: 1,
+        detail: 'Loaded from Gist',
+      };
+      if (node.adapterId === 'pdb-input' || node.adapterId === 'sequence-input') {
+        const sig = computeInputPreviewSig(node);
+        if (sig) previewedInputSigs.set(node.id, sig);
+      }
+    }
+    outputsByNode = nextOutputs;
+    nodeStates = nextStates;
+    scheduler.seedMemoFromOutputs($state.snapshot(graph) as WorkflowGraph, nextOutputs);
+    if (Object.keys(nextOutputs).length > 0) {
+      focusTerminalOutputNode(nextOutputs);
+      const hasComputeOutputs = graph.nodes.some(
+        (n) =>
+          n.adapterId !== 'pdb-input' &&
+          n.adapterId !== 'sequence-input' &&
+          Boolean(nextOutputs[n.id]),
+      );
+      if (hasComputeOutputs || selectedNodeIds.length >= 2) {
+        rightPanelTab = 'peek';
+      }
+    }
+    canvasFitViewTrigger += 1;
+  }
+
+  async function applyGistQueryParam(refInput: string, isInitialMount = false): Promise<boolean> {
+    if (!isInitialMount && isRunning) {
+      const msg = 'Cannot load Gist session while a run is active — cancel the run first.';
+      hashError = msg;
+      showToastMessage(msg, 4200, 'error');
+      throw new Error(msg);
+    }
+    if (isInitialMount) {
+      showToastMessage('Loading Gist session…', 15000, 'ok');
+    }
+    try {
+      const loaded = await loadGistSession(refInput);
+      hashError = null;
+      showOnboarding = false;
+      hydrateGistSession(loaded, { preserveUrl: isInitialMount });
+      const resultCount = Object.keys(loaded.session.outputs).length;
+      showToastMessage(
+        `Loaded Gist session (${resultCount} cached result${resultCount === 1 ? '' : 's'})`,
+        3200,
+        'ok',
+      );
+      return true;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'failed to fetch Gist';
+      if (isInitialMount) {
+        const msg = `Could not load Gist session: ${detail}`;
+        hashError = msg;
+        showToastMessage(msg, 4800, 'error');
+        return false;
+      }
+      throw err instanceof Error ? err : new Error(detail);
+    }
+  }
+
   async function applySharedHash(
     rawHash: string,
     isInitialMount = false,
@@ -1235,11 +1389,21 @@
     const { webMcpRegistered } = attachProgrammaticApi(scheduler, handleProgress);
     webMcpReady = webMcpRegistered;
 
-    // Load shared workflow from URL query (?p=... / ?g=...) or legacy hash (#p=... / #g=...)
+    // Load shared Gist session (?gist=...) or workflow query/hash (?p=... / ?g=... / ?flow=... / #p=... / #g=...)
+    const initialGistRef = new URLSearchParams(window.location.search).get('gist')?.trim() ?? '';
     const initialSharedSource = isSharedWorkflowHash(window.location.search)
       ? window.location.search
       : window.location.hash;
-    const { loadedFromHash, attemptedSharedHash } = await applySharedHash(initialSharedSource, true);
+    let loadedFromHash = false;
+    let attemptedSharedHash = false;
+    if (initialGistRef) {
+      attemptedSharedHash = true;
+      loadedFromHash = await applyGistQueryParam(initialGistRef, true);
+    } else {
+      const res = await applySharedHash(initialSharedSource, true);
+      loadedFromHash = res.loadedFromHash;
+      attemptedSharedHash = res.attemptedSharedHash;
+    }
 
     // Returning visitors without a shared link land on a clean blank canvas;
     // first-time visitors see the starter workflow + quick tour.
@@ -2396,54 +2560,7 @@
         selectedEdgeId = null;
       } else {
         // Auto-focus the terminal output block (3D Compare -> multi-scorer -> multi-fold -> scorer -> fold -> generator -> last executed node)
-        const lastCompare = [...graph.nodes]
-          .reverse()
-          .find((n) => n.adapterId === 'structure-compare' && outputsByNode[n.id]);
-        const scorersWithData = graph.nodes.filter(
-          (n) => n.adapterId === 'designability-scorer' && outputsByNode[n.id],
-        );
-        const foldsWithData = graph.nodes.filter(
-          (n) => n.adapterId === 'localfold-af2' && outputsByNode[n.id],
-        );
-        const lastScorer = [...graph.nodes].reverse().find((n) => n.adapterId === 'designability-scorer');
-        const lastFold = [...graph.nodes].reverse().find((n) => n.adapterId === 'localfold-af2');
-        const last3DGenerator = [...graph.nodes]
-          .reverse()
-          .find(
-            (n) =>
-              (n.adapterId === 'genie3' || n.adapterId === 'rfd4-proteina') &&
-              outputsByNode[n.id]?.structure,
-          );
-        const lastWithOutput = [...graph.nodes]
-          .reverse()
-          .find((n) => outputsByNode[n.id] && Object.keys(outputsByNode[n.id]).length > 0);
-        if (lastCompare) {
-          setSingleSelection(lastCompare.id);
-          selectedPeekSlotId = null;
-          selectedEdgeId = null;
-        } else if (scorersWithData.length >= 2) {
-          // Forked benchmark (e.g. AF2 vs RoseTTAFold3): auto-open multi-branch 3D comparison!
-          handleSelectNodes(scorersWithData.slice(0, COMPARE_PALETTE.length).map((n) => n.id));
-        } else if (foldsWithData.length >= 2 && scorersWithData.length === 0) {
-          // Parallel pure-folding benchmark (e.g. AF3 vs AF2 vs ESMFold2): auto-open 3D Compare!
-          handleSelectNodes(foldsWithData.slice(0, COMPARE_PALETTE.length).map((n) => n.id));
-        } else if (lastScorer) {
-          setSingleSelection(lastScorer.id);
-          selectedPeekSlotId = null;
-          selectedEdgeId = null;
-        } else if (lastFold) {
-          setSingleSelection(lastFold.id);
-          selectedPeekSlotId = null;
-          selectedEdgeId = null;
-        } else if (last3DGenerator) {
-          setSingleSelection(last3DGenerator.id);
-          selectedPeekSlotId = null;
-          selectedEdgeId = null;
-        } else if (lastWithOutput) {
-          setSingleSelection(lastWithOutput.id);
-          selectedPeekSlotId = null;
-          selectedEdgeId = null;
-        }
+        focusTerminalOutputNode(outputsByNode);
       }
       rightPanelTab = 'peek';
       if (activePaperInsight && !upToNodeId) {
@@ -2525,9 +2642,34 @@
     }
   }
 
+  function openGistPopover() {
+    sysMenuOpen = false;
+    moreMenuOpen = false;
+    shareMenuOpen = false;
+    closeFeedbackPopover();
+    if (gistMenuOpen) {
+      gistMenuOpen = false;
+      return;
+    }
+    gistSnapshot = null;
+    gistSnapshotError = null;
+    try {
+      const plainGraph = $state.snapshot(graph) as WorkflowGraph;
+      const plainOutputs = $state.snapshot(outputsByNode) as Record<
+        string,
+        Record<string, CanonicalArtifact>
+      >;
+      gistSnapshot = serializeGistSession(plainGraph, plainOutputs);
+    } catch (err) {
+      gistSnapshotError = err instanceof Error ? err.message : String(err);
+    }
+    gistMenuOpen = true;
+  }
+
   async function openSharePopover() {
     sysMenuOpen = false;
     moreMenuOpen = false;
+    gistMenuOpen = false;
     closeFeedbackPopover();
     if (shareMenuOpen) {
       shareMenuOpen = false;
@@ -2603,6 +2745,7 @@
     sysMenuOpen = false;
     moreMenuOpen = false;
     shareMenuOpen = false;
+    gistMenuOpen = false;
     if (opts?.category) {
       feedbackCategory = opts.category;
       if (opts.includeError !== undefined) {
@@ -3809,6 +3952,7 @@
         sysMenuOpen = false;
         moreMenuOpen = false;
         shareMenuOpen = false;
+        gistMenuOpen = false;
         closeFeedbackPopover();
         showExamplesGallery = true;
       }}
@@ -4151,6 +4295,37 @@
       {/if}
     </div>
 
+    <!-- Save / Load Results via GitHub Secret Gist -->
+    <div class="pop-wrap" bind:this={gistWrapEl}>
+      <button
+        type="button"
+        class="hdr-save-btn"
+        class:active={gistMenuOpen}
+        aria-expanded={gistMenuOpen}
+        aria-label="Save or load results via GitHub Gist"
+        title="Save or load workflow results via zero-auth GitHub Secret Gists"
+        onclick={openGistPopover}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+          <polyline points="17 21 17 13 7 13 7 21" />
+          <polyline points="7 3 7 8 15 8" />
+        </svg>
+        <span class="hdr-save-label">Save to Gist</span>
+      </button>
+
+      {#if gistMenuOpen}
+        <GistSessionPopover
+          snapshot={gistSnapshot}
+          snapshotError={gistSnapshotError}
+          {isRunning}
+          onLoadGist={(refInput) => applyGistQueryParam(refInput, false).then(() => undefined)}
+          onNotify={(msg, tone) => showToastMessage(msg, 3000, tone ?? 'ok')}
+          onClose={() => (gistMenuOpen = false)}
+        />
+      {/if}
+    </div>
+
     <!-- Share Protocol Popover -->
     <div class="pop-wrap" bind:this={shareWrapEl}>
       <button
@@ -4227,71 +4402,6 @@
       {/if}
     </div>
 
-    <!-- Feedback Popover (Cloudflare KV backed) -->
-    <div class="pop-wrap" bind:this={feedbackWrapEl}>
-      <button
-        type="button"
-        class="hdr-feedback-btn"
-        class:active={feedbackMenuOpen}
-        aria-expanded={feedbackMenuOpen}
-        aria-label="Send feedback"
-        title="Send feedback, model requests, or bug notes"
-        onclick={() => openFeedbackPopover()}
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-        </svg>
-        <span class="hdr-feedback-label">Feedback</span>
-      </button>
-
-      {#if feedbackMenuOpen}
-        <FeedbackPopover
-          category={feedbackCategory}
-          message={feedbackMessage}
-          contact={feedbackContact}
-          includeContext={feedbackIncludeContext}
-          includeWorkflowUrl={feedbackIncludeWorkflowUrl}
-          includeErrorSnippet={feedbackIncludeErrorSnippet}
-          blocksSummary={feedbackBlocksSummary}
-          presetOrGraphId={activePaperInsight?.id || activePreset?.id || graph.id || 'custom'}
-          webgpuSummary={webgpuDetail}
-          computeMode={computeBackend.mode === 'local' ? 'local' : 'remote'}
-          {theme}
-          errorText={runError}
-          getShareableWorkflowUrl={graph.nodes.length > 0 ? getFeedbackWorkflowUrl : undefined}
-          buildGitHubIssueUrl={buildFeedbackGitHubUrl}
-          onCategoryChange={(c) => (feedbackCategory = c)}
-          onMessageChange={(m) => (feedbackMessage = m)}
-          onContactChange={(c) => (feedbackContact = c)}
-          onIncludeContextChange={(v) => (feedbackIncludeContext = v)}
-          onIncludeWorkflowUrlChange={(v) => (feedbackIncludeWorkflowUrl = v)}
-          onIncludeErrorSnippetChange={(v) => (feedbackIncludeErrorSnippet = v)}
-          onSubmitted={() => {
-            feedbackSubmittedPendingReset = true;
-          }}
-          onClose={closeFeedbackPopover}
-        />
-      {/if}
-    </div>
-
-    <!-- GitHub Repository Link -->
-    <a
-      class="hdr-gh-btn"
-      href="https://github.com/ramithuh/ProteinDesignSpace/blob/main/ADDING_A_METHOD.md"
-      target="_blank"
-      rel="noopener noreferrer"
-      title="Add a new method to denovo.run (guide & coding-agent prompt)"
-      aria-label="Add a new method to denovo.run (guide on GitHub)"
-    >
-      <span class="hdr-gh-label">Add a method?</span>
-      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-        <path
-          fill-rule="evenodd"
-          d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"
-        />
-      </svg>
-    </a>
-
     <!-- Layout Split Toggle (Horizontal Side-by-Side vs Vertical Stacked) -->
     <button
       type="button"
@@ -4347,6 +4457,7 @@
         onclick={() => {
           sysMenuOpen = false;
           shareMenuOpen = false;
+          gistMenuOpen = false;
           closeFeedbackPopover();
           moreMenuOpen = !moreMenuOpen;
         }}
@@ -4452,40 +4563,70 @@
       />
     </div>
 
-    <!-- Cancel CTA while any canvas or API run is active -->
-    {#if isRunning}
+    <!-- GitHub Repository Link -->
+    <a
+      class="hdr-gh-btn"
+      href="https://github.com/ramithuh/ProteinDesignSpace/blob/main/ADDING_A_METHOD.md"
+      target="_blank"
+      rel="noopener noreferrer"
+      title="Add a new method to denovo.run (guide & coding-agent prompt)"
+      aria-label="Add a new method to denovo.run (guide on GitHub)"
+    >
+      <span class="hdr-gh-label">Add a method?</span>
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+        <path
+          fill-rule="evenodd"
+          d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"
+        />
+      </svg>
+    </a>
+
+    <!-- Feedback Popover (Cloudflare KV backed) -->
+    <div class="pop-wrap" bind:this={feedbackWrapEl}>
       <button
         type="button"
-        class="btn-cancel"
-        onclick={handleCancelRun}
-        title="Cancel active run and preserve completed steps"
+        class="hdr-feedback-btn"
+        class:active={feedbackMenuOpen}
+        aria-expanded={feedbackMenuOpen}
+        aria-label="Send feedback"
+        title="Send feedback, model requests, or bug notes"
+        onclick={() => openFeedbackPopover()}
       >
-        ■ Cancel
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+        <span class="hdr-feedback-label">Feedback</span>
       </button>
-    {/if}
 
-    <!-- Primary Run CTA -->
-    <button
-      type="button"
-      class="btn-primary"
-      class:is-running={isRunning}
-      data-tour="run-btn"
-      disabled={isRunning || validationErrors.length > 0 || hasInvalidNumeric || hasBioErrors}
-      onclick={() => runWorkflow(false)}
-      title={hasInvalidNumeric
-        ? 'Fix invalid numeric parameter(s) before running'
-        : hasBioErrors
-          ? `Biological compatibility error: ${bioErrorIssues[0].message}`
-          : 'Run workflow (R or ⌘↵ / Ctrl+Enter)'}
-    >
-      {#if isRunning}
-        <span class="run-pulse"></span>
-        {runStepLabel}
-      {:else}
-        ▶ Run
-        <kbd class="run-kbd">R</kbd>
+      {#if feedbackMenuOpen}
+        <FeedbackPopover
+          category={feedbackCategory}
+          message={feedbackMessage}
+          contact={feedbackContact}
+          includeContext={feedbackIncludeContext}
+          includeWorkflowUrl={feedbackIncludeWorkflowUrl}
+          includeErrorSnippet={feedbackIncludeErrorSnippet}
+          blocksSummary={feedbackBlocksSummary}
+          presetOrGraphId={activePaperInsight?.id || activePreset?.id || graph.id || 'custom'}
+          webgpuSummary={webgpuDetail}
+          computeMode={computeBackend.mode === 'local' ? 'local' : 'remote'}
+          {theme}
+          errorText={runError}
+          getShareableWorkflowUrl={graph.nodes.length > 0 ? getFeedbackWorkflowUrl : undefined}
+          buildGitHubIssueUrl={buildFeedbackGitHubUrl}
+          onCategoryChange={(c) => (feedbackCategory = c)}
+          onMessageChange={(m) => (feedbackMessage = m)}
+          onContactChange={(c) => (feedbackContact = c)}
+          onIncludeContextChange={(v) => (feedbackIncludeContext = v)}
+          onIncludeWorkflowUrlChange={(v) => (feedbackIncludeWorkflowUrl = v)}
+          onIncludeErrorSnippetChange={(v) => (feedbackIncludeErrorSnippet = v)}
+          onSubmitted={() => {
+            feedbackSubmittedPendingReset = true;
+          }}
+          onClose={closeFeedbackPopover}
+        />
       {/if}
-    </button>
+    </div>
   </div>
 </header>
 
@@ -4533,6 +4674,15 @@
           onNodeDoubleClick={openStudioForNode}
           onOpenStudio={openStudioForNode}
           onOpenTour={() => (showOnboarding = true)}
+          runDisabled={isRunning || validationErrors.length > 0 || hasInvalidNumeric || hasBioErrors}
+          {runStepLabel}
+          runTitle={hasInvalidNumeric
+            ? 'Fix invalid numeric parameter(s) before running'
+            : hasBioErrors
+              ? `Biological compatibility error: ${bioErrorIssues[0].message}`
+              : 'Run workflow (R or ⌘↵ / Ctrl+Enter)'}
+          onRun={() => runWorkflow(false)}
+          onCancel={handleCancelRun}
         />
       </SvelteFlowProvider>
 
@@ -5698,7 +5848,8 @@
     border-color: var(--accent);
   }
 
-  .hdr-share-btn {
+  .hdr-share-btn,
+  .hdr-save-btn {
     background: var(--bg-surface);
     color: var(--text-secondary);
     border: 1px solid var(--border-strong);
@@ -5714,7 +5865,9 @@
     white-space: nowrap;
   }
   .hdr-share-btn:hover,
-  .hdr-share-btn.active {
+  .hdr-share-btn.active,
+  .hdr-save-btn:hover,
+  .hdr-save-btn.active {
     background: var(--bg-surface-hover);
     color: var(--text-primary);
     border-color: var(--accent);
@@ -5783,10 +5936,12 @@
     }
   }
   @media (max-width: 1080px) {
-    .hdr-share-label {
+    .hdr-share-label,
+    .hdr-save-label {
       display: none;
     }
-    .hdr-share-btn {
+    .hdr-share-btn,
+    .hdr-save-btn {
       padding: 0;
       width: 30px;
       justify-content: center;
@@ -6183,86 +6338,6 @@
     height: 1px;
     background: var(--border-subtle);
     margin: 3px 4px;
-  }
-
-  .btn-cancel {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    background: var(--err-bg);
-    color: var(--err-strong);
-    border: 1px solid var(--err-border);
-    padding: 6px 10px;
-    border-radius: 6px;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .btn-cancel:hover {
-    background: var(--err-strong);
-    color: #fff;
-  }
-  .btn-primary {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    background: #2563eb;
-    color: #fff;
-    border: 1px solid #3b82f6;
-    padding: 6px 13px;
-    border-radius: 6px;
-    font-size: 12.5px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .run-kbd {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 9.5px;
-    font-weight: 600;
-    color: rgba(255, 255, 255, 0.85);
-    background: rgba(255, 255, 255, 0.16);
-    border: 1px solid rgba(255, 255, 255, 0.25);
-    border-radius: 3px;
-    padding: 0 4px;
-    line-height: 1.4;
-  }
-  .btn-primary:hover:not(:disabled) {
-    background: #1d4ed8;
-  }
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .btn-primary.is-running:disabled {
-    opacity: 0.9;
-    background: #b45309;
-    border-color: #f59e0b;
-  }
-  .run-pulse {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #fde68a;
-    animation: run-dot-pulse 1.2s ease-in-out infinite;
-    flex-shrink: 0;
-  }
-  @keyframes run-dot-pulse {
-    0%,
-    100% {
-      opacity: 0.45;
-      transform: scale(0.85);
-    }
-    50% {
-      opacity: 1;
-      transform: scale(1.15);
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .run-pulse {
-      animation: none;
-    }
   }
 
   .workbench-split {
