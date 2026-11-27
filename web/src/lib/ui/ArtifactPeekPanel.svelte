@@ -53,6 +53,7 @@
   import MutationHeatmap, { type HeatmapHighlightSpec } from '$lib/viewer/MutationHeatmap.svelte';
   import PaePlot from '$lib/viewer/PaePlot.svelte';
   import ResidueTrackPlot from '$lib/viewer/ResidueTrackPlot.svelte';
+  import { deriveResidueTrackFromStructure } from '$lib/engine/compare-identity';
 
   interface Props {
     node: WorkflowNode | null;
@@ -595,6 +596,12 @@
       (item, i) => getDesignKeyFromStruct(item, i) === selectedDesignFilter,
     );
     return idx >= 0 ? structCollectionItems[idx] : structArt;
+  });
+
+  let displayedStructTrack = $derived.by(() => {
+    if (!displayedStruct) return null;
+    if (structMultiDesign && selectedDesignFilter === 'all') return null;
+    return deriveResidueTrackFromStructure(displayedStruct);
   });
 
   let activeRow = $derived.by(() => {
@@ -1949,6 +1956,10 @@
         {/each}
       {/if}
     </div>
+
+    {#if displayedStructTrack}
+      <ResidueTrackPlot track={displayedStructTrack} {onDownloadText} {onSelectResidue} />
+    {/if}
 
     <div class="seq-box">
       <div class="seq-head">

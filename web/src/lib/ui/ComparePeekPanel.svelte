@@ -297,6 +297,14 @@
       })
       .filter((x): x is { badge: string; label: string; warning: string } => x !== null),
   );
+  function formatPairedRowLabel(row: ComparisonState['pairedCandidates'][number]): string {
+    for (const entry of Object.values(row.byBranch)) {
+      const lbl = entry?.item?.value?.displayLabel;
+      if (lbl) return lbl;
+    }
+    return row.key;
+  }
+
   let paeBranches = $derived(branches.filter((b) => b.pae !== null));
 </script>
 
@@ -363,8 +371,8 @@
             onchange={(e) => onSelectCandidateKey(e.currentTarget.value)}
           >
             {#each comparison.pairedCandidates as row (row.key)}
-              <option value={row.key}>
-                {row.key} ({row.presentCount}/{branches.length}{row.missingBranchIds.length > 0 ? ' · partial' : ''})
+              <option value={row.key} title={row.key}>
+                {formatPairedRowLabel(row)} ({row.presentCount}/{branches.length}{row.missingBranchIds.length > 0 ? ' · partial' : ''})
               </option>
             {/each}
           </select>
@@ -463,14 +471,16 @@
                   onchange={(e) => onSelectBranchCandidate(b.nodeId, Number(e.currentTarget.value))}
                 >
                   {#each Array.from({ length: b.candidateCount }, (_, idx) => idx) as idx (idx)}
-                    <option value={idx}>#{idx + 1}</option>
+                    <option value={idx}>{b.kind === 'structure' ? `Design ${idx + 1}` : `#${idx + 1}`}</option>
                   {/each}
                 </select>
               {:else if !b.has3D && b.kind !== 'sequence'}
                 <span class="dim">No 3D</span>
               {:else}
                 <code class="mono-sm" title={b.candidateKey ?? b.sequenceId ?? ''}>
-                  {b.candidateKey ?? b.sequenceId ?? (b.length ? `${b.length} aa` : '—')}
+                  {b.kind === 'structure' && b.candidateCount > 1
+                    ? `Design ${b.selectedIndex + 1}`
+                    : (b.candidateKey ?? b.sequenceId ?? (b.length ? `${b.length} aa` : '—'))}
                 </code>
               {/if}
             </td>

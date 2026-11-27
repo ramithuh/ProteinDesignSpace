@@ -10,6 +10,7 @@ import {
 import {
   TRACK_NOUN,
   branchesRenderIdentically,
+  deriveResidueTrackFromStructure,
   expandMergedModelIds,
   findIdenticalTrackGroups,
   granularityCompatible,
@@ -911,5 +912,176 @@ describe('Compare track overlay — viewer / page / panel source wiring', () => 
   it('parses the rendered text (cifText || pdbText) for structure identity fields', () => {
     expect(compareSrc).toContain('const parsed = parseStructureText(displayStructText);');
     expect(compareSrc).not.toContain("parseStructureText(struct.pdbText || struct.cifText || '')");
+  });
+});
+
+describe('Multi-design StructureArtifact collections in Compare & per-design 1D tracks', () => {
+  const BASE_LEN = parseStructureText(BASE_PDB).nResidues;
+
+  function makeBatch(
+    batchId: string,
+    items: StructureArtifact[],
+    opts: { repIdx?: number; criterion?: string } = {},
+  ): StructureArtifact {
+    const repIdx = opts.repIdx ?? 0;
+    const rep = items[repIdx] ?? items[0];
+    return {
+      ...rep,
+      id: batchId,
+      ...(opts.repIdx !== undefined
+        ? {
+            representativeSelection: {
+              selectedIndex: repIdx,
+              selectedKey: rep.designKey ?? rep.id,
+              criterion: opts.criterion ?? 'best-cnn-score',
+              scoreValue: 0.9,
+              totalMembers: items.length,
+            },
+          }
+        : {}),
+      collection: {
+        kind: 'Collection',
+        schema: 'denovo.collection/v1',
+        id: `${batchId}-col`,
+        familyKey: batchId,
+        collectionKind: 'independent-candidates',
+        requestedCount: items.length,
+        complete: true,
+        items,
+        keys: items.map((it) => it.designKey ?? it.id),
+      },
+    };
+  }
+
+  it('switches both 3D structure and per-design 1D track across Design 1..3 in By candidate mode', () => {
+    const d0Pdb = BASE_PDB;
+    const d1Pdb = perturbPdb(BASE_PDB, 1.8);
+    const d2Pdb = perturbPdb(BASE_PDB, 3.4);
+    const L = BASE_LEN;
+
+    const rfdItems = [
+      { ...makeStruct('rfd-d0', d0Pdb, { label: 'RFD4 #1/3' }), designKey: 'design:abc12345:d0' },
+      { ...makeStruct('rfd-d1', d1Pdb, { label: 'RFD4 #2/3' }), designKey: 'design:def67890:d1' },
+      { ...makeStruct('rfd-d2', d2Pdb, { label: 'RFD4 #3/3' }), designKey: 'design:99988877:d2' },
+    ];
+    const dynaBfs = [
+      new Float32Array(L).fill(0.2),
+      new Float32Array(L).fill(0.5),
+      new Float32Array(L).fill(0.85),
+    ];
+    const dynaItems = rfdItems.map((r, i) => ({
+      ...makeStruct(`dyna-d${i}`, paintStructureBfactors(r.pdbText, dynaBfs[i]), {
+        label: `Dyna-1 #${i + 1}/3`,
+        bfactorSemantics: 'dynamics-prob',
+        parentStructureId: r.id,
+      }),
+      designKey: r.designKey,
+    }));
+
+    const rfdBatch = makeBatch('rfd-batch', rfdItems);
+    const dynaBatch = makeBatch('dyna-batch', dynaItems);
+    const graph: WorkflowGraph = {
+      id: 'multi-cmp',
+      name: 'Multi Compare',
+      description: '',
+      nodes: [
+        { id: 'rfd', adapterId: 'rfd4-proteina', label: 'RFD4', params: {}, position: { x: 0, y: 0 } },
+        { id: 'dyna', adapterId: 'dyna1', label: 'Dyna-1', params: {}, position: { x: 200, y: 0 } },
+      ],
+      edges: [{ fromNode: 'rfd', fromPort: 'structure', toNode: 'dyna', toPort: 'structure' }],
+    };
+    const outputs: Record<string, Record<string, CanonicalArtifact>> = {
+      rfd: { structure: rfdBatch },
+      dyna: { structure: dynaBatch },
+    };
+
+    // Select Design 3 (d2) in By candidate mode
+    const cmp = buildComparisonState(graph, ['dyna', 'rfd'], outputs, {
+      layout: 'overlay',
+      pairingMode: 'by-candidate',
+      selectedCandidateKey: 'design:99988877:d2',
+    });
+    expect(cmp.pairingMode).toBe('by-candidate');
+    expect(cmp.candidateKeys).toEqual(['design:abc12345:d0', 'design:def67890:d1', 'design:99988877:d2']);
+    expect(cmp.branches[0].structureId).toBe('dyna-d2');
+    expect(cmp.branches[0].selectedIndex).toBe(2);
+    expect(cmp.branches[0].candidateCount).toBe(3);
+    expect(cmp.branches[1].structureId).toBe('rfd-d2');
+    expect(cmp.branches[1].selectedIndex).toBe(2);
+    // Identical painted Design 3 merges cleanly with RFD4 Design 3 via lineage
+    expect(cmp.mergeGroups.length).toBe(1);
+    expect(cmp.mergeGroups[0].evidence).toBe('lineage');
+    // Per-design 1D track reflects Design 3's B-factors (0.85), NOT Design 1's (0.20)
+    expect(cmp.branches[0].residueTrack).not.toBeNull();
+    expect(cmp.branches[0].residueTrack!.summary?.mean).toBeCloseTo(0.85, 2);
+
+    // Independent per-branch selection in Branch best mode: Dyna-1 Design 3 vs RFD4 Design 1
+    const cross = buildComparisonState(graph, ['dyna', 'rfd'], outputs, {
+      layout: 'overlay',
+      pairingMode: 'branch-best',
+      branchCandidateIdx: { dyna: 2, rfd: 0 },
+    });
+    expect(cross.branches[0].structureId).toBe('dyna-d2');
+    expect(cross.branches[1].structureId).toBe('rfd-d0');
+    // Different designs do NOT merge and remain separate Kabsch-aligned models
+    expect(cross.mergeGroups.length).toBe(0);
+    expect(cross.models.length).toBe(2);
+  });
+
+  it('defaults Branch best to representativeSelection.selectedIndex (e.g. GNINA best pose)', () => {
+    const items = [
+      { ...makeStruct('gn-d0', BASE_PDB), designKey: 'design:11111111:d0' },
+      { ...makeStruct('gn-d1', perturbPdb(BASE_PDB, 1.5)), designKey: 'design:22222222:d1' },
+    ];
+    const gnBatch = makeBatch('gn-batch', items, { repIdx: 1, criterion: 'highest-cnn-score' });
+    const cmp = compare(
+      [
+        ['gn', 'gnina', 'GNINA'],
+        ['ref', 'pdb-input', 'Ref'],
+      ],
+      { gn: { structure: gnBatch }, ref: { structure: makeStruct('ref-s', BASE_PDB) } },
+      { pairingMode: 'branch-best' },
+    );
+    expect(cmp.branches[0].structureId).toBe('gn-d1');
+    expect(cmp.branches[0].selectedIndex).toBe(1);
+    expect(cmp.branches[0].rankingPolicy).toBe('highest-cnn-score');
+  });
+
+  it('does not falsely pair unrelated generators with generic d1..d2 keys and identical sequences', () => {
+    const genA = makeBatch('gen-a', [
+      { ...makeStruct('a1', BASE_PDB), designKey: 'd1' },
+      { ...makeStruct('a2', perturbPdb(BASE_PDB, 1.2)), designKey: 'd2' },
+    ]);
+    const genB = makeBatch('gen-b', [
+      { ...makeStruct('b1', perturbPdb(BASE_PDB, 2.0)), designKey: 'd1' },
+      { ...makeStruct('b2', perturbPdb(BASE_PDB, 3.0)), designKey: 'd2' },
+    ]);
+    // Both have distinct sequences? No, identical BASE_PDB sequence, no shared ancestry.
+    // Using distinct sequences prevents sequence-fallback pairing too:
+    genB.collection!.items[0].sequence = 'G'.repeat(BASE_LEN);
+    genB.collection!.items[1].sequence = 'V'.repeat(BASE_LEN);
+    genB.sequence = genB.collection!.items[0].sequence;
+    const cmp = compare(
+      [
+        ['ga', 'genie2', 'Genie 2 A'],
+        ['gb', 'frameflow', 'FrameFlow B'],
+      ],
+      { ga: { structure: genA }, gb: { structure: genB } },
+    );
+    expect(cmp.pairingMode).toBe('branch-best');
+  });
+
+  it('deriveResidueTrackFromStructure extracts per-residue B-factor tracks accurately', () => {
+    const L = BASE_LEN;
+    const vals = new Float32Array(L);
+    for (let i = 0; i < L; i++) vals[i] = i / Math.max(1, L - 1);
+    const painted = makeStruct('painted-1', paintStructureBfactors(BASE_PDB, vals), {
+      bfactorSemantics: 'dynamics-prob',
+    });
+    const track = deriveResidueTrackFromStructure(painted);
+    expect(track).not.toBeNull();
+    expect(track!.values.length).toBe(L);
+    expect(track!.unit).toBe('p(exch)');
+    expect(track!.summary?.mean).toBeCloseTo(0.5, 2);
   });
 });

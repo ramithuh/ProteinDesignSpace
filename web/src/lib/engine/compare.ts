@@ -29,6 +29,7 @@ import { analyzeSequence, type SequenceAnalysis } from './peek';
 import {
   TRACK_NOUN,
   branchRepresentsStructure,
+  deriveResidueTrackFromStructure,
   findIdenticalTrackGroups,
   isTrackSemantics,
   type TrackMergeGroup,
@@ -65,6 +66,8 @@ export interface BranchCandidateRef {
   key: string;
   sequenceId: string;
   sequence: string;
+  /** Optional human-readable label (e.g. `Design 1`) for multi-design structure collections. */
+  displayLabel?: string;
 }
 
 export interface CompareColorSlot {
@@ -603,6 +606,37 @@ function computeIpsaeFromFoldMatrix(
   return res ? { ipsae: res.ipsae, ipsaeMin: res.ipsaeMin } : null;
 }
 
+function getStructureItems(struct: StructureArtifact): StructureArtifact[] {
+  const items = struct.collection?.items;
+  return Array.isArray(items) && items.length > 0 ? items : [struct];
+}
+
+function structureItemKey(item: StructureArtifact, idx: number): string {
+  return item.designKey ?? item.representativeSelection?.selectedKey ?? item.id ?? `design-${idx + 1}`;
+}
+
+function resolveDefaultStructureIndex(
+  struct: StructureArtifact,
+  items: readonly StructureArtifact[],
+): number {
+  const raw =
+    struct.representativeSelection?.selectedIndex ??
+    struct.collection?.representativeSelection?.selectedIndex ??
+    0;
+  if (items.length <= 0 || !Number.isFinite(raw)) return 0;
+  return Math.max(0, Math.min(items.length - 1, Math.trunc(raw)));
+}
+
+function hasRenderableTrajectory(traj: TrajectoryFramesArtifact | undefined): boolean {
+  if (!traj) return false;
+  if (traj.cifText || traj.pdbText) return true;
+  return Boolean(traj.frames?.some((fr) => Boolean(fr.cifText || fr.pdbText)));
+}
+
+function isGloballyUniqueStructureKey(key: string): boolean {
+  return /^design:[a-f0-9]{6,}:d\d+$/i.test(key);
+}
+
 function extractBranchCandidateItems(
   graph: WorkflowGraph,
   nodeId: string,
@@ -685,40 +719,8 @@ function extractBranchCandidateItems(
     };
   }
 
-  const seqSet = values.find((a): a is SequenceSet => a.kind === 'SequenceSet');
-  if (seqSet && seqSet.candidates.length > 0) {
-    return {
-      branchId: nodeId,
-      label,
-      collectionKind: seqSet.collectionKind ?? 'independent-candidates',
-      items: seqSet.candidates.map((c, idx) => {
-        const key =
-          c.key ??
-          (c.sampleIndex !== undefined && c.sampleIndex !== null
-            ? `${c.id}#sample-${c.sampleIndex}`
-            : c.id);
-        return {
-          key,
-          sequence: c.sequence,
-          rank: idx + 1,
-          score: c.score,
-          confidence: null,
-          confidenceAvailable: false,
-          value: {
-            nodeId,
-            kind: 'sequence' as const,
-            index: idx,
-            key,
-            sequenceId: c.id,
-            sequence: c.sequence,
-          },
-        };
-      }),
-    };
-  }
-
   const traj = values.find((a): a is TrajectoryFramesArtifact => a.kind === 'TrajectoryFrames');
-  if (traj) {
+  if (traj && hasRenderableTrajectory(traj)) {
     const frames = traj.frames ?? [];
     if (frames.length > 0) {
       return {
@@ -766,9 +768,87 @@ function extractBranchCandidateItems(
     };
   }
 
+  const seqSet = values.find((a): a is SequenceSet => a.kind === 'SequenceSet');
   const struct = values.find((a): a is StructureArtifact => a.kind === 'StructureArtifact');
+  const structItems = struct ? getStructureItems(struct) : [];
+  if (struct && structItems.length > 1) {
+    const cands = seqSet?.candidates ?? [];
+    return {
+      branchId: nodeId,
+      label,
+      collectionKind: struct.collection?.collectionKind ?? 'independent-candidates',
+      items: structItems.map((item, idx) => {
+        const key = structureItemKey(item, idx);
+        // Match sibling SequenceSet score strictly by lineage/designKey (never by raw index)
+        const matchedCand = cands.find(
+          (c) =>
+            (item.designKey && (c.designKey === item.designKey || c.key === item.designKey)) ||
+            (item.parentStructureId && c.sourceStructureId === item.parentStructureId) ||
+            c.sourceStructureId === item.id,
+        );
+        const topDockCnn = item.dockingMetrics?.rows?.[0]?.cnnScore;
+        const dockScore =
+          typeof topDockCnn === 'number' && Number.isFinite(topDockCnn) ? topDockCnn : null;
+        const candScore =
+          matchedCand && typeof matchedCand.score === 'number' && Number.isFinite(matchedCand.score)
+            ? matchedCand.score
+            : null;
+        return {
+          key,
+          sequence: item.sequence,
+          rank: idx + 1,
+          score: dockScore ?? candScore,
+          confidence: item.representativeSelection?.scoreValue ?? null,
+          confidenceAvailable:
+            typeof item.representativeSelection?.scoreValue === 'number' &&
+            Number.isFinite(item.representativeSelection.scoreValue),
+          value: {
+            nodeId,
+            kind: 'structure' as const,
+            index: idx,
+            key,
+            sequenceId: item.label,
+            sequence: item.sequence,
+            displayLabel: `Design ${idx + 1}`,
+          },
+        };
+      }),
+    };
+  }
+
+  if (seqSet && seqSet.candidates.length > 0) {
+    return {
+      branchId: nodeId,
+      label,
+      collectionKind: seqSet.collectionKind ?? 'independent-candidates',
+      items: seqSet.candidates.map((c, idx) => {
+        const key =
+          c.key ??
+          (c.sampleIndex !== undefined && c.sampleIndex !== null
+            ? `${c.id}#sample-${c.sampleIndex}`
+            : c.id);
+        return {
+          key,
+          sequence: c.sequence,
+          rank: idx + 1,
+          score: c.score,
+          confidence: null,
+          confidenceAvailable: false,
+          value: {
+            nodeId,
+            kind: 'sequence' as const,
+            index: idx,
+            key,
+            sequenceId: c.id,
+            sequence: c.sequence,
+          },
+        };
+      }),
+    };
+  }
+
   if (struct) {
-    const key = struct.representativeSelection?.selectedKey ?? struct.id;
+    const key = structureItemKey(struct, 0);
     return {
       branchId: nodeId,
       label,
@@ -876,19 +956,35 @@ export function exportJoinedCollectionCsv<T = unknown>(
   return lines.join('\n');
 }
 
+function branchesShareAncestry(
+  aId: string,
+  bId: string,
+  ancestorsByNode: ReadonlyMap<string, Set<string>>,
+): boolean {
+  const ancA = ancestorsByNode.get(aId);
+  const ancB = ancestorsByNode.get(bId);
+  if (!ancA || !ancB) return false;
+  if (ancA.has(bId) || ancB.has(aId)) return true;
+  for (const id of ancA) {
+    if (ancB.has(id)) return true;
+  }
+  return false;
+}
+
 function branchesShareCandidateIdentity(
   branchItems: readonly KeyedCollectionBranch<BranchCandidateRef>[],
+  ancestorsByNode?: ReadonlyMap<string, Set<string>>,
 ): { hasSharedKey: boolean; hasSharedSequence: boolean } {
-  const keyBranchCount = new Map<string, number>();
+  const keyBranches = new Map<string, Array<{ branchId: string; isStruct: boolean }>>();
   const keyDistinctSeqs = new Map<string, Set<string>>();
   const seqBranchCount = new Map<string, number>();
   for (const br of branchItems) {
-    const localKeys = new Set<string>();
+    const localKeys = new Map<string, boolean>();
     const localSeqs = new Set<string>();
     for (const item of br.items) {
       const seq = item.sequence?.trim().toUpperCase();
       if (item.key) {
-        localKeys.add(item.key);
+        if (!localKeys.has(item.key)) localKeys.set(item.key, item.value.kind === 'structure');
         if (seq && seq.length >= 3) {
           let s = keyDistinctSeqs.get(item.key);
           if (!s) {
@@ -900,18 +996,41 @@ function branchesShareCandidateIdentity(
       }
       if (seq && seq.length >= 3) localSeqs.add(seq);
     }
-    for (const k of localKeys) keyBranchCount.set(k, (keyBranchCount.get(k) ?? 0) + 1);
+    for (const [k, isStruct] of localKeys.entries()) {
+      let arr = keyBranches.get(k);
+      if (!arr) {
+        arr = [];
+        keyBranches.set(k, arr);
+      }
+      arr.push({ branchId: br.branchId, isStruct });
+    }
     for (const s of localSeqs) seqBranchCount.set(s, (seqBranchCount.get(s) ?? 0) + 1);
   }
   let hasSharedKey = false;
-  for (const [k, count] of keyBranchCount.entries()) {
+  for (const [k, holders] of keyBranches.entries()) {
+    if (holders.length < 2) continue;
     // Do not treat generic auto-label collisions (e.g. "seq-1" from two unrelated MPNN runs
     // with completely different amino acid sequences) as the same candidate identity.
     const seqs = keyDistinctSeqs.get(k);
-    if (count >= 2 && (!seqs || seqs.size <= 1)) {
-      hasSharedKey = true;
-      break;
+    if (seqs && seqs.size > 1) continue;
+    // Non-hashed generic structure keys (e.g. "d1..dN" / "design-1..N" from two unrelated
+    // generators with identical placeholder poly-ALA sequences) only count as shared identity
+    // when the branches share graph ancestry.
+    const allStruct = holders.every((h) => h.isStruct);
+    if (allStruct && !isGloballyUniqueStructureKey(k) && ancestorsByNode) {
+      let linked = false;
+      for (let i = 0; i < holders.length && !linked; i++) {
+        for (let j = i + 1; j < holders.length; j++) {
+          if (branchesShareAncestry(holders[i].branchId, holders[j].branchId, ancestorsByNode)) {
+            linked = true;
+            break;
+          }
+        }
+      }
+      if (!linked) continue;
     }
+    hasSharedKey = true;
+    break;
   }
   let hasSharedSequence = false;
   for (const count of seqBranchCount.values()) {
@@ -1264,7 +1383,7 @@ function extractBranch(
   }
 
   const traj = values.find((a): a is TrajectoryFramesArtifact => a.kind === 'TrajectoryFrames');
-  if (traj) {
+  if (traj && hasRenderableTrajectory(traj)) {
     if (overrideSelection?.missing) {
       return {
         ...empty,
@@ -1326,82 +1445,120 @@ function extractBranch(
   }
 
   const struct = values.find((a): a is StructureArtifact => a.kind === 'StructureArtifact');
-  const displayStructText = struct ? struct.cifText || struct.pdbText : '';
-  if (struct && displayStructText) {
+  if (struct) {
+    const structItems = getStructureItems(struct);
+    const isMultiStruct = structItems.length > 1;
+    const defaultIdx = resolveDefaultStructureIndex(struct, structItems);
+    const rankingPolicy =
+      struct.representativeSelection?.criterion ??
+      struct.collection?.representativeSelection?.criterion ??
+      (isMultiStruct ? 'design-index' : 'single-structure');
+    const collectionKind = struct.collection?.collectionKind ?? undefined;
+
     if (overrideSelection?.missing) {
       return {
         ...empty,
         hasOutputs: true,
         kind: 'structure',
-        candidateCount: 1,
+        candidateCount: structItems.length,
         selectedIndex: -1,
         candidateKey: overrideSelection.candidateKey,
         missingSelectedCandidate: true,
-        rankingPolicy: 'single-structure',
+        rankingPolicy,
+        ...(collectionKind ? { collectionKind } : {}),
       };
     }
-    let resNums: number[] | null = null;
-    let parsedChainIds: string[] | null = struct.chainIds ?? null;
-    let parsedChainLengths: number[] | null = struct.chainLengths ?? null;
-    let identity: ReturnType<typeof renderedIdentityFields> | null = null;
-    let inferredGranularity: AtomGranularity | null = null;
-    try {
-      // Parse the text the viewer actually renders (cifText wins) so identity checks see
-      // re-normalized receptors (e.g. GNINA) rather than a stale copied pdbText.
-      const parsed = parseStructureText(displayStructText);
-      resNums = parsed.resNums;
-      identity = renderedIdentityFields(parsed, displayStructText);
-      inferredGranularity = inferAtomGranularity(parsed);
-      if (!parsedChainIds || parsedChainIds.length !== struct.length) {
-        // Projected 1-char IDs match `chainRoles` keys even when the rendered mmCIF uses auth IDs.
-        parsedChainIds = parsed.projectedChainIds ?? parsed.chainIds;
+
+    const rawIdx =
+      overrideSelection?.index !== undefined && overrideSelection.index !== null
+        ? overrideSelection.index
+        : (branchCandidateIdx[nodeId] ?? defaultIdx);
+    const idx = Math.max(0, Math.min(structItems.length - 1, rawIdx));
+    const selectedStruct = structItems[idx] ?? struct;
+    const displayStructText = selectedStruct.cifText || selectedStruct.pdbText || '';
+
+    if (displayStructText) {
+      let resNums: number[] | null = null;
+      let parsedChainIds: string[] | null = selectedStruct.chainIds ?? null;
+      let parsedChainLengths: number[] | null = selectedStruct.chainLengths ?? null;
+      let identity: ReturnType<typeof renderedIdentityFields> | null = null;
+      let inferredGranularity: AtomGranularity | null = null;
+      try {
+        // Parse the text the viewer actually renders (cifText wins) so identity checks see
+        // re-normalized receptors (e.g. GNINA) rather than a stale copied pdbText.
+        const parsed = parseStructureText(displayStructText);
+        resNums = parsed.resNums;
+        identity = renderedIdentityFields(parsed, displayStructText);
+        inferredGranularity = inferAtomGranularity(parsed);
+        if (!parsedChainIds || parsedChainIds.length !== selectedStruct.length) {
+          // Projected 1-char IDs match `chainRoles` keys even when the rendered mmCIF uses auth IDs.
+          parsedChainIds = parsed.projectedChainIds ?? parsed.chainIds;
+        }
+        if (!parsedChainLengths || parsedChainLengths.length === 0) {
+          parsedChainLengths = parsed.diagnostics.chainLengths;
+        }
+      } catch {
+        resNums = null;
       }
-      if (!parsedChainLengths || parsedChainLengths.length === 0) {
-        parsedChainLengths = parsed.diagnostics.chainLengths;
-      }
-    } catch {
-      resNums = null;
+      const hasNonProtein3D = Boolean(
+        selectedStruct.diagnostics?.hasLigands || selectedStruct.diagnostics?.hasNucleicAcids,
+      );
+      // For multi-design structure collections, node-level `outputs.track` only holds item 0;
+      // derive the per-item track from `selectedStruct` so Design 1..N each plot their own values.
+      const hasExplicitTrackArt = values.some(
+        (a) => a.kind === 'ResidueTrack' || a.kind === 'MutationMatrix',
+      );
+      const residueTrack = isMultiStruct
+        ? (deriveResidueTrackFromStructure(selectedStruct) ??
+            (idx === 0
+              ? resolveBranchResidueTrack(values, {
+                  length: selectedStruct.length,
+                  sequence: selectedStruct.sequence,
+                })
+              : null))
+        : hasExplicitTrackArt
+          ? resolveBranchResidueTrack(values, {
+              length: selectedStruct.length,
+              sequence: selectedStruct.sequence,
+            })
+          : deriveResidueTrackFromStructure(selectedStruct);
+
+      return {
+        ...empty,
+        hasOutputs: true,
+        has3D: selectedStruct.length > 0 || hasNonProtein3D,
+        kind: 'structure',
+        structureId: selectedStruct.id,
+        designedPdb: null,
+        pdbText: selectedStruct.pdbText || null,
+        cifText: selectedStruct.cifText ?? null,
+        caCoords: selectedStruct.caCoords,
+        resNums,
+        chainIds: parsedChainIds,
+        chainLengths: parsedChainLengths,
+        chainRoles: selectedStruct.chainRoles ?? null,
+        sequence: selectedStruct.sequence || null,
+        motifIndices: selectedStruct.motifIndices ?? null,
+        nativeMotifCoords: selectedStruct.nativeMotifCoords ?? null,
+        benchmarkId: selectedStruct.benchmarkId ?? struct.benchmarkId ?? null,
+        hasNonProtein3D,
+        ...(identity ?? {}),
+        bfactorSemantics: selectedStruct.bfactorSemantics ?? null,
+        parentStructureId: selectedStruct.parentStructureId ?? null,
+        residueTrack,
+        atomGranularity: selectedStruct.atomGranularity ?? inferredGranularity,
+        length: selectedStruct.length,
+        sequenceId: selectedStruct.label,
+        candidateKey: overrideSelection?.candidateKey ?? structureItemKey(selectedStruct, idx),
+        missingSelectedCandidate: false,
+        rankingPolicy,
+        ...(collectionKind ? { collectionKind } : {}),
+        branchRank: idx + 1,
+        candidateCount: structItems.length,
+        selectedIndex: idx,
+        geometry: selectedStruct.geometry,
+      };
     }
-    const hasNonProtein3D = Boolean(
-      struct.diagnostics?.hasLigands || struct.diagnostics?.hasNucleicAcids,
-    );
-    return {
-      ...empty,
-      hasOutputs: true,
-      has3D: struct.length > 0 || hasNonProtein3D,
-      kind: 'structure',
-      structureId: struct.id,
-      designedPdb: null,
-      pdbText: struct.pdbText || null,
-      cifText: struct.cifText ?? null,
-      caCoords: struct.caCoords,
-      resNums,
-      chainIds: parsedChainIds,
-      chainLengths: parsedChainLengths,
-      chainRoles: struct.chainRoles ?? null,
-      sequence: struct.sequence || null,
-      motifIndices: struct.motifIndices ?? null,
-      nativeMotifCoords: struct.nativeMotifCoords ?? null,
-      benchmarkId: struct.benchmarkId ?? null,
-      hasNonProtein3D,
-      ...(identity ?? {}),
-      bfactorSemantics: struct.bfactorSemantics ?? null,
-      parentStructureId: struct.parentStructureId ?? null,
-      residueTrack: resolveBranchResidueTrack(values, {
-        length: struct.length,
-        sequence: struct.sequence,
-      }),
-      atomGranularity: struct.atomGranularity ?? inferredGranularity,
-      length: struct.length,
-      sequenceId: struct.label,
-      candidateKey: struct.representativeSelection?.selectedKey ?? struct.id,
-      missingSelectedCandidate: false,
-      rankingPolicy: 'single-structure',
-      branchRank: 1,
-      candidateCount: 1,
-      selectedIndex: 0,
-      geometry: struct.geometry,
-    };
   }
 
   const seqSet = values.find((a): a is SequenceSet => a.kind === 'SequenceSet');
@@ -2107,6 +2264,10 @@ export function buildComparisonState(
 
   const branchCollections = capped.map((id) => extractBranchCandidateItems(graph, id, outputsByNode));
   const branchById = new Map(branchCollections.map((b) => [b.branchId, b]));
+  const ancestorsByNode = new Map<string, Set<string>>();
+  for (const id of capped) {
+    ancestorsByNode.set(id, getAncestorNodeIds(graph, id));
+  }
   const hasSingleStructOnly = (nid: string): boolean => {
     const outs = outputsByNode[nid];
     if (!outs) return false;
@@ -2116,9 +2277,12 @@ export function buildComparisonState(
     );
     const hasMulti = vals.some(
       (a) =>
+        (a.kind === 'StructureArtifact' && (a.collection?.items?.length ?? 0) > 1) ||
         (a.kind === 'DesignabilityMetrics' && a.rows.length > 1) ||
         (a.kind === 'FoldedStructure' && a.folds.length > 1) ||
-        (a.kind === 'TrajectoryFrames' && (a.frames?.length ?? a.frameCount) > 1),
+        (a.kind === 'TrajectoryFrames' &&
+          hasRenderableTrajectory(a) &&
+          (a.frames?.length ?? a.frameCount) > 1),
     );
     return hasStruct && !hasMulti;
   };
@@ -2146,7 +2310,10 @@ export function buildComparisonState(
   const joinInputCollections =
     pinnedRefSet.size > 0 && hasPopulatedCompare ? compareCollections : branchCollections;
 
-  const { hasSharedKey, hasSharedSequence } = branchesShareCandidateIdentity(joinInputCollections);
+  const { hasSharedKey, hasSharedSequence } = branchesShareCandidateIdentity(
+    joinInputCollections,
+    ancestorsByNode,
+  );
   const hasSharedIdentity = hasSharedKey || hasSharedSequence;
 
   // Allow sequence fallback whenever sequences overlap; joinKeyedCollections guards against
@@ -2287,11 +2454,6 @@ export function buildComparisonState(
   );
   // Branches eligible for Cα Kabsch superposition & pairwise RMSD
   const alignable = renderable.filter((b) => b.caCoords && (b.length ?? 0) >= 3);
-
-  const ancestorsByNode = new Map<string, Set<string>>();
-  for (const b of branches) {
-    ancestorsByNode.set(b.nodeId, getAncestorNodeIds(graph, b.nodeId));
-  }
 
   // Check if 2+ scorer branches share the exact same upstream designed backbone
   // (excluding any pinned single-structure reference branch so ref+scoreA+scoreB keeps shared frame)

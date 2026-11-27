@@ -3775,13 +3775,21 @@
       }
       const struct = values.find((a): a is StructureArtifact => a.kind === 'StructureArtifact');
       if (struct) {
+        const items = struct.collection?.items;
+        const item =
+          selIdx >= 0 && Array.isArray(items) && items.length > 0
+            ? (items[selIdx] ?? struct)
+            : struct;
+        const rep = struct.representativeSelection ?? struct.collection?.representativeSelection;
+        const showRep = rep && (selIdx < 0 || rep.selectedIndex === undefined || rep.selectedIndex === selIdx);
         map[id] = {
-          representativeSelection: struct.representativeSelection,
-          atomGranularity: struct.atomGranularity,
-          provenance: struct.provenance,
-          msaMode: struct.provenance?.msaMode,
-          msaDepth: struct.provenance?.msaDepth,
-          chainLengths: struct.chainLengths ?? struct.diagnostics?.chainLengths,
+          ...(showRep ? { representativeSelection: rep } : {}),
+          collectionKind: struct.collection?.collectionKind,
+          atomGranularity: item.atomGranularity ?? struct.atomGranularity,
+          provenance: item.provenance ?? struct.provenance,
+          msaMode: item.provenance?.msaMode ?? struct.provenance?.msaMode,
+          msaDepth: item.provenance?.msaDepth ?? struct.provenance?.msaDepth,
+          chainLengths: item.chainLengths ?? item.diagnostics?.chainLengths ?? struct.chainLengths ?? struct.diagnostics?.chainLengths,
         };
         continue;
       }

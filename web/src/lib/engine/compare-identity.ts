@@ -3,7 +3,12 @@
 // so the overlay can show ONE cartoon carrying the per-residue track instead of z-fighting
 // duplicates at 0.00 Å.
 
-import type { AtomGranularity, BfactorSemantics } from './types';
+import type {
+  AtomGranularity,
+  BfactorSemantics,
+  ResidueTrackArtifact,
+  StructureArtifact,
+} from './types';
 
 /** B-factor semantics that encode a per-residue scientific track (not pLDDT / crystal B). */
 export type TrackSemantics = Extract<
@@ -282,4 +287,220 @@ export function expandMergedModelIds(
     if (g.memberModelIds.includes(modelId)) return [...g.memberModelIds];
   }
   return [modelId];
+}
+
+const TRACK_META_BY_SEMANTICS: Record<
+  TrackSemantics,
+  {
+    quantity: ResidueTrackArtifact['quantity'];
+    unit: string;
+    range?: [number, number];
+    threshold?: number;
+  }
+> = {
+  'dynamics-prob': {
+    quantity: 'dynamics-prob',
+    unit: 'p(exch)',
+    range: [0, 1],
+    threshold: 0.5,
+  },
+  'ddg-stability': {
+    quantity: 'ddg-stability',
+    unit: 'kcal/mol',
+    threshold: 0,
+  },
+  'llr-fitness': {
+    quantity: 'llr-fitness',
+    unit: 'LLR',
+    threshold: 0,
+  },
+  'gnina-contrib': {
+    quantity: 'gnina-contrib',
+    unit: 'ΔCNN_VS',
+    threshold: 0,
+  },
+};
+
+function tokenizeCifRow(line: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  const n = line.length;
+  while (i < n) {
+    while (i < n && (line[i] === ' ' || line[i] === '\t')) i++;
+    if (i >= n) break;
+    const ch = line[i];
+    if (ch === "'" || ch === '"') {
+      const q = ch;
+      i++;
+      const start = i;
+      while (i < n && !(line[i] === q && (i + 1 === n || line[i + 1] === ' ' || line[i + 1] === '\t'))) {
+        i++;
+      }
+      out.push(line.slice(start, i));
+      if (i < n) i++;
+    } else {
+      const start = i;
+      while (i < n && line[i] !== ' ' && line[i] !== '\t') i++;
+      out.push(line.slice(start, i));
+    }
+  }
+  return out;
+}
+
+function extractPerResidueCaBfactors(
+  rawText: string,
+): { values: Float32Array; residueIds: string[] } | null {
+  if (!rawText) return null;
+  const isCif = /^\s*(data_|loop_|_atom_site\.)/m.test(rawText);
+  const values: number[] = [];
+  const residueIds: string[] = [];
+  const seen = new Set<string>();
+
+  if (!isCif) {
+    for (const line of rawText.split(/\r?\n/)) {
+      if (line.startsWith('ENDMDL') && values.length > 0) break;
+      const isAtom = line.startsWith('ATOM  ');
+      const isHet = line.startsWith('HETATM');
+      if (!isAtom && !isHet) continue;
+      if (line.length < 66) continue;
+      const resName = line.slice(17, 20).trim().toUpperCase();
+      if (isHet && resName !== 'MSE') continue;
+      const atomName = line.slice(12, 16).trim();
+      if (atomName !== 'CA') continue;
+      const alt = line[16];
+      if (alt !== ' ' && alt !== 'A' && alt !== '1') continue;
+      const chain = line[21]?.trim() || 'A';
+      const resSeq = line.slice(22, 26).trim();
+      const ins = (line[26] ?? ' ').trim();
+      const key = `${chain}:${resSeq}:${ins}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const b = parseFloat(line.slice(60, 66));
+      values.push(Number.isFinite(b) ? b : 0);
+      residueIds.push(`${chain}${resSeq}${ins}`);
+    }
+  } else {
+    const cols: string[] = [];
+    let inAtomSite = false;
+    let firstModel: string | null = null;
+    for (const raw of rawText.split(/\r?\n/)) {
+      const tr = raw.trim();
+      if (tr.startsWith('_atom_site.')) {
+        inAtomSite = true;
+        cols.push(tr.slice('_atom_site.'.length));
+        continue;
+      }
+      if (!inAtomSite) continue;
+      if (tr === '' || tr.startsWith('#') || tr.startsWith('loop_') || tr.startsWith('_')) {
+        inAtomSite = false;
+        continue;
+      }
+      const toks = tokenizeCifRow(tr);
+      if (toks.length < cols.length) continue;
+      const idxGroup = cols.indexOf('group_PDB');
+      const idxAtom = cols.indexOf('label_atom_id') >= 0 ? cols.indexOf('label_atom_id') : cols.indexOf('auth_atom_id');
+      const idxComp = cols.indexOf('label_comp_id') >= 0 ? cols.indexOf('label_comp_id') : cols.indexOf('auth_comp_id');
+      const idxAlt = cols.indexOf('label_alt_id');
+      const idxChain = cols.indexOf('auth_asym_id') >= 0 ? cols.indexOf('auth_asym_id') : cols.indexOf('label_asym_id');
+      const idxSeq = cols.indexOf('auth_seq_id') >= 0 ? cols.indexOf('auth_seq_id') : cols.indexOf('label_seq_id');
+      const idxIns = cols.indexOf('pdbx_PDB_ins_code');
+      const idxB = cols.indexOf('B_iso_or_equiv');
+      const idxModel = cols.indexOf('pdbx_PDB_model_num');
+      if (idxAtom < 0 || idxB < 0) continue;
+      if (idxModel >= 0) {
+        const m = toks[idxModel];
+        if (firstModel === null) firstModel = m;
+        else if (m !== firstModel) break;
+      }
+      const grp = idxGroup >= 0 ? toks[idxGroup] : 'ATOM';
+      const comp = idxComp >= 0 ? toks[idxComp].toUpperCase() : '';
+      if (grp !== 'ATOM' && !(grp === 'HETATM' && comp === 'MSE')) continue;
+      if (toks[idxAtom] !== 'CA') continue;
+      const alt = idxAlt >= 0 ? toks[idxAlt] : '.';
+      if (alt !== '.' && alt !== '?' && alt !== 'A' && alt !== '1') continue;
+      const chain = idxChain >= 0 && toks[idxChain] !== '.' && toks[idxChain] !== '?' ? toks[idxChain] : 'A';
+      const seq = idxSeq >= 0 ? toks[idxSeq] : String(values.length + 1);
+      const ins = idxIns >= 0 && toks[idxIns] !== '.' && toks[idxIns] !== '?' ? toks[idxIns] : '';
+      const key = `${chain}:${seq}:${ins}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const b = parseFloat(toks[idxB]);
+      values.push(Number.isFinite(b) ? b : 0);
+      residueIds.push(`${chain}${seq}${ins}`);
+    }
+  }
+
+  if (values.length === 0) return null;
+  return { values: new Float32Array(values), residueIds };
+}
+
+const DERIVED_TRACK_CACHE = new WeakMap<StructureArtifact, ResidueTrackArtifact | null>();
+
+/**
+ * Derive a per-residue `ResidueTrackArtifact` from a painted `StructureArtifact`'s Cα B-factors
+ * when `bfactorSemantics` is a scientific track (`dynamics-prob`, `ddg-stability`, `llr-fitness`,
+ * `gnina-contrib`). Memoized per `StructureArtifact` reference so repeated renders are free.
+ */
+export function deriveResidueTrackFromStructure(
+  struct: StructureArtifact | null | undefined,
+): ResidueTrackArtifact | null {
+  if (!struct || !isTrackSemantics(struct.bfactorSemantics)) return null;
+  if (DERIVED_TRACK_CACHE.has(struct)) {
+    return DERIVED_TRACK_CACHE.get(struct) ?? null;
+  }
+  const text = struct.cifText || struct.pdbText;
+  if (!text) {
+    DERIVED_TRACK_CACHE.set(struct, null);
+    return null;
+  }
+  const extracted = extractPerResidueCaBfactors(text);
+  if (!extracted || extracted.values.length === 0) {
+    DERIVED_TRACK_CACHE.set(struct, null);
+    return null;
+  }
+  const vals = extracted.values;
+  const meta = TRACK_META_BY_SEMANTICS[struct.bfactorSemantics];
+  let sum = 0;
+  let minV = Infinity;
+  let maxV = -Infinity;
+  let above = 0;
+  for (let i = 0; i < vals.length; i++) {
+    const v = vals[i];
+    sum += v;
+    if (v < minV) minV = v;
+    if (v > maxV) maxV = v;
+    if (meta.threshold !== undefined && v >= meta.threshold) above++;
+  }
+  const mean = sum / vals.length;
+  const residueIds =
+    struct.sourceResidues && struct.sourceResidues.length === vals.length
+      ? struct.sourceResidues.map((r) => `${r.authChainId}${r.resNum}${r.insCode ?? ''}`)
+      : extracted.residueIds;
+  const seq =
+    struct.sequence && struct.sequence.length === vals.length
+      ? struct.sequence
+      : 'X'.repeat(vals.length);
+
+  const track: ResidueTrackArtifact = {
+    kind: 'ResidueTrack',
+    id: `${struct.id}-track`,
+    label: `${TRACK_NOUN[struct.bfactorSemantics]} (mean ${mean.toFixed(2)})`,
+    sourceModelId: struct.sourceModelId,
+    ...(struct.parentStructureId ? { parentStructureId: struct.parentStructureId } : {}),
+    quantity: meta.quantity,
+    unit: meta.unit,
+    ...(meta.range ? { range: meta.range } : {}),
+    ...(meta.threshold !== undefined ? { threshold: meta.threshold } : {}),
+    residues: seq,
+    residueIds,
+    values: vals,
+    summary: {
+      mean,
+      min: Number.isFinite(minV) ? minV : 0,
+      max: Number.isFinite(maxV) ? maxV : 0,
+      ...(meta.threshold !== undefined ? { fractionAboveThreshold: above / vals.length } : {}),
+    },
+  };
+  DERIVED_TRACK_CACHE.set(struct, track);
+  return track;
 }
