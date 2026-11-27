@@ -755,5 +755,13 @@ describe('gist-session: UI & zero-local-storage invariants', () => {
     expect(restoredStruct.caCoords.length).toBe(item1.caCoords.length);
     expect(restoredStruct.collection?.items.length).toBe(2);
     expect(restoredStruct.collection?.items[1].caCoords.length).toBe(item2.caCoords.length);
+
+    // Regression: payloads > 512 KB must not deadlock CompressionStream backpressure
+    const bigPdb = Array.from({ length: 120 }, () => samplePdb).join('');
+    const bigItem = makeStructureArtifact('big1', bigPdb);
+    const bigCompressed = await serializeGistSessionCompressed(graph, { gen_1: { structure: bigItem } });
+    expect(bigCompressed.bytes).toBeLessThan(bigPdb.length / 4);
+    const bigRestored = await deserializeGistSessionAsync(bigCompressed.json);
+    expect((bigRestored.outputs.gen_1?.structure as StructureArtifact).pdbText.length).toBe(bigPdb.length);
   });
 });

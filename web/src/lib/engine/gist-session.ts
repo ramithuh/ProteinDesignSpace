@@ -440,18 +440,23 @@ async function compressGzipBase64(text: string): Promise<string | null> {
   const rawBytes = new TextEncoder().encode(text);
   const cs = new CompressionStream('gzip');
   const writer = cs.writable.getWriter();
-  await writer.write(rawBytes);
-  await writer.close();
+  // Drain readable side concurrently with write/close to avoid TransformStream backpressure deadlock on >64 KB inputs
+  const writePromise = writer.write(rawBytes).then(() => writer.close());
   const reader = cs.readable.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      total += value.byteLength;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        total += value.byteLength;
+      }
     }
+    await writePromise;
+  } finally {
+    reader.releaseLock();
   }
   const merged = new Uint8Array(total);
   let offset = 0;
