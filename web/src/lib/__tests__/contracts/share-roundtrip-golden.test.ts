@@ -30,6 +30,7 @@ const IMMUTABLE_SHORT_CODES: Record<string, string> = {
   ligandmpnn: 'lm',
   lasermpnn: 'la',
   'artios-potts': 'ap',
+  'proton-pottsmpnn': 'pm',
   'antifold-esmif1': 'af',
   'localfold-af2': 'f',
   thermompnn: 'tm',

@@ -621,6 +621,74 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     ],
   },
 
+  'proton-pottsmpnn-webgpu': {
+    id: 'proton-pottsmpnn-webgpu',
+    adapterId: 'proton-pottsmpnn',
+    displayName: 'Proton-PottsMPNN',
+    status: 'live',
+    activePrecisionId: 'fp16',
+    precisions: [
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          '120 F32 tensors (1,778,898 params, 1 shard, 7.13 MB); tiled F32 WGSL GEMM, F32 activations and FP32 accumulation',
+        approxSizeMB: 7.1,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Potts coupling tensor J relRMS vs PyTorch FP32',
+          value:
+            'J 1.63e-7 (24-residue crop) · 1.87e-7 (229-residue two-chain complex) vs the reference; 1.7e-7 GPU vs the FP32 CPU backend at the same precision',
+          scope:
+            'Both oracle cases from tools/dump_oracle.py driving the real mpnn.model.pottsmpnn.PottsMPNN in CPU FP32; JS block-descent reproduces reference trajectories bit-exactly',
+          hardware: 'NVIDIA GB10 (ARM64), Chrome for Testing 153 headless-shell, Dawn Vulkan',
+        },
+        latencyHint:
+          '3.25 ms warm GPU (L=24, K=24) · 15.5 ms (L=229, K=48) for encoder + Potts head (median of 12) · ~232× faster than pure-JS CPU (208 ms / 3.54 s)',
+      },
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'IEEE binary16 2-D weights packed two per u32 and widened with unpack2x16float in-shader; 1-D biases and LayerNorm stay F32 (1 shard, 3.59 MB). shader-f16 is not required.',
+        approxSizeMB: 3.6,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Potts coupling tensor J relRMS vs PyTorch FP32',
+          value: 'J 1.1e-4 (weight rounding) · 1.8e-7 GPU vs the identically-quantized CPU backend',
+          scope: 'Same two oracle cases (24-residue crop and 229-residue two-chain complex)',
+          hardware: 'NVIDIA GB10 (ARM64), Chrome for Testing 153 headless-shell, Dawn Vulkan',
+        },
+        latencyHint: '3.25 / 15.5 ms warm GPU per Potts-table pass',
+      },
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Per-output-row symmetric I8 2-D weights packed four per u32 with colocated F32 row scales; 1-D tensors stay F32 (1 shard, 1.87 MB)',
+        approxSizeMB: 1.87,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Potts coupling tensor J relRMS vs PyTorch FP32',
+          value: 'J 6.2e-3 (weight rounding) · 1.7e-7 GPU vs the identically-quantized CPU backend',
+          scope: 'Same two oracle cases',
+          hardware: 'NVIDIA GB10 (ARM64), Chrome for Testing 153 headless-shell, Dawn Vulkan',
+        },
+        caveat:
+          'Couplings carry ~0.6% relRMS at INT8; FP16 is within 1.1e-4 of FP32 for 1.7 MB more and is the default.',
+      },
+    ],
+    upstreamRepo: 'https://github.com/christian-creator/ProtonPottsMPNN',
+    weightsRepo: 'https://huggingface.co/ramithuh/proton-pottsmpnn-webgpu',
+    weightsRevision: '37f33cce178c',
+    license: 'MIT (ProtonPottsMPNN) · BSD-3-Clause (PottsMPNN from the bundled IPD rc-foundry mpnn package)',
+    citation:
+      'Jacobsen C. P. (2026) Proton-PottsMPNN: a pH-aware PottsMPNN for protonation-state-explicit scoring and pH-selective sequence design (christian-creator/ProtonPottsMPNN, MIT; checkpoint potts_v6_afdb_edge_his0.3_acid0.06/epoch-0125.ckpt, extended_vocab v6). PottsMPNN itself is the Institute for Protein Design rc-foundry mpnn package (BSD-3-Clause) and builds on Dauparas et al. (2022) ProteinMPNN.',
+    limitations: [
+      'The upstream HBPLUS/propka/FLAML protonation labeller is not bundled in-browser; unpinned ASP/GLU/HIS default to physiological state (ASP-D/GLU-D/HIS-S) and can be pinned via `protonationOverrides` (e.g. "A42=HIS-P, A58=ASP-P").',
+      'Backbone-only (N/CA/C/O + virtual CB over a 48-NN Cα graph): no ligand/metal/nucleic-acid pathway and no side chains are built — pair with PULCHRA, cg2all or LASErMPNN for all-atom output.',
+      'Block descent at Temp 0 is an exact argmin and deterministic (1 design per backbone); set Temp > 0 for multiple Boltzmann-sampled designs.',
+      'Energies are Potts pseudo-energies and per-centre E_P − E_D is a selectivity score, not a calibrated physical ΔG or pKa.',
+    ],
+  },
+
   'lasermpnn-webgpu': {
     id: 'lasermpnn-webgpu',
     adapterId: 'lasermpnn',

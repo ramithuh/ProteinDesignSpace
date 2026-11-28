@@ -37,7 +37,7 @@ describe('engine/llms-txt', () => {
   it('covers 100% of live ADAPTER_REGISTRY models, short codes, ports, PortTypes, and primary parameters with zero stale IDs', () => {
     const text = generateLlmsTxt();
     const adapterIds = Object.keys(ADAPTER_REGISTRY);
-    expect(adapterIds).toHaveLength(31);
+    expect(adapterIds).toHaveLength(32);
 
     for (const id of adapterIds) {
       expect(text).toContain(id);

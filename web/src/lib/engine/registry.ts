@@ -10,6 +10,7 @@ import {
 } from './localfold-template';
 import { ARTIOS_BACKBONE_MANIFEST } from '../plugins/artios-backbone/manifest';
 import { ARTIOS_POTTS_MANIFEST } from '../plugins/artios-potts/manifest';
+import { PROTON_POTTSMPNN_MANIFEST } from '../plugins/proton-pottsmpnn/manifest';
 
 export interface Rfd4BenchmarkMeta {
   id: string;
@@ -2851,6 +2852,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
     ],
   },
   'artios-potts': ARTIOS_POTTS_MANIFEST,
+  'proton-pottsmpnn': PROTON_POTTSMPNN_MANIFEST,
   'antifold-esmif1': {
     id: 'antifold-esmif1',
     displayName: 'AntiFold / ESM-IF1',

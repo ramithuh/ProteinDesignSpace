@@ -37,6 +37,7 @@ export const ALLOWED_GPU_ADAPTER_IDS = new Set([
   'ligandmpnn',
   'lasermpnn',
   'artios-potts',
+  'proton-pottsmpnn',
   'antifold-esmif1',
   'protpardelle',
   'rfdiffusion',

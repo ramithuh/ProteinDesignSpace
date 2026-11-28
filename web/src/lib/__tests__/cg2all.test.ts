@@ -485,7 +485,7 @@ describe('cg2all plugin #29 registration', () => {
   it('registers manifest, short code, catalog, model card, GPU allowlists and llms.txt', () => {
     const reg = createDefaultPluginRegistry();
     expect(reg.getPlugin('cg2all')).toBe(cg2allPlugin);
-    expect(reg.listPlugins()).toHaveLength(31);
+    expect(reg.listPlugins()).toHaveLength(32);
     expect(reg.resolveShortCode('cg')).toBe('cg2all');
     expect(ADAPTER_TO_SHORT.cg2all).toBe('cg');
     expect(SHORT_TO_ADAPTER.cg).toBe('cg2all');

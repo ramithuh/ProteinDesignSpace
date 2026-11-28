@@ -38,13 +38,13 @@ describe('Phase 2 contract: @domain/protein-biopolymer DomainPack & live 26-plug
     }
 
     const plugins = defaultPluginRegistry.listPlugins();
-    expect(plugins).toHaveLength(31);
+    expect(plugins).toHaveLength(32);
     expect(plugins.map((p) => p.id).sort()).toEqual(Object.keys(ADAPTER_REGISTRY).sort());
 
-    // Short codes are bijective across all 31 plugins
+    // Short codes are bijective across all 32 plugins
     const { adapterToShort, shortToAdapter } = defaultPluginRegistry.getShortCodeMaps();
-    expect(Object.keys(adapterToShort)).toHaveLength(31);
-    expect(Object.keys(shortToAdapter)).toHaveLength(31);
+    expect(Object.keys(adapterToShort)).toHaveLength(32);
+    expect(Object.keys(shortToAdapter)).toHaveLength(32);
 
     // LocalFold ESMFold2 worker isolation hook works without scheduler hardcoding
     const lf = defaultPluginRegistry.getPlugin('localfold-af2')!;
@@ -72,6 +72,7 @@ describe('Phase 2 contract: @domain/protein-biopolymer DomainPack & live 26-plug
       'lasermpnn',
       'ligandmpnn',
       'proteina',
+      'proton-pottsmpnn',
       'protpardelle',
       'rfd3',
       'rfdiffusion',
@@ -196,7 +197,7 @@ describe('Phase 2 contract: @domain/protein-biopolymer DomainPack & live 26-plug
       extraPlugins: [admetPlugin],
     });
 
-    expect(multiDomainReg.listPlugins()).toHaveLength(32);
+    expect(multiDomainReg.listPlugins()).toHaveLength(33);
     expect(multiDomainReg.resolveShortCode('ac')).toBe('admet-chemprop');
     expect(multiDomainReg.portTypes.has('PropertyTable')).toBe(true);
     expect(multiDomainReg.portTypes.has('StructureArtifact')).toBe(true);

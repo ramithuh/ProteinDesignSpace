@@ -93,6 +93,7 @@ const ADAPTER_META: Record<string, AdapterMeta> = {
   ligandmpnn: { shortName: 'LigandMPNN', category: 'sequence' },
   lasermpnn: { shortName: 'LASErMPNN', category: 'sequence' },
   'artios-potts': { shortName: 'ArtiosPotts', category: 'sequence' },
+  'proton-pottsmpnn': { shortName: 'Proton-PottsMPNN', category: 'sequence' },
   'antifold-esmif1': { shortName: 'AntiFold / ESM-IF1', category: 'sequence' },
   'localfold-af2': { shortName: 'LocalFold', category: 'prediction' },
   thermompnn: { shortName: 'ThermoMPNN', category: 'evaluation' },
@@ -155,6 +156,14 @@ function formatCompactParamChip(adapterId: string, params: Record<string, unknow
       const n = num('numSequences', 8);
       const t = num('temperature', 0.1);
       return `${n} seq${n === 1 ? '' : 's'} · T=${t}`;
+    }
+    case 'proton-pottsmpnn': {
+      if (str('mode', 'design') === 'score') return 'Potts energy + ΔE';
+      const centres = str('protonationCentres', '').split(/[,;\s]+/).filter(Boolean).length;
+      const t = num('temperature', 0);
+      const n = t > 0 ? num('numSequences', 4) : 1;
+      if (centres === 0) return `${n} seq${n === 1 ? '' : 's'} · stability`;
+      return `${n} seq${n === 1 ? '' : 's'} · λ=${num('lambda', 0.5)} · ${centres} pH`;
     }
     case 'web-protein-mpnn':
     case 'ligandmpnn':

@@ -86,6 +86,8 @@ web/static/vendor/cg2all/weights/
 web/static/vendor/artios-potts/weights/
 !web/static/vendor/artios-backbone/
 web/static/vendor/artios-backbone/weights/
+!web/static/vendor/proton-pottsmpnn/
+web/static/vendor/proton-pottsmpnn/weights/
 # PULCHRA statistical tables (1.6 MB, packed by tools/pack-pulchra-tables.mjs) are source data, not weights.
 !web/static/vendor/pulchra/pulchra-tables.bin
 .upstream-tmp/

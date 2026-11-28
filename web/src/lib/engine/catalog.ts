@@ -83,7 +83,7 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
   },
   {
     title: 'Sequence Design',
-    ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'artios-potts', 'antifold-esmif1', 'evodiff'],
+    ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'artios-potts', 'proton-pottsmpnn', 'antifold-esmif1', 'evodiff'],
   },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
   { title: 'Refinement / Backmapping', ids: ['pulchra', 'cg2all'] },
@@ -111,6 +111,7 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   ligandmpnn: 'Ligand-, metal- & nucleic-acid-aware protein sequence design',
   lasermpnn: 'Ligand-aware sequence & all-atom sidechain rotamer co-design',
   'artios-potts': 'All-atom ligand-aware Potts sequence design & scoring (energy + per-residue pseudo-log-likelihood)',
+  'proton-pottsmpnn': 'pH-aware Potts sequence design & scoring over explicit protonation states (pH-selective block descent, E_P − E_D)',
   'antifold-esmif1': 'Antibody CDR (AntiFold) & general protein inverse folding (ESM-IF1)',
   evodiff: 'MSA-free discrete sequence diffusion & masked sequence inpainting (OA-DM 38M)',
   'localfold-af2': 'Predict 3D structures (AlphaFold2, RF3, Boltz-2, AlphaFold 3 & more)',
@@ -1019,6 +1020,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
     const lig = ADAPTER_REGISTRY.ligandmpnn;
     const laser = ADAPTER_REGISTRY.lasermpnn;
     const potts = ADAPTER_REGISTRY['artios-potts'];
+    const proton = ADAPTER_REGISTRY['proton-pottsmpnn'];
     const evo = ADAPTER_REGISTRY.evodiff;
     const allAtomItems: CatalogSubItem[] = [
       {
@@ -1049,6 +1051,17 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
           `${potts.id} ${potts.shortName} ${potts.displayName} ${CONCISE_BLOCK_ROLES['artios-potts']} artios artiospotts potts mrf markov random field couplings gibbs dlmc mcmc ligand cofactor metal active site pocket pll pseudo-log-likelihood energy ligo biosciences apache-2.0`.toLowerCase(),
       },
     ];
+    const phItems: CatalogSubItem[] = [
+      {
+        key: 'proton-pottsmpnn',
+        label: proton.shortName,
+        subtitle: CONCISE_BLOCK_ROLES['proton-pottsmpnn'],
+        meta: `~${proton.approxWeightsMB} MB · MIT`,
+        insert: { adapterId: 'proton-pottsmpnn', label: 'Proton-PottsMPNN' },
+        searchBlob:
+          `${proton.id} ${proton.shortName} ${proton.displayName} ${CONCISE_BLOCK_ROLES['proton-pottsmpnn']} proton protonpotts protonpottsmpnn pottsmpnn potts ph ph-selective protonation state titratable histidine his aspartate glutamate pka charge microstate block descent couplings energy rc-foundry jacobsen mit bsd-3-clause`.toLowerCase(),
+      },
+    ];
     const seqDiffItems: CatalogSubItem[] = [
       {
         key: 'evodiff',
@@ -1063,6 +1076,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
     const subGroups: CatalogSubGroup[] = [
       { title: 'ProteinMPNN Family', items: mpnn.subGroups[0]?.items ?? [] },
       { title: 'Ligand & All-Atom Inverse Folding', items: allAtomItems },
+      { title: 'pH-Aware & Protonation-State Design', items: phItems },
       { title: 'Antibody & General GVP-Transformer', items: antifold.subGroups[0]?.items ?? [] },
       { title: 'Sequence Diffusion (MSA-Free)', items: seqDiffItems },
     ];

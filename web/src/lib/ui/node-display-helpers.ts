@@ -38,6 +38,7 @@ const INVERSE_FOLD_ADAPTERS = new Set([
   'ligandmpnn',
   'lasermpnn',
   'artios-potts',
+  'proton-pottsmpnn',
   'antifold-esmif1',
 ]);
 
@@ -469,6 +470,30 @@ export function formatNodeParamSummary(
       const cfg = num(p.cfgScale, 0);
       if (cfg > 0) parts.push(`CFG ${cfg}`);
       parts.push(String(p.precision ?? 'fp16').toUpperCase());
+      return parts.join(' · ');
+    }
+    case 'proton-pottsmpnn': {
+      const centres = String(p.protonationCentres ?? '')
+        .split(/[,;\s]+/)
+        .filter(Boolean).length;
+      const precision = String(p.precision ?? 'fp16').toUpperCase();
+      if (String(p.mode ?? 'design') === 'score') {
+        const parts = ['Score native · Potts energy'];
+        parts.push(centres > 0 ? `${centres} pH centre${centres === 1 ? '' : 's'} · ΔE` : 'no pH centre');
+        parts.push(precision);
+        return parts.join(' · ');
+      }
+      const t = num(p.temperature, 0);
+      const n = t > 0 ? num(p.numSequences, 4) : 1;
+      const parts = [`${n} seq${n === 1 ? '' : 's'}`];
+      parts.push(
+        centres > 0
+          ? `λ=${num(p.lambda, 0.5)} · ${centres} pH centre${centres === 1 ? '' : 's'}`
+          : 'stability only',
+      );
+      parts.push(`B=${num(p.blockSize, 2)}`);
+      parts.push(t > 0 ? `T=${t}` : 'argmin');
+      parts.push(precision);
       return parts.join(' · ');
     }
     case 'antifold-esmif1': {

@@ -844,7 +844,7 @@ describe('PULCHRA registration (native plugin #28)', () => {
   it('registers in the plugin registry, flow DSL, share codes and catalog without a model card', () => {
     const reg = createDefaultPluginRegistry();
     expect(reg.getPlugin('pulchra')).toBe(pulchraPlugin);
-    expect(reg.listPlugins()).toHaveLength(31);
+    expect(reg.listPlugins()).toHaveLength(32);
     expect(reg.resolveShortCode('pu')).toBe('pulchra');
     expect(ADAPTER_TO_SHORT.pulchra).toBe('pu');
     expect(SHORT_TO_ADAPTER.pu).toBe('pulchra');

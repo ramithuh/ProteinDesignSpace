@@ -48,6 +48,7 @@ const HOST_GPU_ALLOWED_ADAPTERS: readonly string[] = [
   'ligandmpnn',
   'lasermpnn',
   'artios-potts',
+  'proton-pottsmpnn',
   'antifold-esmif1',
   'protpardelle',
   'rfdiffusion',

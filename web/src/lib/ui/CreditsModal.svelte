@@ -293,6 +293,15 @@
       linkLabel: 'Ligo-Biosciences/artios',
     },
     {
+      name: 'Proton-PottsMPNN',
+      role: 'pH-Aware Potts Sequence Design & Scoring',
+      detail:
+        'Backbone-only PottsMPNN encoder and etab_out Potts head over a 30-token protonation-state vocabulary (HIS-P/S/A, ASP-P/D/A, GLU-P/D/A), with pH-selective block coordinate descent on (1−λ)·z(E_global) + λ·z(Σ(E_P − E_D)) (Christian P. Jacobsen; PottsMPNN from the Institute for Protein Design rc-foundry), ported to WebGPU (ramithuh/proton-pottsmpnn-webgpu) with verified parity to the PyTorch FP32 reference (J relRMS 1.63e-7 – 1.87e-7 on NVIDIA GB10) and bit-exact block-descent trajectories.',
+      license: 'MIT · BSD-3-Clause (rc-foundry PottsMPNN)',
+      url: 'https://github.com/christian-creator/ProtonPottsMPNN',
+      linkLabel: 'christian-creator/ProtonPottsMPNN',
+    },
+    {
       name: 'cg2all',
       role: 'Neural Cα → All-Atom Backmapping',
       detail:
