@@ -538,6 +538,7 @@ export interface ArtiosSharedFeaturizer {
   buildTokenization(opts: {
     atoms: readonly ArtiosAtom[];
     components: Map<string, CcdComponent>;
+    isMotifRelated?: Uint8Array | null;
   }): {
     nToken: number;
     atom_to_token_idx: Int32Array;
@@ -654,7 +655,7 @@ export function buildArtiosFeatures(
     // `ContextGenerator.get_renamed_atom_names`: ligand identity must not leak through atom names.
     ligandAtomRename: hasLigand,
   });
-  const tok = shared.buildTokenization({ atoms, components });
+  const tok = shared.buildTokenization({ atoms, components, isMotifRelated: plan.isMotifAtom });
 
   const coordinate = new Float32Array(nAtom * 3);
   for (let i = 0; i < nAtom; i++) {
@@ -920,7 +921,24 @@ export function coordsToArtiosPdb(
     );
   }
   const lines: string[] = [];
-  for (const remark of remarks) lines.push(`REMARK   1 ${remark}`.slice(0, 80));
+  for (const remark of remarks) {
+    const prefix = 'REMARK   1 ';
+    const maxBody = 80 - prefix.length;
+    if (remark.length <= maxBody) {
+      lines.push(`${prefix}${remark}`);
+    } else {
+      let rest = remark;
+      while (rest.length > maxBody) {
+        let cut = rest.lastIndexOf(',', maxBody);
+        if (cut <= 0) cut = rest.lastIndexOf(' ', maxBody);
+        if (cut <= 0) cut = maxBody;
+        else cut += 1;
+        lines.push(`${prefix}${rest.slice(0, cut).trimEnd()}`);
+        rest = rest.slice(cut).trimStart();
+      }
+      if (rest.length > 0) lines.push(`${prefix}${rest}`);
+    }
+  }
   let serial = 1;
   let prevChain = '';
   let prevHet = false;
@@ -1028,7 +1046,8 @@ export function buildArtiosBackboneArtifact(
       }),
     );
   const hasMotif = plan.motifIndices.length > 0;
-  const tag = hasMotif ? 'motif' : 'de novo';
+  const hasLigand = plan.ligandResNames.length > 0;
+  const tag = hasMotif ? (hasLigand ? 'motif+ligand' : 'motif') : hasLigand ? 'ligand' : 'de novo';
   const warnings = [...plan.warnings, ...result.warnings];
   if (backend === 'cpu') {
     warnings.push(

@@ -1430,7 +1430,7 @@ export function renameLigandAtoms(atoms, components) {
  *            sym_id: Int32Array, centre_atom_index: Int32Array, token_res_name: string[],
  *            is_ligand_token: Uint8Array, is_protein_token: Uint8Array}}
  */
-export function buildTokenization({ atoms, components, centreAtomNames = { protein: 'CA', dna: "C1'", rna: "C1'" } }) {
+export function buildTokenization({ atoms, components, isMotifRelated = null, centreAtomNames = { protein: 'CA', dna: "C1'", rna: "C1'" } }) {
   const lookup = components instanceof Map ? components : new Map(Object.entries(components ?? {}));
   const atomToToken = new Int32Array(atoms.length);
   const tokens = [];
@@ -1442,7 +1442,19 @@ export function buildTokenization({ atoms, components, centreAtomNames = { prote
     const resName = atoms[i].resName;
     const comp = lookup.get(resName);
     const molType = comp?.molType ?? (resName in RESIDUE_VOCAB ? 'protein' : 'ligand');
-    const isPolymer = molType !== 'ligand' && resName in RESIDUE_VOCAB;
+    let motifRelated = false;
+    if (isMotifRelated) {
+      for (let k = i; k < j; k += 1) {
+        if (isMotifRelated[k]) {
+          motifRelated = true;
+          break;
+        }
+      }
+    }
+    // Upstream `artios.data.structure.tokenization.compute_token_grouping`:
+    // standard non-ligand, non-motif-related residues get 1 token/residue;
+    // ligands AND motif-related residues are tokenized per-atom (1 token/atom).
+    const isPolymer = molType !== 'ligand' && resName in RESIDUE_VOCAB && !motifRelated;
 
     if (!chains.has(atoms[i].chainId)) chains.set(atoms[i].chainId, chains.size);
     const asymId = chains.get(atoms[i].chainId);

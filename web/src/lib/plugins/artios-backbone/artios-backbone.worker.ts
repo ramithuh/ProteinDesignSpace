@@ -474,7 +474,9 @@ createWorkerHarness({
               `L=${plan.designedLength} steps=${options.numSteps} seed=${seed}`,
             plan.motifIndices.length > 0
               ? `motif residues: ${plan.motifIndices.map((i) => i + 1).join(',')}`
-              : 'unconditional de novo design',
+              : plan.ligandResNames.length > 0
+                ? `ligand-conditioned design: ${[...new Set(plan.ligandResNames)].join(',')}`
+                : 'unconditional de novo design',
           ],
         });
         items.push(

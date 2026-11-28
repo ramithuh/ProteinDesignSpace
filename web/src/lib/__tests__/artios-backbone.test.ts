@@ -986,36 +986,45 @@ describe('artios-backbone feature assembly', () => {
     const { result } = featuresFor(plan, { ligandRasa: 0.35, motifDepth: 1.1 });
     const f = result.features;
     expect(cpu.prepareFeatures(f).nToken).toBe(f.nToken);
-    // 24 polymer tokens + 1 atom token for the zinc.
-    expect(f.nToken).toBe(25);
-    expect(f.is_ligand_token[24]).toBe(1);
-    expect([...f.is_ligand_token.slice(0, 24)].every((v) => v === 0)).toBe(true);
+    // Upstream Artios tokenizes non-motif standard residues 1/residue (20 tokens),
+    // motif residues 1/atom (each motif heavy atom gets its own token), and ligand 1/atom (1 Zn).
+    const motifAtomCount = Array.from(plan.isMotifAtom).reduce(
+      (sum, v, idx) => sum + (v === 1 && plan.isHetAtom[idx] === 0 ? 1 : 0),
+      0,
+    );
+    const expectedTokens = 20 + motifAtomCount + 1;
+    expect(f.nToken).toBe(expectedTokens);
+    expect(f.is_ligand_token[expectedTokens - 1]).toBe(1);
+    expect([...f.is_ligand_token.slice(0, expectedTokens - 1)].every((v) => v === 0)).toBe(true);
     expect(f.is_ligand[f.nAtom - 1]).toBe(1);
     expect(f.is_protein[f.nAtom - 1]).toBe(0);
     expect([...f.is_dna].every((v) => v === 0)).toBe(true);
     expect([...f.is_rna_token].every((v) => v === 0)).toBe(true);
 
-    // Motif tokens 2..5 plus the ligand token carry motif conditioning.
+    // Every motif atom token (tokens 2 .. 2+motifAtomCount-1) plus the ligand token carry motif conditioning.
     expect([...f.is_motif_token]).toEqual(
-      Array.from({ length: 25 }, (_, t) => (t >= 2 && t <= 5) || t === 24 ? 1 : 0),
+      Array.from(
+        { length: expectedTokens },
+        (_, t) => (t >= 2 && t < 2 + motifAtomCount) || t === expectedTokens - 1 ? 1 : 0,
+      ),
     );
     expect([...f.is_motif_related_token]).toEqual([...f.is_motif_token]);
-    const nativeCa = plan.nativeMotifCoords[0];
+    const firstMotifAtom = plan.atoms.find((_, idx) => plan.isMotifAtom[idx] === 1 && plan.isHetAtom[idx] === 0)!;
     expect([f.motif_coordinate[2 * 3], f.motif_coordinate[2 * 3 + 1], f.motif_coordinate[2 * 3 + 2]]).toEqual(
-      nativeCa.map((v) => Math.fround(v)),
+      firstMotifAtom.coord.map((v) => Math.fround(v)),
     );
     expect([...f.motif_coordinate.slice(0, 6)].every((v) => v === 0)).toBe(true);
 
     // motif_restype one-hots the real residue identity of motif tokens only.
     const restypeOf = (t: number) => [...f.motif_restype.slice(t * 32, (t + 1) * 32)].indexOf(1);
     expect(restypeOf(2)).toBe(shared.RESIDUE_VOCAB.SER);
-    expect(restypeOf(5)).toBe(shared.RESIDUE_VOCAB.ALA);
-    expect(restypeOf(24)).toBe(shared.RESIDUE_VOCAB.UNK); // ZN is not in the restype vocabulary
+    expect(restypeOf(2 + motifAtomCount - 1)).toBe(shared.RESIDUE_VOCAB.ALA);
+    expect(restypeOf(expectedTokens - 1)).toBe(shared.RESIDUE_VOCAB.UNK); // ZN is not in the restype vocabulary
     expect(restypeOf(0)).toBe(-1);
 
     // Conditioning targets land on the ligand / every token respectively.
-    expect(f.rasa[24]).toBeCloseTo(0.35, 6);
-    expect([...f.rasa.slice(0, 24)].every((v) => v === -1)).toBe(true);
+    expect(f.rasa[expectedTokens - 1]).toBeCloseTo(0.35, 6);
+    expect([...f.rasa.slice(0, expectedTokens - 1)].every((v) => v === -1)).toBe(true);
     expect([...f.motif_depth_norm].every((v) => Math.abs(v - 1.1) < 1e-6)).toBe(true);
 
     // The ligand's atom name is anonymized to <ELEMENT><n> (ContextGenerator.get_renamed_atom_names).

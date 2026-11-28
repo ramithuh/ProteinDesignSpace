@@ -1087,7 +1087,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
       id: 'sequence-design',
       title: 'Sequence Design',
       stage: 'inverse-fold',
-      subtitle: 'ProteinMPNN, LigandMPNN, LASErMPNN, AntiFold & EvoDiff-38M',
+      subtitle: 'ProteinMPNN, LigandMPNN, LASErMPNN, ArtiosPotts, Proton-PottsMPNN, AntiFold & EvoDiff-38M',
       countLabel: `${total}`,
       footnote: 'Runs locally over WebGPU — ProteinMPNN, LigandMPNN, LASErMPNN, AntiFold, ESM-IF1 & EvoDiff',
       subGroups,

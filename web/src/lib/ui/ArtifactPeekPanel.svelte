@@ -1680,7 +1680,20 @@
                 · chains [{c.chainLengths.join('+')}]
               {/if}
               {#if isFiniteNum(c.score)}
-                · score {c.score.toFixed(2)}
+                {#if c.sourceModelId === 'proton-pottsmpnn'}
+                  · E/res {c.score.toFixed(2)}
+                {:else if c.sourceModelId === 'artios-potts'}
+                  · −PLL {c.score.toFixed(2)}
+                {:else}
+                  · score {c.score.toFixed(2)}
+                {/if}
+              {/if}
+              {#if isFiniteNum(c.globalScore)}
+                {#if c.sourceModelId === 'proton-pottsmpnn'}
+                  · ΔE {c.globalScore >= 0 ? '+' : ''}{c.globalScore.toFixed(2)}
+                {:else if c.sourceModelId === 'artios-potts'}
+                  · E/res {c.globalScore.toFixed(2)}
+                {/if}
               {/if}
               {#if isFiniteNum(st.recoveryPct)}
                 · recovery {st.recoveryPct.toFixed(0)}%
