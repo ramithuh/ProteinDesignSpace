@@ -8,6 +8,8 @@ import {
   LocalFoldTemplateError,
   parseTemplateStructure,
 } from './localfold-template';
+import { ARTIOS_BACKBONE_MANIFEST } from '../plugins/artios-backbone/manifest';
+import { ARTIOS_POTTS_MANIFEST } from '../plugins/artios-potts/manifest';
 
 export interface Rfd4BenchmarkMeta {
   id: string;
@@ -1679,6 +1681,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       },
     ],
   },
+  'artios-backbone': ARTIOS_BACKBONE_MANIFEST,
   evodiff: {
     id: 'evodiff',
     displayName: 'EvoDiff-Seq (38M)',
@@ -2847,6 +2850,7 @@ export const ADAPTER_REGISTRY: Record<string, AdapterManifest> = {
       },
     ],
   },
+  'artios-potts': ARTIOS_POTTS_MANIFEST,
   'antifold-esmif1': {
     id: 'antifold-esmif1',
     displayName: 'AntiFold / ESM-IF1',

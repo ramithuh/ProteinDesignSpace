@@ -6,7 +6,10 @@ import {
   LOCALFOLD_MODEL_OPTIONS,
   MPNN_VARIANT_OPTIONS,
 } from './registry';
-import { BENCHMARK_TARGETS } from './benchmarks';
+import {
+  AME_BENCHMARK_TARGETS,
+  BENCHMARK_TARGETS,
+} from './benchmarks';
 import { DEFAULT_ALPHAFOLD_DB_UNIPROT_ID, QUICK_ALPHAFOLD_DB_EXAMPLES } from '$lib/protein-ops/alphafold-db';
 import { PORT_COLORS } from './graph-utils';
 
@@ -32,6 +35,8 @@ export interface CatalogSubGroup {
   items: CatalogSubItem[];
   collapsible?: boolean;
   defaultCollapsed?: boolean;
+  /** Render as a compact nested hover/click flyout submenu when not actively searching. */
+  nestedFlyout?: 'ame41' | 'benchmarks';
 }
 
 export interface CatalogItem {
@@ -72,12 +77,13 @@ export const CATALOG_STAGE_GROUPS: { title: string; ids: string[] }[] = [
       'frameflow',
       'foldflow2',
       'boltzgen',
+      'artios-backbone',
       'protpardelle',
     ],
   },
   {
     title: 'Sequence Design',
-    ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'antifold-esmif1', 'evodiff'],
+    ids: ['web-protein-mpnn', 'ligandmpnn', 'lasermpnn', 'artios-potts', 'antifold-esmif1', 'evodiff'],
   },
   { title: 'Structure Prediction', ids: ['localfold-af2'] },
   { title: 'Refinement / Backmapping', ids: ['pulchra', 'cg2all'] },
@@ -99,10 +105,12 @@ export const CONCISE_BLOCK_ROLES: Record<string, string> = {
   frameflow: 'Compact 16.8M rigid-frame flow matching for 5-atom backbones',
   foldflow2: 'ReFT rigid-frame flow matching with frozen ESM-2 650M encoder',
   boltzgen: 'BoltzGen-1 all-atom unconditional, binder & motif diffusion',
+  'artios-backbone': 'All-atom EDM diffusion (136.7M) for de novo backbones, motif scaffolding & ligand-conditioned design',
   protpardelle: 'All-atom & backbone EDM diffusion, motif scaffolding & MiniMPNN co-design',
   'web-protein-mpnn': 'Inverse folding (SolubleMPNN, ProteinMPNN, Cα-only)',
   ligandmpnn: 'Ligand-, metal- & nucleic-acid-aware protein sequence design',
   lasermpnn: 'Ligand-aware sequence & all-atom sidechain rotamer co-design',
+  'artios-potts': 'All-atom ligand-aware Potts sequence design & scoring (energy + per-residue pseudo-log-likelihood)',
   'antifold-esmif1': 'Antibody CDR (AntiFold) & general protein inverse folding (ESM-IF1)',
   evodiff: 'MSA-free discrete sequence diffusion & masked sequence inpainting (OA-DM 38M)',
   'localfold-af2': 'Predict 3D structures (AlphaFold2, RF3, Boltz-2, AlphaFold 3 & more)',
@@ -828,7 +836,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         },
         label: `PDB: ${b.name} (${b.pdbId})`,
       },
-      searchBlob: `${b.id} ${b.name} ${b.shortLabel} ${b.pdbId} ${b.biology} benchmark ${extraTokens}`.toLowerCase(),
+      searchBlob: `${b.id} ${b.mcsaId ?? ''} ${b.name} ${b.shortLabel} ${b.pdbId} ${(b.ligands ?? []).join(' ')} ${b.biology} benchmark ${extraTokens}`.toLowerCase(),
     });
 
     const binderBenchItems: CatalogSubItem[] = BENCHMARK_TARGETS.filter(
@@ -839,17 +847,22 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
       (b) => b.category === 'motif',
     ).map((b) => makeBenchmarkItem(b, 'motif scaffold'));
 
-    const enzymeBenchItems: CatalogSubItem[] = BENCHMARK_TARGETS.filter(
-      (b) => b.category === 'enzyme-ligand',
-    ).map((b) => makeBenchmarkItem(b, 'enzyme ligand dna cofactor'));
+    const ligandDnaBenchItems: CatalogSubItem[] = BENCHMARK_TARGETS.filter(
+      (b) => b.category === 'enzyme-ligand' && !b.id.startsWith('ame_'),
+    ).map((b) => makeBenchmarkItem(b, 'ligand dna cofactor'));
+
+    const ame41BenchItems: CatalogSubItem[] = AME_BENCHMARK_TARGETS.map((b) =>
+      makeBenchmarkItem(b, 'ame enzyme mcsa catalytic tip-atom ligand'),
+    );
 
     const subGroups: CatalogSubGroup[] = [
       { title: 'Starting Inputs', items },
-      { title: 'PPI Binders', items: binderBenchItems, collapsible: true, defaultCollapsed: true },
-      { title: 'Motif Scaffolding', items: motifBenchItems, collapsible: true, defaultCollapsed: true },
-      { title: 'Enzymes, Ligands & DNA', items: enzymeBenchItems, collapsible: true, defaultCollapsed: true },
+      { title: 'PPI Binders', items: binderBenchItems, nestedFlyout: 'benchmarks' },
+      { title: 'Motif Scaffolding', items: motifBenchItems, nestedFlyout: 'benchmarks' },
+      { title: 'Ligands & DNA', items: ligandDnaBenchItems, nestedFlyout: 'benchmarks' },
+      { title: 'AME 41 Benchmarks', items: ame41BenchItems, nestedFlyout: 'ame41' },
     ];
-    const allItems = [...items, ...binderBenchItems, ...motifBenchItems, ...enzymeBenchItems];
+    const allItems = [...items, ...binderBenchItems, ...motifBenchItems, ...ligandDnaBenchItems, ...ame41BenchItems];
     const identityBlob = 'inputs input source pdb sequence fasta mmcif benchmark';
     const searchBlob = `${identityBlob} ${allItems.map((i) => i.searchBlob).join(' ')}`;
     return {
@@ -875,6 +888,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
     const ff = ADAPTER_REGISTRY.frameflow;
     const ff2 = ADAPTER_REGISTRY.foldflow2;
     const bg = ADAPTER_REGISTRY.boltzgen;
+    const ab = ADAPTER_REGISTRY['artios-backbone'];
     const pp = ADAPTER_REGISTRY.protpardelle;
     const items: CatalogSubItem[] = [
       {
@@ -969,6 +983,14 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         searchBlob: `${bg.id} ${bg.shortName} ${bg.displayName} ${CONCISE_BLOCK_ROLES.boltzgen} boltzgen boltzgen1 all-atom binder motif diverse adherence diffusion mit`.toLowerCase(),
       },
       {
+        key: 'artios-backbone',
+        label: ab.shortName,
+        subtitle: CONCISE_BLOCK_ROLES['artios-backbone'],
+        meta: `~${ab.approxWeightsMB} MB · Apache-2.0`,
+        insert: { adapterId: 'artios-backbone', label: 'ArtiosBackbone' },
+        searchBlob: `${ab.id} ${ab.shortName} ${ab.displayName} ${CONCISE_BLOCK_ROLES['artios-backbone']} artios artiosbackbone ligo biosciences all-atom edm diffusion dit motif scaffolding ligand enzyme rasa burial de novo backbone karras self-conditioning apache`.toLowerCase(),
+      },
+      {
         key: 'protpardelle',
         label: pp.shortName,
         subtitle: CONCISE_BLOCK_ROLES.protpardelle,
@@ -996,6 +1018,7 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
     const antifold = buildSubGroupsForAdapter('antifold-esmif1');
     const lig = ADAPTER_REGISTRY.ligandmpnn;
     const laser = ADAPTER_REGISTRY.lasermpnn;
+    const potts = ADAPTER_REGISTRY['artios-potts'];
     const evo = ADAPTER_REGISTRY.evodiff;
     const allAtomItems: CatalogSubItem[] = [
       {
@@ -1015,6 +1038,15 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
         insert: { adapterId: 'lasermpnn', label: 'LASErMPNN' },
         searchBlob:
           `${laser.id} ${laser.shortName} ${laser.displayName} ${CONCISE_BLOCK_ROLES.lasermpnn} ligand rotamer sidechain packing all-atom spice polizzi mpnn mit`.toLowerCase(),
+      },
+      {
+        key: 'artios-potts',
+        label: potts.shortName,
+        subtitle: CONCISE_BLOCK_ROLES['artios-potts'],
+        meta: `~${potts.approxWeightsMB} MB · Apache-2.0`,
+        insert: { adapterId: 'artios-potts', label: 'ArtiosPotts' },
+        searchBlob:
+          `${potts.id} ${potts.shortName} ${potts.displayName} ${CONCISE_BLOCK_ROLES['artios-potts']} artios artiospotts potts mrf markov random field couplings gibbs dlmc mcmc ligand cofactor metal active site pocket pll pseudo-log-likelihood energy ligo biosciences apache-2.0`.toLowerCase(),
       },
     ];
     const seqDiffItems: CatalogSubItem[] = [

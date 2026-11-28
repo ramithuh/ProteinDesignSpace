@@ -7,6 +7,8 @@
     type FilteredCategoryEntry,
   } from '$lib/engine/catalog';
   import { STAGE_COLORS } from '$lib/engine/graph-utils';
+  import type { BenchmarkTargetMeta } from '$lib/engine/benchmarks';
+  import AmeBenchmarkSubmenu from './AmeBenchmarkSubmenu.svelte';
 
   interface Props {
     disabled?: boolean;
@@ -55,12 +57,31 @@
     return found;
   });
 
-  function isSubGroupOpen(catId: string, subGrp: { title: string; collapsible?: boolean; defaultCollapsed?: boolean }): boolean {
+  function isSubGroupOpen(
+    catId: string,
+    subGrp: { title: string; collapsible?: boolean; defaultCollapsed?: boolean; nestedFlyout?: 'ame41' | 'benchmarks' },
+  ): boolean {
+    if (subGrp.nestedFlyout) return query.trim().length > 0;
     if (!subGrp.collapsible) return true;
     if (query.trim().length > 0) return true;
     const key = `${catId}::${subGrp.title}`;
     if (key in expandedGroups) return expandedGroups[key];
     return !subGrp.defaultCollapsed;
+  }
+
+  function buildAmeInsertRequest(bench: BenchmarkTargetMeta): CatalogInsertRequest {
+    return {
+      adapterId: 'pdb-input',
+      params: {
+        mode: 'pdb-id',
+        pdbId: bench.pdbId,
+        filename: `${bench.pdbId}.cif`,
+        pdbText: '',
+        benchmarkId: bench.id,
+        ...(bench.cropSegments ? { cropSegments: bench.cropSegments } : {}),
+      },
+      label: `PDB: ${bench.name} (${bench.pdbId})`,
+    };
   }
 
   function toggleSubGroup(catId: string, title: string, currentlyOpen: boolean) {
@@ -252,6 +273,7 @@
       if (!target) return;
       if (shellEl?.contains(target)) return;
       if (triggerEl?.contains(target)) return;
+      if (target instanceof Element && target.closest('[data-ame-flyout]')) return;
       onClose();
     }
     window.addEventListener('pointerdown', handlePointerDown);
@@ -516,7 +538,44 @@
       <div class="flyout-list">
         {#each flyoutEntry.matchingSubGroups as subGrp (subGrp.title)}
           {@const grpOpen = isSubGroupOpen(flyoutEntry.category.id, subGrp)}
-          {#if subGrp.collapsible}
+          {#if subGrp.nestedFlyout === 'ame41' && !query.trim()}
+            <AmeBenchmarkSubmenu
+              compact={true}
+              {disabled}
+              triggerLabel="AME 41 Benchmarks"
+              onSelect={(bench) => {
+                if (disabled) return;
+                onInsert(buildAmeInsertRequest(bench));
+              }}
+              onDragStart={onDragStart
+                ? (ev, bench) => {
+                    searchInputEl?.focus();
+                    onDragStart(ev, buildAmeInsertRequest(bench));
+                  }
+                : undefined}
+              onFlyoutMouseEnter={clearCloseTimer}
+              onFlyoutMouseLeave={scheduleFlyoutClose}
+            />
+          {:else if subGrp.nestedFlyout === 'benchmarks' && !query.trim()}
+            <AmeBenchmarkSubmenu
+              compact={true}
+              {disabled}
+              triggerLabel={subGrp.title}
+              catalogItems={subGrp.items}
+              onSelectCatalogItem={(item) => {
+                if (disabled) return;
+                onInsert(item.insert);
+              }}
+              onDragCatalogItem={onDragStart
+                ? (ev, item) => {
+                    searchInputEl?.focus();
+                    onDragStart(ev, item.insert);
+                  }
+                : undefined}
+              onFlyoutMouseEnter={clearCloseTimer}
+              onFlyoutMouseLeave={scheduleFlyoutClose}
+            />
+          {:else if subGrp.collapsible}
             <button
               type="button"
               class="group-toggle"

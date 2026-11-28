@@ -1,5 +1,5 @@
-// Layer 3 Model Plugins Barrel — Single Registration Entrypoint (ALL 29 ADAPTERS NATIVE!).
-// Adding model #30 = 1 cohesive folder under `src/lib/plugins/<id>/` + 1 entry in `NATIVE_PLUGINS`.
+// Layer 3 Model Plugins Barrel — Single Registration Entrypoint (ALL 31 ADAPTERS NATIVE!).
+// Adding model #32 = 1 cohesive folder under `src/lib/plugins/<id>/` + 1 entry in `NATIVE_PLUGINS`.
 
 import { PluginRegistry, setActivePluginRegistry, type DomainPack, type ModelPlugin } from '$lib/kernel';
 import { proteinBiopolymerDomainPack } from '$lib/domains/protein-biopolymer';
@@ -15,7 +15,7 @@ import { pulchraPlugin } from './pulchra';
 // Batch 3B: ort-webgpu (1)
 import { webProteinMpnnPlugin } from './web-protein-mpnn';
 
-// Batch 3C: standard wgsl-custom generators & inverse-folders (13)
+// Batch 3C: standard wgsl-custom generators & inverse-folders (15)
 import { evodiffPlugin } from './evodiff';
 import { laProteinaPlugin } from './la-proteina';
 import { proteinaPlugin } from './proteina';
@@ -27,8 +27,10 @@ import { protpardellePlugin } from './protpardelle';
 import { rfdiffusionPlugin } from './rfdiffusion';
 import { rfd3Plugin } from './rfd3';
 import { boltzgenPlugin } from './boltzgen';
+import { artiosBackbonePlugin } from './artios-backbone';
 import { ligandmpnnPlugin } from './ligandmpnn';
 import { lasermpnnPlugin } from './lasermpnn';
+import { artiosPottsPlugin } from './artios-potts';
 import { antifoldEsmif1Plugin } from './antifold-esmif1';
 
 // Batch 3D: scorers & dynamics (3)
@@ -48,7 +50,7 @@ import { genie3Plugin } from './genie3';
 import { localfoldAf2Plugin } from './localfold-af2';
 
 /**
- * All 29 native Layer 3 ModelPlugins (zero legacy-bridged adapters remain!).
+ * All 31 native Layer 3 ModelPlugins (zero legacy-bridged adapters remain!).
  */
 export const NATIVE_PLUGINS: readonly ModelPlugin[] = [
   // 6 cpu-ts utilities
@@ -60,11 +62,12 @@ export const NATIVE_PLUGINS: readonly ModelPlugin[] = [
   pulchraPlugin,
   // 1 ort-webgpu
   webProteinMpnnPlugin,
-  // 14 wgsl-custom generators & inverse-folders
+  // 16 wgsl-custom generators & inverse-folders
   protpardellePlugin,
   rfdiffusionPlugin,
   rfd3Plugin,
   boltzgenPlugin,
+  artiosBackbonePlugin,
   laProteinaPlugin,
   proteinaPlugin,
   sidProteinPlugin,
@@ -74,6 +77,7 @@ export const NATIVE_PLUGINS: readonly ModelPlugin[] = [
   evodiffPlugin,
   ligandmpnnPlugin,
   lasermpnnPlugin,
+  artiosPottsPlugin,
   antifoldEsmif1Plugin,
   // 3 scorers & dynamics
   thermompnnPlugin,

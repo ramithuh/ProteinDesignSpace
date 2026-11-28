@@ -37,7 +37,7 @@ describe('engine/llms-txt', () => {
   it('covers 100% of live ADAPTER_REGISTRY models, short codes, ports, PortTypes, and primary parameters with zero stale IDs', () => {
     const text = generateLlmsTxt();
     const adapterIds = Object.keys(ADAPTER_REGISTRY);
-    expect(adapterIds).toHaveLength(29);
+    expect(adapterIds).toHaveLength(31);
 
     for (const id of adapterIds) {
       expect(text).toContain(id);
@@ -113,7 +113,7 @@ describe('engine/llms-txt', () => {
       expect(text).toContain(preset.id);
     }
 
-    expect(BENCHMARK_TARGETS).toHaveLength(16);
+    expect(BENCHMARK_TARGETS).toHaveLength(80);
     for (const bench of BENCHMARK_TARGETS) {
       expect(text, `Missing benchmark target ${bench.id}`).toContain(bench.id);
       expect(text).toContain(bench.pdbId);

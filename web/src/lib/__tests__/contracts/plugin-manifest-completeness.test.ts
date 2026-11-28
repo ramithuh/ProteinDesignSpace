@@ -19,9 +19,11 @@ const EXPECTED_ADAPTER_IDS = [
   'genie2',
   'frameflow',
   'foldflow2',
+  'artios-backbone',
   'web-protein-mpnn',
   'ligandmpnn',
   'lasermpnn',
+  'artios-potts',
   'antifold-esmif1',
   'localfold-af2',
   'thermompnn',
@@ -35,11 +37,11 @@ const EXPECTED_ADAPTER_IDS = [
   'cg2all',
 ] as const;
 
-describe('Phase 0 contract: plugin manifest & model-card completeness (29 adapters)', () => {
-  it('registers all 29 baseline adapters with valid manifests and default params', () => {
+describe('Phase 0 contract: plugin manifest & model-card completeness (31 adapters)', () => {
+  it('registers all 31 baseline adapters with valid manifests and default params', () => {
     const keys = Object.keys(ADAPTER_REGISTRY).sort();
     expect(keys).toEqual([...EXPECTED_ADAPTER_IDS].sort());
-    expect(keys).toHaveLength(29);
+    expect(keys).toHaveLength(31);
 
     let cpuCount = 0;
     let ortCount = 0;
@@ -68,14 +70,14 @@ describe('Phase 0 contract: plugin manifest & model-card completeness (29 adapte
 
     expect(cpuCount).toBe(6);
     expect(ortCount).toBe(1);
-    expect(wgslCount).toBe(22);
+    expect(wgslCount).toBe(24);
   });
 
-  it('provides model cards for all 23 ML adapters and none for the 6 pure CPU utilities', () => {
+  it('provides model cards for all 25 ML adapters and none for the 6 pure CPU utilities', () => {
     const mlAdapters = EXPECTED_ADAPTER_IDS.filter((id) => ADAPTER_REGISTRY[id].runtime !== 'cpu-ts');
     const cpuAdapters = EXPECTED_ADAPTER_IDS.filter((id) => ADAPTER_REGISTRY[id].runtime === 'cpu-ts');
 
-    expect(mlAdapters).toHaveLength(23);
+    expect(mlAdapters).toHaveLength(25);
     expect(cpuAdapters).toHaveLength(6);
 
     for (const id of mlAdapters) {

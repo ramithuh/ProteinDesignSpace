@@ -260,8 +260,8 @@ describe('Model-Agnostic Conditioning & Curated Benchmark Targets', () => {
     expect(reparsed.resNums).toEqual(cropped.resNums);
     expect(reparsed.chainIds.every((c) => c === 'A')).toBe(true);
 
-    // Every single curated benchmark (all 16: motifs, PPI binders, AME enzymes, SAM, B-DNA) defines explicit cropSegments
-    expect(BENCHMARK_TARGETS.length).toBe(16);
+    // Every single curated benchmark (all 80: 31 motifs, 6 PPI binders, 41 AME enzymes, SAM, B-DNA) defines explicit cropSegments
+    expect(BENCHMARK_TARGETS.length).toBe(80);
     for (const b of BENCHMARK_TARGETS) {
       expect(b.cropSegments && b.cropSegments.length > 0, `Missing cropSegments on ${b.id}`).toBe(true);
     }

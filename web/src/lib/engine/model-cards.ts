@@ -554,6 +554,73 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     ],
   },
 
+  'artios-potts-webgpu': {
+    id: 'artios-potts-webgpu',
+    adapterId: 'artios-potts',
+    displayName: 'ArtiosPotts',
+    status: 'live',
+    activePrecisionId: 'fp16',
+    precisions: [
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          '80 F32 tensors (2,602,338 params, 1 shard, 10.42 MB); tiled F32 WGSL GEMM, F32 activations and accumulation',
+        approxSizeMB: 10.4,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Potts fields / couplings relRMS vs PyTorch FP32',
+          value: 'h 1.81e-7 – 1.87e-7 · J 3.18e-7 – 3.77e-7 (0 kNN edge mismatches on all 3 cases)',
+          maxAbsDiff: '3.65e-7 (h) · 1.48e-7 (J) vs the FP32 CPU reference on the 24-token case',
+          scope: 'Three oracle cases from tools/potts/dump_oracle.py: 1HEW lysozyme pocket (20 aa + 6-atom NAG), synthetic helix + 4-atom ligand (8 aa), apo 3x16-aa helix bundle; full per-stage traces (featurizer, 3 encoder + 3 decoder layers, h, J, MPNN logits) all < 1.3e-6',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 headless-shell, Dawn Vulkan',
+        },
+        latencyHint:
+          '4.1–14.7 ms warm median (24–40 tokens) · 70–119 ms cold first call incl. WGSL pipeline build · the pure-JS CPU reference takes 0.8–1.8 s for the same shapes',
+      },
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'F16 tiled-matmul weights packed two per u32 (39 of 80 tensors), F32 norms, biases and embeddings (1 shard, 5.21 MB); F32 activations and accumulation',
+        approxSizeMB: 5.2,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Potts fields / couplings relRMS vs PyTorch FP32',
+          value: 'h 1.11e-4 – 1.91e-4 · J 1.42e-4 – 1.75e-4',
+          scope: 'Same 3 oracle cases (1HEW pocket, synthetic helix + ligand, apo helix bundle)',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 headless-shell, Dawn Vulkan',
+        },
+        latencyHint: '4.2–13.9 ms warm GPU per Potts-parameter pass (24–40 tokens)',
+      },
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Symmetric per-output-row I8 tiled-matmul weights packed four per u32 with colocated F32 row scales, F32 1D tensors (1 shard, 2.68 MB)',
+        approxSizeMB: 2.7,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU Potts fields / couplings relRMS vs PyTorch FP32',
+          value: 'h 1.22e-3 – 4.23e-3 · J 1.24e-2 – 1.46e-2',
+          scope: 'Same 3 oracle cases (1HEW pocket, synthetic helix + ligand, apo helix bundle)',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium 1243 headless-shell, Dawn Vulkan',
+        },
+        caveat:
+          'Couplings J carry ~1.3% relRMS at INT8, which can flip individual residue choices in a tight pocket; FP16 is within 2e-4 of FP32 for only 2.5 MB more and is the default.',
+      },
+    ],
+    upstreamRepo: 'https://github.com/Ligo-Biosciences/artios',
+    weightsRepo: 'https://huggingface.co/ramithuh/artios-webgpu',
+    license: 'Apache-2.0',
+    citation:
+      'Ligo Biosciences (2026) ArtiosPotts: all-atom ligand-aware Potts sequence design (Ligo-Biosciences/artios; checkpoint Ligo-Biosciences/ArtiosPotts @ c98b78ebcd76, 38400_ema_0.9999). Builds on Dauparas et al. (2022) ProteinMPNN message passing and the Protenix/AF3 feature stack.',
+    limitations: [
+      'Only the factorized (`parameterisation: "factor"`) GraphPotts head is ported; the dense parameterisation is not.',
+      'The released inference config averages 50 noise-perturbed forward passes (ensemble_size=50, noise 0.25 Å); this port runs the single noise-free pass the oracle fixtures record, so h and J are slightly sharper than an upstream ensemble run.',
+      'DNA/RNA chains are conditioned on as generic context atoms — ArtiosPotts’ dedicated nucleic entity-type and restype embeddings are not driven by this port’s PDB path.',
+      'Side chains are never built: the model scores and designs sequence identity on a fixed backbone (pair with cg2all, PULCHRA or LASErMPNN for all-atom output).',
+      'The MCMC sampler runs on the CPU in JS; one chain completes between cancellation checks.',
+    ],
+  },
+
   'lasermpnn-webgpu': {
     id: 'lasermpnn-webgpu',
     adapterId: 'lasermpnn',
@@ -1149,6 +1216,67 @@ export const MODEL_CARDS: Record<string, ModelCardSpec> = {
     limitations: [
       'Outputs backbone N/CA/C/O geometry for designed residues (plus full target sidechains); wire ProteinMPNN / LigandMPNN downstream for sequence assignment.',
       'Pairformer triangle attention scales cubically with total token count; keep binder + target lengths moderate in browser VRAM.',
+    ],
+  },
+
+  'artios-backbone-webgpu': {
+    id: 'artios-backbone-webgpu',
+    adapterId: 'artios-backbone',
+    displayName: 'ArtiosBackbone (All-Atom EDM Diffusion)',
+    status: 'live',
+    activePrecisionId: 'int8',
+    precisions: [
+      {
+        id: 'int8',
+        label: 'INT8',
+        quantizationDetail:
+          'Symmetric per-output-row I8 matrices + F32 scales, F32 norms/biases/embeddings (131.3 MiB; 6 shards ≤ 25 MiB, 270 tensors, 136.67M params, exported from Ligo-Biosciences/ArtiosBackbone @ 3b8939e37aff1544cb74937bad3516673c9914ad `280000_ema_0.9999.pt`)',
+        approxSizeMB: 131.3,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU denoised-coordinate relRMS vs the real PyTorch FP32 oracle',
+          value: '8.10e-3 cold / 8.31e-3 with Kabsch-aligned self-conditioning',
+          scope: 'Released 136.7M checkpoint, cold and self-conditioned denoise steps on the oracle motif+ligand fixture',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium headless (Dawn Vulkan)',
+        },
+        latencyHint: '13.7 ms median per denoise step at 256 tokens / 2048 atoms (≈2.7 s for a 200-step trajectory)',
+      },
+      {
+        id: 'fp16',
+        label: 'FP16',
+        quantizationDetail:
+          'Packed 2×F16 linear matrices + F32 norms/biases/embeddings (260.7 MiB; 11 shards, 270 tensors, 136.67M params)',
+        approxSizeMB: 260.7,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU denoised-coordinate relRMS vs the real PyTorch FP32 oracle',
+          value: '2.95e-4 cold / 4.96e-4 with Kabsch-aligned self-conditioning',
+          scope: 'Released 136.7M checkpoint, cold and self-conditioned denoise steps on the oracle motif+ligand fixture',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium headless (Dawn Vulkan)',
+        },
+      },
+      {
+        id: 'fp32',
+        label: 'FP32',
+        quantizationDetail:
+          'Reference F32 tensors (521.4 MiB; 23 shards, 270 tensors, 136.67M params) — matches the released checkpoint bit-for-bit after dequantization',
+        approxSizeMB: 521.4,
+        parityVsPytorchFp32: {
+          metric: 'WebGPU denoised-coordinate relRMS vs the real PyTorch FP32 oracle',
+          value: '1.32e-6 cold / 1.11e-6 with Kabsch-aligned self-conditioning',
+          scope: 'Released 136.7M checkpoint on the oracle motif+ligand fixture (full DiffusionModule forward, 16 DiT blocks)',
+          hardware: 'NVIDIA GB10 (ARM64), Chromium headless (Dawn Vulkan)',
+        },
+      },
+    ],
+    upstreamRepo: 'https://github.com/Ligo-Biosciences/artios',
+    weightsRepo: 'https://huggingface.co/ramithuh/artios-webgpu',
+    license: 'Apache-2.0 (Ligo Biosciences / Artios; derivative of ByteDance Protenix, Apache-2.0)',
+    citation:
+      'Ligo Biosciences (2026) ArtiosBackbone: all-atom motif-scaffolding diffusion (Ligo-Biosciences/artios); builds on Chen et al. (2024) Protenix and Abramson et al. (2024) Accurate structure prediction of biomolecular interactions with AlphaFold 3, Nature 630, 493–500.',
+    limitations: [
+      'The released checkpoint is the diffusion module only (270 `diffusion_module.*` tensors, 136.67M params, 16 AdaLN DiT blocks × 16 heads): there is no confidence head, so designs carry no per-residue confidence and should be validated by folding (LocalFold) and scRMSD scoring downstream.',
+      'Reference conformers come from wwPDB CCD ideal coordinates (`pdbx_model_Cartn_*_ideal`) rather than an RDKit ETKDGv3 embedding; for ligands without an ideal conformer, the input structure\'s own conformer is used.',
+      'The timestep-independent conditioning cache is computed once per run and shared by every design in the batch.',
+      'Generated scaffold positions are emitted as glycine backbone N/CA/C/O — pair with ArtiosPotts / LigandMPNN / ProteinMPNN downstream for sequence design.',
     ],
   },
 

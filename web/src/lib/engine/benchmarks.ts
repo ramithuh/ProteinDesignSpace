@@ -2,6 +2,22 @@
 // Compiled from AME, RFdiffusion 25, MotifBench / Genie 3 (RSV-F & BinderBench),
 // BindCraft / BoltzGen / Adaptyv Bio, and RFD4-Proteina.
 
+import { AME_BENCHMARK_TARGETS, FEATURED_AME_BENCHMARK_IDS } from './ame-benchmarks';
+import {
+  ALL_ATOM_MOTIF_BENCHMARK_IDS,
+  FEATURED_MOTIF_BENCHMARK_IDS,
+  MOTIF_BENCHMARK_TARGETS,
+  MOTIF_BENCHMARK_YAML_KEYS,
+} from './motif-benchmarks';
+
+export { AME_BENCHMARK_TARGETS, FEATURED_AME_BENCHMARK_IDS };
+export {
+  ALL_ATOM_MOTIF_BENCHMARK_IDS,
+  FEATURED_MOTIF_BENCHMARK_IDS,
+  MOTIF_BENCHMARK_TARGETS,
+  MOTIF_BENCHMARK_YAML_KEYS,
+};
+
 export type BenchmarkCategory = 'motif' | 'binder' | 'enzyme-ligand';
 
 export interface BenchmarkTargetMeta {
@@ -18,6 +34,14 @@ export interface BenchmarkTargetMeta {
   biology: string;
   /** Optional segment crop applied to the raw RCSB structure so only the benchmark domain/motif is loaded. */
   cropSegments?: string;
+  /** Optional M-CSA catalytic site entry ID (e.g. 'M0097') for AME enzyme benchmarks. */
+  mcsaId?: string;
+  /** Optional ligand CCD codes present in this benchmark (e.g. ['DHZ', 'ZN']). */
+  ligands?: string[];
+  /** Optional number of catalytic motif residues. */
+  motifResidueCount?: number;
+  /** Optional canonical designed scaffold length in residues. */
+  targetLength?: number;
   /** Canonical conditioning parameters applied to the Conditioning block in 1 click. */
   conditionParams: {
     taskPreset: 'custom' | string;
@@ -37,121 +61,8 @@ export interface BenchmarkTargetMeta {
 }
 
 export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
-  // ── Motif Scaffolding & Catalytic Sites ──
-  {
-    id: 'rfd_5tpn_rsvf_v',
-    name: 'RSV-F Site V Epitope',
-    shortLabel: 'RSV-F Site V (5TPN)',
-    category: 'motif',
-    pdbId: '5TPN',
-    sourceFamily: 'RFdiffusion 25 / Genie 3 RSV-F',
-    approxTokens: 75,
-    tier: 'fast',
-    supportsGenie3: true,
-    entities: ['protein'],
-    biology: 'Viral prefusion neutralizing helix–strand epitope (A163–181)',
-    cropSegments: 'A163-181',
-    conditionParams: {
-      taskPreset: 'custom',
-      contig: '25-25,A163-181,31-31',
-      motifSpan: 'A163-181',
-    },
-  },
-  {
-    id: 'rfd_1prw_efhand',
-    name: 'Calmodulin EF-Hand',
-    shortLabel: 'Calmodulin EF-Hand (1PRW)',
-    category: 'motif',
-    pdbId: '1PRW',
-    sourceFamily: 'RFdiffusion / RFD4',
-    approxTokens: 76,
-    tier: 'fast',
-    supportsGenie3: true,
-    entities: ['protein'],
-    biology: 'Twin Ca²⁺-binding EF-hand loops (A16–35 & A52–71)',
-    cropSegments: 'A16-35, A52-71',
-    conditionParams: {
-      taskPreset: 'custom',
-      contig: '10-10,A16-35,16-16,A52-71,10-10',
-      motifSpan: 'A16-35, A52-71',
-    },
-  },
-  {
-    id: 'g3_5yui_ca2',
-    name: 'Carbonic Anhydrase II',
-    shortLabel: 'CA II His₃ Site (5YUI)',
-    category: 'motif',
-    pdbId: '5YUI',
-    sourceFamily: 'RFdiffusion / Genie 3 MotifBench',
-    approxTokens: 75,
-    tier: 'fast',
-    supportsGenie3: true,
-    entities: ['protein'],
-    biology: '3-island catalytic His₃ Zn²⁺ binding site with Thr199 gatekeeper',
-    cropSegments: 'A93-97, A118-120, A198-200',
-    conditionParams: {
-      taskPreset: 'custom',
-      contig: '14-14,A93-97,20-20,A118-120,20-20,A198-200,10-10',
-      motifSpan: 'A93-97, A118-120, A198-200',
-    },
-  },
-  {
-    id: 'rfd_1ycr_p53',
-    name: 'p53 Helix (MDM2 Motif)',
-    shortLabel: 'p53 Helix Motif (1YCR)',
-    category: 'motif',
-    pdbId: '1YCR',
-    sourceFamily: 'RFdiffusion Classic',
-    approxTokens: 65,
-    tier: 'fast',
-    supportsGenie3: true,
-    entities: ['protein'],
-    biology: '9-aa cancer-suppressor helical motif (B19–27, F19/W23/L26 triad)',
-    cropSegments: 'B19-27',
-    conditionParams: {
-      taskPreset: 'custom',
-      contig: '28-28,B19-27,28-28',
-      motifSpan: 'B19-27',
-    },
-  },
-  {
-    id: 'rfd_1bcf_diiron',
-    name: 'Di-Iron 4-Helix Bundle',
-    shortLabel: 'Di-Iron Site (1BCF)',
-    category: 'motif',
-    pdbId: '1BCF',
-    sourceFamily: 'RFdiffusion / Genie 3',
-    approxTokens: 125,
-    tier: 'fast',
-    supportsGenie3: true,
-    entities: ['protein'],
-    biology: '4-island bacterioferritin di-iron coordinating helices',
-    cropSegments: 'A18-25, A47-54, A92-99, A123-130',
-    conditionParams: {
-      taskPreset: 'custom',
-      contig: '12-12,A92-99,24-24,A123-130,24-24,A47-54,23-23,A18-25,10-10',
-      motifSpan: 'A18-25, A47-54, A92-99, A123-130',
-    },
-  },
-  {
-    id: 'g3_4xoj_trypsin',
-    name: 'Trypsin Catalytic Triad',
-    shortLabel: 'Trypsin Triad (4XOJ)',
-    category: 'motif',
-    pdbId: '4XOJ',
-    sourceFamily: 'Genie 3 MotifBench',
-    approxTokens: 150,
-    tier: 'fast',
-    supportsGenie3: true,
-    entities: ['protein'],
-    biology: 'Metal-free Ser–His–Asp catalytic triad + oxyanion hole',
-    cropSegments: 'A55, A99, A190-192',
-    conditionParams: {
-      taskPreset: 'custom',
-      contig: '15-15,A55-55,45-45,A99-99,70-70,A190-192,15-15',
-      motifSpan: 'A55, A99, A190-192',
-    },
-  },
+  // ── Motif Scaffolding & Catalytic Sites (6 curated + 25 `motif_dict.yaml` tasks) ──
+  ...MOTIF_BENCHMARK_TARGETS,
 
   // ── Protein–Protein (PPI) Binder Targets ──
   {
@@ -275,49 +186,8 @@ export const BENCHMARK_TARGETS: BenchmarkTargetMeta[] = [
     },
   },
 
-  // ── AME Enzymes, Cofactors & DNA (All-Atom RFD4) ──
-  {
-    id: 'ame_1ctt_cda',
-    name: 'AME: Cytidine Deaminase',
-    shortLabel: 'AME: CDA Zn²⁺ (1CTT)',
-    category: 'enzyme-ligand',
-    pdbId: '1CTT',
-    sourceFamily: 'AME / RFD2–4',
-    approxTokens: 190,
-    tier: 'fast',
-    supportsGenie3: false,
-    entities: ['protein', 'ligand'],
-    biology: 'Unindexed 4-residue catalytic Zn²⁺ + transition-state analog (DHZ) with AME tip-atom conditioning',
-    cropSegments: 'A102, A104, A129, A132, A:ZN, A:DHZ',
-    conditionParams: {
-      taskPreset: 'custom',
-      contig: '180-180',
-      motifSpan: 'A102, A104, A129, A132',
-      motifAtoms: 'A102:ND1,CG,CE1; A104:OE1,CD; A129:SG,CB; A132:SG,CB,CA',
-      unindexedMotif: true,
-    },
-  },
-  {
-    id: 'ame_1os7_taud',
-    name: 'AME: TauD Dioxygenase',
-    shortLabel: 'AME: TauD Fe²⁺ (1OS7)',
-    category: 'enzyme-ligand',
-    pdbId: '1OS7',
-    sourceFamily: 'AME / RFD2–4',
-    approxTokens: 195,
-    tier: 'fast',
-    supportsGenie3: false,
-    entities: ['protein', 'ligand'],
-    biology: '2-His-1-carboxylate facial triad + Arg270 coordinating Fe²⁺, α-ketoglutarate (AKG), and taurine (TAU) with AME tip-atom conditioning',
-    cropSegments: 'A99, A101, A255, A270, A:FE2, A:AKG, A:TAU',
-    conditionParams: {
-      taskPreset: 'custom',
-      contig: '180-180',
-      motifSpan: 'A99, A101, A255, A270',
-      motifAtoms: 'A99:NE2,CD2,CE1; A101:OD1,CG,CB,OD2; A255:NE2,CD2,CE1,CG,ND1; A270:NH1,CZ',
-      unindexedMotif: true,
-    },
-  },
+  // ── AME Enzymes (41 M-CSA tasks), Cofactors & DNA (All-Atom RFD4 / RFD3) ──
+  ...AME_BENCHMARK_TARGETS,
   {
     id: 'sm_7c7m_sam',
     name: 'SAM Cofactor Pocket',

@@ -60,7 +60,7 @@ describe('engine/catalog & biologist terminology', () => {
     const groupedIds = CATALOG_STAGE_GROUPS.flatMap((g) => g.ids);
     expect(new Set(groupedIds)).toEqual(new Set(Object.keys(ADAPTER_REGISTRY)));
     expect(CATALOG_ITEMS).toHaveLength(Object.keys(ADAPTER_REGISTRY).length);
-    expect(CATALOG_ITEMS).toHaveLength(29);
+    expect(CATALOG_ITEMS).toHaveLength(31);
     expect(ADAPTER_REGISTRY['structure-compare']).toBeDefined();
     expect(ADAPTER_REGISTRY.rfdiffusion).toBeDefined();
     expect(ADAPTER_REGISTRY.rfd3).toBeDefined();
@@ -210,6 +210,7 @@ describe('engine/catalog & biologist terminology', () => {
       'ca',
       'ligandmpnn',
       'lasermpnn',
+      'artios-potts',
       'antifold',
       'esmif1',
       'evodiff',

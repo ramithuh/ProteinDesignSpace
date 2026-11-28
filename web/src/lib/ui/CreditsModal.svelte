@@ -275,6 +275,24 @@
       linkLabel: 'euplotes/pulchra',
     },
     {
+      name: 'ArtiosBackbone',
+      role: 'All-Atom EDM Diffusion & Motif / Ligand Scaffolding',
+      detail:
+        '136.7M-parameter all-atom EDM diffusion module (16 AdaLN DiT blocks × 16 heads, Ligo Biosciences) conditioned on CCD reference conformers, motif coordinates, burial depth and ligand RASA, ported to native WebGPU (ramithuh/artios-webgpu) with 1.32e-6 relRMS parity against the PyTorch FP32 reference.',
+      license: 'Apache-2.0',
+      url: 'https://github.com/Ligo-Biosciences/artios',
+      linkLabel: 'Ligo-Biosciences/artios',
+    },
+    {
+      name: 'ArtiosPotts',
+      role: 'Ligand-Aware Potts Sequence Design & Scoring',
+      detail:
+        'Sequence-blind MPNN encoder/decoder with a factorized GraphPotts head that emits per-residue fields and pairwise couplings over a 32-neighbour token graph, sampled by chromatic Gibbs or DLMC MCMC (Ligo Biosciences), ported to WebGPU (ramithuh/artios-webgpu) with verified parity to the PyTorch FP32 reference (h relRMS 1.81e-7, J 3.77e-7 on NVIDIA GB10).',
+      license: 'Apache-2.0',
+      url: 'https://github.com/Ligo-Biosciences/artios',
+      linkLabel: 'Ligo-Biosciences/artios',
+    },
+    {
       name: 'cg2all',
       role: 'Neural Cα → All-Atom Backmapping',
       detail:

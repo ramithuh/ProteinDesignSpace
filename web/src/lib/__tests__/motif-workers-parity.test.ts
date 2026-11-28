@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { BENCHMARK_TARGETS } from '$lib/engine/benchmarks';
+import { BENCHMARK_TARGETS, FEATURED_MOTIF_BENCHMARK_IDS } from '$lib/engine/benchmarks';
 import { resolveGenie3CompiledInput } from '$lib/engine/conditioning';
 import type { StructureArtifact } from '$lib/engine/types';
 import { computeGeometryStats } from '$lib/protein-ops/kabsch';
@@ -192,7 +192,11 @@ function buildAllSixMotifBenchmarkFixtures(): Record<string, BenchmarkFixture> {
   };
 
   const out: Record<string, BenchmarkFixture> = {};
-  for (const bench of BENCHMARK_TARGETS.filter((b) => b.category === 'motif')) {
+  // Scoped to the 6 curated motif benchmarks these synthetic fixtures were authored for; the
+  // wider `motif_dict.yaml` suite (MOTIF_BENCHMARK_TARGETS) has no hand-built island geometry.
+  for (const bench of BENCHMARK_TARGETS.filter(
+    (b) => b.category === 'motif' && FEATURED_MOTIF_BENCHMARK_IDS.has(b.id),
+  )) {
     const spec = fixtures[bench.pdbId];
     if (!spec) throw new Error(`Missing test fixture for motif benchmark ${bench.pdbId}`);
     const pdbText = buildSyntheticMotifPdb(spec.islands);

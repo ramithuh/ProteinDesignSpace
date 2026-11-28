@@ -81,6 +81,7 @@ const ADAPTER_META: Record<string, AdapterMeta> = {
   rfdiffusion: { shortName: 'RFdiffusion', category: 'generation' },
   rfd3: { shortName: 'RFdiffusion3', category: 'generation' },
   boltzgen: { shortName: 'BoltzGen', category: 'generation' },
+  'artios-backbone': { shortName: 'ArtiosBackbone', category: 'generation' },
   evodiff: { shortName: 'EvoDiff', category: 'generation' },
   'la-proteina': { shortName: 'La-Proteina', category: 'generation' },
   proteina: { shortName: 'Proteina', category: 'generation' },
@@ -91,6 +92,7 @@ const ADAPTER_META: Record<string, AdapterMeta> = {
   'web-protein-mpnn': { shortName: 'ProteinMPNN', category: 'sequence' },
   ligandmpnn: { shortName: 'LigandMPNN', category: 'sequence' },
   lasermpnn: { shortName: 'LASErMPNN', category: 'sequence' },
+  'artios-potts': { shortName: 'ArtiosPotts', category: 'sequence' },
   'antifold-esmif1': { shortName: 'AntiFold / ESM-IF1', category: 'sequence' },
   'localfold-af2': { shortName: 'LocalFold', category: 'prediction' },
   thermompnn: { shortName: 'ThermoMPNN', category: 'evaluation' },
@@ -148,6 +150,12 @@ function formatCompactParamChip(adapterId: string, params: Record<string, unknow
       const seq = str('sequence').replace(/[^A-Za-z]/g, '');
       return seq ? `${seq.length} aa sequence` : 'FASTA Sequence';
     }
+    case 'artios-potts': {
+      if (str('mode', 'design') === 'score') return 'Potts energy + PLL';
+      const n = num('numSequences', 8);
+      const t = num('temperature', 0.1);
+      return `${n} seq${n === 1 ? '' : 's'} · T=${t}`;
+    }
     case 'web-protein-mpnn':
     case 'ligandmpnn':
     case 'lasermpnn':
@@ -173,6 +181,7 @@ function formatCompactParamChip(adapterId: string, params: Record<string, unknow
     case 'foldflow2':
     case 'la-proteina':
     case 'proteina':
+    case 'artios-backbone':
     case 'genie2': {
       const len = num('length', 80);
       const n = num('numDesigns', 1);

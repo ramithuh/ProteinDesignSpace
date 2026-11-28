@@ -37,6 +37,7 @@ const INVERSE_FOLD_ADAPTERS = new Set([
   'web-protein-mpnn',
   'ligandmpnn',
   'lasermpnn',
+  'artios-potts',
   'antifold-esmif1',
 ]);
 
@@ -332,6 +333,19 @@ export function formatNodeParamSummary(
       if (tm === 'motif') return `Motif (${variant}) · ${len} aa · ${steps} steps${nTag}`;
       return `${variant} · ${len} aa · ${steps} steps${nTag}`;
     }
+    case 'artios-backbone': {
+      const len = Math.round(num(p.length, 100));
+      const steps = Math.round(num(p.numSteps, 200));
+      const prec = String(p.precision ?? 'int8').toUpperCase();
+      const n = Math.round(num(p.numDesigns, 1));
+      const nTag = n > 1 ? ` · ×${n}` : '';
+      const ligTag = p.includeLigand === false ? ' · no ligand' : '';
+      const motif = String(p.motifContig ?? '').trim();
+      if (motif) {
+        return `Motif (${motif}) · ${len} aa · ${steps} steps${ligTag}${nTag}`;
+      }
+      return `${len} aa · ${steps} steps · ${prec}${ligTag}${nTag}`;
+    }
     case 'protpardelle': {
       const ckpt = String(p.checkpoint ?? 'cc91_epoch383').replace(/_epoch\d+$/, '');
       const mode = String(p.taskMode ?? 'unconditional');
@@ -437,6 +451,25 @@ export function formatNodeParamSummary(
       const t = num(p.temperature, 0.1);
       const prec = String(p.precision ?? 'fp16').toUpperCase();
       return `All-atom · ${n} seq${n === 1 ? '' : 's'} · T=${t} · ${prec}`;
+    }
+    case 'artios-potts': {
+      if (String(p.mode ?? 'design') === 'score') {
+        const parts = ['Score native · Energy + PLL'];
+        const cutoff = num(p.ligandCutoff, 0);
+        if (cutoff > 0) parts.push(`${cutoff} Å pocket`);
+        parts.push(String(p.precision ?? 'fp16').toUpperCase());
+        return parts.join(' · ');
+      }
+      const n = num(p.numSequences, 8);
+      const t = num(p.temperature, 0.1);
+      const sampler = String(p.sampler ?? 'gibbs') === 'dlmc' ? 'DLMC' : 'Gibbs';
+      const parts = [`${n} seq${n === 1 ? '' : 's'}`, `T=${t}`, `${sampler} ×${num(p.numSteps, 150)}`];
+      const cutoff = num(p.ligandCutoff, 0);
+      if (cutoff > 0) parts.push(`≤${cutoff} Å of ligand`);
+      const cfg = num(p.cfgScale, 0);
+      if (cfg > 0) parts.push(`CFG ${cfg}`);
+      parts.push(String(p.precision ?? 'fp16').toUpperCase());
+      return parts.join(' · ');
     }
     case 'antifold-esmif1': {
       const variant = String(p.variant ?? 'antifold');

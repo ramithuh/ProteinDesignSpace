@@ -36,7 +36,15 @@
   import { parseStructureText, type ParsedStructure } from '$lib/protein-ops/pdb';
   import { isSilentProteinOnlyHetatm } from '$lib/protein-ops/hetatm-policy';
   import { resolveMotifSourceResidues, type SelectedMotifSourceResidue } from '$lib/engine/conditioning';
-  import { BENCHMARK_TARGETS, getBenchmarkById } from '$lib/engine/benchmarks';
+  import {
+    ALL_ATOM_MOTIF_BENCHMARK_IDS,
+    BENCHMARK_TARGETS,
+    FEATURED_AME_BENCHMARK_IDS,
+    FEATURED_MOTIF_BENCHMARK_IDS,
+    getBenchmarkById,
+    type BenchmarkTargetMeta,
+  } from '$lib/engine/benchmarks';
+  import AmeBenchmarkSubmenu from './AmeBenchmarkSubmenu.svelte';
   import {
     BENCHMARK_SYNC_ADAPTER_IDS,
     buildBenchmarkPdbParams,
@@ -1209,13 +1217,37 @@
                   <option value={b.id}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
                 {/each}
               </optgroup>
-              <optgroup label="Motif Scaffolding (RFdiffusion / MotifBench)">
-                {#each BENCHMARK_TARGETS.filter((b) => b.category === 'motif') as b (b.id)}
+              <optgroup label="Motif Scaffolding · Curated (RFdiffusion / MotifBench)">
+                {#each BENCHMARK_TARGETS.filter(
+                  (b) => b.category === 'motif' && FEATURED_MOTIF_BENCHMARK_IDS.has(b.id),
+                ) as b (b.id)}
                   <option value={b.id}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
                 {/each}
               </optgroup>
-              <optgroup label="AME Enzymes (RFD4 All-Atom)">
-                {#each BENCHMARK_TARGETS.filter((b) => b.category === 'enzyme-ligand' && b.id.startsWith('ame_')) as b (b.id)}
+              <optgroup label="Motif Scaffolding · RFdiffusion 25 (Full Suite)">
+                {#each BENCHMARK_TARGETS.filter(
+                  (b) =>
+                    b.category === 'motif' &&
+                    !FEATURED_MOTIF_BENCHMARK_IDS.has(b.id) &&
+                    !ALL_ATOM_MOTIF_BENCHMARK_IDS.has(b.id),
+                ) as b (b.id)}
+                  <option value={b.id}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
+                {/each}
+              </optgroup>
+              <optgroup label="Motif Scaffolding · All-Atom Sites (RFD4 / Proteina)">
+                {#each BENCHMARK_TARGETS.filter(
+                  (b) => b.category === 'motif' && ALL_ATOM_MOTIF_BENCHMARK_IDS.has(b.id),
+                ) as b (b.id)}
+                  <option value={b.id}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
+                {/each}
+              </optgroup>
+              <optgroup label="AME Enzymes (Featured · RFD4 All-Atom)">
+                {#each BENCHMARK_TARGETS.filter(
+                  (b) =>
+                    b.category === 'enzyme-ligand' &&
+                    b.id.startsWith('ame_') &&
+                    (FEATURED_AME_BENCHMARK_IDS.has(b.id) || b.id === activeBenchId),
+                ) as b (b.id)}
                   <option value={b.id}>{b.pdbId} — {b.name} (~{b.approxTokens} tok)</option>
                 {/each}
               </optgroup>
@@ -1226,6 +1258,18 @@
               </optgroup>
             </select>
           </label>
+          <AmeBenchmarkSubmenu
+            selectedId={activeBenchId}
+            disabled={disabled || isBusy}
+            triggerLabel="AME 41 Benchmarks"
+            onSelect={(bench: BenchmarkTargetMeta) => {
+              patchPdbStatus(node.id, { error: null, summary: null });
+              if (isAutoPdbLabel(node.label, String(node.params.filename ?? ''))) {
+                onUpdateLabel?.(node.id, `PDB: ${bench.name} (${bench.pdbId})`);
+              }
+              onUpdate(node.id, buildBenchmarkPdbParams(node.params, bench));
+            }}
+          />
           {#if curPdbStatus.error}
             <span class="field-hint err">{curPdbStatus.error}</span>
           {:else if nodeState?.status === 'error' && nodeState.error}
