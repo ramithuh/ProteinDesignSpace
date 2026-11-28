@@ -31,6 +31,7 @@ import {
   parsePdbAtomRecords,
   rcsbCcdUrl,
   runArtiosEdmSampler,
+  stitchUnindexedMotifCoords,
   wrapArtiosBackboneOutputs,
   type ArtiosBackboneBackend,
   type ArtiosBackboneCpuFallbackReason,
@@ -316,11 +317,12 @@ createWorkerHarness({
       plan = buildUnconditionalPlan(options.length, components);
     }
 
+    const motifCount = plan.motifIndices.length + plan.unindexedMotifResidues.length;
     ctx.progress(
       'init',
       0.05,
-      plan.motifIndices.length > 0 || plan.ligandResNames.length > 0
-        ? `Featurizing ${plan.designedLength} aa design (${plan.motifIndices.length} motif residue(s)${
+      motifCount > 0 || plan.ligandResNames.length > 0
+        ? `Featurizing ${plan.designedLength} aa design (${motifCount} motif residue(s)${
             plan.ligandResNames.length ? `, ligand ${[...new Set(plan.ligandResNames)].join('/')}` : ''
           })...`
         : `Featurizing ${plan.designedLength} aa unconditional design...`,
@@ -334,7 +336,7 @@ createWorkerHarness({
     const nAtom = features.nAtom;
     const nToken = features.nToken;
     const atomMask = features.atom_mask;
-    if (structure && plan.motifIndices.length === 0 && plan.ligandResNames.length === 0) {
+    if (structure && motifCount === 0 && plan.ligandResNames.length === 0) {
       warnings.push(
         `The connected structure ${structure.id} is not conditioning this run: set motifContig to scaffold residues from it, or enable includeLigand when it carries a HETATM ligand.`,
       );
@@ -466,24 +468,28 @@ createWorkerHarness({
       }
 
       for (let s = 0; s < nSample; s++) {
-        const designCoords = coords.slice(s * nAtom * 3, (s + 1) * nAtom * 3);
+        const rawDesignCoords = coords.slice(s * nAtom * 3, (s + 1) * nAtom * 3);
+        const { coords: designCoords, plan: outputPlan } =
+          plan.unindexedMotifResidues.length > 0
+            ? stitchUnindexedMotifCoords(rawDesignCoords, plan)
+            : { coords: rawDesignCoords, plan };
         const designIndex = firstIndex + s;
         const seed = options.seed + designIndex;
-        const pdbText = coordsToArtiosPdb(designCoords, plan, {
+        const pdbText = coordsToArtiosPdb(designCoords, outputPlan, {
           remarks: [
             `ArtiosBackbone ${options.precision} (${backend === 'cpu' ? 'cpu-js' : 'webgpu'}) ` +
-              `L=${plan.designedLength} steps=${options.numSteps} seed=${seed}`,
-            plan.motifIndices.length > 0
-              ? `motif residues: ${plan.motifIndices.map((i) => i + 1).join(',')}`
-              : plan.ligandResNames.length > 0
-                ? `ligand-conditioned design: ${[...new Set(plan.ligandResNames)].join(',')}`
+              `L=${outputPlan.designedLength} steps=${options.numSteps} seed=${seed}`,
+            outputPlan.motifIndices.length > 0
+              ? `motif residues: ${outputPlan.motifIndices.map((i) => i + 1).join(',')}`
+              : outputPlan.ligandResNames.length > 0
+                ? `ligand-conditioned design: ${[...new Set(outputPlan.ligandResNames)].join(',')}`
                 : 'unconditional de novo design',
           ],
         });
         items.push(
           buildArtiosBackboneArtifact(
             { pdbText, designIndex, seed, stepsRun: options.numSteps, warnings },
-            { options, plan, backend, fallbackReason, parent: structure, runHash },
+            { options, plan: outputPlan, backend, fallbackReason, parent: structure, runHash },
           ),
         );
       }

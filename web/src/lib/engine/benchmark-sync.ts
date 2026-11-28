@@ -36,6 +36,7 @@ export const BENCHMARK_SYNC_ADAPTER_IDS: ReadonlySet<string> = new Set([
   'protpardelle',
   'rfdiffusion',
   'genie2',
+  'artios-backbone',
 ]);
 
 /** Return whether a curated benchmark can be auto-seeded onto `adapterId`. */
@@ -61,6 +62,8 @@ export function isBenchmarkSupportedForAdapter(
       );
     case 'genie2':
       return bench.category === 'motif' && Boolean(bench.supportsGenie3);
+    case 'artios-backbone':
+      return bench.category === 'motif' || bench.category === 'enzyme-ligand';
     default:
       return false;
   }
@@ -199,6 +202,10 @@ export function buildResetToBenchmarkParams(
   } else if (adapterId === 'genie2') {
     next.length = defLen;
     next.motifRange = '';
+  } else if (adapterId === 'artios-backbone') {
+    next.length = defLen;
+    next.motifContig = '';
+    next.unindexedMotif = true;
   }
   return next;
 }
@@ -456,6 +463,7 @@ function getSeededBenchmarkId(cp: Record<string, unknown>): string {
 function getAdapterDefaultLength(adapterId: string): number {
   if (adapterId === 'boltzgen') return 48;
   if (adapterId === 'rfd4-proteina') return 70;
+  if (adapterId === 'artios-backbone') return 100;
   return 80;
 }
 
@@ -693,6 +701,27 @@ export function computeBenchmarkAutoSeedPatches(
         const nextPatch: Record<string, unknown> = {
           ...cp,
           motifRange: '',
+          ...(shouldResetLen ? { length: adapterDefaultLen } : {}),
+        };
+        delete nextPatch.autoSeededBenchmarkId;
+        delete nextPatch.autoSeededFromBenchmark;
+        delete nextPatch.autoSeededLength;
+        if (!shouldResetLen && Number.isFinite(curLen) && curLen > 0) {
+          nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      } else if (node.adapterId === 'artios-backbone') {
+        const shouldResetLen =
+          !cp.userEditedLength &&
+          (!Number.isFinite(curLen) ||
+            curLen <= 0 ||
+            curLen === prevAutoLen ||
+            curLen === adapterDefaultLen);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          motifContig: '',
+          unindexedMotif: true,
           ...(shouldResetLen ? { length: adapterDefaultLen } : {}),
         };
         delete nextPatch.autoSeededBenchmarkId;
@@ -1175,6 +1204,54 @@ export function computeBenchmarkAutoSeedPatches(
         patches ??= {};
         patches[node.id] = nextPatch;
       }
+    } else if (node.adapterId === 'artios-backbone') {
+      if (isBenchmarkSupportedForAdapter('artios-backbone', bench)) {
+        if (!seededId && String(cp.motifContig ?? '').trim()) continue;
+        const bp = bench.conditionParams;
+        const parsedLen = parseLengthFromContig(bp.contig);
+        const clampedParsedLen =
+          parsedLen !== null ? Math.max(30, Math.min(512, parsedLen)) : null;
+        const nextLength = hasCustomLength
+          ? Math.max(30, Math.min(512, Math.round(curLen)))
+          : clampedParsedLen;
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          ...(nextLength !== null ? { length: nextLength } : {}),
+          motifContig: String(bp.motifSpan ?? '').trim(),
+          unindexedMotif: bp.unindexedMotif ?? true,
+          autoSeededBenchmarkId: bench.id,
+        };
+        delete nextPatch.autoSeededFromBenchmark;
+        if (!hasCustomLength && nextLength !== null) {
+          nextPatch.autoSeededLength = nextLength;
+        } else {
+          delete nextPatch.autoSeededLength;
+          if (hasCustomLength) nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      } else if (seededId) {
+        const shouldResetLen =
+          !cp.userEditedLength &&
+          (!Number.isFinite(curLen) ||
+            curLen <= 0 ||
+            curLen === prevAutoLen ||
+            curLen === adapterDefaultLen);
+        const nextPatch: Record<string, unknown> = {
+          ...cp,
+          motifContig: '',
+          unindexedMotif: true,
+          autoSeededBenchmarkId: bench.id,
+          ...(shouldResetLen ? { length: adapterDefaultLen, autoSeededLength: adapterDefaultLen } : {}),
+        };
+        delete nextPatch.autoSeededFromBenchmark;
+        if (!shouldResetLen) {
+          delete nextPatch.autoSeededLength;
+          nextPatch.userEditedLength = true;
+        }
+        patches ??= {};
+        patches[node.id] = nextPatch;
+      }
     }
   }
 
@@ -1610,6 +1687,39 @@ export function applyPlannerBenchmarkSeedingToNode(
     params.autoSeededBenchmarkId = bench.id;
     if (explicitLen === null && parsedBenchLen !== null) {
       params.autoSeededLength = parsedBenchLen;
+    } else if (explicitLen !== null) {
+      delete params.autoSeededLength;
+    }
+  } else if (gen.adapterId === 'artios-backbone') {
+    if (!isBenchmarkSupportedForAdapter('artios-backbone', bench)) {
+      return { repairedHallucination: false };
+    }
+    const targetMotif = String(bp.motifSpan ?? '').trim();
+    const curMotif = String(params.motifContig ?? '').trim();
+    if (targetMotif) {
+      const disjoint = curMotif && isResidueSpecDisjointFromBenchmark(curMotif, bench);
+      if (!curMotif || disjoint || (opts?.overwriteUnpromptedResidues && curMotif !== targetMotif)) {
+        if (curMotif && curMotif !== targetMotif) repairedHallucination = true;
+        params.motifContig = targetMotif;
+      }
+    }
+    params.unindexedMotif = bp.unindexedMotif ?? true;
+    const parsedBenchLen = parseLengthFromContig(bp.contig);
+    const clampedBenchLen =
+      parsedBenchLen !== null ? Math.max(30, Math.min(512, parsedBenchLen)) : null;
+    const curLen = typeof params.length === 'number' && Number.isFinite(params.length) ? params.length : null;
+    const explicitLen =
+      opts?.explicitLength !== undefined
+        ? opts.explicitLength
+        : curLen !== null && curLen !== getAdapterDefaultLength('artios-backbone')
+          ? curLen
+          : null;
+    const targetLen =
+      explicitLen !== null ? Math.max(30, Math.min(512, explicitLen)) : clampedBenchLen;
+    if (targetLen !== null) params.length = targetLen;
+    params.autoSeededBenchmarkId = bench.id;
+    if (explicitLen === null && clampedBenchLen !== null) {
+      params.autoSeededLength = clampedBenchLen;
     } else if (explicitLen !== null) {
       delete params.autoSeededLength;
     }

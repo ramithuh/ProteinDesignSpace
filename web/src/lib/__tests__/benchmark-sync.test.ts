@@ -189,4 +189,45 @@ describe('benchmark-sync: AME 180-180 defaults, symmetric teardown (WF-02), and 
     expect(isResidueSpecDisjointFromBenchmark('20-20,A1-10,20-20', efhand)).toBe(true);
     expect(isResidueSpecDisjointFromBenchmark('10-10,A16-35,16-16,A52-71,10-10', efhand)).toBe(false);
   });
+
+  it('auto-seeds artios-backbone from AME enzyme-ligand and motif benchmarks and tears down symmetrically', () => {
+    const ame = getBenchmarkById('ame_1ctt_cda')!;
+    const graph: WorkflowGraph = {
+      id: 'sync-artios',
+      name: 'ArtiosBackbone Benchmark Sync',
+      nodes: [
+        {
+          id: 'pdb',
+          adapterId: 'pdb-input',
+          label: '1CTT',
+          params: { mode: 'pdb-id', pdbId: '1CTT', benchmarkId: 'ame_1ctt_cda' },
+        },
+        {
+          id: 'ab',
+          adapterId: 'artios-backbone',
+          label: 'ArtiosBackbone',
+          params: { ...defaultParamsForAdapter('artios-backbone') },
+        },
+      ],
+      edges: [{ fromNode: 'pdb', fromPort: 'structure', toNode: 'ab', toPort: 'structure' }],
+    };
+
+    const seeded = reconcileBenchmarkSeeding(graph);
+    expect(seeded.changedNodeIds).toEqual(['ab']);
+    const abSeeded = seeded.graph.nodes.find((n) => n.id === 'ab')!;
+    expect(abSeeded.params.motifContig).toBe(ame.conditionParams.motifSpan);
+    expect(abSeeded.params.unindexedMotif).toBe(ame.conditionParams.unindexedMotif ?? true);
+    expect(abSeeded.params.length).toBe(180);
+    expect(abSeeded.params.autoSeededBenchmarkId).toBe('ame_1ctt_cda');
+    expect(abSeeded.params.autoSeededLength).toBe(180);
+
+    // Disconnect -> symmetric teardown restores defaults.
+    const tornDown = reconcileBenchmarkSeeding({ ...seeded.graph, edges: [] });
+    expect(tornDown.changedNodeIds).toEqual(['ab']);
+    const abAfter = tornDown.graph.nodes.find((n) => n.id === 'ab')!;
+    expect(abAfter.params.motifContig).toBe('');
+    expect(abAfter.params.unindexedMotif).toBe(true);
+    expect(abAfter.params.length).toBe(100);
+    expect(abAfter.params.autoSeededBenchmarkId).toBeUndefined();
+  });
 });

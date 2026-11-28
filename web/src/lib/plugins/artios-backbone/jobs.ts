@@ -28,6 +28,7 @@ export interface ArtiosBackboneOptions {
   numDesigns: number;
   numSteps: number;
   motifContig: string;
+  unindexedMotif: boolean;
   includeLigand: boolean;
   /** Target ligand RASA in [0, 1], or -1 for the unconditioned (null) bin. */
   ligandRasa: number;
@@ -91,6 +92,7 @@ export function artiosBackboneOptionsFromParams(
     numDesigns: clampInt(params.numDesigns, 1, 1, 16),
     numSteps: clampInt(params.numSteps, 200, 20, 400),
     motifContig: String(params.motifContig ?? '').trim(),
+    unindexedMotif: params.unindexedMotif !== false,
     includeLigand: params.includeLigand !== false,
     ligandRasa: normalizeNullableTarget(params.ligandRasa, 1, 'ligandRasa'),
     motifDepth: normalizeNullableTarget(params.motifDepth, 2, 'motifDepth'),
@@ -284,9 +286,24 @@ export function groupResidues(atoms: readonly ArtiosAtom[]): InputResidue[] {
   return residues;
 }
 
+/** Metadata for one unindexed motif residue placed on its own chain (`M0`, `M1`, ...). */
+export interface UnindexedMotifResidue {
+  /** Start index in `plan.atoms` of this motif residue's atoms. */
+  atomStart: number;
+  /** Number of heavy atoms in this motif residue. */
+  atomCount: number;
+  resName: string;
+  sourceChainId: string;
+  sourceResId: number;
+  /** Offset from `atomStart` to the Cα atom (or `0` when no Cα atom is present). */
+  caOffset: number;
+  /** Native (uncentred) Cα coordinate from the input structure. */
+  nativeCaCoord: [number, number, number];
+}
+
 /** Deterministic token/atom layout handed to the featurizer and to the PDB writer. */
 export interface ArtiosTokenPlan {
-  /** Model-order atoms: the designed chain first, then each ligand chain. */
+  /** Model-order atoms: the designed chain first, then any unindexed motif chains, then each ligand chain. */
   atoms: ArtiosAtom[];
   /** Per-atom motif flag (motif residue atoms and, when kept, every ligand atom). */
   isMotifAtom: Uint8Array;
@@ -300,6 +317,8 @@ export interface ArtiosTokenPlan {
   fixedResidueIndices: number[];
   /** Native (uncentred) Cα coordinates of the placed motif residues, aligned with `motifIndices`. */
   nativeMotifCoords: number[][];
+  /** Unindexed motif residues placed on separate chains `M0`, `M1`, ... awaiting post-diffusion stitching. */
+  unindexedMotifResidues: UnindexedMotifResidue[];
   /** CCD codes of the kept ligand components, in layout order. */
   ligandResNames: string[];
   /** Output chain IDs of the kept ligand components. */
@@ -349,6 +368,7 @@ export function buildUnconditionalPlan(
     motifIndices: [],
     fixedResidueIndices: [],
     nativeMotifCoords: [],
+    unindexedMotifResidues: [],
     ligandResNames: [],
     ligandChainIds: [],
     missingComponentCodes: [],
@@ -358,16 +378,21 @@ export function buildUnconditionalPlan(
 
 export interface MotifPlanInput {
   pdbText: string;
-  options: Pick<ArtiosBackboneOptions, 'length' | 'motifContig' | 'includeLigand'>;
+  options: Pick<ArtiosBackboneOptions, 'length' | 'motifContig' | 'includeLigand'> & {
+    unindexedMotif?: boolean;
+  };
   components?: Map<string, CcdComponent>;
 }
 
 /**
  * Build the motif + ligand layout.
  *
- * Motif residues keep their identity, every heavy atom and (when it fits) their native numbering
- * inside the designed chain; the remaining positions are generated scaffold residues. Kept ligand
- * components are appended as one token per atom and are conditioned on their input coordinates.
+ * When `unindexedMotif` is `true` (default, matching upstream `AnnotatedStructure.with_unindexed_motif()`),
+ * chain `A` holds `length` generated scaffold residues and each motif residue is appended on its own
+ * unindexed chain (`M0`, `M1`, ...) to be stitched onto the nearest scaffold slot post-diffusion.
+ * When `unindexedMotif` is `false`, motif residues are placed directly on chain `A` (at native
+ * numbering if they fit, rigidly center-shifted if their span fits, or evenly distributed otherwise).
+ * Each distinct HETATM ligand residue is placed on its own chain (`B`, `C`, ...) with `resId = 1`.
  */
 export function buildMotifPlan({
   pdbText,
@@ -375,6 +400,7 @@ export function buildMotifPlan({
   components = buildStandardComponents(),
 }: MotifPlanInput): ArtiosTokenPlan {
   const { length } = options;
+  const unindexedMotif = options.unindexedMotif ?? true;
   const scaffold = components.get(SCAFFOLD_RESIDUE);
   if (!scaffold) {
     throw new Error(`ArtiosBackbone: missing bundled CCD component for ${SCAFFOLD_RESIDUE}.`);
@@ -409,59 +435,158 @@ export function buildMotifPlan({
     );
   }
 
-  // --- place spans, preferring native numbering ------------------------------
-  const placement = new Map<number, InputResidue>();
-  let cursor = 0;
-  for (let s = 0; s < selected.length; s++) {
-    const group = selected[s];
-    const remainingAfter = selected.slice(s + 1).reduce((sum, grp) => sum + grp.length, 0);
-    const latestStart = length - remainingAfter - group.length;
-    const nativeStart = Math.min(...group.map((res) => res.resId)) - 1;
-    const start = Math.max(cursor, Math.min(nativeStart, latestStart));
-    if (start < 0 || start > latestStart) {
-      throw new Error(
-        `ArtiosBackbone cannot place ${motifResidueCount} motif residues inside a ${length}-residue design.`,
-      );
-    }
-    if (start !== nativeStart) {
-      warnings.push(
-        `Motif span ${group[0].chainId}${group[0].resId}-${group[group.length - 1].resId} was shifted to design position ${start + 1} to fit a ${length}-residue chain.`,
-      );
-    }
-    group.forEach((res, k) => placement.set(start + k, res));
-    cursor = start + group.length;
-  }
-
-  // --- designed chain --------------------------------------------------------
+  // --- designed chain & motif residues ---------------------------------------
   const atoms: ArtiosAtom[] = [];
   const motifFlags: number[] = [];
   const hetFlags: number[] = [];
   const motifIndices: number[] = [];
   const nativeMotifCoords: number[][] = [];
+  const unindexedMotifResidues: UnindexedMotifResidue[] = [];
   const missing = new Set<string>();
 
-  for (let i = 0; i < length; i++) {
-    const motifRes = placement.get(i);
-    if (!motifRes) {
+  if (unindexedMotif && selected.length > 0) {
+    // Chain A: full `length` poly-GLY scaffold.
+    for (let i = 0; i < length; i++) {
       for (const atom of scaffoldResidueAtoms(i, 'A', scaffold)) {
         atoms.push(atom);
         motifFlags.push(0);
         hetFlags.push(0);
       }
-      continue;
     }
-    if (!components.has(motifRes.resName)) missing.add(motifRes.resName);
-    for (const atom of motifRes.atoms) {
-      atoms.push({ ...atom, chainId: 'A', resId: i + 1, insCode: '', hetero: false });
-      motifFlags.push(1);
-      hetFlags.push(0);
+    // Each selected motif residue gets its own unindexed chain `M0`, `M1`, ...
+    let motifIdx = 0;
+    for (const group of selected) {
+      for (const motifRes of group) {
+        if (!components.has(motifRes.resName)) missing.add(motifRes.resName);
+        const atomStart = atoms.length;
+        const outChain = `M${motifIdx++}`;
+        for (const atom of motifRes.atoms) {
+          atoms.push({ ...atom, chainId: outChain, resId: 1, insCode: '', hetero: false });
+          motifFlags.push(1);
+          hetFlags.push(0);
+        }
+        const rawCaOffset = motifRes.atoms.findIndex((a) => a.atomName === 'CA');
+        const caOffset = rawCaOffset >= 0 ? rawCaOffset : 0;
+        const caAtom = motifRes.atoms[caOffset];
+        unindexedMotifResidues.push({
+          atomStart,
+          atomCount: motifRes.atoms.length,
+          resName: motifRes.resName,
+          sourceChainId: motifRes.chainId,
+          sourceResId: motifRes.resId,
+          caOffset,
+          nativeCaCoord: [...caAtom.coord],
+        });
+      }
     }
-    const ca = motifRes.atoms.find((a) => a.atomName === 'CA') ?? motifRes.atoms[0];
-    motifIndices.push(i);
-    nativeMotifCoords.push([...ca.coord]);
+  } else {
+    // Indexed placement on chain A.
+    const placement = new Map<number, InputResidue>();
+    if (selected.length > 0) {
+      const nativeStarts = selected.map((grp) => Math.min(...grp.map((res) => res.resId)) - 1);
+      const nativeEnds = selected.map((grp, s) => nativeStarts[s] + grp.length - 1);
+
+      // Check whether all spans fit natively within [0, length) without overlap.
+      const nativeOccupied = new Set<number>();
+      let fitsNatively = true;
+      for (let s = 0; s < selected.length; s++) {
+        if (nativeStarts[s] < 0 || nativeEnds[s] >= length) {
+          fitsNatively = false;
+          break;
+        }
+        for (let k = 0; k < selected[s].length; k++) {
+          const pos = nativeStarts[s] + k;
+          if (nativeOccupied.has(pos)) {
+            fitsNatively = false;
+            break;
+          }
+          nativeOccupied.add(pos);
+        }
+        if (!fitsNatively) break;
+      }
+
+      if (fitsNatively) {
+        for (let s = 0; s < selected.length; s++) {
+          selected[s].forEach((res, k) => placement.set(nativeStarts[s] + k, res));
+        }
+      } else {
+        // Check if spans are non-overlapping in native coordinates and rigidly fit within `length`.
+        const minNativeStart = Math.min(...nativeStarts);
+        const maxNativeEnd = Math.max(...nativeEnds);
+        const nativeSpanWidth = maxNativeEnd - minNativeStart + 1;
+        const nativeRelOccupied = new Set<number>();
+        let noNativeOverlap = true;
+        for (let s = 0; s < selected.length && noNativeOverlap; s++) {
+          for (let k = 0; k < selected[s].length; k++) {
+            const rel = nativeStarts[s] + k - minNativeStart;
+            if (nativeRelOccupied.has(rel)) {
+              noNativeOverlap = false;
+              break;
+            }
+            nativeRelOccupied.add(rel);
+          }
+        }
+
+        if (noNativeOverlap && nativeSpanWidth <= length) {
+          // Rigidly center-shift all spans together, preserving exact inter-span spacing.
+          const leftPad = Math.floor((length - nativeSpanWidth) / 2);
+          const shift = leftPad - minNativeStart;
+          for (let s = 0; s < selected.length; s++) {
+            const group = selected[s];
+            const start = nativeStarts[s] + shift;
+            group.forEach((res, k) => placement.set(start + k, res));
+            if (start !== nativeStarts[s]) {
+              warnings.push(
+                `Motif span ${group[0].chainId}${group[0].resId}-${group[group.length - 1].resId} was shifted to design position ${start + 1} to fit a ${length}-residue chain.`,
+              );
+            }
+          }
+        } else {
+          // Distribute span groups evenly across [0, length) with balanced N-term, inter-span, and C-term linkers.
+          const freeSlots = length - motifResidueCount;
+          const nGaps = selected.length + 1;
+          const baseGap = Math.floor(freeSlots / nGaps);
+          const rem = freeSlots % nGaps;
+          let cursor = 0;
+          for (let s = 0; s < selected.length; s++) {
+            cursor += baseGap + (s < rem ? 1 : 0);
+            const group = selected[s];
+            const start = cursor;
+            group.forEach((res, k) => placement.set(start + k, res));
+            if (start !== nativeStarts[s]) {
+              warnings.push(
+                `Motif span ${group[0].chainId}${group[0].resId}-${group[group.length - 1].resId} was shifted to design position ${start + 1} to fit a ${length}-residue chain.`,
+              );
+            }
+            cursor += group.length;
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < length; i++) {
+      const motifRes = placement.get(i);
+      if (!motifRes) {
+        for (const atom of scaffoldResidueAtoms(i, 'A', scaffold)) {
+          atoms.push(atom);
+          motifFlags.push(0);
+          hetFlags.push(0);
+        }
+        continue;
+      }
+      if (!components.has(motifRes.resName)) missing.add(motifRes.resName);
+      for (const atom of motifRes.atoms) {
+        atoms.push({ ...atom, chainId: 'A', resId: i + 1, insCode: '', hetero: false });
+        motifFlags.push(1);
+        hetFlags.push(0);
+      }
+      const ca = motifRes.atoms.find((a) => a.atomName === 'CA') ?? motifRes.atoms[0];
+      motifIndices.push(i);
+      nativeMotifCoords.push([...ca.coord]);
+    }
   }
 
-  // --- ligand components ------------------------------------------------------
+  // --- ligand components (one fresh output chain per distinct HETATM residue) -
   const ligandResNames: string[] = [];
   const ligandChainIds: string[] = [];
   if (options.includeLigand) {
@@ -469,7 +594,8 @@ export function buildMotifPlan({
     const chainMap = new Map<string, string>();
     for (const res of residues) {
       if (!res.atoms[0].hetero) continue;
-      let outChain = chainMap.get(res.chainId);
+      const ligKey = `${res.chainId}|${res.resId}|${res.insCode}|${res.resName}`;
+      let outChain = chainMap.get(ligKey);
       if (!outChain) {
         outChain =
           (!used.has(res.chainId.toUpperCase()) && res.chainId.length === 1
@@ -480,13 +606,13 @@ export function buildMotifPlan({
           continue;
         }
         used.add(outChain);
-        chainMap.set(res.chainId, outChain);
+        chainMap.set(ligKey, outChain);
+        ligandResNames.push(res.resName);
+        ligandChainIds.push(outChain);
       }
       if (!components.has(res.resName)) missing.add(res.resName);
-      ligandResNames.push(res.resName);
-      ligandChainIds.push(outChain);
       for (const atom of res.atoms) {
-        atoms.push({ ...atom, chainId: outChain, hetero: true });
+        atoms.push({ ...atom, chainId: outChain, resId: 1, insCode: '', hetero: true });
         // Ligand coordinates are given, so every ligand atom conditions the generation.
         motifFlags.push(1);
         hetFlags.push(1);
@@ -502,10 +628,196 @@ export function buildMotifPlan({
     motifIndices,
     fixedResidueIndices: motifIndices.map((i) => i + 1),
     nativeMotifCoords,
+    unindexedMotifResidues,
     ligandResNames,
     ligandChainIds,
     missingComponentCodes: [...missing].sort(),
     warnings,
+  };
+}
+
+/**
+ * Exact O(M^2 * L) rectangular Hungarian algorithm for 1-to-1 min-cost matching (`rows <= cols`).
+ * Returns `assignment[row] = col`.
+ */
+export function solveMinCostAssignment(cost: Float64Array, rows: number, cols: number): Int32Array {
+  if (rows > cols) {
+    throw new Error(
+      `ArtiosBackbone: cannot match ${rows} unindexed motif residue(s) into ${cols} scaffold slot(s).`,
+    );
+  }
+  const u = new Float64Array(rows + 1);
+  const v = new Float64Array(cols + 1);
+  const p = new Int32Array(cols + 1);
+  const way = new Int32Array(cols + 1);
+
+  for (let i = 1; i <= rows; i++) {
+    p[0] = i;
+    let j0 = 0;
+    const minv = new Float64Array(cols + 1).fill(Infinity);
+    const used = new Uint8Array(cols + 1);
+    do {
+      used[j0] = 1;
+      const i0 = p[j0];
+      let delta = Infinity;
+      let j1 = 0;
+      for (let j = 1; j <= cols; j++) {
+        if (used[j]) continue;
+        const cur = cost[(i0 - 1) * cols + (j - 1)] - u[i0] - v[j];
+        if (cur < minv[j]) {
+          minv[j] = cur;
+          way[j] = j0;
+        }
+        if (minv[j] < delta) {
+          delta = minv[j];
+          j1 = j;
+        }
+      }
+      for (let j = 0; j <= cols; j++) {
+        if (used[j]) {
+          u[p[j]] += delta;
+          v[j] -= delta;
+        } else {
+          minv[j] -= delta;
+        }
+      }
+      j0 = j1;
+    } while (p[j0] !== 0);
+
+    do {
+      const j1 = way[j0];
+      p[j0] = p[j1];
+      j0 = j1;
+    } while (j0 !== 0);
+  }
+
+  const assignment = new Int32Array(rows).fill(-1);
+  for (let j = 1; j <= cols; j++) {
+    if (p[j] > 0) assignment[p[j] - 1] = j - 1;
+  }
+  return assignment;
+}
+
+/**
+ * Stitch sampled unindexed motif chains (`M0`, `M1`, ...) onto chain `A` post-diffusion by
+ * finding the exact 1-to-1 min-cost Euclidean Cα assignment against the `L` scaffold slots.
+ */
+export function stitchUnindexedMotifCoords(
+  coords: Float32Array,
+  plan: ArtiosTokenPlan,
+): { coords: Float32Array; plan: ArtiosTokenPlan } {
+  const unindexed = plan.unindexedMotifResidues;
+  if (unindexed.length === 0) return { coords, plan };
+  if (coords.length !== plan.atoms.length * 3) {
+    throw new Error(
+      `ArtiosBackbone: expected ${plan.atoms.length * 3} coordinates for ${plan.atoms.length} atoms, got ${coords.length}.`,
+    );
+  }
+
+  // Locate each chain A scaffold residue's atom span and Cα atom index.
+  const scaffoldSpans: Array<{ start: number; end: number; caIdx: number }> = [];
+  let idx = 0;
+  while (idx < plan.atoms.length && plan.atoms[idx].chainId === 'A' && plan.isHetAtom[idx] === 0) {
+    const start = idx;
+    const resId = plan.atoms[idx].resId;
+    let caIdx = start;
+    while (
+      idx < plan.atoms.length &&
+      plan.atoms[idx].chainId === 'A' &&
+      plan.isHetAtom[idx] === 0 &&
+      plan.atoms[idx].resId === resId
+    ) {
+      if (plan.atoms[idx].atomName === 'CA') caIdx = idx;
+      idx++;
+    }
+    scaffoldSpans.push({ start, end: idx, caIdx });
+  }
+
+  const M = unindexed.length;
+  const L = scaffoldSpans.length;
+  const cost = new Float64Array(M * L);
+  for (let m = 0; m < M; m++) {
+    const motifCaIdx = unindexed[m].atomStart + unindexed[m].caOffset;
+    const mx = coords[motifCaIdx * 3];
+    const my = coords[motifCaIdx * 3 + 1];
+    const mz = coords[motifCaIdx * 3 + 2];
+    for (let i = 0; i < L; i++) {
+      const scCaIdx = scaffoldSpans[i].caIdx;
+      const dx = mx - coords[scCaIdx * 3];
+      const dy = my - coords[scCaIdx * 3 + 1];
+      const dz = mz - coords[scCaIdx * 3 + 2];
+      cost[m * L + i] = Math.hypot(dx, dy, dz);
+    }
+  }
+
+  const assignment = solveMinCostAssignment(cost, M, L);
+  const slotToMotif = new Map<number, number>();
+  for (let m = 0; m < M; m++) slotToMotif.set(assignment[m], m);
+
+  const outAtoms: ArtiosAtom[] = [];
+  const outMotifFlags: number[] = [];
+  const outHetFlags: number[] = [];
+  const outCoords: number[] = [];
+  const motifIndices: number[] = [];
+  const nativeMotifCoords: number[][] = [];
+
+  for (let i = 0; i < L; i++) {
+    const matchedMotif = slotToMotif.get(i);
+    if (matchedMotif !== undefined) {
+      const motif = unindexed[matchedMotif];
+      for (let k = 0; k < motif.atomCount; k++) {
+        const srcIdx = motif.atomStart + k;
+        outAtoms.push({
+          ...plan.atoms[srcIdx],
+          chainId: 'A',
+          resId: i + 1,
+          insCode: '',
+          hetero: false,
+        });
+        outMotifFlags.push(1);
+        outHetFlags.push(0);
+        outCoords.push(coords[srcIdx * 3], coords[srcIdx * 3 + 1], coords[srcIdx * 3 + 2]);
+      }
+      motifIndices.push(i);
+      nativeMotifCoords.push([...motif.nativeCaCoord]);
+    } else {
+      const span = scaffoldSpans[i];
+      for (let srcIdx = span.start; srcIdx < span.end; srcIdx++) {
+        outAtoms.push({
+          ...plan.atoms[srcIdx],
+          chainId: 'A',
+          resId: i + 1,
+          insCode: '',
+          hetero: false,
+        });
+        outMotifFlags.push(0);
+        outHetFlags.push(0);
+        outCoords.push(coords[srcIdx * 3], coords[srcIdx * 3 + 1], coords[srcIdx * 3 + 2]);
+      }
+    }
+  }
+
+  // Append all ligand atoms unchanged.
+  for (let a = 0; a < plan.atoms.length; a++) {
+    if (plan.isHetAtom[a] !== 1) continue;
+    outAtoms.push(plan.atoms[a]);
+    outMotifFlags.push(plan.isMotifAtom[a]);
+    outHetFlags.push(1);
+    outCoords.push(coords[a * 3], coords[a * 3 + 1], coords[a * 3 + 2]);
+  }
+
+  return {
+    coords: Float32Array.from(outCoords),
+    plan: {
+      ...plan,
+      atoms: outAtoms,
+      isMotifAtom: Uint8Array.from(outMotifFlags),
+      isHetAtom: Uint8Array.from(outHetFlags),
+      motifIndices,
+      fixedResidueIndices: motifIndices.map((slot) => slot + 1),
+      nativeMotifCoords,
+      unindexedMotifResidues: [],
+    },
   };
 }
 
@@ -518,6 +830,7 @@ type FlatArray = Float32Array | Int32Array | Uint8Array;
 /** The subset of `static/vendor/artios-backbone/shared/index.js` the feature builder needs. */
 export interface ArtiosSharedFeaturizer {
   ELEMENT_SYMBOLS: readonly string[];
+  createRng(seed: number): ArtiosRng;
   buildReferenceFeatures(opts: {
     atoms: readonly ArtiosAtom[];
     components: Map<string, CcdComponent>;
@@ -631,7 +944,10 @@ export interface ArtiosFeatureResult {
 export function buildArtiosFeatures(
   shared: ArtiosSharedFeaturizer,
   plan: ArtiosTokenPlan,
-  options: Pick<ArtiosBackboneOptions, 'ligandRasa' | 'motifDepth'>,
+  options: Pick<ArtiosBackboneOptions, 'ligandRasa' | 'motifDepth'> & {
+    seed?: number;
+    augment?: boolean;
+  },
   components: Map<string, CcdComponent>,
 ): ArtiosFeatureResult {
   const { atoms } = plan;
@@ -648,10 +964,12 @@ export function buildArtiosFeatures(
   }
 
   const hasLigand = plan.ligandResNames.length > 0;
+  const augment = options.augment ?? true;
   const ref = shared.buildReferenceFeatures({
     atoms,
     components,
-    augment: false,
+    augment,
+    ...(augment ? { rng: shared.createRng(options.seed ?? 42) } : {}),
     // `ContextGenerator.get_renamed_atom_names`: ligand identity must not leak through atom names.
     ligandAtomRename: hasLigand,
   });

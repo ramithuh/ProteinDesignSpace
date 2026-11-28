@@ -3,7 +3,8 @@
 // constraint/mask resolution (fixedPositions, inherited locks, ligand cutoff, omit alphabet),
 // SequenceSet / ResidueTrack assembly, and an end-to-end CPU smoke test that runs the vendored
 // runtime in `static/vendor/artios-potts/` (featurize -> Potts head -> score -> Gibbs/DLMC MCMC)
-// on a deterministic synthetic weight bundle.
+// on a deterministic synthetic weight bundle, plus bit-exactness of the row-restricted Gibbs sweep
+// and count-based complexity penalty against the reference-shaped `legacyPath`.
 
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -982,6 +983,7 @@ describe('end-to-end CPU smoke test on the vendored ArtiosPotts runtime', () => 
       'buildLigandProximityMask',
       'sequencesByChain',
       'scoreSequence',
+      'prepareSampleFromParams',
       'sampleFromParams',
       'loadWeightBundle',
     ]) {
@@ -1206,5 +1208,315 @@ describe('end-to-end CPU smoke test on the vendored ArtiosPotts runtime', () => 
     await expect(
       cpuMod.createArtiosPottsCPU({ baseUrl: '/weights', precision: 'fp16', read }),
     ).rejects.toThrow(/no "fp16" precision/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Row-restricted Gibbs & count-based LCP are bit-identical to the legacy path
+// ---------------------------------------------------------------------------
+
+const POTTS_R = 32;
+
+/** Seeded uniform in [-0.5, 0.5). */
+function lcg(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 4294967296 - 0.5;
+  };
+}
+
+/** A compact synthetic backbone (+ optional ligand atoms) with a real kNN graph and random `h` / `J`. */
+function syntheticPotts(
+  nResidues: number,
+  nLigand: number,
+  options: { seed?: number; scale?: number; neighbours?: number } = {},
+): { context: any; params: any } {
+  const { seed = 7, scale = 1, neighbours = 32 } = options;
+  const N = nResidues + nLigand;
+  const rand = lcg(seed);
+  const centre = new Float32Array(N * 3);
+  const pos = [0, 0, 0];
+  for (let i = 0; i < nResidues; i++) {
+    const r = Math.hypot(pos[0], pos[1], pos[2]) || 1;
+    const pull = Math.min(0.9, r / (2.2 * Math.cbrt(nResidues)));
+    const step = [0, 1, 2].map((d) => rand() - (pull * pos[d]) / r);
+    const norm = Math.hypot(step[0], step[1], step[2]) || 1;
+    for (let d = 0; d < 3; d++) {
+      pos[d] += (3.8 * step[d]) / norm;
+      centre[i * 3 + d] = pos[d];
+    }
+  }
+  const anchor = Math.floor(nResidues / 2);
+  for (let a = 0; a < nLigand; a++) {
+    centre[(nResidues + a) * 3] = centre[anchor * 3] + (a % 3) * 1.4;
+    centre[(nResidues + a) * 3 + 1] = centre[anchor * 3 + 1] + Math.floor(a / 3) * 1.4;
+    centre[(nResidues + a) * 3 + 2] = centre[anchor * 3 + 2] + 2;
+  }
+  const tokenMask = new Uint8Array(N).fill(1);
+  const isProteinToken = new Uint8Array(N).fill(1, 0, nResidues);
+  const isLigandToken = new Uint8Array(N).fill(1, nResidues, N);
+  const restypeIndex = Int32Array.from({ length: N }, (_, i) => (i < nResidues ? (i * 7) % 20 : 25));
+  // Five backbone slots per residue, as the ligand proximity mask reads them.
+  const backboneCoordinate = new Float32Array(N * 5 * 3);
+  const backboneMask = new Uint8Array(N * 5);
+  for (let i = 0; i < N; i++) {
+    for (let slot = 0; slot < 5; slot++) {
+      backboneMask[i * 5 + slot] = i < nResidues ? 1 : 0;
+      for (let d = 0; d < 3; d++) backboneCoordinate[(i * 5 + slot) * 3 + d] = centre[i * 3 + d] + slot * 0.4;
+    }
+  }
+  const context = {
+    nToken: N,
+    nAtom: N,
+    tokenMask,
+    isProteinToken,
+    isLigandToken,
+    restypeIndex,
+    asymId: new Int32Array(N),
+    centreCoordinate: centre,
+    backboneCoordinate,
+    backboneMask,
+  };
+  const graph = shared.buildNeighbourGraph({ nToken: N, centreCoordinate: centre, tokenMask }, neighbours);
+  const h = Float32Array.from({ length: N * POTTS_R }, () => rand() * scale);
+  const J = Float32Array.from({ length: N * graph.k * POTTS_R * POTTS_R }, () => rand() * 0.1 * scale);
+  return {
+    context,
+    params: {
+      h,
+      J,
+      edgeIndex: graph.edgeIndex,
+      edgeMask: graph.edgeMask,
+      nToken: N,
+      k: graph.k,
+      numResidueTypes: POTTS_R,
+    },
+  };
+}
+
+function sameBits(a: ArrayBufferView, b: ArrayBufferView): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  const ua = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+  const ub = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+  for (let i = 0; i < ua.length; i++) if (ua[i] !== ub[i]) return false;
+  return true;
+}
+
+/** Sampler options as `artios-potts.worker.ts` passes them with manifest defaults. */
+const WORKER_SAMPLER_DEFAULTS = {
+  proposal: 'gibbs',
+  nSweeps: 8,
+  temperature: 0.1,
+  temperatureInit: 1.0,
+  annealingFraction: 0.8,
+  dt: 0.1,
+  rejectionStep: false,
+  excludeCys: true,
+  excludeMet: true,
+  complexityPenaltyWeight: 0.6,
+  complexityWindowSize: 30,
+  complexityEntropyMin: 2.32,
+  activeSiteDistanceCutoff: 10.0,
+  granularActiveSiteColoring: true,
+  trackTrajectory: true,
+};
+
+describe('ArtiosPotts fast sampler is bit-identical to the legacy path', () => {
+  /** Every per-sweep sequence, the final state and the energies must carry the same bits. */
+  function expectIdenticalRuns(fast: any, legacy: any): void {
+    expect(fast.trajectory.sequences).toHaveLength(legacy.trajectory.sequences.length);
+    for (let t = 0; t < legacy.trajectory.sequences.length; t++) {
+      expect([...fast.trajectory.sequences[t]], `sweep ${t}`).toEqual([...legacy.trajectory.sequences[t]]);
+    }
+    expect(sameBits(fast.sequence, legacy.sequence)).toBe(true);
+    expect(sameBits(fast.oneHot, legacy.oneHot)).toBe(true);
+    expect(sameBits(fast.energyPerNode, legacy.energyPerNode)).toBe(true);
+    expect(sameBits(fast.temperatureSchedule, legacy.temperatureSchedule)).toBe(true);
+    expect(Object.is(fast.totalEnergy, legacy.totalEnergy)).toBe(true);
+    expect(fast.trajectory.energies).toEqual(legacy.trajectory.energies);
+  }
+
+  /**
+   * Runs the legacy path once per seed and checks the fast path against it three ways: built per
+   * call, with the per-backbone `prepared` setup the worker hoists, and without the transposed J.
+   */
+  function compareAgainstLegacy(
+    built: { context: any; params: any },
+    extra: Record<string, unknown>,
+    expected: { columns: number; seeds?: number[] },
+  ): void {
+    const options = { ...WORKER_SAMPLER_DEFAULTS, context: built.context, ...extra };
+    const prepared = shared.prepareSampleFromParams(built.params, options);
+    for (const seed of expected.seeds ?? [42, 43]) {
+      const legacy = shared.sampleFromParams(built.params, { ...options, seed, legacyPath: true });
+      expect(legacy.gibbsPath).toBe('legacy');
+      const fast = shared.sampleFromParams(built.params, { ...options, seed });
+      expect(fast.gibbsPath).toBe('row-restricted');
+      expect(fast.gibbsColumns).toBe(expected.columns);
+      expectIdenticalRuns(fast, legacy);
+      const hoisted = shared.sampleFromParams(built.params, { ...options, seed, prepared });
+      expect(hoisted.gibbsPath).toBe('row-restricted');
+      expect(hoisted.gibbsColumns).toBe(expected.columns);
+      expectIdenticalRuns(hoisted, legacy);
+      const inPlace = shared.sampleFromParams(built.params, { ...options, seed, transposeJ: false });
+      expectIdenticalRuns(inPlace, legacy);
+    }
+  }
+
+  it('count-based complexityLcp returns the legacy gradient and value bits', () => {
+    const N = 64;
+    const rand = lcg(3);
+    const chainId = Int32Array.from({ length: N }, (_, i) => (i < 40 ? 0 : 1));
+    const tokenMask = new Uint8Array(N).fill(1);
+    tokenMask[17] = 0;
+    for (const [windowSize, entropyMin, alphabet] of [
+      [30, 2.32, 20],
+      [30, 2.32, 3],
+      [7, 1.6, 6],
+    ]) {
+      const lcpOptions = { nToken: N, numResidueTypes: POTTS_R, chainId, tokenMask, windowSize, entropyMin };
+      const evaluate = shared.createComplexityLcp(lcpOptions);
+      let nonZero = 0;
+      for (let rep = 0; rep < 4; rep++) {
+        const S = new Float32Array(N * POTTS_R);
+        for (let i = 0; i < N; i++) {
+          // Mostly a low-complexity alphabet, with the odd non-amino-acid state.
+          const state = rand() > 0.42 ? 20 + (i % 12) : Math.floor((rand() + 0.5) * alphabet);
+          S[i * POTTS_R + state] = 1;
+        }
+        const legacy = shared.complexityLcpLegacy(S, lcpOptions);
+        for (const got of [evaluate(S), shared.complexityLcp(S, lcpOptions)]) {
+          expect(sameBits(got.grad, legacy.grad)).toBe(true);
+          expect(Object.is(got.value, legacy.value)).toBe(true);
+        }
+        nonZero += legacy.grad.filter((v: number) => v !== 0).length;
+      }
+      // A full alphabet sits above the perplexity floor (all-zero gradient); for the reduced
+      // ones the comparison is vacuous unless the penalty actually fires.
+      if (alphabet < 20) expect(nonZero, `window ${windowSize}`).toBeGreaterThan(0);
+    }
+    // A soft state has no integer counts: it must take the brute-force path, not approximate.
+    const soft = new Float32Array(N * POTTS_R);
+    for (let i = 0; i < N; i++) {
+      soft[i * POTTS_R + (i % 4)] = 0.75;
+      soft[i * POTTS_R + 5] = 0.25;
+    }
+    const softOptions = { nToken: N, numResidueTypes: POTTS_R, chainId, tokenMask };
+    const softLegacy = shared.complexityLcpLegacy(soft, softOptions);
+    const softGot = shared.complexityLcp(soft, softOptions);
+    expect(sameBits(softGot.grad, softLegacy.grad)).toBe(true);
+    expect(Object.is(softGot.value, softLegacy.value)).toBe(true);
+  });
+
+  it('apo backbone: identical sequences at every sweep, 20 live columns', () => {
+    compareAgainstLegacy(syntheticPotts(40, 0), {}, { columns: 20 });
+  }, 120_000);
+
+  it('sparse graph: identical when a colour group resamples many positions at once', () => {
+    // With 8 neighbours the colouring needs few colours, so groups are large and every member's
+    // conditional must come from the pre-group state, as in a 300-residue production run.
+    const built = syntheticPotts(60, 0, { neighbours: 8 });
+    const groups: Uint8Array[] = shared.colorGroups(built.params);
+    const largest = Math.max(...groups.map((g) => g.reduce((a, b) => a + b, 0)));
+    expect(largest).toBeGreaterThanOrEqual(4);
+    compareAgainstLegacy(built, {}, { columns: 20 });
+  }, 120_000);
+
+  it('low-complexity regime: identical while the complexity penalty is steering', () => {
+    const built = syntheticPotts(40, 0);
+    // Six letters left: every window is below the perplexity floor, so no LCP term can be skipped.
+    const energyBias = Object.fromEntries([...'ADEFGHIKLNPQ'].map((c) => [c, shared.ALPHABET_BIAS]));
+    const extra = { energyBias, complexityPenaltyWeight: 2 };
+    compareAgainstLegacy(built, extra, { columns: 20, seeds: [42] });
+    // The penalty must change the outcome here, or this case would not exercise it at all.
+    const options = { ...WORKER_SAMPLER_DEFAULTS, context: built.context, energyBias, seed: 42 };
+    const steered = shared.sampleFromParams(built.params, { ...options, complexityPenaltyWeight: 2 });
+    const unsteered = shared.sampleFromParams(built.params, { ...options, complexityPenaltyWeight: 0 });
+    expect([...steered.sequence]).not.toEqual([...unsteered.sequence]);
+  }, 120_000);
+
+  it('ligand + granular active-site colouring: identical with singleton colours', () => {
+    const built = syntheticPotts(36, 6);
+    const groups = shared.colorGroups(built.params, {
+      activeSiteMask: shared.buildLigandProximityMask(built.context, 10.0),
+      granular: true,
+    });
+    // Granular colouring gives each active-site token its own colour, ligand atoms included.
+    expect(groups.length).toBeGreaterThan(6 + 20);
+    compareAgainstLegacy(built, {}, { columns: 20 });
+  }, 120_000);
+
+  it('classifier-free guidance: identical when blending against ligand-free parameters', () => {
+    const built = syntheticPotts(36, 6);
+    const uncond = syntheticPotts(36, 6, { seed: 11 }).params;
+    compareAgainstLegacy(built, { uncond, cfgScale: 2.0 }, { columns: 20, seeds: [42] });
+    // Active-site-only CFG over a partial pocket, so both guided and unguided rows are exercised.
+    const activeSiteMask = Uint8Array.from({ length: built.context.nToken }, (_, i) => (i % 3 === 0 ? 1 : 0));
+    compareAgainstLegacy(
+      built,
+      { uncond, cfgScale: 0.5, activeSiteOnlyCfg: true, activeSiteMask },
+      { columns: 20, seeds: [43] },
+    );
+  }, 120_000);
+
+  it('fixed positions: identical, and fixed tokens keep their identity (incl. C, M and an omitted letter)', () => {
+    const built = syntheticPotts(36, 6);
+    const fixedMask = new Uint8Array(built.context.nToken);
+    for (let i = 0; i < 36; i += 3) {
+      fixedMask[i] = 1;
+      built.context.restypeIndex[i] = [4, 12, 0][(i / 3) % 3]; // CYS, MET, ALA
+    }
+    const extra = { fixedMask, energyBias: { A: shared.ALPHABET_BIAS } };
+    compareAgainstLegacy(built, extra, { columns: 20 });
+    const run = shared.sampleFromParams(built.params, {
+      ...WORKER_SAMPLER_DEFAULTS,
+      context: built.context,
+      ...extra,
+      seed: 42,
+    });
+    for (let i = 0; i < built.context.nToken; i++) {
+      if (fixedMask[i] || i >= 36) expect(run.sequence[i]).toBe(built.context.restypeIndex[i]);
+      else expect([0, 4, 12]).not.toContain(run.sequence[i]);
+    }
+  }, 120_000);
+
+  it('dead-state guard refusal: falls back to all 32 columns and stays identical', () => {
+    const built = syntheticPotts(36, 6);
+    // A hot start, or a weak alphabet bias, leaves non-amino-acid states reachable in principle.
+    compareAgainstLegacy(built, { temperatureInit: 20 }, { columns: 32, seeds: [42] });
+    compareAgainstLegacy(built, { alphabetBias: 50 }, { columns: 32, seeds: [43] });
+  }, 120_000);
+
+  it('keeps the legacy sweep when another penalty is active, and DLMC stays identical', () => {
+    const built = syntheticPotts(30, 4);
+    const options = { ...WORKER_SAMPLER_DEFAULTS, context: built.context, nSweeps: 4, seed: 5 };
+    const mixed = shared.sampleFromParams(built.params, { ...options, netChargePenaltyWeight: 0.5 });
+    expect(mixed.gibbsPath).toBe('legacy');
+    expect(mixed.penaltyNames).toEqual(['lcp', 'net_charge']);
+    const mixedLegacy = shared.sampleFromParams(built.params, {
+      ...options,
+      netChargePenaltyWeight: 0.5,
+      legacyPath: true,
+    });
+    expectIdenticalRuns(mixed, mixedLegacy);
+
+    // DLMC needs the full gradient every sweep, so only the penalty itself is faster there.
+    const dlmc = { ...options, proposal: 'dlmc', rejectionStep: true, nSweeps: 12 };
+    const dlmcFast = shared.sampleFromParams(built.params, dlmc);
+    const dlmcLegacy = shared.sampleFromParams(built.params, { ...dlmc, legacyPath: true });
+    expect(dlmcFast.gibbsPath).toBeNull();
+    expect(dlmcFast.acceptedSweeps).toBe(dlmcLegacy.acceptedSweeps);
+    expectIdenticalRuns(dlmcFast, dlmcLegacy);
+  }, 120_000);
+
+  it('refuses a `prepared` setup built for other parameters', () => {
+    const built = syntheticPotts(30, 0);
+    const other = syntheticPotts(30, 0, { seed: 9 });
+    const options = { ...WORKER_SAMPLER_DEFAULTS, context: built.context };
+    const prepared = shared.prepareSampleFromParams(built.params, options);
+    expect(() =>
+      shared.sampleFromParams(other.params, { ...options, context: other.context, prepared }),
+    ).toThrow(/prepared/);
   });
 });

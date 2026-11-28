@@ -100,6 +100,15 @@ export const ARTIOS_BACKBONE_MANIFEST: AdapterManifest = {
         'Residue spans of the connected structure to scaffold. Motif residues keep their identity, all-atom coordinates and native numbering inside the designed chain; everything else is generated. Empty = unconditional de novo design.',
     },
     {
+      key: 'unindexedMotif',
+      label: 'Unindexed motif',
+      kind: 'boolean',
+      tier: 'advanced',
+      defaultValue: true,
+      description:
+        'Upstream ArtiosBackbone places each motif residue on its own unindexed chain and stitches it onto the nearest scaffold residue post-diffusion. Disable for fixed native-numbered placement.',
+    },
+    {
       key: 'includeLigand',
       label: 'Keep ligand',
       kind: 'boolean',

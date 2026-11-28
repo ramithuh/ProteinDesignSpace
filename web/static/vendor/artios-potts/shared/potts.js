@@ -261,3 +261,178 @@ export function applyFieldBias(h, numResidueTypes, options = {}) {
   }
   return out;
 }
+
+/**
+ * Residue states a row-restricted sampler may drop without changing its output.
+ *
+ * State `a` is dead when, at every mutable row, its field exceeds the row
+ * minimum by more than `2 k max|J| + penaltyScale * penaltyMax + 746 Tmax + 1`.
+ * Then `exp(-(E_a - E_min) / T)` underflows to exactly 0 for every reachable
+ * neighbourhood, penalty and temperature: the state adds +0 to every sum and can
+ * never be drawn, so leaving it out is bit-identical to keeping it. (`exp(x)` is
+ * exactly 0 below -745.14; the +1 absorbs float32 rounding of the energies.)
+ *
+ * `columns` is 20 when every non-amino-acid state is dead — the usual case,
+ * since mutable rows carry `ALPHABET_BIAS` there — and `R` otherwise, e.g. for a
+ * high `temperatureInit` or a small `alphabetBias`. `liveLetters` marks which of
+ * the 20 amino acids are live, so a penalty need not be evaluated for the rest.
+ *
+ * @param {PottsParams[]} paramsList every parameter set the rows are read from
+ *   (conditional, and unconditional under CFG), with biased fields
+ * @param {object} options
+ * @param {ArrayLike<number>} [options.mutableMask] rows that are sampled
+ * @param {number} options.temperatureMax
+ * @param {number} options.temperatureMin
+ * @param {number} [options.penaltyMax] upper bound on a penalty gradient entry
+ * @param {number} [options.penaltyScale] weight of the gradient in the energy
+ * @returns {{columns: number, liveLetters: Uint8Array}}
+ */
+export function pottsLiveStates(paramsList, options) {
+  const {
+    mutableMask = null,
+    temperatureMax,
+    temperatureMin = temperatureMax,
+    penaltyMax = 0,
+    penaltyScale = 0.5,
+  } = options;
+  const { nToken, k, numResidueTypes: R } = paramsList[0];
+  const Q = NUM_STANDARD_AA;
+  const allLive = { columns: R, liveLetters: new Uint8Array(Math.min(Q, R)).fill(1) };
+  // A temperature this small could overflow -E / T, where the argument fails.
+  if (R <= Q || !(temperatureMin > 1e-30) || !(temperatureMax >= temperatureMin)) return allLive;
+
+  const dead = new Uint8Array(R).fill(1);
+  let anyRow = false;
+  for (const { h, J } of paramsList) {
+    let jMax = 0;
+    for (let x = 0; x < J.length; x += 1) {
+      const v = J[x] < 0 ? -J[x] : J[x];
+      if (!(v <= jMax)) jMax = v; // a NaN coupling poisons the bound, as it must
+    }
+    // E_a >= h_a - k jMax, and E_best <= h_min + k jMax + penaltyScale * penaltyMax.
+    const spread = 2 * k * jMax + penaltyScale * penaltyMax + 746 * temperatureMax + 1;
+    if (!Number.isFinite(spread)) return allLive;
+    for (let i = 0; i < nToken; i += 1) {
+      if (mutableMask && !mutableMask[i]) continue;
+      anyRow = true;
+      let rowMin = Infinity;
+      for (let a = 0; a < R; a += 1) if (h[i * R + a] < rowMin) rowMin = h[i * R + a];
+      if (!Number.isFinite(rowMin)) return allLive;
+      for (let a = 0; a < R; a += 1) if (!(h[i * R + a] - rowMin > spread)) dead[a] = 0;
+    }
+  }
+  if (!anyRow) return allLive;
+
+  let tailDead = true;
+  for (let a = Q; a < R; a += 1) if (!dead[a]) tailDead = false;
+  const liveLetters = new Uint8Array(Q);
+  for (let a = 0; a < Q; a += 1) liveLetters[a] = dead[a] ? 0 : 1;
+  return { columns: tailDead ? Q : R, liveLetters };
+}
+
+/**
+ * Row-at-a-time access to the conditional energies, for samplers that update a
+ * few positions at a time and need `-pottsSingleLogits` for those rows only.
+ *
+ * Built once per parameter set:
+ *
+ * * a neighbour list per sampled row with self and masked edges dropped, in the
+ *   edge order `pottsSingleLogits` walks;
+ * * `J` transposed to `[edge, s_j, a]` and cropped to `columns` states, so one
+ *   neighbour's contribution is a contiguous run rather than a stride-`R` gather.
+ *   This copies the sampled rows' couplings (`4 * edges * R * columns` bytes);
+ *   with `transpose: false`, or when that allocation fails, rows are read from
+ *   `J` in place instead — slower, same result.
+ *
+ * @param {PottsParams} params
+ * @param {object} [options]
+ * @param {ArrayLike<number>} [options.rowMask] rows that will be read; default all
+ * @param {number} [options.columns] leading states to keep; default `R`
+ * @param {boolean} [options.transpose]
+ */
+export function preparePotts(params, options = {}) {
+  const { h, J, edgeIndex, edgeMask, nToken, k, numResidueTypes: R } = params;
+  const { rowMask = null, columns = R, transpose = true } = options;
+  const C = columns;
+  const rowStart = new Int32Array(nToken + 1);
+  let capacity = 0;
+  for (let i = 0; i < nToken; i += 1) if (!rowMask || rowMask[i]) capacity += k;
+  const edgeOf = new Int32Array(capacity);
+  const neighbour = new Int32Array(capacity);
+  let n = 0;
+  for (let i = 0; i < nToken; i += 1) {
+    if (!rowMask || rowMask[i]) {
+      for (let s = 0; s < k; s += 1) {
+        const edge = i * k + s;
+        const j = edgeIndex[edge];
+        if (j === i || !edgeMask[edge]) continue; // not_self & edge_mask
+        edgeOf[n] = edge;
+        neighbour[n] = j;
+        n += 1;
+      }
+    }
+    rowStart[i + 1] = n;
+  }
+
+  let Jt = null;
+  if (transpose) {
+    try {
+      Jt = new Float32Array(n * R * C);
+    } catch {
+      Jt = null; // too large to copy: read J in place
+    }
+  }
+  if (Jt) {
+    const RC = R * C;
+    for (let t = 0; t < n; t += 1) {
+      const src = edgeOf[t] * R * R;
+      const dst = t * RC;
+      for (let a = 0; a < C; a += 1) {
+        for (let b = 0; b < R; b += 1) Jt[dst + b * C + a] = J[src + a * R + b];
+      }
+    }
+  }
+  return { h, J, R, columns: C, rowStart, edgeOf, neighbour, Jt, rowMask };
+}
+
+// Written by the prefetch pass below so the engine cannot drop its loads.
+let prefetchSink = 0;
+
+/**
+ * Conditional energies `U_i(a) = h_i(a) + sum_j J_ij(a, s_j)` of one prepared
+ * row into `acc[0 .. columns)`. `acc` must be a Float64Array: the sum runs in
+ * double over the edges in `pottsSingleLogits` order, so storing the result to
+ * float32 gives exactly `-pottsSingleLogits` for that row.
+ *
+ * @param {ReturnType<typeof preparePotts>} prepared
+ * @param {ArrayLike<number>} sequence restype index per token
+ * @param {number} i a row inside `rowMask`
+ * @param {Float64Array} acc
+ */
+export function pottsRowEnergies(prepared, sequence, i, acc) {
+  const { h, J, R, columns: C, rowStart, edgeOf, neighbour, Jt } = prepared;
+  const hBase = i * R;
+  for (let a = 0; a < C; a += 1) acc[a] = h[hBase + a];
+  const begin = rowStart[i];
+  const end = rowStart[i + 1];
+  if (Jt) {
+    // Touch both ends of every run first: the loads are independent, so their
+    // cache misses overlap instead of queueing behind the additions below.
+    let x = 0;
+    for (let t = begin; t < end; t += 1) {
+      const base = (t * R + sequence[neighbour[t]]) * C;
+      x += Jt[base] + Jt[base + C - 1];
+    }
+    prefetchSink = x;
+    for (let t = begin; t < end; t += 1) {
+      const base = (t * R + sequence[neighbour[t]]) * C;
+      for (let a = 0; a < C; a += 1) acc[a] += Jt[base + a];
+    }
+  } else {
+    for (let t = begin; t < end; t += 1) {
+      const base = edgeOf[t] * R * R + sequence[neighbour[t]];
+      for (let a = 0; a < C; a += 1) acc[a] += J[base + a * R];
+    }
+  }
+  return acc;
+}

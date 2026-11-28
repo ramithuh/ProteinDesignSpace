@@ -95,7 +95,7 @@ describe('Wave 2 — Multi-generator benchmark sync (WF-06)', () => {
   it('helper utilities normalize RFdiffusion contigs, Genie 2 ranges, and inspector resets cleanly', () => {
     expect(formatRfdiffusionContig('10-10, A16-35, 10-10')).toBe('10-10/A16-35/10-10');
     expect(extractFirstContiguousMotifRange('A16-35, A52-71')).toBe('A16-35');
-    expect(BENCHMARK_SYNC_ADAPTER_IDS.size).toBe(7);
+    expect(BENCHMARK_SYNC_ADAPTER_IDS.size).toBe(8);
 
     const resetBg = buildResetToBenchmarkParams('boltzgen', {
       taskMode: 'binder',

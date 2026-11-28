@@ -14,6 +14,10 @@
  *   ordinary analytic one, matching what autograd computes there.
  *
  * `S` is a one-hot (or soft) sequence `[nToken, R]`, flat and row major.
+ *
+ * `complexityLcp` is by far the most expensive of these, so for a one-hot `S` it
+ * runs on integer window counts (`createLcpStatic` / `createLcpState`) and
+ * returns bit-identical results to the brute-force `complexityLcpLegacy`.
  */
 
 import {
@@ -60,13 +64,14 @@ function windowGeometry(nToken, chainId, tokenMask, windowSize) {
 
 /**
  * `complexity_lcp` — local composition perplexity floor with the reference's
- * straight-through counterfactual gradient.
+ * straight-through counterfactual gradient, written as the reference writes it:
+ * every (window, position, letter) counterfactual is brute-forced.
  *
- * Cost is `O(nToken * windowSize * 400)`; with the released defaults
- * (`windowSize = 30`) that is ~360k operations per node, so a long structure
- * makes this the dominant cost of a Gibbs sweep.
+ * Cost is `O(nToken * windowSize * 400)` with a `Math.log` per term. It is kept
+ * as the oracle for `complexityLcp` (pass `legacyPath: true` to reach it) and as
+ * the path for a soft, non-one-hot `S`.
  */
-export function complexityLcp(S, options) {
+export function complexityLcpLegacy(S, options) {
   const {
     nToken,
     numResidueTypes: R,
@@ -148,6 +153,357 @@ export function complexityLcp(S, options) {
     }
   }
   return { value, grad };
+}
+
+/**
+ * Token index per row of a one-hot `S`, or `null` when any row is not exactly
+ * one-hot (soft, empty or multi-hot) and the count-based LCP does not apply.
+ */
+export function oneHotSequence(S, nToken, numResidueTypes) {
+  const R = numResidueTypes;
+  if (S.length !== nToken * R) return null;
+  const sequence = new Int32Array(nToken);
+  for (let i = 0; i < nToken; i += 1) {
+    let hot = -1;
+    for (let a = 0; a < R; a += 1) {
+      const v = S[i * R + a];
+      if (v === 1) {
+        if (hot >= 0) return null;
+        hot = a;
+      } else if (v !== 0) return null;
+    }
+    if (hot < 0) return null;
+    sequence[i] = hot;
+  }
+  return sequence;
+}
+
+/**
+ * Sequence-independent tables of the count-based LCP: window membership in both
+ * directions, the entropy-term table and the per-total "provably zero" bound.
+ *
+ * `lut[tot * M + c]` holds `p * log(p + EPS)` with `p = c / (tot + EPS)`, i.e. the
+ * exact expression `complexityLcpLegacy` evaluates, so a table lookup reproduces
+ * its terms bit for bit. (A 1-D `c * log(c)` table would not.)
+ */
+export function createLcpStatic(options) {
+  const {
+    nToken: N,
+    chainId,
+    tokenMask,
+    windowSize = 30,
+    entropyMin = 2.32,
+    minCoverage = 0.9,
+  } = options;
+  const Q = NUM_STANDARD_AA;
+  const w = Math.min(windowSize, N);
+  const halfW = Math.floor(w / 2);
+  // Members of window i, ascending offset — the order the legacy loops use.
+  const start = new Int32Array(N + 1);
+  const members = new Int32Array(N * w);
+  let n = 0;
+  for (let i = 0; i < N; i += 1) {
+    for (let o = 0; o < w; o += 1) {
+      const raw = i + o - halfW;
+      if (raw >= 0 && raw < N && chainId[i] === chainId[raw] && tokenMask[raw] && tokenMask[i]) {
+        members[n] = raw;
+        n += 1;
+      }
+    }
+    start[i + 1] = n;
+  }
+  // Inverse: the windows whose member list contains position p.
+  const invStart = new Int32Array(N + 1);
+  for (let t = 0; t < n; t += 1) invStart[members[t] + 1] += 1;
+  for (let p = 0; p < N; p += 1) invStart[p + 1] += invStart[p];
+  const invList = new Int32Array(n);
+  const cursor = invStart.slice(0, N);
+  for (let j = 0; j < N; j += 1) {
+    for (let t = start[j]; t < start[j + 1]; t += 1) {
+      invList[cursor[members[t]]] = j;
+      cursor[members[t]] += 1;
+    }
+  }
+
+  const M = w + 2;
+  const lut = new Float64Array(M * M);
+  for (let tot = 0; tot < M; tot += 1) {
+    for (let c = 0; c < M; c += 1) {
+      const p = c / (tot + EPS);
+      lut[tot * M + c] = p * Math.log(p + EPS);
+    }
+  }
+  // zeroBound[tot]: a window whose entropy exceeds this keeps entropy > entropyMin
+  // after removing any present residue and adding any residue, so every
+  // counterfactual deficit is exactly 0. Brute-forced from the table.
+  const zeroBound = new Float64Array(M);
+  for (let tot = 0; tot < M; tot += 1) {
+    let dRemove = 0;
+    let dAdd = 0;
+    for (let c = 1; c <= tot; c += 1) {
+      dRemove = Math.max(dRemove, lut[tot * M + c - 1] - lut[tot * M + c]);
+    }
+    for (let c = 0; c < tot; c += 1) {
+      dAdd = Math.min(dAdd, lut[tot * M + c] - lut[tot * M + c + 1]);
+    }
+    zeroBound[tot] = entropyMin + 1e-7 + dRemove - dAdd;
+  }
+  const validToken = new Uint8Array(N);
+  for (let i = 0; i < N; i += 1) validToken[i] = tokenMask[i] ? 1 : 0;
+
+  return {
+    N,
+    Q,
+    w,
+    M,
+    lut,
+    zeroBound,
+    coverageThreshold: Math.trunc(minCoverage * w),
+    target: Math.exp(entropyMin),
+    // Entries whose estimated entropy clears this are exactly 0 without a fold.
+    foldThreshold: entropyMin + 1e-9,
+    start,
+    members: members.subarray(0, n),
+    invStart,
+    invList,
+    validToken,
+  };
+}
+
+/**
+ * Mutable LCP state for one sequence: integer window counts kept up to date by
+ * `flip`, plus lazily cached counterfactual rows.
+ *
+ * `D[j][b][a]` is the penalty of window j with one `b` removed and one `a` added.
+ * It depends on the window's counts only, not on which member is mutated, so it
+ * is cached per (window, removed letter) under a version stamp and shared by all
+ * the window's members: `grad[i][a] = sum_{j covering i} D[j][seq[i]][a]`.
+ *
+ * Every shortcut skips terms that are provably exactly zero, and whatever is
+ * computed is summed in the legacy order, so `rowGrad` and `value` return the
+ * same bits as `complexityLcpLegacy` on the matching one-hot `S`.
+ *
+ * @param {ReturnType<typeof createLcpStatic>} tables
+ * @param {ArrayLike<number> | null} [liveLetters] letters whose gradient entry
+ *   the caller consumes; the rest are left at 0. Defaults to all 20.
+ */
+export function createLcpState(tables, liveLetters = null) {
+  const {
+    N, Q, M, lut, zeroBound, coverageThreshold, target, foldThreshold,
+    start, members, invStart, invList, validToken,
+  } = tables;
+  const QB = Q + 1; // removed-letter slots: 20 amino acids + "not an amino acid"
+  const letters = [];
+  for (let a = 0; a < Q; a += 1) if (!liveLetters || liveLetters[a]) letters.push(a);
+  const nLetters = letters.length;
+
+  const counts = new Int32Array(N * Q);
+  const totals = new Int32Array(N);
+  // Window entropy, updated in O(1) per flip. A FILTER only: it drifts by
+  // rounding, which the 1e-7 margin in zeroBound and the periodic refold cover.
+  const entropyEstimate = new Float64Array(N);
+  let flipsSinceRefold = 0;
+  const windowStamp = new Int32Array(N).fill(1);
+  const rowStamp = new Int32Array(N * QB);
+  const rowIsZero = new Uint8Array(N * QB);
+  const D = new Float64Array(N * QB * Q);
+  const prefix = new Float64Array(Q + 1);
+  const cf = new Int32Array(Q);
+  const nonZero = new Int32Array(Q);
+
+  function foldEntropy(j) {
+    const row = totals[j] * M;
+    let e = 0;
+    for (let q = 0; q < Q; q += 1) e -= lut[row + counts[j * Q + q]];
+    entropyEstimate[j] = e;
+  }
+
+  function refold() {
+    for (let j = 0; j < N; j += 1) foldEntropy(j);
+    flipsSinceRefold = 0;
+  }
+
+  /** Reset to `sequence` (restype index per token). */
+  function init(sequence) {
+    counts.fill(0);
+    totals.fill(0);
+    rowStamp.fill(0);
+    windowStamp.fill(1);
+    for (let j = 0; j < N; j += 1) {
+      for (let t = start[j]; t < start[j + 1]; t += 1) {
+        const s = sequence[members[t]];
+        if (s < Q) {
+          counts[j * Q + s] += 1;
+          totals[j] += 1;
+        }
+      }
+    }
+    refold();
+  }
+
+  /** Position p changed from `oldState` to `newState`. */
+  function flip(p, oldState, newState) {
+    for (let t = invStart[p]; t < invStart[p + 1]; t += 1) {
+      const j = invList[t];
+      if (oldState < Q && newState < Q) {
+        const row = totals[j] * M;
+        const co = counts[j * Q + oldState];
+        const cn = counts[j * Q + newState];
+        entropyEstimate[j] += (lut[row + co] - lut[row + co - 1]) + (lut[row + cn] - lut[row + cn + 1]);
+        counts[j * Q + oldState] = co - 1;
+        counts[j * Q + newState] = cn + 1;
+      } else {
+        if (oldState < Q) {
+          counts[j * Q + oldState] -= 1;
+          totals[j] -= 1;
+        }
+        if (newState < Q) {
+          counts[j * Q + newState] += 1;
+          totals[j] += 1;
+        }
+        foldEntropy(j);
+      }
+      windowStamp[j] += 1;
+    }
+    flipsSinceRefold += 1;
+    if (flipsSinceRefold >= 65536) refold();
+  }
+
+  function computeRow(j, b, key) {
+    const c0 = j * Q;
+    for (let q = 0; q < Q; q += 1) cf[q] = counts[c0 + q];
+    // `clamped`: the removed letter is absent from window j, where the legacy
+    // max(count - 1 + [q === a], 0) leaves the counts unchanged for a === b.
+    let clamped = -1;
+    let tot = totals[j] + 1;
+    if (b < Q) {
+      if (cf[b] > 0) {
+        cf[b] -= 1;
+        tot -= 1;
+      } else clamped = b;
+    }
+    const row = tot * M;
+    // Fold over non-zero counts only: a zero count contributes `e -= -0`, an
+    // exact no-op, so every partial sum equals the legacy q = 0..19 fold.
+    let nnz = 0;
+    for (let q = 0; q < Q; q += 1) {
+      if (cf[q] > 0) {
+        nonZero[nnz] = q;
+        nnz += 1;
+      }
+    }
+    let e = 0;
+    for (let t = 0; t < nnz; t += 1) {
+      prefix[t] = e;
+      e -= lut[row + cf[nonZero[t]]];
+    }
+    prefix[nnz] = e;
+
+    const off = key * Q;
+    let any = 0;
+    let pos = 0;
+    for (let u = 0; u < nLetters; u += 1) {
+      const a = letters[u];
+      while (pos < nnz && nonZero[pos] < a) pos += 1;
+      const na = cf[a];
+      // O(1) estimate (error ~1e-14), used only to prove the deficit is 0.
+      const estimate = e + lut[row + na] - lut[row + na + 1];
+      let val = 0;
+      if (!(estimate > foldThreshold)) {
+        let x = prefix[pos] - lut[row + na + 1]; // exact legacy summation order
+        for (let t = na > 0 ? pos + 1 : pos; t < nnz; t += 1) x -= lut[row + cf[nonZero[t]]];
+        const deficit = Math.min(Math.exp(x) - target, 0);
+        val = deficit * deficit;
+      }
+      D[off + a] = val;
+      if (val !== 0) any = 1;
+    }
+    if (clamped >= 0 && (!liveLetters || liveLetters[clamped])) {
+      const row2 = totals[j] * M;
+      let x = 0;
+      for (let q = 0; q < Q; q += 1) x -= lut[row2 + counts[c0 + q]];
+      const deficit = Math.min(Math.exp(x) - target, 0);
+      D[off + clamped] = deficit * deficit;
+      any = 0;
+      for (let a = 0; a < Q; a += 1) if (D[off + a] !== 0) any = 1;
+    }
+    rowIsZero[key] = any ? 0 : 1;
+    rowStamp[key] = windowStamp[j];
+  }
+
+  /**
+   * Unscaled gradient row of position i (holding `state`) into
+   * `out[offset .. offset + 20)`. `out` must be a Float32Array: the legacy code
+   * accumulates into one, rounding after every window.
+   */
+  function rowGrad(i, state, out, offset = 0) {
+    for (let a = 0; a < Q; a += 1) out[offset + a] = 0;
+    if (!(totals[i] > 0 && validToken[i])) return;
+    const b = state < Q ? state : Q;
+    for (let t = start[i]; t < start[i + 1]; t += 1) {
+      const j = members[t];
+      if (!(totals[j] > coverageThreshold)) continue;
+      if (b < Q && counts[j * Q + b] > 0 && entropyEstimate[j] > zeroBound[totals[j]]) continue;
+      const key = j * QB + b;
+      if (rowStamp[key] !== windowStamp[j]) computeRow(j, b, key);
+      if (rowIsZero[key]) continue;
+      const off = key * Q;
+      for (let a = 0; a < Q; a += 1) out[offset + a] += D[off + a];
+    }
+  }
+
+  /** Scalar penalty, summed in the legacy order. */
+  function value() {
+    let v = 0;
+    for (let i = 0; i < N; i += 1) {
+      const row = totals[i] * M;
+      let entropy = 0;
+      for (let q = 0; q < Q; q += 1) entropy -= lut[row + counts[i * Q + q]];
+      const deficit = Math.min(Math.exp(entropy) - target, 0);
+      const U = (totals[i] > coverageThreshold ? 1 : 0) * deficit * deficit;
+      v += (totals[i] > 0 && validToken[i] ? 1 : 0) * U;
+    }
+    return v;
+  }
+
+  return { init, flip, rowGrad, value };
+}
+
+/**
+ * A reusable `complexityLcp` evaluator: the window tables are built once and
+ * every call costs integer counting and table lookups, with no `Math.log`.
+ *
+ * @returns {(S: Float32Array) => {value: number, grad: Float32Array}}
+ */
+export function createComplexityLcp(options) {
+  const { nToken, numResidueTypes: R, differentiable = true, legacyPath = false } = options;
+  const Q = NUM_STANDARD_AA;
+  if (legacyPath || R < Q) return (S) => complexityLcpLegacy(S, options);
+  let state = null;
+  return (S) => {
+    const sequence = oneHotSequence(S, nToken, R);
+    if (!sequence) return complexityLcpLegacy(S, options);
+    state ??= createLcpState(createLcpStatic(options));
+    state.init(sequence);
+    const grad = new Float32Array(nToken * R);
+    if (differentiable) {
+      for (let i = 0; i < nToken; i += 1) state.rowGrad(i, sequence[i], grad, i * R);
+    }
+    return { value: state.value(), grad };
+  };
+}
+
+/**
+ * `complexity_lcp` — local composition perplexity floor with the reference's
+ * straight-through counterfactual gradient.
+ *
+ * For a one-hot `S` this runs on integer window counts and returns the same bits
+ * as `complexityLcpLegacy`; a soft `S`, or `legacyPath: true`, takes the
+ * brute-force path. Callers evaluating many states should hold on to a
+ * `createComplexityLcp` evaluator instead, which keeps the window tables.
+ */
+export function complexityLcp(S, options) {
+  return createComplexityLcp(options)(S);
 }
 
 /**
@@ -397,6 +753,7 @@ export function buildPenalties(options = {}) {
     compositionToleranceK = 1.0,
     netChargePenaltyWeight = 0,
     netChargeTargetPerResidue = -0.013,
+    legacyPath = false,
   } = options;
 
   const scale = (weight, fn) => (S) => {
@@ -409,15 +766,16 @@ export function buildPenalties(options = {}) {
   const shape = { nToken, numResidueTypes };
   const penalties = {};
 
+  let lcpOptions = null;
   if (complexityPenaltyWeight > 0) {
-    penalties.lcp = scale(complexityPenaltyWeight, (S) =>
-      complexityLcp(S, {
-        ...shape,
-        chainId,
-        tokenMask,
-        windowSize: complexityWindowSize,
-        entropyMin: complexityEntropyMin,
-      }));
+    lcpOptions = {
+      ...shape,
+      chainId,
+      tokenMask,
+      windowSize: complexityWindowSize,
+      entropyMin: complexityEntropyMin,
+    };
+    penalties.lcp = scale(complexityPenaltyWeight, createComplexityLcp({ ...lcpOptions, legacyPath }));
   }
   if (complexityNatPriorPenaltyWeight > 0) {
     const logPi = buildNaturalLogPi(complexityNatPriorOrganism);
@@ -466,7 +824,13 @@ export function buildPenalties(options = {}) {
         targetPerResidue: netChargeTargetPerResidue,
       }));
   }
-  return createPenaltyCollection(penalties);
+  const collection = createPenaltyCollection(penalties);
+  // When LCP is the only penalty the Gibbs sampler can evaluate it row by row
+  // from incremental window counts; this is the recipe it needs for that.
+  if (collection && lcpOptions && collection.names.length === 1) {
+    collection.lcpOnly = { ...lcpOptions, weight: complexityPenaltyWeight };
+  }
+  return collection;
 }
 
 function andMask(a, b) {

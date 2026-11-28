@@ -47,7 +47,7 @@ import {
 
 declare const self: DedicatedWorkerGlobalScope;
 
-const VENDOR_VERSION = 1;
+const VENDOR_VERSION = 2;
 
 type Backend = 'webgpu' | 'cpu';
 
@@ -97,6 +97,8 @@ interface SharedModule {
     logLikelihood: Float32Array;
     pseudoLogLikelihood: number;
   };
+  /** Seed-independent sampler setup (masks, biased fields, penalty, Gibbs tables) for one backbone. */
+  prepareSampleFromParams(params: PottsParams, options: Record<string, unknown>): unknown;
   sampleFromParams(
     params: PottsParams,
     options: Record<string, unknown>,
@@ -363,7 +365,6 @@ function samplerOptions(
   context: PottsContext,
   fixedMask: Uint8Array,
   uncond: PottsParams | null,
-  seed: number,
 ): Record<string, unknown> {
   const alphabet = resolveArtiosPottsAlphabet(options.omitAAs);
   const energyBias =
@@ -390,7 +391,6 @@ function samplerOptions(
     activeSiteDistanceCutoff: 10.0,
     granularActiveSiteColoring: true,
     ...(uncond ? { uncond, cfgScale: options.cfgScale } : {}),
-    seed,
   };
 }
 
@@ -576,13 +576,14 @@ async function runJob(
 
   const candidates: SequenceCandidate[] = [];
   const samples: ArtiosPottsSample[] = [];
+  // Everything but the seed is shared by the designs of one backbone, so the masks, biased fields,
+  // penalty and Gibbs tables are built once here rather than once per chain.
+  const chainOptions = samplerOptions(shared, options, context, fixedMask, uncond);
+  const prepared = shared.prepareSampleFromParams(params, chainOptions);
   for (let i = 0; i < options.numSequences; i++) {
     ctx.signal.throwIfAborted();
     const seed = options.seed + i;
-    const result = shared.sampleFromParams(
-      params,
-      samplerOptions(shared, options, context, fixedMask, uncond, seed),
-    );
+    const result = shared.sampleFromParams(params, { ...chainOptions, seed, prepared });
     const score = toScore(shared, params, context, result.sequence);
     const flat = flattenChainSequences(
       input.proteinResidues,

@@ -13,10 +13,15 @@
  *   ProteinMPNN virtual CB, context heavy atoms, kNN graph, 16 Gaussian RBFs and
  *   the AF3 relative position encoding. No RDKit, no CCD, no structure library.
  * * `potts.js` — factorized Potts energy, conditional logits, pseudo-log-likelihood
- *   scoring and the alphabet/bias masking.
+ *   scoring, the alphabet/bias masking and the row-at-a-time energy layout
+ *   (`preparePotts`) the Gibbs sampler reads.
  * * `penalties.js` — complexity, enrichment, composition and net-charge penalties
- *   with hand-written gradients.
+ *   with hand-written gradients; the complexity penalty runs on incremental
+ *   window counts (`createLcpState`).
  * * `sampler.js` — steerable Gibbs / DLMC sampling from Potts parameters.
+ *   `prepareSampleFromParams` hoists the per-backbone setup out of a multi-design
+ *   loop, and `legacyPath: true` selects the reference-shaped implementation the
+ *   fast one is bit-identical to.
  *
  * Every symbol names the `artios` function it mirrors in its own doc comment.
  */

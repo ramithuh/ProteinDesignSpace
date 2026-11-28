@@ -43,6 +43,8 @@ import {
   parsePdbAtomRecords,
   rcsbCcdUrl,
   runArtiosEdmSampler,
+  solveMinCostAssignment,
+  stitchUnindexedMotifCoords,
   wrapArtiosBackboneOutputs,
   type ArtiosSharedModule,
   type ArtiosTokenPlan,
@@ -461,6 +463,7 @@ describe('artios-backbone plugin manifest & registration', () => {
       'numSteps',
       'numDesigns',
       'motifContig',
+      'unindexedMotif',
       'includeLigand',
       'ligandRasa',
       'motifDepth',
@@ -482,6 +485,7 @@ describe('artios-backbone plugin manifest & registration', () => {
     expect(byKey.get('numSteps')).toMatchObject({ kind: 'integer', min: 20, max: 400, defaultValue: 200 });
     expect(byKey.get('numSteps')!.warnBelow?.fixValue).toBe(200);
     expect(byKey.get('motifContig')).toMatchObject({ kind: 'text', defaultValue: '' });
+    expect(byKey.get('unindexedMotif')).toMatchObject({ kind: 'boolean', defaultValue: true });
     expect(byKey.get('includeLigand')).toMatchObject({ kind: 'boolean', defaultValue: true });
     expect(byKey.get('ligandRasa')).toMatchObject({ kind: 'number', min: -1, max: 1, defaultValue: -1 });
     expect(byKey.get('motifDepth')).toMatchObject({ kind: 'number', min: -1, max: 2, defaultValue: -1 });
@@ -494,6 +498,7 @@ describe('artios-backbone plugin manifest & registration', () => {
       numSteps: 200,
       numDesigns: 1,
       motifContig: '',
+      unindexedMotif: true,
       includeLigand: true,
       ligandRasa: -1,
       motifDepth: -1,
@@ -669,6 +674,7 @@ describe('artios-backbone option normalization', () => {
       numDesigns: 1,
       numSteps: 200,
       motifContig: '',
+      unindexedMotif: true,
       includeLigand: true,
       ligandRasa: -1,
       motifDepth: -1,
@@ -688,6 +694,7 @@ describe('artios-backbone option normalization', () => {
       gamma0: -5,
       seed: '7',
       motifContig: '  A10-25  ',
+      unindexedMotif: false,
       includeLigand: false,
       selfConditioning: false,
       precision: 'FP16',
@@ -701,6 +708,7 @@ describe('artios-backbone option normalization', () => {
       gamma0: 0,
       seed: 7,
       motifContig: 'A10-25',
+      unindexedMotif: false,
       includeLigand: false,
       selfConditioning: false,
       precision: 'fp16',
@@ -823,14 +831,15 @@ describe('artios-backbone token-layout planning', () => {
     expect(plan.warnings).toEqual([]);
   });
 
-  it('places a motif at its native numbering, keeps its side chains and conditions on the ligand', () => {
+  it('places a motif at its native numbering (indexed mode), keeps its side chains and conditions on the ligand', () => {
     const plan = buildMotifPlan({
       pdbText: FIXTURE_PDB,
-      options: { length: 60, motifContig: 'A3-6', includeLigand: true },
+      options: { length: 60, motifContig: 'A3-6', includeLigand: true, unindexedMotif: false },
     });
     expect(plan.designedLength).toBe(60);
     expect(plan.motifIndices).toEqual([2, 3, 4, 5]); // residues 3..6 -> 0-based 2..5
     expect(plan.fixedResidueIndices).toEqual([3, 4, 5, 6]);
+    expect(plan.unindexedMotifResidues).toEqual([]);
     expect(plan.warnings).toEqual([]);
 
     // Motif residues keep their identity and every heavy atom; scaffold positions are GLY N/CA/C/O.
@@ -852,12 +861,12 @@ describe('artios-backbone token-layout planning', () => {
     );
     expect(plan.nativeMotifCoords).toEqual(inputCa.map((a) => [...a.coord]));
 
-    // The ligand becomes its own chain of motif-flagged HETATM tokens.
+    // The ligand becomes its own chain of motif-flagged HETATM tokens with resId = 1.
     expect(plan.ligandResNames).toEqual(['ZN']);
     expect(plan.ligandChainIds).toEqual(['B']);
     const lig = plan.atoms.filter((a, i) => plan.isHetAtom[i] === 1);
     expect(lig).toHaveLength(1);
-    expect(lig[0]).toMatchObject({ resName: 'ZN', chainId: 'B', element: 'ZN' });
+    expect(lig[0]).toMatchObject({ resName: 'ZN', chainId: 'B', resId: 1, insCode: '', element: 'ZN' });
     expect(plan.missingComponentCodes).toEqual(['ZN']); // fetched from the RCSB CCD at run time
 
     const motifAtomCount = plan.atoms.filter((_, i) => plan.isMotifAtom[i] === 1).length;
@@ -866,10 +875,179 @@ describe('artios-backbone token-layout planning', () => {
     );
   });
 
+  it('allocates separate output chains (B, C, ...) and resId=1 for multiple ligands sharing an input chain', () => {
+    const multiLigPdb = [
+      'ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00  0.00           N',
+      'ATOM      2  CA  ALA A   1       1.458   0.000   0.000  1.00  0.00           C',
+      'ATOM      3  C   ALA A   1       2.009   1.420   0.000  1.00  0.00           C',
+      'ATOM      4  O   ALA A   1       1.251   2.390   0.000  1.00  0.00           O',
+      'HETATM    5 FE    FE A 501       5.000   5.000   5.000  1.00  0.00          FE',
+      'HETATM    6  C1  FPY A 502       7.000   5.000   5.000  1.00  0.00           C',
+      'HETATM    7  O1  FPY A 502       8.200   5.000   5.000  1.00  0.00           O',
+      'END',
+    ].join('\n');
+    const plan = buildMotifPlan({
+      pdbText: multiLigPdb,
+      options: { length: 10, motifContig: '', includeLigand: true },
+    });
+    expect(plan.ligandResNames).toEqual(['FE', 'FPY']);
+    expect(plan.ligandChainIds).toEqual(['B', 'C']);
+    const hetAtoms = plan.atoms.filter((_, i) => plan.isHetAtom[i] === 1);
+    expect(hetAtoms).toHaveLength(3);
+    expect(hetAtoms[0]).toMatchObject({ resName: 'FE', chainId: 'B', resId: 1, insCode: '' });
+    expect(hetAtoms[1]).toMatchObject({ resName: 'FPY', chainId: 'C', resId: 1, insCode: '' });
+    expect(hetAtoms[2]).toMatchObject({ resName: 'FPY', chainId: 'C', resId: 1, insCode: '' });
+
+    // Tokenization assigns distinct asym_id and entity_id to FE vs FPY.
+    const { result } = featuresFor(plan);
+    const f = result.features;
+    const nTok = f.nToken;
+    // Last 3 tokens are FE (chain B), FPY C1 (chain C), FPY O1 (chain C).
+    expect(f.asym_id[nTok - 3]).not.toBe(f.asym_id[nTok - 2]);
+    expect(f.entity_id[nTok - 3]).not.toBe(f.entity_id[nTok - 2]);
+    expect(f.asym_id[nTok - 2]).toBe(f.asym_id[nTok - 1]);
+    expect(f.residue_index[nTok - 3]).toBe(1);
+    expect(f.residue_index[nTok - 2]).toBe(1);
+  });
+
+  it('builds native unindexed motif layout (chain A full GLY + M0/M1... chains + ligands)', () => {
+    const plan = buildMotifPlan({
+      pdbText: FIXTURE_PDB,
+      options: { length: 20, motifContig: 'A3, A5', includeLigand: true, unindexedMotif: true },
+    });
+    expect(plan.designedLength).toBe(20);
+    expect(plan.motifIndices).toEqual([]);
+    expect(plan.fixedResidueIndices).toEqual([]);
+    expect(plan.unindexedMotifResidues).toHaveLength(2);
+    expect(plan.unindexedMotifResidues[0]).toMatchObject({
+      resName: 'SER',
+      sourceChainId: 'A',
+      sourceResId: 3,
+      atomStart: 20 * 4,
+      atomCount: 6,
+      caOffset: 1,
+    });
+    expect(plan.unindexedMotifResidues[1]).toMatchObject({
+      resName: 'VAL',
+      sourceChainId: 'A',
+      sourceResId: 5,
+      atomStart: 20 * 4 + 6,
+      atomCount: 7,
+      caOffset: 1,
+    });
+
+    // Chain A is pure 20-residue GLY scaffold (isMotifAtom = 0).
+    const chainAAtoms = plan.atoms.filter((a) => a.chainId === 'A');
+    expect(chainAAtoms).toHaveLength(20 * 4);
+    expect(new Set(chainAAtoms.map((a) => a.resName))).toEqual(new Set(['GLY']));
+    expect([...plan.isMotifAtom.slice(0, 80)].every((v) => v === 0)).toBe(true);
+
+    // M0 and M1 carry the motif atoms with resId = 1, hetero = false, isMotifAtom = 1, isHetAtom = 0.
+    const m0 = plan.atoms.filter((a) => a.chainId === 'M0');
+    const m1 = plan.atoms.filter((a) => a.chainId === 'M1');
+    expect(m0).toHaveLength(6);
+    expect(m1).toHaveLength(7);
+    expect(m0.every((a) => a.resId === 1 && !a.hetero)).toBe(true);
+    expect(m1.every((a) => a.resId === 1 && !a.hetero)).toBe(true);
+    expect([...plan.isMotifAtom.slice(80, 93)].every((v) => v === 1)).toBe(true);
+    expect([...plan.isHetAtom.slice(80, 93)].every((v) => v === 0)).toBe(true);
+
+    // Ligand ZN is appended on chain B.
+    expect(plan.ligandResNames).toEqual(['ZN']);
+    expect(plan.ligandChainIds).toEqual(['B']);
+    expect(plan.atoms[93]).toMatchObject({ resName: 'ZN', chainId: 'B', resId: 1, hetero: true });
+
+    // Tokenization gives 20 scaffold tokens + 6 M0 tokens + 7 M1 tokens + 1 ZN token = 34 tokens,
+    // with distinct asym_id for A, M0, M1, B.
+    const { result } = featuresFor(plan);
+    const f = result.features;
+    expect(f.nToken).toBe(20 + 6 + 7 + 1);
+    expect(f.asym_id[0]).toBe(0); // chain A
+    expect(f.asym_id[20]).toBe(1); // chain M0
+    expect(f.asym_id[26]).toBe(2); // chain M1
+    expect(f.asym_id[33]).toBe(3); // chain B (ZN)
+    expect([...f.is_motif_token.slice(0, 20)].every((v) => v === 0)).toBe(true);
+    expect([...f.is_motif_token.slice(20)].every((v) => v === 1)).toBe(true);
+    expect([...f.is_protein_token.slice(20, 33)].every((v) => v === 1)).toBe(true);
+    expect(f.is_ligand_token[33]).toBe(1);
+  });
+
+  it('stitches unindexed motif coordinates via exact 1-to-1 Hungarian matching and round-trips through PDB', () => {
+    // Direct Hungarian test where greedy matching fails:
+    // Row 0 -> [1, 2], Row 1 -> [0, 100]. Greedy picks (0->0, 1->1) = 101; Hungarian picks (0->1, 1->0) = 2.
+    expect([...solveMinCostAssignment(Float64Array.from([1, 2, 0, 100]), 2, 2)]).toEqual([1, 0]);
+
+    const plan = buildMotifPlan({
+      pdbText: FIXTURE_PDB,
+      options: { length: 16, motifContig: 'A3, A5', includeLigand: true, unindexedMotif: true },
+    });
+    const coords = new Float32Array(plan.atoms.length * 3);
+    // Place scaffold residues i = 0..15 along the x-axis at x = i * 4.0.
+    for (let i = 0; i < 16; i++) {
+      for (let a = 0; a < 4; a++) {
+        const idx = (i * 4 + a) * 3;
+        coords[idx] = i * 4.0 + a * 0.1;
+        coords[idx + 1] = 0;
+        coords[idx + 2] = 0;
+      }
+    }
+    // Place M0 (SER) near scaffold slot 12 (x = 48.0), M1 (VAL) near scaffold slot 4 (x = 16.0).
+    const [m0, m1] = plan.unindexedMotifResidues;
+    for (let k = 0; k < m0.atomCount; k++) {
+      const idx = (m0.atomStart + k) * 3;
+      coords[idx] = 48.05 + k * 0.2;
+      coords[idx + 1] = 0.3;
+      coords[idx + 2] = -0.1;
+    }
+    for (let k = 0; k < m1.atomCount; k++) {
+      const idx = (m1.atomStart + k) * 3;
+      coords[idx] = 16.05 + k * 0.2;
+      coords[idx + 1] = -0.2;
+      coords[idx + 2] = 0.4;
+    }
+    // Place ligand ZN at [30, 5, 2].
+    const znIdx = (plan.atoms.length - 1) * 3;
+    coords[znIdx] = 30.0;
+    coords[znIdx + 1] = 5.0;
+    coords[znIdx + 2] = 2.0;
+
+    const stitched = stitchUnindexedMotifCoords(coords, plan);
+    expect(stitched.plan.designedLength).toBe(16);
+    expect(stitched.plan.unindexedMotifResidues).toEqual([]);
+    // Sorted stitched 0-based indices: slot 4 (M1 = VAL) and slot 12 (M0 = SER).
+    expect(stitched.plan.motifIndices).toEqual([4, 12]);
+    expect(stitched.plan.fixedResidueIndices).toEqual([5, 13]);
+    // nativeMotifCoords aligns with sorted motifIndices: M1 first, then M0!
+    expect(stitched.plan.nativeMotifCoords).toEqual([m1.nativeCaCoord, m0.nativeCaCoord]);
+    // Ligand preserved at the end with its sampled coordinates.
+    expect(stitched.plan.ligandResNames).toEqual(['ZN']);
+    const outZnIdx = (stitched.plan.atoms.length - 1) * 3;
+    expect([stitched.coords[outZnIdx], stitched.coords[outZnIdx + 1], stitched.coords[outZnIdx + 2]]).toEqual([
+      30, 5, 2,
+    ]);
+
+    // PDB & StructureArtifact round-trip.
+    const pdbText = coordsToArtiosPdb(stitched.coords, stitched.plan);
+    const parsed = parseStructureText(pdbText);
+    expect(parsed.nResidues).toBe(16);
+    expect(parsed.sequence[4]).toBe('V'); // M1 (VAL) stitched onto slot 4
+    expect(parsed.sequence[12]).toBe('S'); // M0 (SER) stitched onto slot 12
+    expect(parsed.diagnostics.ligandNames).toContain('ZN');
+
+    const artifact = buildArtiosBackboneArtifact(
+      { pdbText, designIndex: 0, seed: 42, stepsRun: 20, warnings: [] },
+      { options: { ...DEFAULT_OPTIONS, length: 16 }, plan: stitched.plan, backend: 'webgpu' },
+    );
+    expect(artifact.length).toBe(16);
+    expect(artifact.motifIndices).toEqual([4, 12]);
+    expect(artifact.fixedResidueIndices).toEqual([5, 13]);
+    expect(artifact.nativeMotifCoords).toEqual([m1.nativeCaCoord, m0.nativeCaCoord]);
+  });
+
   it('keeps the ligand out of the layout when includeLigand is false', () => {
     const plan = buildMotifPlan({
       pdbText: FIXTURE_PDB,
-      options: { length: 40, motifContig: 'A2', includeLigand: false },
+      options: { length: 40, motifContig: 'A2', includeLigand: false, unindexedMotif: false },
     });
     expect(plan.ligandResNames).toEqual([]);
     expect([...plan.isHetAtom].every((v) => v === 0)).toBe(true);
@@ -888,33 +1066,67 @@ describe('artios-backbone token-layout planning', () => {
     expect(plan.isMotifAtom[plan.atoms.length - 1]).toBe(1);
   });
 
-  it('shifts motif spans that do not fit the design and rejects impossible requests', () => {
-    const shifted = buildMotifPlan({
+  it('center-shifts overflowing indexed spans preserving spacing, evenly distributes wide spans, and rejects impossible requests', () => {
+    const fits = buildMotifPlan({
       pdbText: FIXTURE_PDB,
-      options: { length: 30, motifContig: 'A9-12', includeLigand: false },
+      options: { length: 30, motifContig: 'A9-12', includeLigand: false, unindexedMotif: false },
     });
-    expect(shifted.motifIndices).toEqual([8, 9, 10, 11]);
-    expect(shifted.warnings).toEqual([]);
+    expect(fits.motifIndices).toEqual([8, 9, 10, 11]);
+    expect(fits.warnings).toEqual([]);
 
-    const squeezed = buildMotifPlan({
+    // Overflowing single span A9-12 (width 4) in L=10 is rigidly center-shifted to [3, 4, 5, 6].
+    const centered = buildMotifPlan({
       pdbText: FIXTURE_PDB,
-      options: { length: 10, motifContig: 'A9-12', includeLigand: false },
+      options: { length: 10, motifContig: 'A9-12', includeLigand: false, unindexedMotif: false },
     });
-    expect(squeezed.motifIndices).toEqual([6, 7, 8, 9]);
-    expect(squeezed.warnings.join(' ')).toMatch(/was shifted to design position 7/);
+    expect(centered.motifIndices).toEqual([3, 4, 5, 6]);
+    expect(centered.warnings.join(' ')).toMatch(/was shifted to design position 4/);
+
+    // Multi-span rigid center-shift (1RA0-style A156, A217 in L=180): preserves exact 61-aa spacing!
+    const makeHighResPdb = (resIds: number[]) =>
+      [
+        ...resIds.flatMap((id, k) => [
+          `ATOM  ${String(k * 4 + 1).padStart(5, ' ')}  N   ALA A${String(id).padStart(4, ' ')}       0.000   0.000   0.000  1.00  0.00           N`,
+          `ATOM  ${String(k * 4 + 2).padStart(5, ' ')}  CA  ALA A${String(id).padStart(4, ' ')}       1.458   0.000   0.000  1.00  0.00           C`,
+          `ATOM  ${String(k * 4 + 3).padStart(5, ' ')}  C   ALA A${String(id).padStart(4, ' ')}       2.009   1.420   0.000  1.00  0.00           C`,
+          `ATOM  ${String(k * 4 + 4).padStart(5, ' ')}  O   ALA A${String(id).padStart(4, ' ')}       1.251   2.390   0.000  1.00  0.00           O`,
+        ]),
+        'END',
+      ].join('\n');
+
+    const ra0 = buildMotifPlan({
+      pdbText: makeHighResPdb([156, 217]),
+      options: { length: 180, motifContig: 'A156, A217', includeLigand: false, unindexedMotif: false },
+    });
+    expect(ra0.motifIndices).toEqual([59, 120]);
+    expect(ra0.motifIndices[1] - ra0.motifIndices[0]).toBe(61);
+
+    // Wide multi-span (native width > L) falls back to even distribution, never crushing onto C-terminus.
+    const wide = buildMotifPlan({
+      pdbText: makeHighResPdb([5, 6, 50, 51]),
+      options: { length: 20, motifContig: 'A5-6, A50-51', includeLigand: false, unindexedMotif: false },
+    });
+    expect(wide.motifIndices).toEqual([6, 7, 13, 14]);
+    expect(wide.motifIndices.at(-1)!).toBeLessThan(19);
 
     expect(() =>
-      buildMotifPlan({ pdbText: FIXTURE_PDB, options: { length: 3, motifContig: 'A1-12', includeLigand: false } }),
+      buildMotifPlan({
+        pdbText: FIXTURE_PDB,
+        options: { length: 3, motifContig: 'A1-12', includeLigand: false, unindexedMotif: false },
+      }),
     ).toThrow(/motif needs 12 residues but length is 3/);
     expect(() =>
-      buildMotifPlan({ pdbText: FIXTURE_PDB, options: { length: 40, motifContig: 'Z1-5', includeLigand: false } }),
+      buildMotifPlan({
+        pdbText: FIXTURE_PDB,
+        options: { length: 40, motifContig: 'Z1-5', includeLigand: false, unindexedMotif: false },
+      }),
     ).toThrow(/matched 0 polymer residues/);
   });
 
   it('places multiple spans in order without overlap', () => {
     const plan = buildMotifPlan({
       pdbText: FIXTURE_PDB,
-      options: { length: 40, motifContig: 'A2-3, A7-8', includeLigand: false },
+      options: { length: 40, motifContig: 'A2-3, A7-8', includeLigand: false, unindexedMotif: false },
     });
     expect(plan.motifIndices).toEqual([1, 2, 6, 7]);
     const resNames = plan.motifIndices.map(
@@ -928,7 +1140,10 @@ describe('artios-backbone token-layout planning', () => {
 // 7. feature assembly
 // ===========================================================================
 
-function featuresFor(plan: ArtiosTokenPlan, overrides: Partial<typeof DEFAULT_OPTIONS> = {}) {
+function featuresFor(
+  plan: ArtiosTokenPlan,
+  overrides: Partial<typeof DEFAULT_OPTIONS> & { augment?: boolean } = {},
+) {
   const components = buildStandardComponents();
   for (const code of plan.missingComponentCodes) {
     // Stand in for the run-time RCSB fetch with the structure's own conformer.
@@ -969,19 +1184,35 @@ describe('artios-backbone feature assembly', () => {
     expect([...f.residue_index]).toEqual(Array.from({ length: 16 }, (_, i) => i + 1));
     expect([...f.token_index]).toEqual(Array.from({ length: 16 }, (_, i) => i));
     expect([...f.asym_id].every((v) => v === 0)).toBe(true);
-    // Reference conformers are per-residue centred CCD ideal coordinates: every token repeats one.
+    // Reference conformers are per-residue augmented CCD ideal coordinates by default (augment: true).
     expect([...f.ref_space_uid.slice(0, 8)]).toEqual([0, 0, 0, 0, 1, 1, 1, 1]);
-    expect(f.ref_pos[0]).toBeCloseTo(f.ref_pos[12], 6);
+    expect(Math.abs(f.ref_pos[0] - f.ref_pos[12])).toBeGreaterThan(1e-4);
+    // Intra-residue bond lengths are preserved by the rigid per-residue augmentation.
+    const dist = (a: number, b: number) =>
+      Math.hypot(
+        f.ref_pos[a * 3] - f.ref_pos[b * 3],
+        f.ref_pos[a * 3 + 1] - f.ref_pos[b * 3 + 1],
+        f.ref_pos[a * 3 + 2] - f.ref_pos[b * 3 + 2],
+      );
+    expect(dist(0, 1)).toBeCloseTo(dist(4, 5), 4);
     expect([...f.ref_mask].every((v) => v === 1)).toBe(true);
     expect(result.unresolvedAtomCount).toBe(0);
     expect(result.missingComponents).toEqual([]);
     expect(result.warnings).toEqual([]);
+
+    // Deterministic for a given seed, diverges across seeds, and unaugmented repeats identical conformers.
+    const sameSeed = featuresFor(plan, { seed: 42 }).result.features.ref_pos;
+    const diffSeed = featuresFor(plan, { seed: 99 }).result.features.ref_pos;
+    const unaug = featuresFor(plan, { augment: false }).result.features.ref_pos;
+    expect([...sameSeed]).toEqual([...f.ref_pos]);
+    expect([...diffSeed]).not.toEqual([...f.ref_pos]);
+    expect(unaug[0]).toBeCloseTo(unaug[12], 6);
   });
 
   it('conditions motif tokens on their native coordinates and the ligand on RASA', () => {
     const plan = buildMotifPlan({
       pdbText: FIXTURE_PDB,
-      options: { length: 24, motifContig: 'A3-6', includeLigand: true },
+      options: { length: 24, motifContig: 'A3-6', includeLigand: true, unindexedMotif: false },
     });
     const { result } = featuresFor(plan, { ligandRasa: 0.35, motifDepth: 1.1 });
     const f = result.features;
@@ -1074,7 +1305,7 @@ describe('artios-backbone PDB serialization & artifact assembly', () => {
   it('writes ATOM/HETATM records, chain IDs and TER that round-trip through parseStructureText', () => {
     const plan = buildMotifPlan({
       pdbText: FIXTURE_PDB,
-      options: { length: 20, motifContig: 'A3-6', includeLigand: true },
+      options: { length: 20, motifContig: 'A3-6', includeLigand: true, unindexedMotif: false },
     });
     const coords = Float32Array.from({ length: plan.atoms.length * 3 }, (_, i) => (i % 97) * 0.37 - 10);
     const pdbText = coordsToArtiosPdb(coords, plan, { remarks: ['unit test remark'] });
@@ -1108,7 +1339,12 @@ describe('artios-backbone PDB serialization & artifact assembly', () => {
     const parent = fixtureStructure();
     // `length` below the schema minimum (30) is clamped by artiosBackboneOptionsFromParams.
     expect(artiosBackboneOptionsFromParams({ length: 20 }).length).toBe(30);
-    const options = artiosBackboneOptionsFromParams({ length: 40, motifContig: 'A3-6', numDesigns: 2 });
+    const options = artiosBackboneOptionsFromParams({
+      length: 40,
+      motifContig: 'A3-6',
+      unindexedMotif: false,
+      numDesigns: 2,
+    });
     const plan = buildMotifPlan({ pdbText: FIXTURE_PDB, options });
     const makeArtifact = (designIndex: number, backend: 'webgpu' | 'cpu') => {
       const coords = Float32Array.from(
@@ -1289,16 +1525,18 @@ describe('artios-backbone end-to-end CPU EDM sampling (tiny config, synthetic we
     expect([...c]).not.toEqual([...a]);
   });
 
-  it('samples a motif + ligand layout and keeps every token finite', async () => {
+  it('samples a motif + ligand layout (unindexed + post-diffusion stitch) and keeps every token finite', async () => {
     const plan = buildMotifPlan({
       pdbText: FIXTURE_PDB,
-      options: { length: 14, motifContig: 'A3-6', includeLigand: true },
+      options: { length: 14, motifContig: 'A3-6', includeLigand: true, unindexedMotif: true },
     });
-    const coords = await run(plan, { length: 14, ligandRasa: 0.4, motifDepth: 0.9 }).coords;
-    expect(coords).toHaveLength(plan.atoms.length * 3);
-    expect([...coords].every(Number.isFinite)).toBe(true);
-    const parsed = parseStructureText(coordsToArtiosPdb(coords, plan));
+    const rawCoords = await run(plan, { length: 14, ligandRasa: 0.4, motifDepth: 0.9 }).coords;
+    expect(rawCoords).toHaveLength(plan.atoms.length * 3);
+    expect([...rawCoords].every(Number.isFinite)).toBe(true);
+    const { coords, plan: stitchedPlan } = stitchUnindexedMotifCoords(rawCoords, plan);
+    const parsed = parseStructureText(coordsToArtiosPdb(coords, stitchedPlan));
     expect(parsed.nResidues).toBe(14);
+    expect(stitchedPlan.motifIndices).toHaveLength(4);
     expect(parsed.diagnostics.ligandNames).toContain('ZN');
   });
 
