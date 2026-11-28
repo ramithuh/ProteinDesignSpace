@@ -32,8 +32,8 @@ import {
   matmulKernel,
   MATMUL_TILE,
   scatterMeanKernel,
-} from './shaders.js?v=2';
-import { linearFormat, packLinearF16, quantizeLinearInt8, roundUp } from './quant.js';
+} from './shaders.js?v=3';
+import { linearFormat, packLinearF16, quantizeLinearInt8, roundUp } from './packing.js?v=3';
 
 const BU = globalThis.GPUBufferUsage ?? {
   MAP_READ: 0x1, COPY_SRC: 0x4, COPY_DST: 0x8, UNIFORM: 0x40, STORAGE: 0x80,

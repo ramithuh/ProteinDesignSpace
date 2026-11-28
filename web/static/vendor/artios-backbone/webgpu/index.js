@@ -12,11 +12,11 @@ export {
   edmScalars,
   SIGMA_DATA,
   N_REF_FEATURES,
-} from './engine.js?v=2';
-export * as shaders from './shaders.js?v=2';
-export { linearFormat, dequantizeLinear, f32ToF16Bits, f16BitsToF32 } from './quant.js';
+} from './engine.js?v=3';
+export * as shaders from './shaders.js?v=3';
+export { linearFormat, dequantizeLinear, f32ToF16Bits, f16BitsToF32 } from './packing.js?v=3';
 
-import { SIGMA_DATA } from './engine.js?v=2';
+import { SIGMA_DATA } from './engine.js?v=3';
 
 /** EDM sampler constants of EDMSampler.sample (generator.py). */
 export const EDM_SAMPLER_DEFAULTS = Object.freeze({
