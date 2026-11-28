@@ -145,8 +145,8 @@ fn loadW(n: u32, k: u32) -> vec4<f32> {
 const BM = 64u;
 const BN = 64u;
 const BK = 16u;
-var<workgroup> As: array<vec4<f32>, 256>;
-var<workgroup> Bs: array<vec4<f32>, 256>;
+var<workgroup> As: array<f32, 1024>;
+var<workgroup> Bs: array<f32, 1024>;
 ${loadW}
 
 fn epiPre(acc: f32, n: u32) -> f32 {
@@ -180,16 +180,18 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
       let gk = k0 + lk + u;
       var xv = 0.0;
       if (gr < P.M && gk < P.K) { xv = X[gr * P.ldx + P.xoff + gk]; }
-      As[(lk + u) * 16u + (lr >> 2u)][lr & 3u] = xv;
+      As[(lk + u) * 64u + lr] = xv;
     }
     let wv = loadW(bn0 + lr, k0 + lk);
     for (var u = 0u; u < 4u; u++) {
-      Bs[(lk + u) * 16u + (lr >> 2u)][lr & 3u] = wv[u];
+      Bs[(lk + u) * 64u + lr] = wv[u];
     }
     workgroupBarrier();
     for (var kk = 0u; kk < BK; kk++) {
-      let a = As[kk * 16u + ty];
-      let b = Bs[kk * 16u + tx];
+      let ab = kk * 64u + ty * 4u;
+      let a = vec4<f32>(As[ab], As[ab + 1u], As[ab + 2u], As[ab + 3u]);
+      let bb = kk * 64u + tx * 4u;
+      let b = vec4<f32>(Bs[bb], Bs[bb + 1u], Bs[bb + 2u], Bs[bb + 3u]);
       acc[0] = fma(vec4<f32>(a.x), b, acc[0]);
       acc[1] = fma(vec4<f32>(a.y), b, acc[1]);
       acc[2] = fma(vec4<f32>(a.z), b, acc[2]);

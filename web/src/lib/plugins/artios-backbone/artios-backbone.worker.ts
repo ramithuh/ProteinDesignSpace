@@ -44,7 +44,7 @@ import {
 declare const self: DedicatedWorkerGlobalScope;
 
 const DEFAULT_BASE_URL = 'https://huggingface.co/ramithuh/artios-webgpu/resolve/main/backbone';
-const VENDOR_VERSION = 1;
+const VENDOR_VERSION = 2;
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyModule = any;
 

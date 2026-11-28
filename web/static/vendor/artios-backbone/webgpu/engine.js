@@ -32,7 +32,7 @@ import {
   matmulKernel,
   MATMUL_TILE,
   scatterMeanKernel,
-} from './shaders.js';
+} from './shaders.js?v=2';
 import { linearFormat, packLinearF16, quantizeLinearInt8, roundUp } from './quant.js';
 
 const BU = globalThis.GPUBufferUsage ?? {
